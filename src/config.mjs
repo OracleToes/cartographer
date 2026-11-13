@@ -17,7 +17,7 @@ const DEFAULTS = {
 	server: undefined,
 	model: undefined,
 	// What the server was started with (-c). Cartographer never asks for more than this.
-	contextWindow: 100000,
+	contextWindow: 32000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
 	// how long a file one `write` call can hold.
 	maxTokens: 8192,
