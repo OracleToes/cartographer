@@ -1,0 +1,23 @@
+{
+  "name": "cartographer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A durable agent that keeps a project-local brain and works through atomic tasks.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "carto": "bin/carto"
+  },
+  "scripts": {
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-schema": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2"
+  }
+}

@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+// The `carto` command. This file is only the door: it checks Node and hands over to src/cli.mjs.
+// It may be reached through a symlink (~/.local/bin/carto); Node resolves the link, so the
+// import below always lands in the core folder.
+var major = Number(process.versions.node.split(".")[0]);
+var minor = Number(process.versions.node.split(".")[1]);
+if (major < 22 || (major === 22 && minor < 19)) {
+	console.error("carto needs Node 22.19 or newer; this is Node " + process.versions.node + ".");
+	process.exit(1);
+}
+// Node's built-in SQLite prints an "experimental" notice on every start; it says nothing the user can act on.
+process.removeAllListeners("warning");
+process.on("warning", function (warning) {
+	if (warning.name === "ExperimentalWarning" && /SQLite/.test(warning.message)) return;
+	console.error(warning.name + ": " + warning.message);
+});
+import("../src/cli.mjs").then(
+	function (cli) {
+		return cli.main(process.argv.slice(2));
+	},
+	function (error) {
+		if (error && error.code === "ERR_MODULE_NOT_FOUND" && /@earendil-works/.test(String(error.message))) {
+			console.error("carto is not installed yet: its packages are missing. Run this in the cartographer folder: bash install.sh");
+		} else console.error(error);
+		process.exit(1);
+	},
+);
