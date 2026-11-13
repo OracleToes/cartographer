@@ -1,4 +1,4 @@
-import json, os, pty, select, sys, time, re, fcntl, termios, struct
+import json, os, pty, select, sys, time, re, fcntl, termios, struct, codecs
 # usage: vt.py ROWS COLS STEPS_JSON command...
 # A step is [wait, keys] or [wait, keys, false]: wait is text that must stand on the screen (or seconds), keys are
 # typed then, followed by Enter unless the third entry is false. Prints JSON: the screen after each wait, and the end.
@@ -10,6 +10,8 @@ if pid == 0:
     os.environ.pop("TMUX", None)
     os.execv(sys.argv[4], sys.argv[4:])
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+# A stateful decoder: a multi-byte character the pty delivers across two reads is not mangled into the screen.
+dec = codecs.getincrementaldecoder("utf-8")(errors="replace")
 grid = [[" "] * cols for _ in range(rows)]
 # The background each cell was painted with: None for the terminal's own.
 back = [[None] * cols for _ in range(rows)]
@@ -110,7 +112,7 @@ def pump(until, limit):
         if select.select([fd], [], [], 0.05)[0]:
             try: data = os.read(fd, 65536)
             except OSError: return until is None
-            feed(data.decode(errors="replace"))
+            feed(dec.decode(data))
     return until is None
 shots = []
 for step in steps:
@@ -120,8 +122,13 @@ for step in steps:
     if not ok:
         shots.append("TIMEOUT waiting for: " + str(wait))
         break
-    os.write(fd, keys.replace("<UP>", "\x1b[A").replace("<DOWN>", "\x1b[B").replace("<ENTER>", "\r").replace("<TAB>", "\t").replace("<ESC>", "\x1b").replace("<PGUP>", "\x1b[5~").replace("<CTRLT>", "\x14").replace("<CTRLC>", "\x03").replace("<CTRLD>", "\x04").replace("<CTRLJ>", "\n").replace("<PASTE>", "\x1b[200~").replace("</PASTE>", "\x1b[201~").replace("<NL>", "\r").encode())
-    if not (len(step) > 2 and not step[2]): os.write(fd, b"\r")
+    try:
+        os.write(fd, keys.replace("<UP>", "\x1b[A").replace("<DOWN>", "\x1b[B").replace("<ENTER>", "\r").replace("<TAB>", "\t").replace("<ESC>", "\x1b").replace("<PGUP>", "\x1b[5~").replace("<CTRLT>", "\x14").replace("<CTRLC>", "\x03").replace("<CTRLX>", "\x18").replace("<CTRLV>", "\x16").replace("<CTRLD>", "\x04").replace("<CTRLJ>", "\n").replace("<PASTE>", "\x1b[200~").replace("</PASTE>", "\x1b[201~").replace("<NL>", "\r").encode())
+    except OSError:
+        pass  # the program left; the keys have nowhere to go
+    if not (len(step) > 2 and not step[2]):
+        try: os.write(fd, b"\r")
+        except OSError: pass
 pump(None, 3)
 shots.append(screen())
 try: os.kill(pid, 15)

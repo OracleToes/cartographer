@@ -63,6 +63,7 @@ export function atlasView({ root, brainDir }) {
 		].filter((line) => line !== undefined && line !== "");
 		return {
 			key: `node:${node.name}`,
+			archived: node.archived === true,
 			head: [
 				[node.kind ? `${node.kind.replace("_", " ")} ` : "", "muted"],
 				[node.name, "bold"],
@@ -70,6 +71,7 @@ export function atlasView({ root, brainDir }) {
 				[node.files.length > 0 ? `  [${node.files.join(", ")}]` : "", "tool"],
 				[node.links.length > 0 ? `  → ${node.links.join(", ")}` : "", "muted"],
 				[old ? "  (may be out of date)" : "", "warn"],
+				[node.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 			],
 			body: body.join("\n"),
 			target: { file, line: jsonLine(file, "name", node.name) },
@@ -89,7 +91,13 @@ export function ledgerView({ brainDir }) {
 	const items = [];
 	const entry = (item) => ({
 		key: `entry:${item.id}`,
-		head: [[`${item.id}  `, item.status === "done" ? "muted" : "tool"], [item.text, item.status === "done" ? "muted" : ""], [item.kind === "goal" && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"]],
+		archived: item.archived === true,
+		head: [
+			[`${item.id}  `, item.status === "done" || item.archived === true ? "muted" : "tool"],
+			[item.text, item.status === "done" || item.archived === true ? "muted" : ""],
+			[item.kind === "goal" && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"],
+			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
+		],
 		body: [
 			item.text,
 			item.kind === "goal" && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
@@ -124,12 +132,14 @@ export function planView({ brainDir, yolo }) {
 	if (plan === undefined || plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes one when a goal needs changes.")] };
 	const items = plan.items.map((item) => ({
 		key: `item:${item.id}`,
+		archived: item.archived === true,
 		head: [
 			[item.status === "done" ? "✓ " : "○ ", item.status === "done" ? "ok" : "warn"],
 			[`${item.id} `, "tool"],
 			[`[${item.mode}${item.network ? ", network" : ""}${item.standing ? ", standing" : ""}] `, "muted"],
-			[item.text, item.status === "done" ? "muted" : ""],
+			[item.text, item.status === "done" || item.archived === true ? "muted" : ""],
 			[item.status === "done" && item.outcome ? `  → ${item.outcome}` : "", "muted"],
+			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 		],
 		body: [
 			item.text,
@@ -159,7 +169,9 @@ export function requestsView({ brainDir, yolo }) {
 		],
 		body: [
 			...(request.detail ?? []),
-			request.kind === "question" ? `answer with /answer ${request.id} words` : `/approve ${request.id} approves it · /deny ${request.id} turns it down`,
+			request.kind === "question"
+				? `answer with /answer ${request.id} words · d forgets the question`
+				: `a approves it · n turns it down · d forgets it, and the agent is not told`,
 		].join("\n"),
 		copy: `${request.id} [${request.kind}] ${request.text}`,
 	}));
@@ -167,7 +179,8 @@ export function requestsView({ brainDir, yolo }) {
 	return {
 		header: [
 			[[all.length === 1 ? "1 request waits for you" : `${all.length} requests wait for you`, "warn"]],
-			[[approvals ? "  /approve ID ... · /deny ID [why] · /answer ID words" : "  /answer ID words · /deny ID [why]", "muted"]],
+			[["  a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "muted"]],
+			[[approvals ? "  /approve ID ... · /deny ID [why] · /delete ID · /answer ID words" : "  /answer ID words · /deny ID [why] · /delete ID", "muted"]],
 		],
 		items,
 	};
@@ -470,7 +483,7 @@ export function contextBar(parts, windowSize, cols) {
  * @param {ReturnType<ReturnType<typeof import("../engine.mjs").createEngine>["window"]>} sent  what the engine holds of the newest request
  * @param {{ windowSize: number, cols: number, writing?: any }} options  writing: the reply as far as it is written
  */
-export function contextView(sent, { windowSize, cols, writing, isOpen, edits }) {
+export function contextView(sent, { windowSize, cols, writing, isOpen, edits, deleted }) {
 	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to the model in this run of carto yet. Say something, and what the agent sees shows here.")] };
 	const { payload } = sent;
 	const messages = payload.messages ?? [];
@@ -571,6 +584,9 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits }) 
 	};
 	for (const [index, part] of parts.entries()) {
 		if (index === inRequest) items.push({ key: "since", plain: true, head: [["── since that request: what the next one will hold as well ──", "muted"]] });
+		// A part the user has deleted stands out of the list, but the sizes above stay those of what was sent:
+		// the agent reads it until the next collapse, and then the talk that replaced it keeps nothing of it.
+		if (deleted !== undefined && (deleted.has(part.text) || (part.chat !== undefined && deleted.has(part.chat)))) continue;
 		items.push(one(part, part.key === "tools" ? { folder: true } : {}));
 		// The tools part stands for the block the model reads; unfolded, a line for each tool of it.
 		if (part.key === "tools" && isOpen?.("tools")) {

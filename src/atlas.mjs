@@ -480,17 +480,21 @@ const HEADINGS = [
  */
 export function renderOutline(atlas, max = OUTLINE_MAX) {
 	if (atlas.nodes.length === 0) return "The graph has no nodes yet.";
+	const shown = atlas.nodes.filter((node) => node.archived !== true);
+	if (shown.length === 0) return `Every node is archived by you; \`atlas\` look shows one, and nothing of them stands in the outline.`;
 	const short = new Set();
-	const oldestFirst = [...atlas.nodes].sort((a, b) => String(a.written ?? "").localeCompare(String(b.written ?? "")));
+	const oldestFirst = [...shown].sort((a, b) => String(a.written ?? "").localeCompare(String(b.written ?? "")));
 	const render = () => {
 		const lines = [];
 		for (const [kind, heading] of HEADINGS) {
-			const nodes = atlas.nodes.filter((node) => node.kind === kind && !short.has(node.name)).sort((a, b) => a.name.localeCompare(b.name));
+			const nodes = shown.filter((node) => node.kind === kind && !short.has(node.name)).sort((a, b) => a.name.localeCompare(b.name));
 			if (nodes.length === 0) continue;
 			lines.push(`${heading}:`);
 			for (const node of nodes) lines.push(`  ${nodeLine(node)}`);
 		}
 		if (short.size > 0) lines.push(`By name only, to keep this short (\`atlas\` look shows one): ${[...short].sort().join(", ")}`);
+		const archived = atlas.nodes.length - shown.length;
+		if (archived > 0) lines.push(`(${archived} archived ${archived === 1 ? "node" : "nodes"} not shown)`);
 		return lines.join("\n");
 	};
 	let text = render();

@@ -86,7 +86,7 @@ export function saveLedger(brainDir, ledger) {
 	renameSync(temp, path);
 }
 
-export const open = (ledger, kind) => ledger.items.filter((item) => item.status === "open" && (kind === undefined || item.kind === kind));
+export const open = (ledger, kind) => ledger.items.filter((item) => item.status === "open" && item.archived !== true && (kind === undefined || item.kind === kind));
 
 function find(ledger, id) {
 	const wanted = flat(id ?? "");
@@ -196,16 +196,19 @@ const HEADINGS = { goal: "Goals", question: "Questions for the user", note: "Not
  */
 export function renderLedger(ledger, options = {}) {
 	const lines = [];
+	const shown = ledger.items.filter((item) => item.archived !== true);
+	const archived = ledger.items.length - shown.length;
 	for (const kind of KINDS) {
-		const entries = open(ledger, kind);
+		const entries = shown.filter((item) => item.kind === kind && item.status === "open");
 		if (entries.length === 0) continue;
 		lines.push(`${HEADINGS[kind]}:`);
 		for (const item of entries) lines.push(`  ${entryLine(item, options.now)}`);
 	}
-	const closed = ledger.items.filter((item) => item.status === "done");
+	const closed = shown.filter((item) => item.status === "done");
 	if (options.closed && closed.length > 0) {
 		lines.push("Closed:");
 		for (const item of closed) lines.push(`  ${entryLine(item)}`);
 	} else if (closed.length > 0) lines.push(`(${closed.length} closed ${closed.length === 1 ? "entry" : "entries"} not shown)`);
+	if (archived > 0) lines.push(`(${archived} archived ${archived === 1 ? "entry" : "entries"} not shown; /unarchive ID brings one back)`);
 	return lines.length > 0 ? lines.join("\n") : "The ledger is empty.";
 }

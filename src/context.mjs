@@ -735,3 +735,21 @@ export function reviseNote(brainDir, from, to) {
 	});
 	return changed;
 }
+
+/**
+ * The user takes a message out of the talk the collapse keeps: it is gone from view, and the next collapse keeps
+ * nothing of it. What was sent stays stored, and the agent reads it until then. @returns whether it was there
+ */
+export function forgetChat(brainDir, text) {
+	const said = String(text ?? "").trim();
+	if (said === "") return false;
+	let changed = false;
+	updateContext(brainDir, (store) => {
+		const at = store.chat.findLastIndex((entry) => entry.text === said);
+		if (at >= 0) {
+			store.chat.splice(at, 1);
+			changed = true;
+		}
+	});
+	return changed;
+}

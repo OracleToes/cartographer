@@ -19,7 +19,7 @@ export function listRequests(brainDir, { yolo = false } = {}) {
 	const { plan } = loadPlan(brainDir);
 	if (plan !== undefined && !yolo) for (const item of waiting(plan)) out.push({ id: item.id, kind: "approval", text: itemLine(item) });
 	const { ledger } = loadLedger(brainDir);
-	if (ledger !== undefined) for (const item of ledger.items) if (item.kind === "question" && item.status === "open") out.push({ id: item.id, kind: "question", text: `${item.id}  ${item.text}` });
+	if (ledger !== undefined) for (const item of ledger.items) if (item.kind === "question" && item.status === "open" && item.archived !== true) out.push({ id: item.id, kind: "question", text: `${item.id}  ${item.text}` });
 	for (const item of loadProposals(brainDir).items) out.push({ id: item.id, kind: "prompt", text: proposalLine(item), detail: proposalDiff(item) });
 	return out;
 }

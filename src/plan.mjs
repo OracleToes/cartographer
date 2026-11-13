@@ -76,7 +76,7 @@ export function savePlan(brainDir, plan) {
 	renameSync(`${path}.tmp`, path);
 }
 
-export const openItems = (plan, mode) => plan.items.filter((item) => item.status === "open" && (mode === undefined || item.mode === mode));
+export const openItems = (plan, mode) => plan.items.filter((item) => item.status === "open" && item.archived !== true && (mode === undefined || item.mode === mode));
 
 /** Whether a change item may run now. */
 export const isAuthorized = (plan) => plan.authorized !== undefined;
@@ -211,10 +211,11 @@ export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 /** "3 items, 1 done · authorized" */
 export function planSummary(plan) {
 	if (plan.items.length === 0) return "no plan";
-	const done = plan.items.length - openItems(plan).length;
+	const shown = plan.items.filter((item) => item.archived !== true);
+	const done = shown.length - openItems(plan).length;
 	const change = openItems(plan, "change").length;
 	const state = change === 0 ? "" : isAuthorized(plan) ? " · authorized" : ` · ${plural(change, "change item")} not authorized`;
-	return `${plural(plan.items.length, "item")}${done > 0 ? `, ${done} done` : ""}${state}`;
+	return `${plural(shown.length, "item")}${done > 0 ? `, ${done} done` : ""}${state}`;
 }
 
 /** What the user is told when approval is switched off. */
@@ -236,12 +237,15 @@ export function authorizationLine(plan, { yolo = false } = {}) {
 export function renderPlan(plan, options = {}) {
 	if (plan.items.length === 0) return "There is no plan.";
 	const lines = [authorizationLine(plan, options)];
-	const done = plan.items.filter((item) => item.status === "done");
-	for (const item of plan.items) {
+	const shown = plan.items.filter((item) => item.archived !== true);
+	const archived = plan.items.length - shown.length;
+	const done = shown.filter((item) => item.status === "done");
+	for (const item of shown) {
 		if (item.status === "open") lines.push(`  ${itemLine(item)}`);
 		else if (options.done) lines.push(`  ✓ ${itemLine(item)}`);
 	}
 	if (!options.done && done.length > 0) lines.push(`  (done: ${done.map((item) => item.id).join(", ")})`);
+	if (archived > 0) lines.push(`  (${archived} archived ${archived === 1 ? "item" : "items"} not shown; /unarchive ID brings one back)`);
 	return lines.join("\n");
 }
 

@@ -20,7 +20,8 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { archiveReports, clearFront, contextPath, deleteReports, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unarchiveReports, unshelveForUser } from "./context.mjs";
+import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser } from "./context.mjs";
+import { archiveRows, dropRows, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -546,6 +547,11 @@ export async function runTerminal(session, options) {
 	let busy = false;
 	let stopped = false;
 	let closing = false;
+	let paused = false; // the user's pause: the agent finishes what it is doing and gets nothing new until it is lifted
+	const heldInputs = []; // what the user wrote while it was paused, sent when it is lifted
+	/** Lines the user wrote while the agent worked, sent to join its run. A run that ends without reading them —
+	 * stopped, or failed — withdraws them unread; they are sent again when the run is over, so nothing said is lost. */
+	const steered = [];
 	let onIdle = () => {};
 	// Wakes the agent may still get at once (see WAKE_BURST), and since when the next one is being earned.
 	const spacing = (options.wakeMin ?? WAKE_MIN) * 1000;
@@ -675,7 +681,8 @@ export async function runTerminal(session, options) {
 	 * @returns {Promise<boolean>} whether something was done
 	 */
 	const rest = async ({ away = false, user = false, final = false } = {}) => {
-		if (engine === undefined || busy || stopped || closing) return false;
+		// Paused, the context is left as it stands, unless the user asked for the collapse themselves.
+		if (engine === undefined || busy || stopped || closing || (paused && !user)) return false;
 		const view = await main.context(context);
 		const would = engine.droppable(view.messages);
 		const due = engine.due();
@@ -855,6 +862,12 @@ export async function runTerminal(session, options) {
 	};
 
 	const submit = async (content) => {
+		// Paused, nothing new reaches the agent: what the user writes waits here, and goes when the pause is lifted.
+		if (paused && options.interactive && options.oneShot === undefined) {
+			heldInputs.push(content);
+			line(dim(`  (held: the agent is paused, ${plural(heldInputs.length, "line")} wait${heldInputs.length === 1 ? "s" : ""} · /pause or Ctrl-V lets them go)`));
+			return undefined;
+		}
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
 		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
@@ -911,7 +924,8 @@ export async function runTerminal(session, options) {
 	 * @returns the submission, or undefined when there was nothing to tell, the agent is busy, or the wake has to wait
 	 */
 	const wake = async () => {
-		if (busy || stopped || !(windows?.hasNews() || wakes?.hasNews())) return undefined;
+		// Paused, the agent is woken by nothing: what happened waits, and is told when the pause is lifted.
+		if (paused || busy || stopped || !(windows?.hasNews() || wakes?.hasNews())) return undefined;
 		const earned = Math.floor((Date.now() - creditAt) / spacing);
 		if (earned > 0) {
 			credit = Math.min(WAKE_BURST, credit + earned);
@@ -976,7 +990,9 @@ export async function runTerminal(session, options) {
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
 						"  /requests what waits for you: change items, questions of taste, and changes to the agent's own prompt",
 						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
-						"  /deny     /deny ID [why] turns a request down; /answer ID words answers a question of taste",
+						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
+						"  /answer   /answer ID words answers a question of taste",
+						"  /pause    hold everything new back from the agent while it finishes what it is doing; /pause or Ctrl-V again lets it go on",
 						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
 						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
@@ -985,13 +1001,13 @@ export async function runTerminal(session, options) {
 						"  /bwrap    how tasks' commands run; /bwrap off runs them without the sandbox, /bwrap on with it",
 						"  /shells   the shell windows: what runs in each, for how long, and its newest lines",
 						"  /kill     /kill NAME closes a shell window and ends what runs in it; /kill all closes every one",
-						"  /stop     stop what the agent is doing (Ctrl-C does the same); shell windows keep running",
+						"  /stop     stop what the agent is doing (Ctrl-X does the same); shell windows keep running",
 						"  /model    the models the server serves; /model NAME (or a number) switches to one",
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
-						"  /archive ID …, /unarchive ID …  take a report's line out of the kept block for good, or bring it back; the report stays on disk either way",
-						"  /delete ID …  remove a report for good: its record line and its file; nothing recalls it again",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a prompt proposal (x1), a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1378,9 +1394,40 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "stop": {
+				if (!busy) {
+					line("  nothing runs: the agent rests (Ctrl-X does the same when something does)");
+					return true;
+				}
 				await main.abort(context);
 				line(dim("  stopped"));
 				runningLine();
+				return true;
+			}
+			case "pause": {
+				// The agent is not interrupted: it finishes the round it is on, and until the pause is lifted nothing
+				// new reaches it — no line the user writes (they wait below), no wake of its own, no auto-collapse.
+				const to = argument === "on" ? true : argument === "off" ? false : !paused;
+				if (to === paused) {
+					line(to ? "  already paused. /pause or Ctrl-V lets it go on." : "  nothing is paused.");
+					return true;
+				}
+				paused = to;
+				setPrompt();
+				if (paused) {
+					line(`${bold("●")} paused: the agent finishes what it is doing and gets nothing new · /pause or Ctrl-V lets it go on`);
+					return true;
+				}
+				const held = heldInputs.splice(0);
+				line(`${bold("●")} on again${held.length > 0 ? `: what you wrote is sent now (${plural(held.length, "line")})` : ", and what happened while it was paused is told"}`);
+				for (const text of held) {
+					const wasBusy = busy;
+					const submission = await submit(text);
+					if (submission === undefined) {
+						busy = wasBusy;
+						if (!busy) reader.prompt();
+					} else if (wasBusy) line(dim("  (sent; the agent reads it after its current step)"));
+				}
+				await wake();
 				return true;
 			}
 			case "shells": {
@@ -1532,21 +1579,21 @@ export async function runTerminal(session, options) {
 			}
 			case "archive":
 			case "unarchive": {
-				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				const ids = args;
 				if (ids.length === 0) {
-					line(`  /${name} ID … ${name === "archive" ? "takes a report's record line out of the kept block for good (the report stays, recall by id finds it)" : "brings an archived report's line back into the record"}.`);
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
-				line(`  ${name === "archive" ? archiveReports(options.brainDir, ids) : unarchiveReports(options.brainDir, ids)}`);
+				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
 				return true;
 			}
 			case "delete": {
-				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				const ids = args;
 				if (ids.length === 0) {
-					line("  /delete ID … removes a report for good: its record line and its file. Nothing recalls it again. /archive hides the line and keeps the report.");
+					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan item, a prompt proposal (x1), a node of the graph. /archive hides a row and keeps it.");
 					return true;
 				}
-				line(`  ${deleteReports(options.brainDir, ids)}`);
+				line(`  ${dropRows(options.brainDir, coreDir, ids)}`);
 				return true;
 			}
 			case "send": {
@@ -1605,9 +1652,16 @@ export async function runTerminal(session, options) {
 	await follow(main.id, 0);
 	harness.resume();
 	if (busy) {
-		await settle();
-		usageLine();
-		approvalLine();
+		// The work that was going on when carto last went away goes on. The screen and the prompt must come up
+		// while it does, so that the user can talk into it and leave it; only piped input waits here, for its
+		// first line is part of the same queue. settle() waits for the queue, so it must not run inside it.
+		const finishing = async () => {
+			await settle();
+			usageLine();
+			approvalLine();
+		};
+		if (options.oneShot !== undefined || !options.interactive) await finishing();
+		else finishing().catch((error) => line(`! display error: ${error?.message ?? error}`));
 	}
 
 	// After this nothing more is printed. A watch waits for its running listener when stopped, and a listener waits
@@ -1663,6 +1717,7 @@ export async function runTerminal(session, options) {
 	const reader = ui !== undefined ? ui.reader : createInterface({ input: options.input, output: out, prompt: "› " });
 	ui?.attach({
 		busy: () => busy,
+		paused: () => paused,
 		thinking: () => thinking,
 		// What the server counted for the newest reply, also in the middle of a turn.
 		contextSize: () => engine?.usedBy(main.id) ?? contextSize,
@@ -1689,7 +1744,7 @@ export async function runTerminal(session, options) {
 	}
 	// The prompt says what is switched off, so that it cannot be forgotten.
 	setPrompt = () => {
-		const marks = [gate.yolo ? "yolo" : "", options.runner?.mode === "direct" ? "no sandbox" : ""].filter((mark) => mark !== "");
+		const marks = [gate.yolo ? "yolo" : "", paused ? "paused" : "", options.runner?.mode === "direct" ? "no sandbox" : ""].filter((mark) => mark !== "");
 		reader.setPrompt(marks.length > 0 ? `[${marks.join(", ")}] › ` : "› ");
 	};
 	setPrompt();
@@ -1702,6 +1757,16 @@ export async function runTerminal(session, options) {
 			endLine();
 			usageLine();
 			approvalLine();
+			// Lines the user wrote while the agent worked, which the run that just ended left unread, go out now:
+			// the agent reads them as the next thing. What it read stands in the conversation, and is not sent again.
+			for (const wait of [...steered]) {
+				const record = await wait.submission.status(context).catch(() => undefined);
+				if (record === undefined || record.status === "queued") continue;
+				steered.splice(steered.indexOf(wait), 1);
+				if (record.status !== "unanswered") continue;
+				const again = await submit(wait.content);
+				if (again !== undefined) steered.push({ content: wait.content, submission: again });
+			}
 			// Something may have happened in a window while the agent was finishing.
 			if (closing || (await wake()) !== undefined) return;
 			// The agent rests: the moment to collapse its context when that is due.
@@ -1794,21 +1859,36 @@ export async function runTerminal(session, options) {
 				if (submission === undefined) {
 					busy = wasBusy;
 					if (!busy) reader.prompt();
-				} else if (wasBusy) line(dim("  (sent; the agent reads it after its current step, and a running task finishes first)"));
+				} else if (wasBusy) {
+					steered.push({ content: text, submission });
+					line(dim("  (sent; the agent reads it after its current step, and a running task finishes first)"));
+				}
 			});
 		});
+		// Bash-like: Ctrl-C clears what is typed on the line. With the line already clear, Ctrl-C twice in a row
+		// leaves the way /quit does; Ctrl-X stops the agent instead, and Ctrl-V pauses it.
+		let armedQuit = 0;
 		reader.on("SIGINT", () => {
-			if (!busy) return void leave();
-			enqueue(async () => {
-				await main.abort(context);
-				line(dim("  stopped (Ctrl-C again to leave)"));
-				runningLine();
-			});
+			const typed = typeof reader.line === "string" ? reader.line : "";
+			if (typed !== "") {
+				reader.line = "";
+				reader.cursor = 0;
+				out.write("\r\x1b[K");
+				if (!busy) reader.prompt(true);
+				return;
+			}
+			const now = Date.now();
+			if (now - armedQuit < 2000) return void leave();
+			armedQuit = now;
+			line(dim(busy ? "  Ctrl-C again to leave; Ctrl-X stops the agent" : "  Ctrl-C again to leave"));
 		});
 		reader.on("close", () => void leave());
-		// Ctrl-T: show or hide the agent's own text. readline has no use for the key.
+		// Ctrl-T: show or hide the agent's own text. readline has no use for the key; nor for Ctrl-X and Ctrl-V.
 		(ui !== undefined ? ui.keys : options.input).on("keypress", (_text, key) => {
-			if (key?.ctrl !== true || key.name !== "t" || closing) return;
+			if (key?.ctrl !== true || closing) return;
+			if (key.name === "x") return void enqueue(async () => command("/stop"));
+			if (key.name === "v") return void enqueue(async () => command("/pause"));
+			if (key.name !== "t") return;
 			enqueue(async () => {
 				// The prompt and what is typed on it are taken off the line, and put back after.
 				if (!busy) out.write("\r\x1b[K");
@@ -1816,7 +1896,7 @@ export async function runTerminal(session, options) {
 				if (!busy) reader.prompt(true);
 			});
 		});
-		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C stops the agent; again leaves." : "Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl-T hides and shows its thinking."));
+		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it; Ctrl-T hides and shows its thinking."));
 		// A context left large by the last session is collapsed before the first message has to carry it.
 		enqueue(async () => {
 			await rest();

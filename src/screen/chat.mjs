@@ -265,17 +265,25 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 			const item = items.find((entry) => entry.key === key);
 			return item?.type === "user" || item?.type === "agent" || item?.type === "note";
 		},
-		/** A message said anew, as it shows. The conversation's stored entries cannot change; this changes the tab. */
-		revise(key, text) {
-			const item = items.find((entry) => entry.key === key);
-			if (item === undefined || (item.type !== "user" && item.type !== "agent" && item.type !== "note")) return false;
-			const said = String(text ?? "").replace(/\s+$/, "");
-			if (said === "" || said === item.text) return false;
-			item.text = said;
-			delete item.md;
-			touch();
-			return true;
-		},
+	/** A message said anew, as it shows. The conversation's stored entries cannot change; this changes the tab. */
+	revise(key, text) {
+		const item = items.find((entry) => entry.key === key);
+		if (item === undefined || (item.type !== "user" && item.type !== "agent" && item.type !== "note")) return false;
+		const said = String(text ?? "").replace(/\s+$/, "");
+		if (said === "" || said === item.text) return false;
+		item.text = said;
+		delete item.md;
+		touch();
+		return true;
+	},
+	/** A message taken out of the tab (deleted in the Context window): gone where it stood. */
+	forget(key) {
+		const at = items.findIndex((entry) => entry.key === key);
+		if (at < 0) return false;
+		items.splice(at, 1);
+		touch();
+		return true;
+	},
 		toggleRow(key, index, to) {
 			const item = items.find((entry) => entry.key === key);
 			const row = item?.rows?.[index];

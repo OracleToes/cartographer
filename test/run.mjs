@@ -629,6 +629,40 @@ test("task: `return` needs a report, and a task that writes nothing at all is en
 	}
 });
 
+test("kill: after a kill mid-inference, the restart does not wait for the stuck agent to talk to the user", async () => {
+	const root = makeProject("kill", { git: false });
+	// Hold any request the tool result of a call waits behind, for good: the agent is stuck mid-inference,
+	// before and after the restart, and nothing the user does should wait on it.
+	const server = await startStandIn({ holdWhen: (body) => body.messages.at(-1)?.role === "tool" });
+	try {
+		const child = spawn(process.execPath, [CARTO, "--url", server.url, "--model", "stand-in", "-p", "look: list: ."], { cwd: root, stdio: "ignore" });
+		const gone = new Promise((resolve) => child.on("close", resolve));
+		await until(() => server.heldCount() === 1, "the agent reaches its second step");
+		child.kill("SIGKILL");
+		await gone;
+		server.release();
+		// The released request never finishes: after the restart the same step is held again, still mid-inference.
+		const before = server.requests.length;
+
+		const resumed = await cartoOnTerminal(root, server, [], [
+			["Continuing unfinished work", "/books"],
+			["carto-books.json", "say: you answer at once though the task hangs"],
+			["sent; the agent reads it after its current step", "\u0018", false],
+			[3, "", false],
+			[1.5, "/quit"],
+		]);
+		ok(resumed, "restart after the kill (the stale lock is taken over)");
+		has(resumed.screen, "Continuing unfinished work from the last session", "says it is continuing");
+		has(resumed.screen, "you answer at once though the task hangs", "the user's own line was accepted while the agent hung");
+		// The echo of the line holds it once; the agent's answer holds it again.
+		const said = resumed.screen.split("you answer at once though the task hangs").length - 1;
+		assert.ok(said >= 2, `the agent answered what it had held: the words stand ${said} times on the screen`);
+		assert.ok(server.requests.slice(before).length <= 3, `only the unfinished step was redone: ${server.requests.slice(before).length} requests after the restart`);
+	} finally {
+		await server.close();
+	}
+});
+
 test("kill: carto killed in the middle of a task picks the task up again at the next start", async () => {
 	const root = makeProject("kill", { git: false });
 	// Hold the task's second request: the task has started, done one step, and is waiting for the model.
@@ -5456,6 +5490,8 @@ test("screen: blocks have backgrounds of their own inside an empty margin, and h
 	const server = await startStandIn();
 	try {
 		ok(await carto(root, server, [], { input: "" }), "set up");
+		// The greys are pinned below in the 256 palette, so the colour mode is pinned too: a COLORTERM of the
+		// shell this suite runs in would otherwise make the theme truecolor.
 		const result = await cartoOnScreen(root, server, [], [
 			["Type a message", "think: Thinking it over."],
 			["┊ Thinking it over.", "task: read: a.txt"],
@@ -5468,7 +5504,7 @@ test("screen: blocks have backgrounds of their own inside an empty margin, and h
 			[0.6, "<ESC>", false],
 			["COMMANDS", "kkk", false],
 			[0.5, "", false],
-		], { rows: 34 });
+		], { rows: 34, env: { COLORTERM: "" } });
 		if (result === undefined) return "python3 is needed for a terminal";
 		const rows = result.painted;
 		const row = (text) => rows.find((entry) => entry.text.includes(text)) ?? assert.fail(`no row shows ${JSON.stringify(text)}:\n${rows.map((entry) => entry.text).join("\n")}`);
@@ -5498,7 +5534,7 @@ test("screen: blocks have backgrounds of their own inside an empty margin, and h
 		assert.ok(result.osc.includes("11;?") && result.osc.includes("10;?"), "the terminal is asked for its background and text colours");
 
 		// A terminal that answers with a light background gets light blocks.
-		const light = await cartoOnScreen(root, server, [], [["Type a message", "say: hi"], ["\n  hi\n", "", false], [0.5, "", false]], { rows: 20, env: { VT_BACKGROUND: "faf9f6" } });
+		const light = await cartoOnScreen(root, server, [], [["Type a message", "say: hi"], ["\n  hi\n", "", false], [0.5, "", false]], { rows: 20, env: { VT_BACKGROUND: "faf9f6", COLORTERM: "" } });
 		const grey = (code) => Number(/^5;(\d+)$/.exec(code ?? "")?.[1]);
 		const [darkBar, lightBar] = [grey(tabs.edge), grey(light.painted[0].edge)];
 		assert.ok(darkBar >= 232 && darkBar < 242, `on a dark background the row of tabs is a dark grey: ${tabs.edge}`);
@@ -5898,6 +5934,191 @@ test("screen: Hands lists the shelf and the reports with the agent's operations,
 	const nothing = shellsOutView({ session: { windows } }, "nope");
 	has(nothing.header[0].map(([part]) => part).join(""), "Output of term", "a window there is not falls back to the newest");
 	windows.shutdown();
+});
+
+test("pause: /pause and Ctrl-V hold everything new back from the agent, and let it go on", async () => {
+	const root = makeProject("pause", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const first = await cartoOnTerminal(root, server, [], [
+			["› ", "/pause"],
+			["paused", "say: held while paused"],
+			[1.2, "/pause"],
+			["on again: what you wrote is sent now", ""],
+			[1.5, ""],
+		]);
+		ok(first, "a session with a pause");
+		has(first.screen, "[paused", "the prompt says the pause");
+		has(first.screen, "(held: the agent is paused, 1 line waits · /pause or Ctrl-V lets them go)", "a line written while it is paused is held, and said to be");
+		has(first.screen, "on again: what you wrote is sent now (1 line)", "and is sent when the pause is lifted");
+		has(first.screen, "held while paused", "the agent answers it");
+		assert.equal(server.requests.length, 1, "the held line reached the agent only when the pause was lifted");
+		has(rawText(server.requests[0].messages.at(-1)), "held while paused", "as itself, not as a note");
+		// Ctrl-V does the same, and lifts the pause while the agent works.
+		const second = await cartoOnTerminal(root, server, [], [
+			["› ", "\u0016"],
+			["paused", "say: held by the key"],
+			[1.2, "\u0016"],
+			["on again", ""],
+			[1.5, ""],
+		]);
+		ok(second, "a session with Ctrl-V");
+		has(second.screen, "[paused", "Ctrl-V pauses");
+		has(second.screen, "on again: what you wrote is sent now (1 line)", "and Ctrl-V again lets the held line go");
+		assert.equal(server.requests.length, 2, "one request more, for the line the second pause held");
+	} finally {
+		await server.close();
+	}
+});
+
+test("the books: /archive, /unarchive and /delete reach every book the agent keeps, and deleting says nothing to the agent", async () => {
+	const root = makeProject("books-ops", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const brainDir = join(root, ".atlas");
+		addRecord(brainDir, { id: "t1", at: Date.now(), mode: "look", brief: "Read the tree", report: "The tree has 5 files.", changed: 0 });
+		writeFileSync(join(brainDir, "carto-ledger.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "g1", kind: "goal", text: "Keep the lights on", doneWhen: "they stay on", status: "open", added: "2026-01-01T00:00:00.000Z" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-plan.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "p1", mode: "change", text: "Run things" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-atlas.json"), `${JSON.stringify({ nodes: [{ name: "alpha", gist: "First.", links: ["beta"] }, { name: "beta", gist: "Second." }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-proposals.json"), `${JSON.stringify({ next: 2, items: [{ id: "x1", action: "edit", target: "approach", text: "Be brief.", why: "shorter replies", at: Date.now() }] }, null, "\t")}\n`);
+		const result = await carto(root, server, [], { input: lines("/archive g1 p1", "/ledger", "/plan", "/unarchive p1", "/delete g1", "/delete beta", "/atlas", "/delete alpha x1 zz", "/delete t1") });
+		ok(result, "the commands run");
+		has(result.stdout, "g1 archived: the goal leaves the ledger as the agent reads it", "/archive archives a ledger entry");
+		has(result.stdout, "p1 archived: the item leaves the plan as the agent reads it", "and a plan item");
+		has(result.stdout, "(1 archived entry not shown; /unarchive ID brings one back)", "/ledger hides the archived one and says how many");
+		hasNot(result.stdout, "Keep the lights on", "the archived entry is not shown");
+		has(result.stdout, "(1 archived item not shown; /unarchive ID brings one back)", "/plan hides the archived one too");
+		hasNot(result.stdout, "Run things", "the archived item is not shown");
+		has(result.stdout, "p1 is back in the plan as the agent reads it.", "/unarchive brings a row back");
+		has(result.stdout, "g1 is gone for good: the goal is out of the ledger, and nothing of it is said to the agent.", "/delete takes a ledger entry away for good");
+		has(result.stdout, "beta is gone for good: the node is out of the graph, and 1 link to it went with it", "/delete takes a node away, and its links with it");
+		has(result.stdout, "alpha is gone for good: the node is out of the graph", "and another");
+		has(result.stdout, "x1 is forgotten: the proposal is out of the book, and nothing of it is said to the agent.", "/delete forgets a prompt proposal");
+		has(result.stdout, "There is no zz. a report is t1", "an id that names nothing is refused, with the books named");
+		has(result.stdout, "t1 deleted: the record line is gone", "a report goes by the words of the context store");
+		assert.ok(!existsSync(join(brainDir, "reports", "t1.md")), "and the report's file is gone with it");
+		const atlas = JSON.parse(readFileSync(join(brainDir, "carto-atlas.json"), "utf8"));
+		assert.deepEqual([atlas.nodes.map((node) => node.name), atlas.nodes.flatMap((node) => node.links)], [[], []], "the graph holds neither node nor link");
+		assert.equal(JSON.parse(readFileSync(join(brainDir, "carto-ledger.json"), "utf8")).items.length, 0, "the ledger holds neither");
+		// Not one word to the agent: archiving and deleting are the user's hands on what the agent keeps.
+		assert.equal(server.requests.length, 0, "the agent is sent nothing through all of it");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: Ctrl-C clears what is typed; twice on the empty line leaves; Ctrl-X says nothing runs", async () => {
+	const root = makeProject("screen-keys", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const result = await cartoOnScreen(root, server, [], [
+			// Typed but not sent: the Enter that would send it is held back.
+			["Type a message", "hello there", false],
+			["hello there", "<CTRLC>", false],
+			["type a message, or /help", "", false],
+			[0.3, "<CTRLX>", false],
+			["nothing runs: the agent rests", "", false],
+			// With the line standing empty, the first Ctrl-C asks, the second, soon after, leaves.
+			[0.3, "<CTRLC>", false],
+			["Ctrl-C again to leave", "<CTRLC>", false],
+			[1, "", false],
+		], { rows: 24 });
+		if (result === undefined) return "python3 is needed for a terminal";
+		const cleared = result.shots.find((shot) => shot.includes("type a message, or /help"));
+		assert.ok(cleared, `the line is cleared:\n${result.shots.join("\n────\n")}`);
+		hasNot(cleared, "hello there", "and what was typed is gone");
+		assert.ok(result.shots.some((shot) => shot.includes("nothing runs: the agent rests")), "Ctrl-X at rest says so, and says nothing to the agent");
+		assert.ok(result.shots.some((shot) => shot.includes("Ctrl-C again to leave")), "the first Ctrl-C on the empty line asks");
+		has(result.shots.at(-1), "Ctrl-C again to leave", "the second leaves, and the conversation stands on the screen");
+		assert.equal(server.requests.length, 0, "what was cleared never reached the agent");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: in Requests, a approves, n turns down, and d forgets a request without a word to the agent", async () => {
+	const root = makeProject("screen-requests", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const brainDir = join(root, ".atlas");
+		writeFileSync(join(brainDir, "carto-ledger.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Blue or red?", status: "open", added: "2026-01-01T00:00:00.000Z" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-plan.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "p1", mode: "change", text: "Run things" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-proposals.json"), `${JSON.stringify({ next: 2, items: [{ id: "x1", action: "edit", target: "approach", text: "Be brief.", why: "shorter replies", at: Date.now() }] }, null, "\t")}\n`);
+		const result = await cartoOnScreen(root, server, [], [
+			[0.5, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["Atlas", "]", false],
+			["Ledger", "]", false],
+			["Plan", "]", false],
+			// A refresh selects the first row by itself: a approves p1 where it stands.
+			["3 requests wait for you", "a", false],
+			["approved p1", "", false],
+			// The approve left the session on the Chat tab, typing; go back to the rows.
+			[2.2, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["2 requests wait for you", "n", false],
+			["q1 turned down", "", false],
+			[2.2, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["1 request waits for you", "d", false],
+			["Press d again: x1 is forgotten", "d", false],
+			["Nothing waits for you", "<ESC>", false],
+			[0.4, "/quit"],
+		], { rows: 30 });
+		if (result === undefined) return "python3 is needed for a terminal";
+		const asked = result.shots.find((shot) => shot.includes("3 requests wait for you"));
+		assert.ok(asked, `the requests view shows:\n${result.shots.join("\n────\n")}`);
+		has(asked, "a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "the view says what the keys do");
+		assert.ok(result.shots.some((shot) => shot.includes("Press d again: x1 is forgotten")), `the first d asks, in the words of a forget:\n${result.shots.join("\n────\n")}`);
+		const gone = result.shots.find((shot) => shot.includes("Nothing waits for you"));
+		assert.ok(gone, `the forgotten request leaves the view:\n${result.shots.join("\n────\n")}`);
+		has(gone, "Nothing waits for you. The agent goes on with whatever does not depend on an answer.", "the view says what is left");
+		// The approve and the deny were sent; the forget was not.
+		const said = server.requests.map((request) => rawText(request.messages.at(-1)));
+		assert.equal(said.filter((text) => text.includes("I approved p1")).length, 1, "a approved the change item, and the agent is told");
+		assert.equal(said.filter((text) => text.includes("I turned down q1")).length, 1, "n turned the question down, and the agent is told");
+		assert.equal(server.requests.length, 2, "and the forget says nothing to the agent");
+		const ledger = JSON.parse(readFileSync(join(brainDir, "carto-ledger.json"), "utf8"));
+		assert.equal(ledger.items[0].status, "done", "the question was closed by the deny");
+		assert.equal(JSON.parse(readFileSync(join(brainDir, "carto-proposals.json"), "utf8")).items.length, 0, "the proposal is out of the book");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: d in the Context window takes a message of yours out of the talk the collapse keeps, and out of view", async () => {
+	const root = makeProject("screen-delete", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const result = await cartoOnScreen(root, server, [], [
+			["Type a message", "say: hello there"],
+			["hello there", "", false],
+			[0.8, "<ESC>", false],
+			["COMMANDS", "5", false],
+			["What the main agent sees", "j", false],
+			[0.2, "j", false],
+			// The front block rides inside the first message of the user: three j's from the system prompt reach your words.
+			[0.2, "j", false],
+			[0.2, "d", false],
+			["Press d again: the message goes for good", "d", false],
+			["deleted from the talk", "", false],
+			[2.2, "/quit"],
+		], { rows: 30 });
+		if (result === undefined) return "python3 is needed for a terminal";
+		assert.ok(result.shots.some((shot) => shot.includes("Press d again: the message goes for good")), `the first d asks:\n${result.shots.join("\n────\n")}`);
+		assert.ok(result.shots.some((shot) => shot.includes("deleted from the talk the collapse keeps")), `the second carries it out:\n${result.shots.join("\n────\n")}`);
+		const store = JSON.parse(readFileSync(join(root, ".atlas", "carto-context.json"), "utf8"));
+		assert.ok(!store.chat.some((entry) => entry.text.includes("say: hello there")), `the talk the collapse keeps holds neither:\n${JSON.stringify(store.chat)}`);
+		assert.ok(store.chat.some((entry) => entry.text.includes("hello there")), "what the agent said to you stays");
+		hasNot(result.shots.at(-1), "say: hello there", "the part stands out of the window, and out of the conversation");
+	} finally {
+		await server.close();
+	}
 });
 
 async function until(condition, what, timeoutMs = 15_000) {

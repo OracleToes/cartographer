@@ -27,7 +27,9 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { archiveReports, contextPath, deleteReports, foldReports, loadContext, recallReport, reviseNote, shelveForUser, unarchiveReports, unshelveForUser } from "../context.mjs";
+import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
+import { archiveRow, dropRow, foldRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { CORE_DIR } from "../config.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
 import { booksPath } from "../books.mjs";
@@ -100,14 +102,15 @@ const COMMANDS = [
 	["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["stop", "stop what the agent is doing; shell windows keep running"],
+	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
+	["pause", "hold everything new back from the agent while it finishes (Ctrl-V)"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
-	["archive", "take a report's record line out of the kept block; the report stays on disk"],
-	["unarchive", "bring an archived report's line back into the record"],
-	["delete", "remove a report for good: its record line and its file"],
+	["archive", "take a row out of what the agent reads: a report, a ledger entry, a plan item, a node"],
+	["unarchive", "bring an archived row back into what the agent reads"],
+	["delete", "a row is gone for good, and the agent is not told: a report, a ledger entry, a plan item, a proposal, a node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "keep a file in view from the next collapse on: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -151,7 +154,8 @@ export const KEYS_HELP = [
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, the system prompt's prompt.json, a tool where it is defined, a shelved file",
-	"  f, v, d, x, a    in Context's Hands view: fold a report out of view or bring it back; archive it out of the record; delete it for good (d again); take a shelved file off the shelf; shelve a file (a puts /shelve in the prompt)",
+	"  f, v, d, x       the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, a ledger entry, a plan item, a node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
 	"  :                type a command",
@@ -163,7 +167,8 @@ export const KEYS_HELP = [
 	"  PgUp, PgDn       scroll; so does the wheel. Ctrl-Home and Ctrl-End go to the top and the end",
 	"  Ctrl-Shift-F     search the tab that shows, where the terminal can send that key (else: Esc, then /)",
 	"  Ctrl-T           show or hide the agent's notes and thinking",
-	"  Ctrl-C           copy what is selected with the mouse; else stop the agent; with the agent at rest, leave",
+	"  Ctrl-C           clear what you have typed; with the line empty, again (soon after) leaves, the way /quit does",
+	"  Ctrl-X           stop the agent; Ctrl-V pauses it: it finishes what it is doing and gets nothing new",
 	"  Ctrl-L           draw the screen again",
 	"  F1               this sheet",
 	"",
@@ -215,9 +220,10 @@ function onPath(name) {
  */
 export async function runScreen(session, options, runTerminal) {
 	const { root, brainDir, config = {} } = options;
+	const coreDir = options.coreDir ?? CORE_DIR;
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
-	let core = { busy: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
+	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
 
 	// ─── The terminal, in pi-tui's hands ─────────────────────────────────────
 	// The lines that break in what is typed, and the keys that bring back what was sent before.
@@ -433,6 +439,7 @@ export async function runScreen(session, options, runTerminal) {
 			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < 10 ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
 			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < 20_000 && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
 		} else first.push(["○ ", "muted"], ["resting", ""], [` · ${span(Date.now() - state.restSince)}`, "muted"]);
+		if (core.paused?.()) first.push([" · paused: the agent gets nothing new · /pause or Ctrl-V lets it go on", "warn"]);
 
 		const second = [];
 		const size = core.contextSize();
@@ -481,7 +488,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits });
+			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
 		if (id === "context.hands") return handsView({ root, brainDir });
@@ -668,6 +675,8 @@ export async function runScreen(session, options, runTerminal) {
 	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
 	/** What the user has said anew in the editor, by the text it was sent with. The tab shows the new words where the old stood; the sizes stay those of what was sent. */
 	const messageEdits = new Map();
+	/** What the user has deleted in the Context window, by the text it was sent with: the parts stand out of the list. */
+	const messageDeleted = new Set();
 	/** A message edited here is also edited in the Chat tab, when it stands there by the same words. */
 	const syncChat = (base, now, type) => {
 		const item = chat.items.findLast((entry) => (type === undefined || entry.type === type) && entry.text === base);
@@ -699,6 +708,26 @@ export async function runScreen(session, options, runTerminal) {
 		syncChat(base, now, item.editKind === "chat-you" ? "user" : item.editKind === "chat-agent" ? "agent" : undefined);
 		refresh(viewId(), true);
 		flash(item.editKind === "chat-you" ? "your message is edited · what follows reads the edited words" : "edited where it shows, and in the talk the collapse keeps · what was sent stays as it was");
+	};
+	/** d on a message of the Context window, yours or the agent's: it leaves the talk the collapse keeps, and the views. What was sent stays stored, and the agent reads it until the next collapse. */
+	const deleteChat = (item) => {
+		const full = item.copy ?? item.body;
+		if (typeof full !== "string" || full === "") return flash("nothing to delete here");
+		// A message of yours was sent with a stamp of its own; the words are what stands without it, and that is what is deleted.
+		let base = full;
+		if (item.editKind === "chat-you") {
+			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(full);
+			if (found !== null) base = full.slice(0, found.index);
+		}
+		if (typeof item.chat === "string") base = item.chat;
+		if (!forgetChat(brainDir, base)) return flash("the talk the collapse keeps does not hold it: a collapse may have dropped it already");
+		messageDeleted.add(full);
+		messageDeleted.add(base);
+		// Where the same words stand in the Chat tab, they go too.
+		const twin = chat.items.findLast((entry) => entry.text === base || entry.text === full);
+		if (twin !== undefined) inPlace(() => chat.forget(twin.key));
+		refresh(viewId(), true);
+		flash("deleted from the talk the collapse keeps, and from view · what was sent stays stored, and the agent reads it until the next collapse");
 	};
 	const editContext = () => {
 		const item = pageOf().list.selected();
@@ -864,46 +893,65 @@ export async function runScreen(session, options, runTerminal) {
 			return second === undefined ? undefined : command(second);
 		}
 		if (key === "z") return void (state.pending = "z");
-		// The Hands view of the Context tab: the same operations the agent's `context` tool has, and the ones
-		// only the user has: archiving a report out of the record, and deleting one for good.
-		if (viewId() === "context.hands") {
+		// The rows of the views, in every tab but Chat: the same keys do everywhere what they do in Hands — f
+		// folds a report, v archives a row out of what the agent reads, d deletes it for good, x unshelves a file.
+		// They stand on whatever the view shows: a report or a shelved file in Hands, a node of the graph, a
+		// ledger entry, a plan item in Carto, a request in Requests, a message of the user or the agent in the
+		// Context window. The operations themselves are in src/ops.mjs, the same code the commands run.
+		if (!inChat) {
 			const item = pageOf().list.selected();
-			if (key === "f" && item?.kind === "report" && item.archived !== true && typeof item.key === "string" && item.key.startsWith("report:")) {
-				const id = item.key.slice(7);
-				const said = loadContext(brainDir).dropped.includes(id) ? recallReport(brainDir, id) : foldReports(brainDir, [id]);
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
+			const deletable = rowKey !== undefined && (/^(?:report|entry|item|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
+			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
+				const said = foldRow(brainDir, bookId);
 				flash(said.replace(/\n+/g, " "));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "v" && item?.kind === "report" && typeof item.key === "string" && item.key.startsWith("report:")) {
-				const id = item.key.slice(7);
-				flash(item.archived === true ? unarchiveReports(brainDir, [id]) : archiveReports(brainDir, [id]));
+			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "d" && item?.kind === "report" && typeof item.key === "string" && item.key.startsWith("report:")) {
-				const id = item.key.slice(7);
-				// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
-				if (state.deleteArm?.id === id && Date.now() - state.deleteArm.at < 6000) {
-					state.deleteArm = undefined;
-					flash(deleteReports(brainDir, [id]));
-					refresh(viewId(), true);
-					return;
-				}
-				state.deleteArm = { id, at: Date.now() };
-				flash(`Press d again: ${id} goes for good`);
-				return;
-			}
-			if (key === "x" && typeof item?.key === "string" && item.key.startsWith("shelf:")) {
+			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) {
 				try {
-					flash(unshelveForUser(brainDir, item.key.slice(6)));
+					flash(unshelveRow(brainDir, bookId));
 				} catch (error) {
 					flash(error.message);
 				}
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "a") {
+			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
+			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
+			if (key === "d" && deletable) {
+				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < 6000) {
+					state.deleteArm = undefined;
+					if (item.editKind === "chat-you" || item.editKind === "chat-agent") deleteChat(item);
+					else flash(dropRow(brainDir, coreDir, bookId));
+					refresh(viewId(), true);
+					return;
+				}
+				state.deleteArm = { id: rowKey, at: Date.now() };
+				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : item.editKind === "chat-you" || item.editKind === "chat-agent" ? "Press d again: the message goes for good" : `Press d again: ${bookId} goes for good`);
+				return;
+			}
+			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
+			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
+			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
+				if (key === "a") {
+					if (/^q\d+$/.test(bookId)) return flash("a question is answered with words: /answer " + bookId + " words");
+					setMode("type");
+					return void submit(`/approve ${bookId}`);
+				}
+				if (key === "n") {
+					setMode("type");
+					return void submit(`/deny ${bookId}`);
+				}
+			}
+			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
+			if (key === "a" && viewId() === "context.hands") {
 				setMode("type");
 				prompt.insertTextAtCursor("/shelve ");
 				return;
@@ -1152,7 +1200,17 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const key = keyOf(data);
 		const done = { consume: true };
-		if (key === "ctrl+c") reader.emit("SIGINT");
+		if (key === "ctrl+c") {
+			// Bash-like: first Ctrl-C clears what is typed. With the line standing empty, the terminal core hears
+			// it, and a second Ctrl-C soon after leaves the way /quit does.
+			if (prompt.getText() !== "") {
+				prompt.setText("");
+				return done;
+			}
+			reader.emit("SIGINT");
+		}
+		else if (key === "ctrl+x") keys.emit("keypress", "", { ctrl: true, name: "x" });
+		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
 		else if (key === "f1") showKeys();
