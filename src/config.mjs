@@ -17,7 +17,7 @@ const DEFAULTS = {
 	server: undefined,
 	model: undefined,
 	// What the server was started with (-c). Cartographer never asks for more than this.
-	contextWindow: 32000,
+	contextWindow: 100000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
 	// how long a file one `write` call can hold.
 	maxTokens: 8192,
@@ -43,6 +43,10 @@ const DEFAULTS = {
 	colors: "auto",
 	// "auto" asks the terminal for its background; "dark" or "light" says it.
 	theme: "auto",
+	// Building from the ground up: `write` creates a new file only, and no longer than this many lines,
+	// so a project is assembled one small, exact edit at a time. Adjustable per install/project.
+	writeLines: 60,
+	writeCreatesOnly: true,
 	// Whether a reply that writes the same character or phrase over and over is cut off.
 	repeatCut: true,
 	// Whether the server is asked how far it is with reading the prompt (llama.cpp's return_progress).
@@ -93,10 +97,14 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 		...readJson(projectPath),
 		...(env.CARTO_SERVER ? { server: env.CARTO_SERVER } : {}),
 		...(env.CARTO_MODEL ? { model: env.CARTO_MODEL } : {}),
-		...(flags.url ? { server: flags.url } : {}),
-		...(flags.model ? { model: flags.model } : {}),
-	};
-	if (typeof config.server !== "string" || typeof config.model !== "string") {
+			...(flags.url ? { server: flags.url } : {}),
+			...(flags.model ? { model: flags.model } : {}),
+		};
+		// The write limit may be overridden for one run (the stand-in tests exercise the old create-or-replace
+		// behaviour, so they relax it); real runs keep the strict default above.
+		if (env.CARTO_WRITE_LINES !== undefined && env.CARTO_WRITE_LINES !== "") config.writeLines = Number(env.CARTO_WRITE_LINES);
+		if (env.CARTO_WRITE_CREATES_ONLY !== undefined && env.CARTO_WRITE_CREATES_ONLY !== "") config.writeCreatesOnly = env.CARTO_WRITE_CREATES_ONLY === "1" || env.CARTO_WRITE_CREATES_ONLY === "true";
+		if (typeof config.server !== "string" || typeof config.model !== "string") {
 		throw new ConfigError(
 			[
 				"No model server is configured.",
@@ -116,7 +124,8 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	if (config.chatWindow + config.shelfTokens > config.contextWindow / 2) throw new ConfigError("config: chatWindow and shelfTokens together must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= 0)) throw new ConfigError("config: collapseMinutes must be a number of minutes, 0 or more");
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < 30 || config.collapseFull > 95) throw new ConfigError("config: collapseFull must be a whole number from 30 to 95 (percent)");
-	for (const key of ["screen", "repeatCut", "prefill"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
+	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
+	if (!Number.isInteger(config.writeLines) || config.writeLines < 1) throw new ConfigError("config: writeLines must be a whole number of lines, 1 or more");
 	if (!["auto", "truecolor", "256", "none"].includes(config.colors)) throw new ConfigError('config: colors must be "auto", "truecolor", "256" or "none"');
 	if (!["auto", "dark", "light"].includes(config.theme)) throw new ConfigError('config: theme must be "auto", "dark" or "light"');
 	if (!Number.isInteger(config.prefillTokens) || config.prefillTokens < 0) throw new ConfigError("config: prefillTokens must be a whole number of tokens, 0 or more");

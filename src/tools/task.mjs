@@ -25,7 +25,7 @@ import { fileMarks, loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../at
 import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep } from "../checkpoints.mjs";
 import { addRecord, KEPT_AS, loadContext, reserveId } from "../context.mjs";
 import { endTaskContext } from "./context.mjs";
-import { applyPlanOp, isAuthorized, loadPlan, savePlan } from "../plan.mjs";
+import { applyPlanOp, loadPlan, mayRun, savePlan } from "../plan.mjs";
 import { CHANGE_NOTE, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";
 import { treeSection } from "../tree.mjs";
@@ -84,7 +84,10 @@ function kindOf(brainDir, item, gate) {
 		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `plan` first, or leave `item` out for a task that only looks." : `The plan has ${ids}.`}` };
 	}
 	if (found.status === "done") return { refusal: `${found.id} is marked done. For further work, add a new item to the plan.` };
-	if (found.mode === "change" && !isAuthorized(plan) && gate?.yolo !== true) return { refusal: REFUSALS.notAuthorized(found.id) };
+	// Approval is per item: a change item runs once the user has approved it (requests), once the
+	// whole plan was authorized with /approve, or while approval is switched off. Adding another
+	// item never cancels what was already agreed.
+	if (found.mode === "change" && !mayRun(plan, found, gate?.yolo === true)) return { refusal: REFUSALS.notAuthorized(found.id) };
 	// Whether the task's commands reach the network is settled here, with the item as the user authorized it.
 	return { run: { mode: found.mode, item: found.id, text: found.text, ...(found.mode === "change" && found.network === true ? { network: true } : {}) } };
 }

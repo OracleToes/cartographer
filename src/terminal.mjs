@@ -24,7 +24,12 @@ import { clearFront, contextPath, FLOOR, isFront, loadReport, recordLine, shelfL
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, renderPlan, savePlan, YOLO_LINE } from "./plan.mjs";
+import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { listRequests, approveRequests, denyRequest, answerQuestion } from "./requests.mjs";
+import { loadOverlay, overlayPath, resetWording, targets } from "./proposals.mjs";
+import { booksPath } from "./books.mjs";
+import { SECTION_NAMES, TOOLS } from "./prompt.mjs";
+import { CORE_DIR } from "./config.mjs";
 import { stateBlock, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, pin, sinceTop } from "./top.mjs";
@@ -707,6 +712,8 @@ export async function runTerminal(session, options) {
 		}
 		const { text, info } = engine.collapse({ reason });
 		await main.reset(text, context);
+		// A collapse is the boundary at which the prompt the agent approved for itself takes effect.
+		session.refreshWording?.();
 		collapsedLine();
 		if (config.readAhead !== false && !final) {
 			const ahead = engine.readAhead(text, info.at);
@@ -833,11 +840,11 @@ export async function runTerminal(session, options) {
 	let reminded;
 	const approvalLine = () => {
 		const { plan } = loadPlan(options.brainDir);
-		if (plan === undefined || !awaitsApproval(plan) || gate.yolo) {
+		if (plan === undefined || !planWaits(plan) || gate.yolo) {
 			reminded = undefined;
 			return;
 		}
-		const waiting = openItems(plan, "change");
+		const waiting = waitingItems(plan);
 		const mark = JSON.stringify(waiting.map((item) => [item.id, item.text, item.network === true, item.standing === true]));
 		const online = waiting.filter((item) => item.network === true).length;
 		const duties = waiting.filter((item) => item.standing === true).length;
@@ -951,7 +958,11 @@ export async function runTerminal(session, options) {
 	let setPrompt = () => {};
 
 	const command = async (text) => {
-		const [name, argument] = text.slice(1).trim().split(/\s+/);
+		const [name, ...parts] = text.slice(1).trim().split(/\s+/);
+		const argument = parts[0];
+		const args = parts.filter((part) => part !== "");
+		const tail = args.slice(1).join(" ");
+		const coreDir = options.coreDir ?? CORE_DIR;
 		switch (name) {
 			case "help":
 				line(
@@ -963,7 +974,10 @@ export async function runTerminal(session, options) {
 						"  /atlas    the tree as the agent sees it, the graph's nodes, and where the file is",
 						"  /assessment  the agent's summary of the project, and where the file is",
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
-						"  /approve  authorize the plan as it stands: its change items may then run",
+						"  /requests what waits for you: change items, questions of taste, and changes to the agent's own prompt",
+						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
+						"  /deny     /deny ID [why] turns a request down; /answer ID words answers a question of taste",
+						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
 						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
 						"  /diff     what the last change task did to the files (/diff all: the whole patch)",
@@ -980,6 +994,28 @@ export async function runTerminal(session, options) {
 					].join("\n"),
 				);
 				return true;
+			case "requests": {
+				const all = listRequests(options.brainDir, { yolo: gate.yolo });
+				if (all.length === 0) line("  Nothing waits for you. /plan, /ledger and /requests show what the agent has written.");
+				else {
+					line(`  ${bold("Requests")}  ${plural(all.length, "request")} wait${all.length === 1 ? "s" : ""} for you:`);
+					for (const request of all) {
+						line(`    ${request.id}  [${request.kind}]  ${request.text}`);
+						for (const detail of request.detail ?? []) line(dim(`      ${detail}`));
+					}
+					line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
+				}
+				return true;
+			}
+			case "books":
+			case "practice": {
+				const { loadBooks, renderBook, BOOK_KINDS } = await import("./books.mjs");
+				const books = loadBooks(options.brainDir);
+				const kinds = name === "practice" ? ["practice"] : BOOK_KINDS;
+				for (const kind of kinds) line(`  ${bold(kind)}\n${renderBook(books, kind) || "    (empty)"}`);
+				line(dim(`  ${booksPath(options.brainDir)}`));
+				return true;
+			}
 			case "report": {
 				if (argument !== undefined) {
 					const kept = loadReport(options.brainDir, argument);
@@ -1090,6 +1126,20 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "approve": {
+				// One or more ids: approve those requests, one item at a time. The agent goes on meanwhile and is
+				// told what changed; it does not have to have been waiting. With no ids the old whole-plan /approve
+				// still works, so a plan described in a few lines can be agreed to in one word.
+				if (args.length > 0) {
+					const done = approveRequests(options.brainDir, coreDir, args);
+					const names = [...done.items, ...done.proposals.map((item) => item.id)];
+					if (names.length === 0) line(`  None of ${args.join(", ")} names a request that waits. /requests lists them.`);
+					else {
+						line(`${bold("●")} requests  approved ${names.join(", ")}${done.proposals.length > 0 ? "  · the wording takes effect at the next collapse or start" : ""}`);
+						await send(`I approved ${names.join(", ")}. What waited on these requests can go on; everything else you were doing does not stop.${done.proposals.length > 0 ? " The new wording takes effect at the next collapse or start." : ""}`);
+					}
+					for (const id of done.unknown) line(dim(`  ${id} is not a request that waits. /requests lists them.`));
+					return true;
+				}
 				const { plan, error } = loadPlan(options.brainDir);
 				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
 				else if (openItems(plan, "change").length === 0) {
@@ -1106,6 +1156,53 @@ export async function runTerminal(session, options) {
 					// The agent is told, so that it starts on the plan without another message from the user.
 					await send("I authorize the plan as it stands. Carry it out.");
 				}
+				return true;
+			}
+			case "deny": {
+				if (argument === undefined) {
+					line("  /deny ID [why] turns down one request. /requests lists the ids.");
+					return true;
+				}
+				const turned = denyRequest(options.brainDir, coreDir, argument, tail);
+				if (turned === undefined) line(`  ${argument} is not a request that waits. /requests lists them.`);
+				else {
+					line(`${bold("●")} requests  ${argument} turned down${tail === "" ? "" : `: ${tail}`}`);
+					await send(`I turned down ${argument}: ${turned.text}. Do not carry it out${tail === "" ? "" : `; my reason was: ${tail}`}. Go on with whatever does not depend on it.`);
+				}
+				return true;
+			}
+			case "answer": {
+				if (argument === undefined || tail === "") {
+					line("  /answer ID words answers a question of taste. /requests lists the ids.");
+					return true;
+				}
+				const answered = answerQuestion(options.brainDir, argument, tail);
+				if (answered === undefined) line(`  ${argument} is not an open question. /requests lists them.`);
+				else {
+					line(`${bold("●")} requests  ${argument} answered: ${tail}`);
+					await send(`My answer to ${argument} (${answered.text}) is: ${tail}. Use it and go on with whatever does not depend on it.`);
+				}
+				return true;
+			}
+			case "prompt": {
+				const overlay = loadOverlay(overlayPath(coreDir));
+				const pieces = [
+					...Object.entries(overlay.sections).map(([name, text]) => [name, text]),
+					...overlay.added.map(([name, text]) => [name, text]),
+					...Object.entries(overlay.tools).map(([name, text]) => [`tool.${name}`, text]),
+				];
+				const toolNames = Object.keys(TOOLS);
+				if (argument === "reset") {
+					if (tail === "") line(`  /prompt reset SECTION|tool.NAME puts one piece back to its built-in wording. Sections: ${targets().sections.join(", ")}; tools: ${toolNames.join(", ")}.`);
+					else {
+						const removed = resetWording(coreDir, tail);
+						line(removed ? `${bold("●")} prompt  ${tail} is back to its built-in wording; it takes effect at the next collapse or start.` : `  ${tail} has no approved wording of its own.`);
+					}
+					return true;
+				}
+				line(`  ${bold("Prompt")}  ${overlayPath(coreDir)}  · ${plural(pieces.length, "piece")} of approved wording${pieces.length === 0 ? " (the built-in wording is in use)" : ""}`);
+				for (const [name, text] of pieces) line(`    ${name}  ${JSON.stringify(String(text).slice(0, 90))}${String(text).length > 90 ? "…" : ""}`);
+				line(dim(`  Sections: ${targets().sections.join(", ")} · tools: ${toolNames.join(", ")} · /prompt reset TARGET`));
 				return true;
 			}
 			case "yolo": {
@@ -1221,6 +1318,7 @@ export async function runTerminal(session, options) {
 						Object.assign(item, { status: "open", undone: now });
 						delete item.outcome;
 						delete item.closed;
+						delete item.approved;
 						delete plan.authorized;
 						savePlan(options.brainDir, plan);
 						line(dim(`  ${item.id} is ${back ? "back in the plan, open" : "open again"}. ${gate.yolo ? "Approval is off, so the agent may carry it out again: tell it what you want instead." : "The plan needs /approve again before a change item runs. Tell the agent what you want instead."}`));

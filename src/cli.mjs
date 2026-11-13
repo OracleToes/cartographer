@@ -165,7 +165,7 @@ export async function main(argv) {
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate });
+		session = await openSession({ root: project.root, brainDir, coreDir: CORE_DIR, config, runner, gate });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
@@ -175,6 +175,7 @@ export async function main(argv) {
 			config,
 			root: project.root,
 			brainDir,
+			coreDir: CORE_DIR,
 			runner,
 			gate,
 			wakeMin: config.wakeMin,

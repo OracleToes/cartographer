@@ -310,7 +310,8 @@ function unmet(base, missing, say) {
 export function applyAtlasOp(atlas, op, who) {
 	const { root, now } = who;
 	switch (op?.action) {
-		case "note": {
+		case "add":
+		case "edit": {
 			const name = normName(op.name);
 			if (name === "") throw new AtlasError("`name` is required: a short name for the node, such as dice_roll.");
 			if (name.length > NAME_MAX) throw new AtlasError(`The name is ${name.length} characters; the limit is ${NAME_MAX}.`);
@@ -327,6 +328,8 @@ export function applyAtlasOp(atlas, op, who) {
 			const links = checkedLinks(op.links, name);
 			let node = atlas.nodes.find((entry) => entry.name === name);
 			const fresh = node === undefined;
+			if (op.action === "add" && !fresh) throw new AtlasError(`There is a node ${name} already; \`edit\` rewrites it.`);
+			if (op.action === "edit" && fresh) throw new AtlasError(`There is no node ${name} to edit; \`add\` writes a new one.`);
 			if (fresh) {
 				if (atlas.nodes.length >= NODES_MAX) throw new AtlasError(`The graph has ${NODES_MAX} nodes, which is its limit. Remove nodes that no longer matter, or fold several into one.`);
 				node = { name, gist, links: [], files: [], seen: {} };
@@ -458,7 +461,7 @@ export function applyAtlasOp(atlas, op, who) {
 			return { line: `The tree is now drawn from ${where}${view.depth !== undefined ? `, ${plural(view.depth, "level")} deep` : ""}: see the state block below.`, shown: `tree from ${where}${view.depth !== undefined ? `, depth ${view.depth}` : ""}`, changed: true };
 		}
 		default:
-			throw new AtlasError(`Unknown action ${JSON.stringify(op?.action)}; the actions are note, link, unlink, confirm, remove, look, tree.`);
+			throw new AtlasError(`Unknown action ${JSON.stringify(op?.action)}; the actions are add, edit, link, unlink, confirm, remove, look, tree.`);
 	}
 }
 

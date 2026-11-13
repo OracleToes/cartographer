@@ -2,7 +2,7 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.atlas/`, which holds the agent's memory of that project.
 
-So far it has: install, launch from a project, the brain folder, chat, the ledger with goals, a plan that you authorize, and tasks that look at the project or, under an authorized plan, write and edit its files and run commands in sandboxed shell windows that keep running, with a checkpoint around each task and an undo. The agent keeps an atlas of the project (a tree of the files and a graph of what it has understood) and an assessment, it is told the time, and it manages its own context. On a terminal it runs in a full screen with tabs for the chat, the brain, the changes, the shell windows and the context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+So far it has: install, launch from a project, the brain folder, chat, the ledger with goals, a plan whose change items you approve one by one, and tasks that look at the project or, under an approved item, write and edit its files and run commands in sandboxed shell windows that keep running, with a checkpoint around each task and an undo. The agent keeps an atlas of the project (a tree of the files and a graph of what it has understood) and two books of short entries — one about the project, one about how it works. What waits for you gathers in one Requests view: change items to approve, questions of taste to answer, and the agent's proposals for its own prompt, which you can approve into its system prompt. It is told the time, and it manages its own context, folding a report away itself once it has done the bookkeeping for it. On a terminal it runs in a full screen with tabs for the chat, the brain, the changes, the shell windows and the context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
@@ -88,7 +88,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | `+` and `-` | Open everything, fold everything (`zR` and `zM` do the same) |
 | Ctrl-D, Ctrl-U | Scroll half a page. Ctrl-F and Ctrl-B a page, Ctrl-E and Ctrl-Y a row |
 | `/` | Search the tab that shows. Enter or Down goes to the next match, Up to the one before, Esc closes the search |
-| `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item, a node or a paragraph of the assessment at the line where it stands in its file. The row under the tabs names the file |
+| `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item, a node or an entry of the books at the line where it stands in its file. The row under the tabs names the file |
 | `y`, `Y` | Copy what is selected; copy the whole tab |
 | `r` | Read the tab again |
 | `:` | Type a command |
@@ -121,7 +121,7 @@ Every command of the plain terminal works when typed and sent, from any tab, and
 **Leaving.** When carto leaves, the terminal gets its screen back, and the conversation is printed there as it stood, runs folded as they were, so that it is in the terminal's own scrollback.
 
 
-**The strip** above the place to type is always there. Its first row begins with a mark that turns while the agent works and stands still while it rests, and says what the agent is doing and where: the task and its plan item, the call that runs or is being written, how long this has been going on, and how fast the model writes. While the server reads a long prompt, the row shows that instead (see [Reading the prompt](#reading-the-prompt)). When the agent waits for your answer, the row says so and since when. The second row shows how full the context is, the open goals, the plan's progress and whether it waits for `/approve`, the shell windows, the wakes, and what is switched off (approval, the sandbox, the notes).
+**The strip** above the place to type is always there. Its first row begins with a mark that turns while the agent works and stands still while it rests, and says what the agent is doing and where: the task and its plan item, the call that runs or is being written, how long this has been going on, and how fast the model writes. While the server reads a long prompt, the row shows that instead (see [Reading the prompt](#reading-the-prompt)). When the agent waits for your answer, the row says so and since when. The second row shows how full the context is, the open goals, the plan's progress, how many requests wait for you, the shell windows, the wakes, and what is switched off (approval, the sandbox, the notes).
 
 #### How it looks
 
@@ -231,7 +231,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `? Which port?` with numbered choices | The agent called `ask` and waits. Type a number or an answer of your own |
 | `! The agent's reply was repeating itself …` | The reply was cut off; see [A reply that repeats itself](#a-reply-that-repeats-itself) |
 | `! The agent made 40 replies in this turn …` | The turn was ended at `mainTurns`. Say "continue" to let it go on |
-| `● atlas  created src/roll/dice.py, empty …` | A node was linked to a file that did not exist, and the plan is authorized, so the file was made |
+| `● atlas  created src/roll/dice.py, empty …` | A node was linked to a file that did not exist, the change item is approved, so the file was made |
 | `● plan  ✓ p2 marked done by its task` | The task returned with `done` true. `● plan  p2 stays open …` when it returned not done |
 | `! Cartographer ended the turn: the same call was sent 3 times …` | The agent sent the same call three times and it failed each time. Its turn is ended; inside a task, the task is ended and the main agent is told why |
 | `◂ report t3 …` | The task reported, and the report is kept as `t3`. `/report` prints the last one in full, `/report t3` that one |
@@ -247,10 +247,11 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `● plan  + p2 [change] …` | The agent changed its plan, with the same signs. `[change, network]`: the item's commands may reach the network. `[change, standing]`: a duty that stays open and may be carried out again and again |
 | `◂ atlas  wrote roller, cli` | What a task did to the graph: nodes it wrote or removed, and nodes its changes left possibly out of date |
 | `● atlas  + component roller …` | The main agent changed the graph itself: `+` written, `~` rewritten, `-` removed, `✓` confirmed. Also where it moved the tree |
-| `● assessment written, 310 characters` | The main agent replaced its assessment |
+| `● a3 [assessment] The tests check nothing yet` | The agent added an entry to one of its books (`assess`) |
 | `● top of the context rewritten` | The copy of the assessment and the graph at the start of the agent's context was replaced with the current ones. The next answer reads the whole context again |
 | `atlas: 3 nodes · assessment written 2 h ago` | At the start: what the atlas holds |
-| `plan  2 change items wait for you` | The plan needs your `/approve` before those items can run |
+| `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2` |
+| `requests  4 requests wait for you` | `/requests` lists them: change items, questions of taste, prompt proposals |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: change items run without `/approve` |
 | `context … · … read for this answer` | How full the context is, and how many tokens the server had to read rather than reuse for the last answer |
 
@@ -261,11 +262,16 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/context` | What the agent's context holds, part by part with sizes; the kept reports; when it was last collapsed and when it will be next |
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
-| `/plan` | The plan, whether it is authorized, and where the file is |
+| `/plan` | The plan, whether its change items are approved, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
-| `/assessment` | The agent's assessment of the project, and whether the copy in its context is current |
+| `/assessment`, `/practice`, `/books` | The two books: the assessment of the project, the agent's notes on how it works, or both, and where the file is |
+| `/requests` | What waits for you: change items to approve, questions of taste to answer, proposals for the agent's own prompt |
+| `/approve ID …` | Approve those requests. `/approve` alone approves the plan as it stands, the old whole-plan way |
+| `/deny ID [why]` | Turn one request down: a change item is taken out of the plan, a proposal dropped, a question closed |
+| `/answer ID words` | Answer a question of taste; the agent uses the answer and carries on |
+| `/prompt` | The agent's approved changes to its own prompt, and the targets a proposal can aim at. `/prompt reset TARGET` puts one piece back to its built-in wording |
+| `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
-| `/approve` | Authorize the plan as it stands. Its change items may then run, and the agent is told to start |
 | `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. For when you are watching; see [Without approval](#without-approval-yolo) |
 | `/wakes`, `/wakes remove ID`, `/wakes remove all` | What the agent has set to wake itself, and taking one or all of them away |
 | `/diff` | What the last change task did to the files, as a patch; or a shell window, when that is the newest step. `/diff all` shows a long patch in full |
@@ -284,7 +290,7 @@ The agent has three kinds of output.
 
 - **A note to itself.** Text without a tool call. You see it dim behind `┊`, together with the model's reasoning; nobody answers it. In the agent's own context it stands as "Note to self: …", and Cartographer follows it with one line so that the agent goes on. Notes are how a model without reasoning thinks in words. They are dropped when the context is collapsed.
 - **`chat`**: what it wants you to read. It does not wait for you. A reply whose only call is `chat` ends the main agent's turn, and you speak next; `chat` beside another call tells you something and goes on working. A task can use `chat` too and carries on after it.
-- **`ask`**: a question it cannot go on without. The call waits until you answer, and your answer is its result. With `choices` you can answer with a number; you can always type something else. In the full screen the strip says that the agent waits and since when. `askMinutes` in the settings makes it give up after that many minutes and tell the agent to go on without an answer; the default is to wait without limit. `/stop` ends the wait. With piped input, the next line is the answer.
+- **`ask`**: the rare blocking question, for when truly nothing can go on without you. A matter of taste that others do not depend on is not this: the agent records it as a question in the ledger, and it waits for you in the Requests view while the agent carries on. With `ask`, the call waits until you answer, and your answer is its result. With `choices` you can answer with a number; you can always type something else. In the full screen the strip says that the agent waits and since when. `askMinutes` in the settings makes it give up after that many minutes and tell the agent to go on without an answer; the default is to wait without limit. `/stop` ends the wait. With piped input, the next line is the answer.
 
 What is said with `chat` and `ask`, and what you answer, is kept as the conversation with you: a collapse keeps the last of it word for word.
 
@@ -326,7 +332,7 @@ Going up from the folder you are in, the first folder that has a Cartographer br
 
 ## How it works
 
-One main agent talks with you. It sees the file tree and its own notes about the project, and it cannot read or change a file itself. To get anything done there it calls `task` with a brief.
+One main agent talks with you. It sees the file tree and its own notes about the project, and it cannot read or change a file itself. To get anything done there it calls `task` with a brief. One task per reply when it can: out into the project for one small, atomic change, then back in to prune its context and update what it keeps.
 
 A task is a fork of the main conversation at the `task` call. Its prompt is the main agent's prompt up to that point, then the brief, so the server reuses everything it has already read and a task starts for the cost of its brief. The task works in the fork with its tools and ends by calling `return`; the report it gives there goes back to the main agent as the result of the call. The task's working steps, including the text of every file it reads or writes, never enter the main agent's context.
 
@@ -335,12 +341,13 @@ A task is a fork of the main conversation at the `task` call. Its prompt is the 
 | `task` | main agent | Hand one piece of work to a task. Tasks run one at a time |
 | `ledger` | main agent | Add, close, reword or remove ledger entries |
 | `plan` | main agent | Add, reword, finish or remove plan items; clear the plan |
-| `assess` | main agent | Replace the assessment of the project |
+| `assess` | main agent | Add, reword, settle or remove entries in its two books: the assessment of the project, and its practice |
+| `prompt` | main agent | Propose a change to its own system prompt or a tool's description. You approve it in the Requests view |
 | `atlas` | main agent, any task | Write, link, confirm, remove and read nodes of the graph. The main agent also moves the tree with it |
 | `read` | any task | Text files with line numbers, up to 8 per call, 300 lines each unless a range is given |
 | `search` | any task | A regular expression over the project's files; returns `path:line: text` |
 | `list` | any task | The files as a tree with sizes |
-| `write` | change task | Create a file, or replace one completely |
+| `write` | change task | Create a NEW file, up to `writeLines` short lines (60 unless you change it). An existing file is changed with `edit`, never replaced whole |
 | `edit` | change task | Replace one passage of a text file; the passage must match exactly one place |
 | `shell` | change task | Type a command into a shell window; returns what it printed and its exit status, or that it is still running |
 | `window` | main agent, any task | Read a window, wait for its command, stop it, close it. Typing a line into a running program (`send`) is for a change task |
@@ -349,11 +356,11 @@ A task is a fork of the main conversation at the `task` call. Its prompt is the 
 | `chat` | main agent, any task | Say something to you. Does not wait |
 | `ask` | main agent, any task | Put a question to you, with optional choices, and wait for the answer |
 | `return` | any task | End the task: the report, whether the brief is carried out, and optionally one or two lines to remember the task by |
-| `context` | main agent, any task | Recall a kept report, keep a file on the shelf, drop a large result, collapse now. A task reaches only its own steps with it |
+| `context` | main agent, any task | Recall a kept report, keep a file on the shelf, fold a report it has finished the bookkeeping for, collapse now. A task reaches only its own steps with it |
 
 `read`, `search` and `list` refuse any path outside the project, including through a symlink, and leave out `.atlas/` and files that git ignores. `write` and `edit` have the stricter rules described under [The plan and changing the project](#the-plan-and-changing-the-project), and `shell` those under [Running commands](#running-commands).
 
-All eighteen tools are in every request, the main agent's and a task's alike, and a call that is not the caller's is refused with a line that says whose it is. They are not split into two lists, because of where the chat template puts them: at the very top of the prompt. A task with a different list would begin with different text than the conversation it forks from, so the server would read the whole context again when a task starts and again when it ends, which on a full context is minutes each time. One list keeps a task's start at the cost of its brief.
+All nineteen tools are in every request, the main agent's and a task's alike, and a call that is not the caller's is refused with a line that says whose it is. They are not split into two lists, because of where the chat template puts them: at the very top of the prompt. A task with a different list would begin with different text than the conversation it forks from, so the server would read the whole context again when a task starts and again when it ends, which on a full context is minutes each time. One list keeps a task's start at the cost of its brief.
 
 ### How a task goes
 
@@ -361,7 +368,7 @@ A task's brief begins with how a task goes, then says which kind it is, then sho
 
 - Text without a call is a note to itself, as for the main agent, and never ends the task.
 - `chat` and `ask` reach you from inside the task.
-- `task`, `ledger`, `plan`, `assess`, `wake` and `sleep` are the main agent's. A task that calls one is told so and goes on, however often it tries. (The same call failing three times in a row ends it, like any other failing call.)
+- `task`, `ledger`, `plan`, `assess`, `prompt`, `wake` and `sleep` are the main agent's. A task that calls one is told so and goes on, however often it tries. (The same call failing three times in a row ends it, like any other failing call.)
 - **`return` ends it**, and nothing else does. `report` is required and is all the main agent gets. `done` says whether the brief is carried out: for a plan item, `true` marks the item done and `false` leaves it open, and the main agent is told which. `summary` is the line that is kept of the task after the main agent's context is collapsed; without it, the start of the report is used. `shelf` names files on the task's shelf to put on the main agent's shelf as well. A `return` in a reply with other calls ends the task after they are carried out.
 - A task has `taskTurns` replies, notes included. From three before the end, each result says how many are left and asks for `return`. A task that uses them all is ended; the main agent then gets the notes the task wrote, marked as not a report, and nothing is marked done.
 - What you type while a task runs goes to the task with its next result, and the main agent is told with the report.
@@ -377,7 +384,7 @@ The ledger is the agent's memory of the project across sessions. The conversatio
 | Kind | | |
 |---|---|---|
 | goal | `g1` | Something you want achieved, with a "done when" line saying how you will both know it is reached |
-| question | `q2` | Something the agent needs to ask you |
+| question | `q2` | Something of taste or design for you to answer; it waits in the Requests view while the agent carries on |
 | note | `n3` | Anything else worth keeping: a decision, a preference, a finding |
 
 It is a notebook, not a gate. Nothing in it stops the agent from working, and the agent needs no permission to write to it. The agent is told to record a goal once you have agreed to its wording, to change that wording only when you ask, and to write down what you say that should outlast the conversation. Every change it makes is printed as a `● ledger` line, so you see what it understood.
@@ -388,26 +395,33 @@ When there is no open goal, `carto` says so at the start, and the agent is told 
 
 Limits: 400 characters per entry, 40 open entries, and the newest 50 closed entries are kept.
 
-## The plan and changing the project
+## Requests
 
-Nothing in the project is changed, and no command is run, without a plan that you have authorized. This is the one gate in Cartographer.
+Nothing in the project is changed, and no command is run, without a change item that you approved. This is the one gate in Cartographer, and it is **per item and asynchronous**: the agent does not stop and wait for you, it asks and carries on.
 
-**The plan** is a short list the agent writes for the open goals. Each item is one piece of work for a single task, marked `look` or `change`:
+Everything that waits on you is a request, and they gather in one place:
+
+- a **change item** the agent added to the plan, which cannot start until you approve it;
+- a **question** of taste or design the agent recorded in the ledger instead of stopping for it;
+- a **proposal** for the agent's own prompt (below).
+
+You see them in the Requests view of the full screen (or `/requests`), and in the strip: `3 requests for you`. You decide with `/approve p2 q3`, `/deny p2 [why]` and `/answer q3 words` — on the terminal or typed on the prompt line of the full screen, where they work like any command. The agent is told what you decided at its next step, whenever that is: it does not have to have been waiting. Meanwhile it works on everything that does not depend on an answer, and sleeps only when everything left is waiting.
 
 ```
-● plan  + p1 [look] See how arguments are parsed today
-● plan  + p2 [change] Write roll.py with the roller and its argument check
-● plan  + p3 [change] Describe the command in the README
-plan  2 change items wait for you: /plan shows the plan, /approve authorizes it
+› /requests
+  Requests  2 requests wait for you:
+    p2  [approval]  p2 [change] Write roll.py with the roller and its argument check
+    q3  [question]  q3  Should a wrong argument print the usage text or an error?
+  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question
 ```
 
-Look items, and tasks that belong to no item, can run at any time. A change item can run only after you type `/approve`. Saying yes in the chat does not authorize; the agent is told to ask you for the command. The agent cannot authorize its own plan: no tool does that. If you type `/approve` while the plan holds no open change item, nothing is authorized and the agent is told so in a message sent for you: a model sometimes describes its plan in the chat without writing it, and this gives it the turn to write it.
+Saying yes in the chat is not an approval; the agent is told to put the work in the plan so that you can approve it there. `/approve` with no ids still works the old way: it approves the plan as it stands, every open change item at once. If you type `/approve` while the plan holds no open change item, nothing is approved and the agent is told so in a message sent for you: a model sometimes describes its plan in the chat without writing it, and this gives it the turn to write it.
 
-Your authorization covers the change items as they stood when you gave it. When the agent adds a change item, rewords one, turns a look item into a change item, or gives an item the network, the authorization is withdrawn, the screen says so, and the agent is told to explain the change and ask you again. Finishing or removing items, and anything done to look items, leaves it in place.
+An approval covers the item as it stood when you gave it. When the agent rewords an approved item, turns a look item into a change item, or gives an item the network, that item waits again — the screen says so, and the agent is told to explain the change and ask you again. Other items keep their approvals: adding work never cancels what you already agreed to.
 
-**A standing item** is a change item for a duty rather than a piece of work: "keep the server running", "restart the worker when it stops". The agent marks it `standing`, and it shows as `[change, standing]`. It needs your `/approve` like any change item, and the line that asks says how many items are standing. Once the plan is authorized, the agent may start a task for a standing item as often as its text calls for it, until it marks the item done, which ends the duty. An ordinary item is for work that is done once. Making an item standing withdraws the authorization, like any change that asks for more than you agreed to. One thing to know: the authorization covers the plan as a whole, so when the agent adds another change item, the standing item also waits until you have typed `/approve` again. Together with a wake (see [Waking up](#waking-up)), a standing item is how the agent looks after something while you are away, without approval being switched off.
+**A standing item** is a change item for a duty rather than a piece of work: "keep the server running", "restart the worker when it stops". The agent marks it `standing`, and it shows as `[change, standing]`. It needs your approval like any change item, and the line that asks says how many items are standing. Once it is approved, the agent may start a task for it as often as its text calls for it, until it marks the item done, which ends the duty. An ordinary item is for work that is done once. Together with a wake (see [Waking up](#waking-up)), a standing item is how the agent looks after something while you are away, without approval being switched off.
 
-**A change task** is a task started for a change item of an authorized plan. It has `write`, `edit` and `shell` besides the three look tools, and may type into a shell window with `window`. Who may write is decided when the call is made, by the program:
+**A change task** is a task started for a change item you approved (or while approval is switched off). It has `write`, `edit` and `shell` besides the three look tools, and may type into a shell window with `window`. Who may write is decided when the call is made, by the program:
 
 - The main agent never writes. Neither does a task without an item, or a task for a look item.
 - A path outside the project is refused, also through a symlinked folder, and so is a symlink itself.
@@ -422,13 +436,13 @@ The checkpoints are kept in a git repository of Cartographer's own, `.atlas/chec
 
 - records the files as they are first, so nothing is lost by it;
 - reopens the plan item and marks it "undone by the user", which the agent sees at its next step. An item the agent had already cleared from its plan is put back;
-- withdraws the authorization, so the agent changes nothing more until you have said what you want and typed `/approve` again.
+- takes the item's approval away, so the agent changes nothing more with it until you have said what you want and approved it again.
 
 A task that you stopped, or that was cut off by a kill, has no checkpoint after it. `/diff` then compares with the files as they are now, and `/undo` puts the whole project back to the checkpoint before that task, which also takes back edits you made since.
 
 The checkpoint history only grows, so every recorded state can be reached with git: `git --git-dir .atlas/checkpoints.git log`.
 
-**Editing the plan yourself.** The plan is `<project>/.atlas/carto-plan.json`, read again at every step. An item needs `id` (like `p3`), `mode` and `text`; `"status": "done"` finishes it, `"network": true` on a change item lets its commands reach the network, and `"standing": true` makes it a standing item. The `authorized` field is the authorization: you can set or delete it by hand. Limits: 300 characters per item, 30 items.
+**Editing the plan yourself.** The plan is `<project>/.atlas/carto-plan.json`, read again at every step. An item needs `id` (like `p3`), `mode` and `text`; `"status": "done"` finishes it, `"network": true` on a change item lets its commands reach the network, and `"standing": true` makes it a standing item. Setting `"approved"` to a time approves that one item by hand; the old whole-plan `authorized` field still works and covers every open change item. Limits: 300 characters per item, 30 items.
 
 Limits of this version:
 
@@ -450,7 +464,7 @@ What it does not change:
 - Every change is still a plan item carried out by a task. So there is still a checkpoint before and after each one, `/diff` shows what it did, and `/undo` takes it back. After an undo the item is open again and the agent may carry it out again, so say what you want instead.
 - The main agent still cannot read, write or run anything itself.
 - The sandbox is a separate switch (`/bwrap`). With both off, commands run directly on your machine and nothing asks you first; `/yolo on` says so when that is the case.
-- The plan's own authorization is not set by it. When you type `/yolo off`, change items that you never approved wait for `/approve`; a task that is running at that moment finishes.
+- No item is approved by it. When you type `/yolo off`, change items that you never approved wait for your approval again; a task that is running at that moment finishes.
 
 Only you can switch it: no tool does, and it is not remembered. The next `carto` asks for approval again.
 
@@ -550,7 +564,7 @@ What this does not do yet:
 - It saves context, not inference: each firing is still one request, and with a context that changed far back, a slow one.
 - A wake turn in which the agent acts stays in the context like any other turn. An agent that acts on every wake fills its context until the context engine exists.
 - Wakes belong to the main agent. A task cannot set one.
-- With approval on and no standing item, a woken agent can look and report but cannot change anything until you are back. See [standing items](#the-plan-and-changing-the-project) and [Without approval](#without-approval-yolo).
+- With approval on and no standing item, a woken agent can look and report but cannot change anything until you are back. See [Requests](#requests) and [Without approval](#without-approval-yolo).
 - On the plain terminal a `◆` line that arrives while you are typing lands in the middle of your line. What you typed is still there and is sent when you press Enter.
 
 ### The sandbox
@@ -637,15 +651,15 @@ The atlas is the agent's map of the project. It has two parts, and they are kept
 
 When a node links to a file, Cartographer keeps a fingerprint of that file from the moment the node was written. If the file later changes or disappears, the node is reported as "may be out of date", to the agent in every request and under the report of the task that changed the file. It stays so until the node is rewritten or the agent confirms that it still holds. A folder link notices files added to or removed from that folder, not changes inside them.
 
-**A node for a file that is not there yet.** While the project may be changed, that is, once you have authorized the plan or switched approval off, linking a node to a path that does not exist creates it: an empty file, or a folder when the path ends with a slash. The agent is told what was created, and so are you. Before that, nothing is created and the agent is told to write the node without the link for now. Such a file is not part of a task's checkpoint when the main agent made it, so `/undo` does not remove it.
+**A node for a file that is not there yet.** While the project may be changed, that is, once the change item it belongs to is approved or approval is switched off, linking a node to a path that does not exist creates it: an empty file, or a folder when the path ends with a slash. The agent is told what was created, and so are you. Before that, nothing is created and the agent is told to write the node without the link for now. Such a file is not part of a task's checkpoint when the main agent made it, so `/undo` does not remove it.
 
-**The assessment** is the agent's summary of the whole project, addressed to itself: what the project is, how it is built and run, what state it is in. The main agent replaces it whole with `assess`; a task cannot.
+**The books.** The agent keeps two lists of short entries, in one language with the ledger and the plan. The **assessment** (`a1`, `a2`, …) is about the project: what it is, how it is built and run, what state it is in. The **practice** (`r1`, `r2`, …) is about itself: what it has learned about this harness and the habits it wants to keep. Both are written with `assess`, with the same verbs as the ledger and the plan — `add`, `edit`, `done`, `remove`, `before` — so compacting the assessment is one `edit`, not a rewrite of the whole. A task cannot; it puts what it learned in its report.
 
 **Who writes.** A look task is asked to record what it learned that will still matter later, and a change task to rewrite the nodes about what it changed. Both write directly, so the knowledge does not have to pass through a report and be written down a second time. Under the task's report the main agent gets Cartographer's own record: which nodes the task wrote, removed, or left possibly out of date. The main agent can write, correct and remove nodes too.
 
 **Mapping without a goal.** When no goal is set, or a plan waits for your `/approve`, the agent is told it may start a look task that maps a part of the project the graph says nothing about. Whether to do that and when to stop is left to it. Nothing in the project changes; type a message or `/stop` at any time.
 
-**Editing them yourself.** The graph is `<project>/.atlas/carto-atlas.json`, the assessment is `<project>/.atlas/assessment.md`. Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. The agent is shown an assessment you edited in full, and a node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
+**Editing them yourself.** The graph is `<project>/.atlas/carto-atlas.json`, the books are `<project>/.atlas/carto-books.json` (one list of entries). Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. The assessment half of the books is mirrored to the old `<project>/.atlas/assessment.md`, and a project that has one is split into entries by paragraph the first time the agent edits its books — so an assessment you keep by hand still works, and `/assessment` shows it. A node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
 
 ```
 › /atlas
@@ -666,6 +680,17 @@ Findings:
   /home/momo/Projects/simpledice/.atlas/carto-atlas.json · edit it by hand, or tell the agent what to change
 ```
 
+## The agent's prompt as a book
+
+The system prompt is not fixed text you cannot reach. It is built from **named sections** (`one-mind`, `roles`, `talking`, `taste`, `context`, `goals`, `ledger`, `atlas`, `assessment`, `practice`, `time`, `plan`, `code`, `running`, `state`), and every tool's description is named too. When a wording keeps misleading the agent, it proposes a change with `prompt`: which piece, the whole new wording, and what it observed that misled it. Nothing changes until you approve the proposal in the Requests view.
+
+- **Budgets** keep the fixed part of the prompt from creeping back up: 250 tokens for a section, 200 for a tool's description, 300 for the four that carry the shell and wake rules. A proposal that does not fit is refused when it is made.
+- The agent can change **wording only**, never the shape of a tool's arguments — the schemas are code and are not part of the book.
+- Approved wording is stored in the **core folder** (`~/cartographer/prompt.json`), not in the project: the prompt is the agent's one mind, and it is up to you to reject a project-local addition. `/prompt` shows what is approved; `/prompt reset SECTION` puts one piece back to how it is built in.
+- It takes effect **at the next collapse or start**, never in the middle of a segment: the prompt is at the very front of the context, and a change there makes the server read the whole thing again.
+
+`/prompt` also lists the targets a proposal can aim at, so you can check one before approving it; the proposal's detail shows the wording now and the wording proposed, one `-` line and one `+` line.
+
 ### Time
 
 The model has no clock, so Cartographer tells it the time in three places, always written the same way:
@@ -682,7 +707,7 @@ Shell windows use the same clock: how long a command has been running, and how l
 
 None of the brain is stored in the conversation. Cartographer adds it to each request as the request is sent, in two places chosen by how often the content changes. The server re-reads a prompt from the first changed character on, so what changes rarely goes to the front and what changes often goes to the very end.
 
-**At the front: the assessment and the outline of the graph.** They stand before your first message, in every request of the main agent and of every task:
+**At the front: the books and the outline of the graph.** The assessment, any practice entries, and the graph's outline stand before your first message, in every request of the main agent and of every task:
 
 ```
 <project>
@@ -690,6 +715,9 @@ Written by Cartographer from your own records of this project, as they stood on 
 
 Your assessment
 A small Python dice roller. roll.py holds the roller, cli.py prints one roll. The tests check nothing yet.
+
+Your practice
+Look tasks first, then change. The stand-in says exit 0 even for nonsense: read what a command printed.
 
 Your graph (3 nodes)
 Components:
@@ -731,11 +759,15 @@ Questions for the user:
   q3  Should a wrong argument print the usage text or an error?
 
 Plan
-Not authorized: change items wait until the user types /approve. Look items may run.
+Not approved: change items wait for the user. Look items may run.
   p2 [change] Write roll.py with the roller and its argument check
   (done: p1)
 
-Answer the user's newest message first. Change items wait for the user: show them the plan in a few lines and ask them to type /approve. Do not start p2 before that.
+Requests
+  p2 [change] Write roll.py with the roller and its argument check · waits for approval
+  q3  Should a wrong argument print the usage text or an error? · waits for an answer
+
+Answer the user's newest message first. Change items wait for the user: show them the plan in a few lines and ask them to approve it. Do not start p2 before that; everything that does not depend on it goes on.
 </state>
 ```
 
@@ -812,11 +844,11 @@ A task reads a file, reports, and the file text is gone with the task. When the 
 
 The shelf holds at most `shelfTokens` (12,000); a file that would not fit is refused, with the sizes. The block shows a shelved file as it was at the collapse. When the file changes afterwards the block is left as it is and the state block says which copy is old; the next collapse writes the current text. A file that was deleted leaves the shelf, and both you and the agent are told. `/context` shows what is on the shelf, what waits for the next collapse, and what was taken off.
 
-### Recalling and dropping
+### Recalling and folding
 
-`{"action":"recall","id":"t12"}` returns report `t12` in full. It stays in view until the next collapse. A report that is still in view is not added a second time.
+The state block lists every report that stands in view, with its size, so the agent sees what it is carrying. A report stays in view until **the agent decides** it has done the bookkeeping for it — updated the books, the graph, the ledger and the plan from it — and folds it itself; the automatic collapse is only the backstop.
 
-`{"action":"drop","id":"t12"}` replaces a report that stands in the context by its one line. This changes the context in its middle, so the server reads everything behind that place again; the answer to the call says how many tokens that is. It is for a large report the agent is done with while much work is still ahead. A dropped report comes back to its place with `recall`.
+`{"action":"fold","id":"t12"}` replaces a report that stands in the context by its one line. This changes the context in its middle, so the server reads everything behind that place again; the answer to the call says how many tokens that is. A folded report comes back to its place with `{"action":"recall","id":"t12"}`, which returns it in full; it stays in view until the next collapse or until it is folded again. (`drop` does the same as `fold`, for habits carried over.)
 
 The main agent has no notes of its own that survive a collapse, on purpose: a `note` action is refused for it with a pointer to the ledger, the graph and the assessment.
 
@@ -902,7 +934,9 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `server` | none | Address of the server, ending in `/v1` |
 | `model` | none | Model name as the server knows it |
 | `contextWindow` | 100000 | Context size the server was started with (`-c`) |
-| `maxTokens` | 8192 | Longest single reply, thinking included. Also the longest file one `write` call can hold |
+| `maxTokens` | 8192 | Longest single reply, thinking included |
+| `writeLines` | 60 | Longest new file one `write` call creates, in lines. A file to grow beyond that is written and then edited |
+| `writeCreatesOnly` | true | Whether `write` refuses to replace an existing file whole, pointing at `edit` instead. false: the old create-or-replace |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Carrying out a plan takes about two per item |
 | `taskTurns` | 30 | Replies one task may make, notes included, before it is ended without a report |
 | `askMinutes` | 0 | Minutes an `ask` waits for your answer before the agent is told there was none. 0: without limit |
@@ -946,25 +980,26 @@ And smaller things, named where they belong above: the full screen does not repl
 - the confinement of the look tools;
 - the ledger: every operation and its errors, the limits, what a hand-written file must hold, a broken file left untouched, a call run twice after a crash;
 - the state block: present once at the end of every main-agent request, never stored, absent from tasks, current after a change, after an edit by hand and after `/new`;
-- the plan: every operation, what withdraws the authorization and what does not, the instruction in the state block for each situation, a finished item not run again;
-- writing: refused for the main agent, for a look task, and for a change item before `/approve` or after the plan grew; every kind of path a task may not write to; edits that match nothing or more than one place;
+- the plan: every operation, what asks for approval again and what does not, the instruction in the state block for each situation, a finished item not run again;
+- writing: refused for the main agent, for a look task, and for a change item before you approved it; every kind of path a task may not write to; edits that match nothing or more than one place; `write` creating a new short file only and refusing to replace one whole;
 - a change task end to end: the files written, the record of changes in the report, the project's own git repository left untouched, a reply cut off at the output limit;
 - checkpoints and `/undo`: files back byte for byte, one task taken back at a time, the user's own files left alone, a task that was cut off, the plan item reopened and the authorization withdrawn;
 - a kill in the middle of a change task: the restart finishes it, it may still write, and the undo goes back to before the task;
 - the shell, with real commands in a real sandbox: what a window can and cannot reach (the project, the home folder, the system, the brain, `.git`, `/tmp`, the network, the environment, other processes), who may type into one, the network mark, long output, a kill in the middle of a command, the record and the undo of what commands did. These are skipped, and say so, on a machine where bubblewrap does not work; one test checks what Cartographer does without it;
 - shell windows: folder and environment kept between commands, a command that outlives its call, `wait` with and without a line to wait for, `read`, `send` to a program that asks, `stop`, `close`, `exit`, the limit of four, output between two calls neither lost nor repeated, the windows block at the end of the main agent's and of a task's requests and that it is never stored, the `windowTail` setting, who may do what, the note that wakes the agent and the limit on such notes, a window's changes as a step of their own with `/diff` and `/undo`, `/shells`, `/kill`, `/stop` leaving other windows running, a message from you ending a wait, the windows reported as gone after a restart. These run in the sandbox where there is one and without it otherwise;
-- the atlas: every operation on nodes and its errors, the limits, the tree at each depth and anchor and when it is made smaller, a task writing nodes and the record under its report, a node left out of date by a change task until it is confirmed, who may move the tree, a call run twice after a crash, an edit by hand, a broken file left untouched;
-- the assessment and the copy at the front: written by the main agent only, the first message of the conversation identical in every request until a goal closes, `/pin` or `/new` replaces it, and identical between the main agent and its tasks;
+- the atlas: every operation on nodes (written with `add`, rewritten with `edit`) and its errors, the limits, the tree at each depth and anchor and when it is made smaller, a task writing nodes and the record under its report, a node left out of date by a change task until it is confirmed, who may move the tree, a call run twice after a crash, an edit by hand, a broken file left untouched;
+- the books: the entry verbs on the two lists, the migration of an old assessment.md by paragraph, the practice entries at the top of the context; and the copy at the front: written by the main agent only, the first message of the conversation identical in every request until a goal closes, `/pin` or `/new` replaces it, and identical between the main agent and its tasks;
 - time: the stamps on messages and task reports, the same words in every request, nothing of them stored;
 - wakes: each kind firing and not firing, the number of times, the least interval, every refusal, a restart, firings folded into one; in a session, a note that wakes a resting agent, `sleep` ending the turn with no further request, quiet turns leaving the request while the turns before them stay the same, a firing told in the state block while the agent works or a task runs, a wake ending the main agent's wait but not a task's, `/wakes`, and wakes in quick succession being spaced out and not dropped;
-- approval switched off: `--yolo` and `/yolo`, change items and network items running without `/approve`, what the agent and the screen are told, `/undo` under it, and that it is not remembered;
+- the requests: a change item, a question and a prompt proposal listed in one view, `/approve` per item and whole-plan, `/deny` and `/answer`, the agent told and going on, and approval switched off: `--yolo` and `/yolo`, change items and network items running without approval, what the agent and the screen are told, `/undo` under it, and that it is not remembered;
+- the prompt as a book: a proposal made, refused over budget or by target, the approved wording laid over the prompt at a start and a collapse, `/prompt` and `/prompt reset`;
 - standing items: needing `/approve`, running more than once, ending when marked done;
-- the context: the report ids and `/report`; a collapse at rest, after the size limit, after time away, by `/collapse` and at the agent's word; a collapse in the middle of a turn at a closed goal and at the fill limit, and that a reply which ends the turn waits for the rest; the question, its exact request, both answers at rest and in a turn, a server that refuses it; the read-ahead being the start of the next request to the letter, and being stopped by typing; the shelf with its limit, its refusals, a changed and a deleted file; recall and drop; a task's marks, re-reads, drops, notes, shelf, its own collapse and the one near the limit, and that nothing before its brief changes; the talk held to its window; a restart; `/context` and `/new`;
+- the context: the report ids and `/report`; a collapse at rest, after the size limit, after time away, by `/collapse` and at the agent's word; a collapse in the middle of a turn at a closed goal and at the fill limit, and that a reply which ends the turn waits for the rest; the question, its exact request, both answers at rest and in a turn, a server that refuses it; the read-ahead being the start of the next request to the letter, and being stopped by typing; the shelf with its limit, its refusals, a changed and a deleted file; what is in view listed with its sizes, recall, and the agent folding a report itself (`drop` as the old name); a task's marks, re-reads, drops, notes, shelf, its own collapse and the one near the limit, and that nothing before its brief changes; the talk held to its window; a restart; `/context` and `/new`;
 - a task's flow: notes followed up and counted, the reply limit with its warnings and the notes that come back, `return` with and without a report, `done` marking the plan item or leaving it open, the summary in the record, the main agent's tools refused without ending the task, `chat` from a task;
 - `ask`: choices and free answers, from the main agent and from a task, with piped input and on a terminal, a command typed while a question waits, `askMinutes`, nobody left to answer;
 - what you type while a task runs: sent to the task once, told to the main agent, kept as talk;
 - a reply that repeats itself: cut off for the main agent and for a task, the one retry, the stop at the second time, the setting;
-- the full screen, on a real terminal read through a small emulator (`test/vt.py`): the tabs, the two modes, a run of calls folded and opened with the keys, a call leading to its tab, the items of Diff and Carto opening, `e` handing the right file and line to the editor, the Context tab folded and wholly opened, pasted text with and without the terminal's marks, the list of commands under a slash and one Enter sending a completed command, Up bringing back what was sent, Tab going to the next tab or completing, the sheet of keys, the search under a slash, Escape and a key arriving as one, dragging over a message and what is copied then, the strip, a question, the reading of a long prompt, `/copy session` to the clipboard sequence and to a file, a click on a tab and on an item, the conversation left on the terminal on leaving, and the terminal's modes switched off again; the look: the margin, a background for each kind of block and none for the agent's words, the bars from edge to edge, the selection by its background, Markdown, a palette made again from the background the terminal answers, Ctrl-T leaving no line behind; and without a terminal: measuring and wrapping text, the names of keys in both encodings, lines that arrive at once taken as pasted, the Chat tab's folding, live text and transcript, the list that the other tabs are made of, the views read from a filled brain, the Context tab built from a request, and the palette itself (the levels of text, hues of one lightness, blocks that stay readable on a low-contrast theme, 256 colours and none);
+- the full screen, on a real terminal read through a small emulator (`test/vt.py`): the tabs (with the Requests view and the Books view of the brain), the two modes, a run of calls folded and opened with the keys, a call leading to its tab, the items of Diff and Carto opening, `e` handing the right file and line to the editor, the Context tab folded and wholly opened, pasted text with and without the terminal's marks, the list of commands under a slash and one Enter sending a completed command, Up bringing back what was sent, Tab going to the next tab or completing, the sheet of keys, the search under a slash, Escape and a key arriving as one, dragging over a message and what is copied then, the strip, a question, the reading of a long prompt, `/copy session` to the clipboard sequence and to a file, a click on a tab and on an item, the conversation left on the terminal on leaving, and the terminal's modes switched off again; the look: the margin, a background for each kind of block and none for the agent's words, the bars from edge to edge, the selection by its background, Markdown, a palette made again from the background the terminal answers, Ctrl-T leaving no line behind; and without a terminal: measuring and wrapping text, the names of keys in both encodings, lines that arrive at once taken as pasted, the Chat tab's folding, live text and transcript, the list that the other tabs are made of, the views read from a filled brain, the Context tab built from a request, and the palette itself (the levels of text, hues of one lightness, blocks that stay readable on a low-contrast theme, 256 colours and none);
 - the sandbox switch: `--no-bwrap` and `/bwrap`, a command reaching beyond the project, what the agent, the task and the screen are told, the system prompt staying the same across a switch, the windows closed by a switch, `/stop`, `/kill` and a kill of `carto` with the sandbox off.
 
 The stand-in is not a model. The tests show that the program does the right thing when the model behaves; they say nothing about how a model behaves.
@@ -981,9 +1016,12 @@ The stand-in is not a model. The tests show that the program does the right thin
 | `src/project.mjs` | Which folder is the project; creating and locking `.atlas/` |
 | `src/config.mjs` | Settings and where they come from |
 | `src/harness.mjs` | Opens the session: model provider, tools, and who may call which |
-| `src/prompt.mjs` | The system prompt, the task's role line, the refusals |
+| `src/prompt.mjs` | The system prompt as named sections, the tool descriptions as one book, the budgets, the task's role line, the refusals |
+| `src/proposals.mjs` | The prompt book's other half: proposals, the approved wording, laying it over the prompt |
+| `src/books.mjs` | The two books of short entries: the assessment and the practice |
+| `src/requests.mjs` | The one list of what waits for the user, and carrying a decision out |
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |
-| `src/plan.mjs` | The plan: its file, its operations, the authorization rules |
+| `src/plan.mjs` | The plan: its file, its operations, the per-item approval rules |
 | `src/checkpoints.mjs` | Checkpoints in `.atlas/checkpoints.git`: record, compare, undo |
 | `src/sandbox.mjs` | The bubblewrap sandbox: what a window sees, and bounding a command's output |
 | `src/windows.mjs` | The shell windows: opening one, typing into it, waiting, reading, stopping, closing, and announcing what happens in them |

@@ -402,6 +402,10 @@ export function contextLines(brainDir, root, { used, window }) {
 	const store = loadContext(brainDir);
 	const lines = [];
 	if (Number.isFinite(used) && used > 0) lines.push(`Your context holds about ${count(used)} of ${count(window)} tokens.`);
+	// Folding by the agent: it sees exactly which reports stand in view in full, with their size, so it can
+	// decide when each has had its bookkeeping done and fold it to its one-line record (recallable by id).
+	const full = store.records.filter((record) => !store.dropped.includes(record.id));
+	if (full.length > 0) lines.push(`In view in full: ${full.map((record) => `${record.id} (about ${count(estimate(record.report ?? ""))} tokens)`).join(", ")}. Fold one with \`context\` once you have done its bookkeeping.`);
 	const shown = store.front?.shelf ?? [];
 	const key = (item) => `${item.path}:${item.from ?? ""}-${item.to ?? ""}`;
 	const waiting = store.shelf.filter((item) => !shown.some((entry) => key(entry) === key(item)));

@@ -27,10 +27,11 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
+import { booksPath } from "../books.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, loadPlan, openItems, planPath } from "../plan.mjs";
+import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
@@ -39,7 +40,7 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { assessmentView, atlasView, contextView, diffView, editorCommand, ledgerView, planView, shellsView, textView, treeView } from "./views.mjs";
+import { atlasView, booksView, contextView, diffView, editorCommand, ledgerView, planView, requestsView, shellsView, textView, treeView } from "./views.mjs";
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
@@ -54,8 +55,9 @@ const VIEWS = {
 		{ id: "atlas", name: "Atlas" },
 		{ id: "ledger", name: "Ledger" },
 		{ id: "plan", name: "Plan" },
+		{ id: "requests", name: "Requests" },
 		{ id: "tree", name: "Tree" },
-		{ id: "assessment", name: "Assessment" },
+		{ id: "books", name: "Books" },
 	],
 	diff: [
 		{ id: "last", name: "Last step" },
@@ -69,7 +71,7 @@ const VIEWS = {
 	],
 };
 /** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.tree", "carto.assessment", "diff.last", "diff.session", "diff.git", "shells", "context.window", "context.main", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.books", "diff.last", "diff.session", "diff.git", "shells", "context.window", "context.main", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = { carto: 2000, diff: 5000, shells: 700, context: 700 };
 /** The marks of the spinner that turns while the agent works, and how long each stands. */
@@ -78,11 +80,16 @@ const SPIN_MS = 80;
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
-	["approve", "authorize the plan as it stands: its change items may then run"],
+	["requests", "what waits for you: change items, questions of taste, changes to the agent's prompt"],
+	["approve", "approve requests by id, or the whole plan as it stands"],
+	["deny", "turn a request down: /deny ID [why]"],
+	["answer", "answer a question of taste: /answer ID words"],
 	["plan", "the plan, whether it is authorized, and where the file is"],
 	["ledger", "goals, questions and notes, open and closed"],
 	["atlas", "the tree as the agent sees it, and the graph's nodes"],
 	["assessment", "the agent's summary of the project"],
+	["practice", "the agent's notes on how it works"],
+	["prompt", "the agent's approved changes to its own prompt"],
 	["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
@@ -357,18 +364,18 @@ export async function runScreen(session, options, runTerminal) {
 		if (Date.now() - brain.at < 1000) return brain;
 		const next = { at: Date.now() };
 		try {
+			const requests = listRequests(brainDir, { yolo: options.gate?.yolo === true });
+			next.requests = requests.length;
+			next.waits = requests.some((request) => request.kind === "approval");
 			const { plan } = loadPlan(brainDir);
 			if (plan !== undefined && plan.items.length > 0) {
 				const open = openItems(plan).length;
-				const waits = openItems(plan, "change").length > 0 && !isAuthorized(plan) && options.gate?.yolo !== true;
-				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${waits ? " · needs /approve" : isAuthorized(plan) ? " · approved" : ""}`;
-				next.waits = waits;
+				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${isAuthorized(plan) ? " · approved" : ""}`;
 			}
 			const { ledger } = loadLedger(brainDir);
 			if (ledger !== undefined) {
 				const goals = openEntries(ledger, "goal").length;
-				const questions = openEntries(ledger, "question").length;
-				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}${questions > 0 ? ` · ${questions === 1 ? "1 question" : `${questions} questions`} for you` : ""}`;
+				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}`;
 			}
 		} catch {
 			// A file edited into something unreadable is said by its tab, not by the strip.
@@ -412,9 +419,10 @@ export async function runScreen(session, options, runTerminal) {
 		const size = core.contextSize();
 		const windowSize = options.contextWindow;
 		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > 0.8 ? "warn" : ""]);
-		const { plan, ledger, waits } = readBrain();
+		const { plan, ledger, waits, requests } = readBrain();
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
+		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
 		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone");
 		if (windows.length > 0) {
 			const running = windows.filter((win) => win.state === "busy").length;
@@ -436,7 +444,7 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.atlas": atlasPath(brainDir),
 			"carto.ledger": join(brainDir, "carto-ledger.json"),
 			"carto.plan": planPath(brainDir),
-			"carto.assessment": assessmentPath(brainDir),
+			"carto.books": booksPath(brainDir),
 		})[id];
 	const env = { root, brainDir, session, started };
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
@@ -446,8 +454,9 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.atlas") return atlasView(env);
 		if (id === "carto.ledger") return ledgerView(env);
 		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
+		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
 		if (id === "carto.tree") return treeView(env, isOpen);
-		if (id === "carto.assessment") return assessmentView(env);
+		if (id === "carto.books") return booksView(env);
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
 		if (id === "shells") return shellsView(env);
 		if (id === "context.window" || id === "context.main") {

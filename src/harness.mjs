@@ -6,7 +6,10 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { createRegistry, defineExtension, GenerationTask, Harness, hook, ROOT_CONVERSATION_ID, section, ToolTask } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+import { describe, loadPromptOverlay, LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+import { CORE_DIR } from "./config.mjs";
+import { loadOverlay, overlayPath } from "./proposals.mjs";
+import { promptTool } from "./tools/prompt.mjs";
 import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
 import { returnTool } from "./tools/return.mjs";
@@ -36,7 +39,7 @@ const CHANGE = new Set(["write", "edit"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
 const types = (call) => call.name === "shell" || (call.name === "window" && call.arguments?.action === "send");
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
-const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, assess: REFUSALS.taskAssesses, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
+const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, assess: REFUSALS.taskAssesses, prompt: REFUSALS.taskProposes, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
 const MAIN_ONLY = Object.fromEntries(MAIN_TOOLS.map((name) => [name, MAIN_ONLY_TEXT[name]]));
 for (const name of MAIN_TOOLS) if (MAIN_ONLY[name] === undefined) throw new Error(`no refusal text for ${name}`);
 
@@ -73,7 +76,7 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false } }) {
+export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, runner, gate = { yolo: false } }) {
 	const context = BACKGROUND_CONTEXT;
 	const model = {
 		id: config.model,
@@ -221,28 +224,48 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			control: { terminate: true },
 		};
 	};
+	// One flat list of tools for the main agent and every task: a fork shares the main conversation's
+	// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
+	// Descriptions come from the named TOOLS book (src/prompt.mjs), so an approved reword takes effect here.
+	const wordingTools = [
+		chatTool({ brainDir }),
+		askTool({ brainDir, asks }),
+		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
+		returnTool({ brainDir }),
+		forMain(ledgerTool({ brainDir, engine })),
+		forMain(planTool({ brainDir, gate })),
+		atlasTool({ root, brainDir, gate }),
+		forMain(assessTool({ brainDir })),
+		forMain(promptTool({ brainDir })),
+		...lookTools(root),
+		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
+		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		windowTool({ config, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		forMain(wakeTool({ wakes, config })),
+		forMain(sleepTool({ wakes })),
+		// For the main agent and for a task, each about its own part of the context.
+		contextTool({ root, brainDir, config, engine }),
+	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
+	// Approved wording from the core folder (src/proposals.mjs) is laid over the built-in prompt and
+	// tool descriptions at a start and at each collapse, and nowhere else: a change at the first bytes
+	// of the prompt forces the server to read the whole thing again. A session segment therefore keeps
+	// the wording it began with, and what the user approved in the meantime comes in at the next
+	// collapse or start. The tool objects are the ones the extension holds, so their descriptions can
+	// be changed in place and the prompt planner will emit one patch at that boundary.
+	const refreshWording = () => {
+		loadPromptOverlay(loadOverlay(overlayPath(coreDir)));
+		for (const tool of wordingTools) tool.description = describe(tool.name) ?? tool.description;
+	};
+	refreshWording();
 	const core = defineExtension({
 		name: "cartographer",
 		// One section that never changes within a project: a change here makes the server read the whole prompt again.
+		// It is built from the named sections of src/prompt.mjs, with any approved wording laid over them.
 		sections: [section("preamble", () => systemPrompt({ root }), { tag: false })],
-		tools: [
-			chatTool({ brainDir }),
-			askTool({ brainDir, asks }),
-			forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
-			returnTool({ brainDir }),
-			forMain(ledgerTool({ brainDir, engine })),
-			forMain(planTool({ brainDir, gate })),
-			atlasTool({ root, brainDir, gate }),
-			forMain(assessTool({ brainDir })),
-			...lookTools(root),
-			...changeTools({ root, brainDir }),
-			shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-			windowTool({ config, windows, runOf: (conversationId) => runs.get(conversationId) }),
-			forMain(wakeTool({ wakes, config })),
-			forMain(sleepTool({ wakes })),
-			// For the main agent and for a task, each about its own part of the context.
-			contextTool({ root, brainDir, config, engine }),
-		],
+		// One flat list of tools for the main agent and every task: a fork shares the main conversation's
+		// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
+		// Descriptions come from the named TOOLS book (src/prompt.mjs), so an approved reword takes effect here.
+		tools: wordingTools,
 		hooks: [
 			hook(ToolTask, {
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
@@ -398,6 +421,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		wakes,
 		engine,
 		asks,
+		/** Take up approved prompt wording at a collapse: called only at a boundary, never mid-segment. */
+		refreshWording,
 		/** `listener` hears what is in no conversation: { type: "prefill" | "limit" | "same-note" | "told", ... }. */
 		on(listener) {
 			listeners.add(listener);

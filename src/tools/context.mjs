@@ -21,11 +21,11 @@ const sameItem = (a, b) => a.path === b.path;
 export function contextTool({ root, brainDir, config, engine }) {
 	// One flat object (see src/tools/wake.mjs for why), so nothing but `action` can be marked required.
 	const Parameters = obj({
-		action: oneOf(["recall", "shelve", "unshelve", "drop", "note", "collapse"], {
+		action: oneOf(["recall", "shelve", "unshelve", "fold", "drop", "note", "collapse"], {
 			description:
-				"recall: bring a kept report back, with `id`. shelve: keep a file in view, with `path` and maybe `lines`. unshelve: take it off, with `path`. drop: replace a large result you are done with by one line, with `id`. note: (task) write down what must stay when your steps are collapsed, with `text`. collapse: collapse your context now.",
+				"recall: bring a kept report back, with `id`. shelve: keep a file in view, with `path` and maybe `lines`. unshelve: take it off, with `path`. fold: shrink a report you have done the bookkeeping for to its one-line record, with `id` (drop is the old name for the same thing). note: (task) write down what must stay when your steps are collapsed, with `text`. collapse: collapse your context now.",
 		}),
-		id: opt(str({ description: "For recall: the report (t12). For drop: what to drop, one id or several with commas: a report (t12) for the main agent, a step (s3, s5) for a task." })),
+		id: opt(str({ description: "For recall: the report (t12). For fold/drop: what to fold, one id or several with commas: a report (t12) for the main agent, a step (s3, s5) for a task." })),
 		path: opt(str({ description: "For shelve and unshelve: a file, as a path inside the project. For unshelve also: all." })),
 		lines: opt(str({ description: 'For shelve: a range of lines like "10-80". Leave out for the whole file.' })),
 		hand_on: opt(bool({ description: "For shelve, in a task: true puts the file on the main agent's shelf as well when the task ends." })),
@@ -37,7 +37,7 @@ export function contextTool({ root, brainDir, config, engine }) {
 			"Manage your own context. Cartographer collapses it by itself when it must; this is for what you know better.",
 			'recall: {"action":"recall","id":"t12"} returns report t12 in full again. It is in view until the next collapse.',
 			'shelve: {"action":"shelve","path":"src/roll.py","lines":"1-80"} marks a file for your shelf. Nothing changes now; from the next collapse on it stands at the start of your context, and every task you start begins with it read. Shelve what you keep sending tasks to read.',
-			"drop: replaces a result by one line. The server then reads everything after that place again, so drop what is large and far from the end only when you will work on for a while.",
+				"fold: shrinks a report you have finished the bookkeeping for to its one-line record (recallable by id). The state block lists what is in view in full with its size. The server then reads everything after that place again, so fold what is large and far from the end only when you will work on for a while.",
 			"collapse: do it now, when you are done with a stretch of work and what matters is written down.",
 		].join(" "),
 		parameters: Parameters,
@@ -106,7 +106,8 @@ export function contextTool({ root, brainDir, config, engine }) {
 					return ok(`Taken off your shelf: ${gone.map(shelfLabel).join(", ")}.${main ? " A copy that stands in your context stays there until the next collapse." : ""}`, `unshelved ${gone.map(shelfLabel).join(", ")}`);
 				}
 
-				if (action === "drop") {
+				// `fold` is the canonical name; `drop` is kept as an alias so an older habit still works.
+				if (action === "fold" || action === "drop") {
 					const ids = String(args.id ?? "")
 						.split(/[\s,]+/)
 						.filter((id) => id !== "");
@@ -171,7 +172,7 @@ export function contextTool({ root, brainDir, config, engine }) {
 					});
 					return ok("Your steps so far are collapsed before your next reply. You keep the brief, your notes, your shelf and one line for each call.", "collapse of its steps asked for");
 				}
-				return fail("`action` is one of recall, shelve, unshelve, drop, note, collapse.");
+				return fail("`action` is one of recall, shelve, unshelve, fold, drop, note, collapse.");
 			} catch (problem) {
 				if (!(problem instanceof ShelfError)) throw problem;
 				return fail(problem.message);

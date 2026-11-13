@@ -17,6 +17,7 @@ import { loadAssessment, textHash } from "./assessment.mjs";
 import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
 import { loadLedger, open, renderLedger } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, openItems, openOnce, openStanding, renderPlan } from "./plan.mjs";
+import { requestLines } from "./requests.mjs";
 import { eventLine } from "./wake.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, sinceTop } from "./top.mjs";
@@ -236,9 +237,10 @@ function atlasText(brainDir, root, config, now) {
 /**
  * @param {string} brainDir
  * @param {{ mode: "sandbox" | "direct" | "none", available?: { why?: string } }} [runner]  how commands run now (src/sandbox.mjs)
- * @param {{ root?: string, config?: { treeDepth?: number }, messages?: readonly any[], now?: number, wakes?: string[], yolo?: boolean }} [more]
+ * @param {{ root?: string, config?: { treeDepth?: number }, messages?: readonly any[], now?: number, wakes?: string[], yolo?: boolean, requests?: boolean, context?: string }} [more]
  *   wakes: the agent's wake triggers, one line each; yolo: the user has switched approval off
- *   context: the lines about the context itself, ready made
+ *   context: the lines about the context itself, ready made; requests: whether to list what waits for the user
+ *     (only the live agent's block lists it; a plain read of the state, as /context and the tests do, does not)
  *   root: the project, for the tree and the atlas (left out, the block has neither); messages: the request's messages;
  * @returns {string} the block, tags included
  */
@@ -250,13 +252,18 @@ export function stateBlock(brainDir, runner, more = {}) {
 	let body;
 	if (ledger === undefined) {
 		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell the user; until they repair the file, the ledger cannot be shown or changed.`;
-	} else {
-		// No plan, no section: the instruction below says when to write one.
-		let planText = "";
-		if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell the user; until they repair the file, no plan item can run.\n\n`;
-		else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
-		body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${direction(ledger, plan, more.yolo === true)}`;
-	}
+		} else {
+			// No plan, no section: the instruction below says when to write one.
+			let planText = "";
+			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell the user; until they repair the file, no plan item can run.\n\n`;
+			else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
+			// What waits for the user: approvals of change items, questions of taste, and proposed edits to the
+			// prompt. Put at the very end, so the shape of the block before it stays as it was. The agent keeps
+			// working on whatever does not depend on one.
+			const waiting = more.requests === true ? requestLines(brainDir, { yolo: more.yolo === true }) : "";
+			const requests = waiting === "" ? "" : `\n\nRequests\nThese wait for the user; carry on with what does not depend on them:\n${waiting}\n`;
+			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${direction(ledger, plan, more.yolo === true)}${requests}`;
+		}
 	// How full the context is and what on the shelf is not as shown (src/context.mjs).
 	return `${OPEN}\n${HEAD}\n\n${front}${more.context ?? ""}${body}\n${CLOSE}`;
 }

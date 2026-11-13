@@ -17,7 +17,7 @@ const files = (what) => opt(arr(str(), { description: `Paths of files or folders
 const Op = union([
 	obj(
 		{
-			action: lit("note"),
+			action: lit("add"),
 			name: name(),
 			gist: str({ description: `One line that says what this is, at most ${GIST_MAX} characters.` }),
 			kind: opt(oneOf(KINDS, { description: "component: a part of the project and what it does. finding: something established. dead_end: something tried and ruled out, kept so it is not tried again. Leave out for a plain node." })),
@@ -25,7 +25,19 @@ const Op = union([
 			links: links("this one relates to; added to the links it has"),
 			files: files("this node is about; added to the ones it has"),
 		},
-		{ description: "Write a node, or rewrite the one of that name. A node needs no file and no link." },
+		{ description: "Write a new node by that name. A node needs no file and no link." },
+	),
+	obj(
+		{
+			action: lit("edit"),
+			name: name(),
+			gist: str({ description: `One line that says what this is, at most ${GIST_MAX} characters.` }),
+			kind: opt(oneOf(KINDS, { description: "component: a part of the project and what it does. finding: something established. dead_end: something tried and ruled out, kept so it is not tried again. Leave out for a plain node." })),
+			detail: opt(str({ description: `Anything longer worth keeping, at most ${DETAIL_MAX} characters. Shown only by look.` })),
+			links: links("this one relates to; added to the links it has"),
+			files: files("this node is about; added to the ones it has"),
+		},
+		{ description: "Rewrite the node of that name: the gist is replaced, links and files are added to the ones it has." },
 	),
 	obj({ action: lit("link"), name: name(), links: links("to link to"), files: files("to link to") }, { description: "Add links to a node, without rewriting it." }),
 	obj({ action: lit("unlink"), name: name(), links: links("to stop linking to"), files: files("to stop linking to") }, { description: "Take links off a node." }),

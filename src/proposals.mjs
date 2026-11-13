@@ -3,15 +3,16 @@
 // The agent can propose to reword a section of its system prompt or a tool's description, to add a section, or
 // to drop one (src/tools/prompt.mjs). A proposal changes nothing. It waits in the project's brain as a request to
 // the user (src/requests.mjs); when the user approves it, the wording goes into one file in the core folder,
-// prompt.json, and is laid over the built-in wording (src/prompt.mjs) the next time carto starts, in every
-// project. The start is the moment because the prompt is the first thing in the agent's context: a change there
-// makes the server read everything again, and a session that is under way keeps the prompt it began with.
+// prompt.json, and is laid over the built-in wording (src/prompt.mjs) at the next collapse or start, in every
+// project. The collapse or start is the moment because the prompt is the first thing in the agent's context: a
+// change there makes the server read everything again, so a segment of the conversation keeps the prompt it
+// began with, and the boundary takes up anything approved in the meantime.
 //
 // Every section and description has a budget (src/prompt.mjs). A proposal that does not fit is refused when it is
 // made, so what is read in front of every request cannot grow back by small steps.
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { budgetOf, SECTIONS, TOOLS, wordingOf } from "./prompt.mjs";
+import { budgetOf, SECTION_NAMES, TOOLS, wordingOf } from "./prompt.mjs";
 
 export class ProposalError extends Error {}
 
@@ -57,7 +58,7 @@ export function loadProposals(brainDir) {
 }
 
 /** The names a proposal can aim at: the sections as they are now, and "tool." with a tool's name. */
-export const targets = () => ({ sections: SECTIONS.map(([name]) => name), tools: Object.keys(TOOLS).map((name) => `tool.${name}`) });
+export const targets = () => ({ sections: [...SECTION_NAMES], tools: Object.keys(TOOLS).map((name) => `tool.${name}`) });
 
 /** A proposal in one line, for the agent and for the user. */
 export function proposalLine(item) {
@@ -107,7 +108,7 @@ export function propose(brainDir, op, now) {
 	// A newer proposal for the same thing takes the place of the older one.
 	book.items = [...book.items.filter((entry) => entry.target !== item.target), item];
 	write(proposalsPath(brainDir), book);
-	return { line: `${item.id} proposed. Nothing has changed: it waits for the user among their requests, and holds from the next start of carto once they approve it.`, shown: `? ${proposalLine(item)}` };
+	return { line: `${item.id} proposed. Nothing has changed: it waits for the user among their requests, and approved wording holds from the next collapse or start of carto once they approve it.`, shown: `? ${proposalLine(item)}` };
 }
 
 function fitting(target, value) {
@@ -132,7 +133,7 @@ export function decide(brainDir, coreDir, id, approved) {
 		if (item.target.startsWith("tool.")) overlay.tools[item.target.slice(5)] = item.text;
 		else if (item.action === "remove") {
 			overlay.added = overlay.added.filter(([name]) => name !== item.target);
-			if (SECTIONS.some(([name]) => name === item.target)) overlay.sections[item.target] = null;
+			if (SECTION_NAMES.includes(item.target)) overlay.sections[item.target] = null;
 			else delete overlay.sections[item.target];
 		} else if (item.action === "add") overlay.added = [...overlay.added.filter(([name]) => name !== item.target), [item.target, item.text, item.before ?? ""]];
 		else if (overlay.added.some(([name]) => name === item.target)) overlay.added = overlay.added.map((entry) => (entry[0] === item.target ? [entry[0], item.text, entry[2]] : entry));

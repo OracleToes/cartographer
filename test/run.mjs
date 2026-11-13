@@ -37,6 +37,12 @@ import { startStandIn } from "./stand-in.mjs";
 
 const CORE = dirname(dirname(fileURLToPath(import.meta.url)));
 const CARTO = join(CORE, "bin", "carto");
+// The stand-in's briefs were written before the mechanical `write` limit (src/config.mjs): they replace
+// whole files again and again. Relax that strict default for every child carto this test file spawns,
+// including the direct spawns in the kill tests. Tests of the limit itself pass CARTO_WRITE_* in `env`
+// to turn it back on for one run.
+process.env.CARTO_WRITE_LINES ??= "1000000";
+process.env.CARTO_WRITE_CREATES_ONLY ??= "0";
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "carto-test-")));
 const only = process.argv[2];
 
@@ -935,7 +941,7 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	assert.equal(apply({ action: "add", mode: "look", text: "First of all", before: "p1" }).line, "p3 added.");
 	assert.deepEqual(plan.items.map((item) => item.id), ["p3", "p1", "p2"], "`before` places an item");
 	assert.equal(planSummary(plan), "3 items · 1 change item not authorized");
-	assert.equal(renderPlan(plan), "Not authorized: change items wait until the user types /approve. Look items may run.\n  p3 [look] First of all\n  p1 [look] See what is in the project\n  p2 [change] Write the roller");
+	assert.equal(renderPlan(plan), "Not approved: change items wait for the user. Look items may run.\n  p3 [look] First of all\n  p1 [look] See what is in the project\n  p2 [change] Write the roller");
 
 	assert.equal(authorize(plan, now), 1, "authorizing says how many change items it covers");
 	assert.equal(planSummary(plan), "3 items · authorized");
@@ -998,7 +1004,7 @@ test("plan: the agent's plan is saved and shown, and the state block says what i
 		has(result.stdout, "● plan  + p1 [look] See what is in the project\n● plan  + p2 [change] Write the roller\n", "the items are shown as written");
 		has(result.stdout, "\nplan  1 change item waits for you: /plan shows the plan, /approve authorizes it\n", "the user is told that the plan waits for them");
 		assert.equal(result.stdout.split("waits for you").length - 1, 1, `and told once for the same plan:\n${result.stdout}`);
-		has(result.stdout, "Not authorized: change items wait until the user types /approve. Look items may run.\n  ✓ p1 [look] See what is in the project\n  p2 [change] Write the roller\n", "/plan");
+		has(result.stdout, "Not approved: change items wait for the user. Look items may run.\n  ✓ p1 [look] See what is in the project\n  p2 [change] Write the roller\n", "/plan");
 		has(result.stdout, "● plan  authorized by you: 1 change item may run\n  p2 Write the roller\n", "/approve");
 		has(result.stdout, "refused: The plan belongs to the main agent. If the plan should change, say so in your report.", "a task cannot write the plan");
 		has(result.stdout, "◂ p1 is marked done. For further work, add a new item to the plan.", "a finished item is not run again");
@@ -1009,7 +1015,7 @@ test("plan: the agent's plan is saved and shown, and the state block says what i
 		has(after("say: before the plan"), "If reaching one needs changes to the project, find out what you need with look tasks, then write the plan.", "a goal and no plan");
 		hasNot(after("say: before the plan"), "\nPlan\n", "no plan section without a plan");
 		const waiting = after("p2 added.");
-		has(waiting, "\n\nPlan\nNot authorized: change items wait until the user types /approve. Look items may run.\n  p1 [look] See what is in the project\n  p2 [change] Write the roller\n\n", "the plan is in the block");
+		has(waiting, "\n\nPlan\nNot approved: change items wait for the user. Look items may run.\n  p1 [look] See what is in the project\n  p2 [change] Write the roller\n\n", "the plan is in the block");
 		has(waiting, "carry out p1 with `task`: look items need no authorization. Change items wait for the user: show them the plan in a few lines and ask them to type /approve.", "a look item is next");
 		has(after("p1 done."), "Change items wait for the user: show them the plan in a few lines and ask them to type /approve. Do not start p2 before that.", "a change item is next and not authorized");
 		const authorized = after("I authorize the plan as it stands.");
@@ -1256,7 +1262,7 @@ test("undo: /undo takes the last change task back, reopens its item and withdraw
 		has(first.stdout, "● undone  p2 · Mention it in the README\n  changed  README.md (−1)\n  p2 is open again. The plan needs /approve again before a change item runs.", "/undo says what it did");
 		assert.equal(readFileSync(join(root, "README.md"), "utf8"), "# Demo project\nA small thing for tests.\n", "the edit is taken back");
 		assert.equal(readFileSync(join(root, "roll.py"), "utf8"), "roll\n", "the task before it is still in effect");
-		has(first.stdout, "Not authorized: change items wait until the user types /approve. Look items may run.\n  ✓ p1 [change] Write the roller\n  p2 [change] Mention it in the README (undone by the user: the files are as they were before this item ran)\n", "/plan after the undo");
+		has(first.stdout, "Not approved: change items wait for the user. Look items may run.\n  ✓ p1 [change] Write the roller\n  p2 [change] Mention it in the README (undone by the user: the files are as they were before this item ran)\n", "/plan after the undo");
 		const told = server.requests.map(stateOf).filter((block) => block?.includes("undone by the user")).at(0);
 		has(told, "p2 [change] Mention it in the README (undone by the user: the files are as they were before this item ran)", "the agent learns of the undo from the state block");
 		has(told, "Do not start p2 before that. No goal is recorded for this plan: agree one with the user", "and that it has to wait; a plan without a goal is pointed out");
@@ -1296,7 +1302,7 @@ test("undo: an item the agent already cleared from the plan is put back, so the 
 		has(result.stdout, "● undone  p2 · Write the roller\n  deleted  roll.py (−1)\n  p2 is back in the plan, open. The plan needs /approve again before a change item runs.", "/undo says the item is back");
 		assert.ok(!existsSync(join(root, "roll.py")), "the file is gone");
 		const told = server.requests.map(stateOf).filter((block) => block?.includes("undone by the user")).at(0);
-		has(told, "Not authorized: change items wait until the user types /approve. Look items may run.\n  p2 [change] Write the roller (undone by the user: the files are as they were before this item ran)", "the agent sees the item again, marked");
+		has(told, "Not approved: change items wait for the user. Look items may run.\n  p2 [change] Write the roller (undone by the user: the files are as they were before this item ran)", "the agent sees the item again, marked");
 		const plan = readPlan(root);
 		assert.deepEqual(plan.items.map((item) => `${item.id} ${item.mode} ${item.status}`), ["p2 change open", "p3 look open"], "the plan file: the item is back and later ids go on from where they were");
 		assert.equal(plan.authorized, undefined, "nothing is authorized");
@@ -2552,24 +2558,24 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 	const refused = (op, pattern, what, as = who) => assert.throws(() => apply(op, as), (error) => error instanceof AtlasError && pattern.test(error.message), what);
 
 	// Writing and rewriting.
-	const made = apply({ action: "note", name: "Math Helpers", gist: "adds", kind: "component", files: ["src/math.js"], links: ["Entry Point", "math helpers"] });
+	const made = apply({ action: "add", name: "Math Helpers", gist: "adds", kind: "component", files: ["src/math.js"], links: ["Entry Point", "math helpers"] });
 	assert.equal(made.line, "math_helpers written. It links to entry_point, which is not a node yet.");
 	assert.equal(made.shown, "+ component math_helpers  adds  [src/math.js]  → entry_point");
 	assert.deepEqual(atlas.nodes[0].links, ["entry_point"], "a link to itself is dropped");
 	assert.match(atlas.nodes[0].seen["src/math.js"], /^f:[0-9a-f]{12}$/, "the file's fingerprint is kept");
-	assert.equal(apply({ action: "note", name: "MATH-helpers", gist: "adds two numbers", detail: "Pure.", files: ["./src/main.js"] }).line.split(".")[0], "math_helpers rewritten", "any spelling of the name finds the node");
+	assert.equal(apply({ action: "edit", name: "MATH-helpers", gist: "adds two numbers", detail: "Pure.", files: ["./src/main.js"] }).line.split(".")[0], "math_helpers rewritten", "any spelling of the name finds the node");
 	assert.deepEqual([atlas.nodes.length, atlas.nodes[0].gist, atlas.nodes[0].kind, atlas.nodes[0].files], [1, "adds two numbers", "component", ["src/math.js", "src/main.js"]], "the gist is replaced, files are added, the kind stays");
-	apply({ action: "note", name: "plain", gist: "a node with no file and no link" });
+	apply({ action: "add", name: "plain", gist: "a node with no file and no link" });
 	assert.deepEqual([atlas.nodes[1].files, atlas.nodes[1].links, atlas.nodes[1].kind], [[], [], undefined], "a node needs no file, no link and no kind");
 
-	refused({ action: "note", name: "x" }, /`gist` .* is required/, "no gist");
-	refused({ action: "note", name: "x", gist: "g".repeat(GIST_MAX + 1) }, /the limit is 200/, "a gist that is too long");
-	refused({ action: "note", name: "x", gist: "g", detail: "d".repeat(DETAIL_MAX + 1) }, /the limit is 2000/, "detail that is too long");
-	refused({ action: "note", name: "x", gist: "g", kind: "hypothesis" }, /it is one of component, finding, dead_end, or left out/, "an unknown kind");
-	refused({ action: "note", name: "x", gist: "g", files: ["src/nope.js"] }, /there is no file or folder src\/nope.js in the project/, "a file that is not there");
-	refused({ action: "note", name: "x", gist: "g", files: ["../elsewhere.txt"] }, /outside the project/, "a file outside the project");
-	refused({ action: "note", name: "!!!", gist: "g" }, /`name` is required/, "no usable name");
-	refused({ action: "fuse", name: "x" }, /the actions are note, link, unlink, confirm, remove, look, tree/, "an unknown action");
+	refused({ action: "add", name: "x" }, /`gist` .* is required/, "no gist");
+	refused({ action: "add", name: "x", gist: "g".repeat(GIST_MAX + 1) }, /the limit is 200/, "a gist that is too long");
+	refused({ action: "add", name: "x", gist: "g", detail: "d".repeat(DETAIL_MAX + 1) }, /the limit is 2000/, "detail that is too long");
+	refused({ action: "add", name: "x", gist: "g", kind: "hypothesis" }, /it is one of component, finding, dead_end, or left out/, "an unknown kind");
+	refused({ action: "add", name: "x", gist: "g", files: ["src/nope.js"] }, /there is no file or folder src\/nope.js in the project/, "a file that is not there");
+	refused({ action: "add", name: "x", gist: "g", files: ["../elsewhere.txt"] }, /outside the project/, "a file outside the project");
+	refused({ action: "add", name: "!!!", gist: "g" }, /`name` is required/, "no usable name");
+	refused({ action: "fuse", name: "x" }, /the actions are add, edit, link, unlink, confirm, remove, look, tree/, "an unknown action");
 	assert.equal(atlas.nodes.length, 2, "a refused operation leaves nothing behind");
 
 	// What a file link checks.
@@ -2587,9 +2593,9 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 	assert.equal(apply({ action: "unlink", name: "math_helpers", files: ["src/main.js"] }).line, "math_helpers no longer links to src/main.js.");
 	assert.deepEqual([staleNodes(root, atlas), Object.keys(atlas.nodes[0].seen)], [[], ["src/math.js"]], "unlinking it clears the mark, and its fingerprint goes");
 	writeFileSync(join(root, "src", "math.js"), "export const add = (a, b) => a + b; // changed once more\n");
-	apply({ action: "note", name: "math_helpers", gist: "adds, the other way round" });
+	apply({ action: "edit", name: "math_helpers", gist: "adds, the other way round" });
 	assert.deepEqual(staleNodes(root, atlas), [], "rewriting a node says it is true of the files as they are now");
-	apply({ action: "note", name: "sources", gist: "all the code", files: ["src"] });
+	apply({ action: "add", name: "sources", gist: "all the code", files: ["src"] });
 	writeFileSync(join(root, "src", "added.js"), "export {};\n");
 	assert.deepEqual(staleNodes(root, atlas).map((node) => node.name), ["sources"], "a folder link notices a file that is added to the folder");
 	apply({ action: "confirm", names: ["sources"] });
@@ -2619,8 +2625,8 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 
 	// The outline, and what changed between two moments.
 	assert.equal(renderOutline(atlas), "Other nodes:\n  plain  a node with no file and no link  [README.md]  → later\n  sources  all the code  [src]", "nodes without a kind");
-	apply({ action: "note", name: "tried_cache", gist: "A cache was tried and made it slower", kind: "dead_end" });
-	apply({ action: "note", name: "roller", gist: "rolls", kind: "component" });
+	apply({ action: "add", name: "tried_cache", gist: "A cache was tried and made it slower", kind: "dead_end" });
+	apply({ action: "add", name: "roller", gist: "rolls", kind: "component" });
 	const outline = renderOutline(atlas);
 	has(outline, "Components:\n  roller  rolls\n", "grouped by kind");
 	has(outline, "Dead ends (tried and ruled out):\n  tried_cache", "dead ends have their own heading");
@@ -2628,13 +2634,13 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 	apply({ action: "remove", name: "roller" });
 	has(renderOutline(atlas, 120), "By name only, to keep this short (`atlas` look shows one): ", "an outline that is too long lists the oldest nodes by name");
 	const before = nodeHashes(atlas);
-	apply({ action: "note", name: "plain", gist: "reworded" });
+	apply({ action: "edit", name: "plain", gist: "reworded" });
 	apply({ action: "remove", name: "sources" });
-	apply({ action: "note", name: "fresh", gist: "new" });
+	apply({ action: "add", name: "fresh", gist: "new" });
 	assert.deepEqual(nodeChanges(before, nodeHashes(atlas)), { written: ["plain", "fresh"], removed: ["sources"] });
 	const full = { version: 1, view: { anchor: "." }, nodes: [] };
-	for (let index = 0; index < NODES_MAX; index++) applyAtlasOp(full, { action: "note", name: `n${index}`, gist: "g" }, who);
-	assert.throws(() => applyAtlasOp(full, { action: "note", name: "one_more", gist: "g" }, who), /200 nodes, which is its limit/, "the graph has a size limit");
+	for (let index = 0; index < NODES_MAX; index++) applyAtlasOp(full, { action: "add", name: `n${index}`, gist: "g" }, who);
+	assert.throws(() => applyAtlasOp(full, { action: "add", name: "one_more", gist: "g" }, who), /200 nodes, which is its limit/, "the graph has a size limit");
 
 	// The file.
 	const dir = join(scratch, "atlas-file");
@@ -2663,7 +2669,7 @@ test("atlas: a node linked to a file that is not there creates it once the plan 
 	const root = makeProject("atlas-create", { git: false });
 	const server = await startStandIn();
 	try {
-		const node = (name, files) => `atlas: ${JSON.stringify([{ action: "note", name, gist: "planned", files }])}`;
+		const node = (name, files) => `atlas: ${JSON.stringify([{ action: "add", name, gist: "planned", files }])}`;
 		const result = await carto(root, server, [], { input: lines(node("early", ["src/planned.js"]), planMessage(WRITE_ITEM), "/approve", node("roller", ["src/roll/dice.js", "docs/"]), node("escape", ["../out.js"]), node("brain", [".atlas/x.json"])) });
 		ok(result, "a session that maps planned files");
 		const results = resultsOf(server, "atlas");
@@ -2687,13 +2693,13 @@ test("atlas: a call that is run again after a crash is not applied twice", async
 	mkdirSync(dir, { recursive: true });
 	const tool = atlasTool({ root, brainDir: dir });
 	const api = { taskId: "task-1", now: () => Date.now(), conversationId: "a-task" };
-	const ops = [{ action: "note", name: "once", gist: "written once" }, { action: "look", name: "once" }];
+	const ops = [{ action: "add", name: "once", gist: "written once" }, { action: "look", name: "once" }];
 	const first = await tool.execute({ ops }, api);
 	has(first.output[0].text, "once written.\nonce (node) · written just now by a task\nwritten once", "the first run");
 	const again = await tool.execute({ ops }, api);
-	has(again.output[0].text, "Op 1 (note once) was already applied, before a restart.\nonce (node)", "the rerun says so, and still answers what only reads");
+	has(again.output[0].text, "Op 1 (add once) was already applied, before a restart.\nonce (node)", "the rerun says so, and still answers what only reads");
 	assert.equal(loadAtlas(dir).atlas.nodes.length, 1, "and writes nothing twice");
-	const batch = await tool.execute({ ops: [{ action: "note", name: "first", gist: "x", links: ["second", "third"] }, { action: "note", name: "second", gist: "y" }] }, { ...api, taskId: "task-1b" });
+	const batch = await tool.execute({ ops: [{ action: "add", name: "first", gist: "x", links: ["second", "third"] }, { action: "add", name: "second", gist: "y" }] }, { ...api, taskId: "task-1b" });
 	assert.equal(batch.output[0].text, "first written. It links to third, which is not a node yet.\nsecond written.", "a node written later in the same call is not reported as missing");
 	const none = await tool.execute({ ops: [] }, api);
 	assert.ok(none.isError && none.output[0].text.includes("`ops` is empty"), "no operations is an error");
@@ -2717,7 +2723,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 
 	saveAssessment(dir, "A demo.\n");
 	const atlas = { version: 1, view: { anchor: "." }, nodes: [] };
-	applyAtlasOp(atlas, { action: "note", name: "one", gist: "the first node" }, { root: dir, now: new Date(at).toISOString(), by: "main", main: true });
+	applyAtlasOp(atlas, { action: "add", name: "one", gist: "the first node" }, { root: dir, now: new Date(at).toISOString(), by: "main", main: true });
 	saveAtlas(dir, atlas);
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: ["one"], removed: [], assessment: true, at: new Date(at).toISOString() }, "what was written since the copy");
 	assert.deepEqual(pin(dir, { now: at + 120_000, reason: "goal g1 was closed" }), { changed: true });
@@ -2778,7 +2784,7 @@ test("state: the time, the age of what is old, the tree, and what the atlas hold
 	has(block(), "\n\nTree\nFrom the project root, 3 levels deep: 5 files in all.\nsrc/\n", "the tree");
 	has(block(), "\n\nAtlas\nGraph: no nodes yet. Assessment: none yet. Write one with `assess` once you know what the project is and how it is built.\n\nLedger\n", "an empty atlas");
 	const atlas = loadAtlas(dir).atlas;
-	applyAtlasOp(atlas, { action: "note", name: "adder", gist: "adds", files: ["src/math.js"] }, { root, now: new Date(now).toISOString(), by: "task", main: false });
+	applyAtlasOp(atlas, { action: "add", name: "adder", gist: "adds", files: ["src/math.js"] }, { root, now: new Date(now).toISOString(), by: "task", main: false });
 	saveAtlas(dir, atlas);
 	has(block(), "  math.js  [adder]\n", "a node is named on the file it links to");
 	has(block(), "Graph: 1 node. Files a node links to: 1 of 5.", "how much of the project the graph touches");
@@ -2811,10 +2817,10 @@ test("atlas: a task records what it learned; the main agent gets the record, and
 	const root = makeProject("atlas-task", { git: false });
 	const server = await startStandIn();
 	try {
-		const note = { action: "note", name: "Math Helpers", gist: "add(a, b), used by main.js", kind: "component", files: ["src/math.js"], links: ["entry"] };
-		const first = await carto(root, server, ["-p", `task: read: src/math.js\\n${atlasMessage(note, { action: "note", name: "ghost", gist: "no such file", files: ["src/nope.js"] })}`]);
+		const note = { action: "add", name: "Math Helpers", gist: "add(a, b), used by main.js", kind: "component", files: ["src/math.js"], links: ["entry"] };
+		const first = await carto(root, server, ["-p", `task: read: src/math.js\\n${atlasMessage(note, { action: "add", name: "ghost", gist: "no such file", files: ["src/nope.js"] })}`]);
 		ok(first, "a task that writes a node");
-		has(first.stdout, "│ atlas note Math Helpers · note ghost", "the call on the screen");
+		has(first.stdout, "│ atlas add Math Helpers · add ghost", "the call on the screen");
 		has(first.stdout, "→ + component math_helpers add(a, b), used by main.js [src/math.js] → entry\n", "with what was written");
 		has(first.stdout, "◂ atlas  wrote math_helpers  (/atlas shows the graph)", "the record on the screen");
 
@@ -2823,7 +2829,7 @@ test("atlas: a task records what it learned; the main agent gets the record, and
 		has(brief, "The project's files as they are now:\nFrom the project root, 3 levels deep: 5 files in all.\nsrc/\n  deep/\n    er/  (1 file)\n  main.js\n  math.js\nREADME.md\nlong.txt\n\nBrief:\nread: src/math.js", "the tree in the brief");
 		has(brief, "`atlas` works for you too: before you return, record what you learned that will still matter later as nodes", "a look task is asked to record what it learns");
 		const told = server.requests.filter(isTask).map((request) => messageText(request.messages.at(-1)));
-		assert.ok(told.some((text) => text.includes("math_helpers written. It links to entry, which is not a node yet.\nOp 2 (note ghost) not applied: `files`: there is no file or folder src/nope.js in the project.")), `the task is told what was applied and what was not: ${JSON.stringify(told.at(-1))}`);
+		assert.ok(told.some((text) => text.includes("math_helpers written. It links to entry, which is not a node yet.\nOp 2 (add ghost) not applied: `files`: there is no file or folder src/nope.js in the project.")), `the task is told what was applied and what was not: ${JSON.stringify(told.at(-1))}`);
 
 		// The main agent learns of it from the record, and sees it in the tree.
 		const last = server.requests.at(-1);
@@ -2897,7 +2903,7 @@ test("atlas: a node whose file a change task changed is reported as possibly out
 	try {
 		const result = await carto(root, server, [], {
 			input: lines(
-				atlasMessage({ action: "note", name: "adder", gist: "add(a, b) returns a + b", files: ["src/math.js"] }),
+				atlasMessage({ action: "add", name: "adder", gist: "add(a, b) returns a + b", files: ["src/math.js"] }),
 				planMessage(WRITE_ITEM),
 				"/approve",
 				"task(p1): edit: src/math.js <<< return a + b; >>> return b + a;",
@@ -2970,7 +2976,7 @@ test("top: /pin and /new rewrite the copy; a task's prompt begins with the same 
 	const server = await startStandIn();
 	try {
 		const first = await carto(root, server, [], {
-			input: lines("say: one", atlasMessage({ action: "note", name: "readme", gist: "what the project is", files: ["README.md"] }), "/assessment", "/pin", "/pin", "say: two"),
+			input: lines("say: one", atlasMessage({ action: "add", name: "readme", gist: "what the project is", files: ["README.md"] }), "/assessment", "/pin", "/pin", "say: two"),
 		});
 		ok(first, "/pin");
 		has(first.stdout, "  No assessment yet. The agent writes one when it knows the project.", "/assessment without one");
@@ -3037,7 +3043,7 @@ test("atlas: an edit made by hand shows at the next request; a broken file is re
 		assert.deepEqual([readAtlas(root).nodes[0].links, readAtlas(root).nodes[0].mine], [["other"], true], "what the user wrote is kept");
 
 		writeFileSync(file, "{ not json");
-		const broken = await carto(root, server, [], { input: lines(atlasMessage({ action: "note", name: "x", gist: "y" }), "/atlas") });
+		const broken = await carto(root, server, [], { input: lines(atlasMessage({ action: "add", name: "x", gist: "y" }), "/atlas") });
 		ok(broken, "a broken file");
 		has(broken.stdout, "! The atlas cannot be read: ", "the start says so");
 		has(broken.stdout, "! The graph cannot be read: ", "and so does /atlas");
@@ -3053,8 +3059,8 @@ test("atlas: an edit made by hand shows at the next request; a broken file is re
 
 test("terminal: one line per call to the atlas and the assessment", () => {
 	assert.equal(
-		describeCall({ name: "atlas", arguments: { ops: [{ action: "note", name: "dice" }, { action: "confirm", names: ["a", "b"] }, { action: "tree", anchor: "src" }, { action: "tree", depth: 2 }] } }),
-		"atlas note dice · confirm a, b · tree src · tree depth 2",
+		describeCall({ name: "atlas", arguments: { ops: [{ action: "add", name: "dice" }, { action: "confirm", names: ["a", "b"] }, { action: "tree", anchor: "src" }, { action: "tree", depth: 2 }] } }),
+		"atlas add dice · confirm a, b · tree src · tree depth 2",
 	);
 	assert.equal(describeCall({ name: "assess", arguments: { text: "x".repeat(1200) } }), "assess  1.2k characters");
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "atlas", isError: false, details, content: [{ type: "text", text }] });
@@ -3596,7 +3602,7 @@ test("plan: a standing item stays open and can be carried out again and again", 
 	assert.equal(applyPlanOp(other, { action: "add", mode: "change", text: "Two" }, now, { yolo: true }).withdrawn, false);
 	assert.equal(other.authorized, undefined, "but the authorization is gone all the same: it covered the plan as it stood");
 	assert.equal(renderPlan(other, { yolo: true }).split("\n")[0], "The user has switched approval off: change items may run without /approve.");
-	assert.equal(renderPlan(other).split("\n")[0], "Not authorized: change items wait until the user types /approve. Look items may run.");
+	assert.equal(renderPlan(other).split("\n")[0], "Not approved: change items wait for the user. Look items may run.");
 
 	const root = makeProject("standing", { git: false });
 	const server = await startStandIn();
@@ -4560,7 +4566,7 @@ test("context: the main agent can drop a report from view and get it back; notes
 		// What the tool refuses.
 		has(result.stdout, "● context  nothing done: A note of this kind is for a task's own steps. What you need after a collapse belongs in the ledger", "the main agent's notes go to the brain");
 		has(result.stdout, "● context  nothing done: drop needs `id`: the report to drop from view, like t12.", "no id");
-		has(result.stdout, '● context  nothing done: Validation failed for tool "context": - action: expected one of ["recall","shelve","unshelve","drop","note","collapse"]', "an unknown action is refused by the tool's schema");
+		has(result.stdout, '● context  nothing done: Validation failed for tool "context": - action: expected one of ["recall","shelve","unshelve","fold","drop","note","collapse"]', "an unknown action is refused by the tool's schema");
 	} finally {
 		await server.close();
 	}
@@ -4747,7 +4753,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 		assert.ok(server.asides.length >= 3, `the question was sent: ${server.asides.length} requests on the side`);
 		const questions = server.asides.filter((aside) => aside.max_tokens === 16);
 		for (const aside of questions) assert.equal(aside.tool_choice, "none", "every question says that no tool can be the answer");
-		for (const aside of questions) assert.ok(aside.tools.length === 18 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
+		for (const aside of questions) assert.ok(aside.tools.length === 19 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
 		assert.deepEqual(questions.map((aside) => aside.response_format !== undefined), [true, false, false], `the form of the answer is tried once, then left out:\n${JSON.stringify(questions.map((aside) => Object.keys(aside)))}`);
 		assert.equal(result.stdout.split("the model server refused the form the answer must have").length - 1, 1, `the user is told once:\n${result.stdout}`);
 		has(result.stdout, "does it need to write something down first? no · ", "and the question is answered all the same");
@@ -4756,7 +4762,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 	}
 });
 
-test("context: /context shows the parts and their sizes, /new starts with nothing in view, and the tools are eighteen flat objects", async () => {
+test("context: /context shows the parts and their sizes, /new starts with nothing in view, and the tools are nineteen flat objects", async () => {
 	const root = makeProject("context-view", { git: false });
 	const server = await startStandIn();
 	try {
@@ -4778,14 +4784,14 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.ok(existsSync(join(root, ".atlas", "reports", "t1.md")), "the report is still on disk");
 		assert.equal(store.next, 2, "and ids are not reused");
 		// The tools: one more, and each a flat object (a schema with a choice at its root breaks tool calls on llama.cpp with Qwen).
-		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "assess", "atlas", "chat", "context", "edit", "ledger", "list", "plan", "read", "return", "search", "shell", "sleep", "task", "wake", "window", "write"]);
+		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "assess", "atlas", "chat", "context", "edit", "ledger", "list", "plan", "prompt", "read", "return", "search", "shell", "sleep", "task", "wake", "window", "write"]);
 		for (const tool of fresh.tools) assert.equal(tool.function.parameters.anyOf ?? tool.function.parameters.oneOf, undefined, `${tool.function.name} is a flat object`);
 		const context = fresh.tools.find((tool) => tool.function.name === "context").function.parameters;
 		assert.equal(context.type, "object");
 		assert.equal(context.anyOf ?? context.oneOf, undefined);
 		assert.deepEqual(context.required, ["action"]);
 		assert.deepEqual(Object.keys(context.properties).sort(), ["action", "hand_on", "id", "lines", "path", "text"]);
-		assert.deepEqual(context.properties.action.enum, ["recall", "shelve", "unshelve", "drop", "note", "collapse"]);
+		assert.deepEqual(context.properties.action.enum, ["recall", "shelve", "unshelve", "fold", "drop", "note", "collapse"]);
 	} finally {
 		await server.close();
 	}
@@ -5127,12 +5133,12 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 });
 
 test("screen: the views read the brain: nodes, entries and items with the line they stand on, the tree, a patch by file, the editor's command", async () => {
-	const { assessmentView, atlasView, diffView, editorCommand, ledgerView, planView, treeView } = await import("../src/screen/views.mjs");
+	const { atlasView, booksView, diffView, editorCommand, ledgerView, planView, treeView } = await import("../src/screen/views.mjs");
 	const root = makeProject("views", { git: false });
 	const brainDir = setUpBrain(root).brainDir;
 	const server = await startStandIn();
 	try {
-		const node = { action: "note", name: "Math Helpers", gist: "add(a, b)", kind: "component", files: ["src/math.js"], links: ["entry"], detail: "Used by main.js." };
+		const node = { action: "add", name: "Math Helpers", gist: "add(a, b)", kind: "component", files: ["src/math.js"], links: ["entry"], detail: "Used by main.js." };
 		const result = await carto(root, server, ["--yolo", "--no-bwrap"], {
 			input: lines(ledgerMessage(GOAL, { action: "add", kind: "note", text: "Prefer tabs" }), planMessage(WRITE_ITEM, LOOK_ITEM), `atlas: ${JSON.stringify([node])}`, "assess: A small demo.\\n\\nTwo source files.", "task(p1): write: roll.py <<< print(4)\\\\n\\nedit: src/math.js <<< return a + b; >>> return b + a;"),
 		});
@@ -5163,7 +5169,10 @@ test("screen: the views read the brain: nodes, entries and items with the line t
 		has(text(open), "math.js  71 B  ← math_helpers", "a file names the graph's nodes about it");
 		assert.deepEqual(open.items.find((item) => item.key === "file:src/math.js").target, { file: join(root, "src/math.js") }, "and e opens the file itself");
 
-		assert.deepEqual(assessmentView({ brainDir }).items.map((item) => item.head[0][0]), ["A small demo.", "Two source files."], "the assessment, a paragraph to an item");
+		const books = booksView({ brainDir });
+		has(text(books), "a1  A small demo.", "the assessment, one entry to an item (migrated from assessment.md)");
+		has(text(books), "a2  Two source files.", "and the second");
+		has(books.items[1].target.file, join(root, ".atlas", "assessment.md"), "until the agent edits the books, e opens the assessment they were split from");
 
 		const diff = diffView({ root, brainDir, started: 0 }, "last");
 		has(text(diff), "p1 · Write the roller", "the last step");
@@ -5264,6 +5273,8 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 			["[change] Write the roller", "\x1b[<0;6;5M\x1b[<0;6;5m", false],
 			["▾ ✓ p1", "e", false],
 			[0.8, "]", false],
+			// One more ] than before: Requests stands between Plan and Tree.
+			[0.4, "]", false],
 			[" files in ", "5", false],
 			["What the main agent sees", "+", false],
 			["You are in one of two roles at any time.", "G", false],
@@ -5295,7 +5306,7 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		has(diff, "p1 · Write the roller  1 file (+1)\n▾ new      roll.py (+1)\n    --- /dev/null\n    +++ b/roll.py\n    @@ -0,0 +1 @@\n    +print(4)\n", "l opens the changed file to its patch");
 		has(at("Since carto started"), "Since carto started: 1 step  1 file (+1)\n▸ new      roll.py (+1)\n", "] goes to the next view: this session");
 		const plan = at("[change] Write the roller");
-		assert.match(plan, /\n {2}Atlas {2}Ledger {2}Plan {2}Tree {2}Assessment {4}\[ \] change view · e opens \.atlas\/carto-plan\.json\n/, `Carto has its views on a row:\n${plan}`);
+		assert.match(plan, /\n {2}Atlas {2}Ledger {2}Plan {2}Requests {2}Tree {2}Books {4}\[ \] change view · e opens \.atlas\/carto-plan\.json\n/, `Carto has its views on a row:\n${plan}`);
 		has(plan, "▸ ✓ p1 [change] Write the roller", "the plan's items are lines that can be selected");
 		assert.match(at("▾ ✓ p1"), /\n▾ ✓ p1 \[change\] Write the roller[^\n]*\n {4}Write the roller\n {4}done /, "a click on one opens it");
 		has(at(" files in "), "▸ src/  ", "the tree is a view of folders that open");
@@ -5310,7 +5321,7 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		const context = at("What the main agent sees");
 		assert.match(context, /\nWhat the main agent sees {2}· {2}about [\d.]+k of 100k tokens \(\d+%\) {2}· {2}the server counted [\d.]+k\nrequest \d+ of this run, sent \d\d:\d\d \([^)]*\), as the server got it · part sizes are estimates\n/, `the Context tab says whose window it is, how full, and which request it shows:\n${context}`);
 		assert.match(context, /\n■+□+\n■ System prompt \.+ +[\d.]+k +[\d.]+% +■ Tools \.+ +[\d.]+k +[\d.]+%/, `then the window as one row, and what each part of it is:\n${context}`);
-		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 18: /, `then every part as one line, folded:\n${context}`);
+		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 19: /, `then every part as one line, folded:\n${context}`);
 		assert.match(at("You are in one of two roles at any time."), /\n▾ ■ +[\d.]+k {2}System prompt/, "+ opens every part: the tab is then the whole window, word for word");
 		const end = at("since that request");
 		has(end, "── since that request: what the next one will hold as well ──", "the reply and what its calls returned follow what was sent");
@@ -5540,7 +5551,7 @@ test("screen: the editor completes commands, a sheet shows the keys, a slash sea
 		has(at("→ session"), "› /copy session\n", "a command's own words are completed too");
 		assert.equal(readdirSync(join(root, ".atlas", "export")).filter((name) => name.startsWith("session-")).length, 1, "one Enter takes the completion and sends the command");
 		assert.ok(result.shots.some((shot) => /\n› say: canary bird\n/.test(shot)), `Up brings back what was sent, into the place to type:\n${result.shots.slice(4, 6).join("\n────\n")}`);
-		has(at("Graph:"), "Atlas  Ledger  Plan", "with nothing typed, Tab goes to the next tab");
+		has(at("Graph:"), "Atlas  Ledger  Plan  Requests", "with nothing typed, Tab goes to the next tab");
 		has(at("› /plan"), " 1 Chat ", "with something typed, Tab completes it");
 		const sheet = at("Two modes");
 		assert.match(sheet, /\n {3}Keys {3}1–\d+ of \d+ · j k scroll {3}Esc closes\n\n {3}Two modes\n/, `F1 lays a sheet with the keys over the screen:\n${sheet}`);

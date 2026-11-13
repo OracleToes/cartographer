@@ -97,7 +97,7 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 			// A look that failed is taken again at the next tick.
 		}
 		const fired = wakes?.noteShown() ?? [];
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+			dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
 	}
 	// The windows come last of all, in a task's request too: they change from one request to the next, and a
 	// task that left a command running sees how it is doing each time it thinks.

@@ -53,15 +53,29 @@ export function confineWrite(root, brainDir, given) {
 	return { abs, rel };
 }
 
-/** Create or replace a file. @returns {string} what happened, one line */
-export function writeOne(root, brainDir, given, content) {
+/**
+ * Create a file. With `options` the mechanical limit for building from the ground up is enforced:
+ * `newOnly` refuses to replace an existing file (use `edit`), and `maxLines` caps how long a brand-new
+ * file may be. Called without options it keeps the old create-or-replace behaviour, for callers that
+ * predate the limit (and for tests of the primitive itself).
+ * @param {{ newOnly?: boolean, maxLines?: number }} [options]
+ * @returns {string} what happened, one line
+ */
+export function writeOne(root, brainDir, given, content, options = {}) {
 	if (typeof content !== "string") throw new ChangeError("`content` is required: the whole text of the file");
 	if (Buffer.byteLength(content) > CONTENT_MAX_BYTES) throw new ChangeError(`\`content\` is larger than ${CONTENT_MAX_BYTES / 1_000_000} MB; write the file in parts, or generate it another way`);
 	const path = confineWrite(root, brainDir, given);
+	const lines = lineCount(content);
+	if (options.maxLines !== undefined && lines > options.maxLines) {
+		throw new ChangeError(`\`content\` has ${plural(lines, "line")}; \`write\` may create at most ${plural(options.maxLines, "line")} of a new file. Start the file short and grow it with \`edit\`, one exact passage at a time`);
+	}
 	const had = existsSync(path.abs) ? lineCount(readFileSync(path.abs, "utf8")) : undefined;
+	if (options.newOnly === true && had !== undefined) {
+		throw new ChangeError(`${path.rel} already exists, so \`write\` will not replace it whole. Change it with \`edit\`, one exact passage at a time (or give a new path)`);
+	}
 	mkdirSync(dirname(path.abs), { recursive: true });
 	writeFileSync(path.abs, content);
-	return `Wrote ${path.rel}: ${plural(lineCount(content), "line")}, ${had === undefined ? "a new file" : `replacing a file of ${plural(had, "line")}`}.`;
+	return `Wrote ${path.rel}: ${plural(lines, "line")}, ${had === undefined ? "a new file" : `replacing a file of ${plural(had, "line")}`}.`;
 }
 
 /** Replace one passage of a file. @returns {string} what happened, one line */
@@ -96,12 +110,12 @@ const run = (work) => {
 	}
 };
 
-/** @param {{ root: string, brainDir: string }} project  root: real path of the project */
-export function changeTools({ root, brainDir }) {
+/** @param {{ root: string, brainDir: string, write?: { newOnly?: boolean, maxLines?: number } }} project  root: real path of the project */
+export function changeTools({ root, brainDir, write = {} }) {
 	return [
 		defineTool({
 			name: "write",
-			description: "Create a file of the project, or replace one completely, with the text you give. Folders are created as needed. To change part of a file, use `edit`. A call must fit in one reply: write a file of more than a few hundred lines in parts, the first part with `write` and the rest added with `edit`.",
+			description: "Create a NEW file of the project with a short piece of boilerplate. `write` refuses to replace an existing file and will not write a long one: build and grow files with `edit`, one exact passage at a time. Folders are created as needed.",
 			parameters: obj({
 				path: str({ description: "Path relative to the project directory" }),
 				content: str({ description: "The whole text of the file" }),
@@ -109,7 +123,7 @@ export function changeTools({ root, brainDir }) {
 			executionMode: "sequential",
 			// Writing the same text twice leaves the same file.
 			replay: "safe",
-			execute: async (args) => run(() => writeOne(root, brainDir, args.path, args.content)),
+				execute: async (args) => run(() => writeOne(root, brainDir, args.path, args.content, write)),
 		}),
 		defineTool({
 			name: "edit",

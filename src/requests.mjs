@@ -43,7 +43,8 @@ export function approveRequests(brainDir, coreDir, ids, now = new Date().toISOSt
 	const done = { items: [], proposals: [], unknown: [] };
 	const { plan } = loadPlan(brainDir);
 	if (plan !== undefined) {
-		const result = approve(plan, now, all ? undefined : wanted.filter((id) => /^p\d+$/.test(id)));
+		const ids = all ? waiting(plan).map((item) => item.id) : wanted.filter((id) => /^p\d+$/.test(id));
+		const result = ids.length === 0 ? { approved: [], unknown: wanted.filter((id) => /^p\d+$/.test(id)) } : approve(plan, now, ids);
 		done.items = result.approved;
 		done.unknown.push(...result.unknown);
 		if (result.approved.length > 0) savePlan(brainDir, plan);

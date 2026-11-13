@@ -83,6 +83,8 @@ export const isAuthorized = (plan) => plan.authorized !== undefined;
 
 /** Whether the user's /approve is what the plan waits for. */
 export const awaitsApproval = (plan) => !isAuthorized(plan) && openItems(plan, "change").length > 0;
+/** Whether any request waits on the plan: an open change item that neither the whole-plan approval nor its own covers. */
+export const planWaits = (plan) => !isAuthorized(plan) && waiting(plan).length > 0;
 /** Open items that are finished by being carried out once; a standing item is a duty and stays open. */
 export const openOnce = (plan) => openItems(plan).filter((item) => item.standing !== true);
 export const openStanding = (plan) => openItems(plan).filter((item) => item.standing === true);
@@ -120,7 +122,11 @@ const WITHDRAWN = "This changed what the plan may change, so the user's authoriz
 export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 	const withdraw = () => {
 		if (!isAuthorized(plan)) return false;
+		// A whole-plan /approve covered every item it held. If the plan grows or changes, that cover ends for
+		// all of them: each item becomes a request again. In the per-item case there is no cover to withdraw;
+		// the other items keep their own approvals, and only the edited one waits again (below).
 		delete plan.authorized;
+		for (const item of plan.items) delete item.approved;
 		// With approval switched off there is nothing to ask the user for.
 		return !yolo;
 	};
@@ -164,8 +170,12 @@ export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 			delete item.undone;
 			// Rewording a change item, or making an item one, changes what the user agreed to.
 			const after = `${item.mode} ${item.text} ${hadNetwork || item.network === true} ${wasStanding || item.standing === true}`;
-			const withdrawn = item.mode === "change" && item.status === "open" && before !== after && withdraw();
-			return { line: `${item.id} changed.${withdrawn ? ` ${WITHDRAWN}` : ""}`, shown: `~ ${itemLine(item)}`, withdrawn };
+			const changed = item.mode === "change" && item.status === "open" && before !== after;
+			// Per item: rewording this one asks the user to approve this one again, and leaves its neighbours alone.
+			const reasked = changed && item.approved !== undefined;
+			if (reasked) delete item.approved;
+			const withdrawn = changed && withdraw();
+			return { line: `${item.id} changed.${withdrawn || reasked ? ` ${WITHDRAWN}` : ""}`, shown: `~ ${itemLine(item)}`, withdrawn: withdrawn || reasked };
 		}
 		case "done": {
 			const item = find(plan, op.id);
@@ -214,7 +224,7 @@ export const YOLO_LINE = "approval: OFF (yolo) · the agent's change items run w
 export function authorizationLine(plan, { yolo = false } = {}) {
 	if (yolo && openItems(plan, "change").length > 0) return "The user has switched approval off: change items may run without /approve.";
 	if (isAuthorized(plan)) return "Authorized by the user: change items may run.";
-	if (openItems(plan, "change").length > 0) return "Not authorized: change items wait until the user types /approve. Look items may run.";
+	if (openItems(plan, "change").length > 0) return "Not approved: change items wait for the user. Look items may run.";
 	return "No change item is open, so nothing needs authorizing.";
 }
 
@@ -236,11 +246,51 @@ export function renderPlan(plan, options = {}) {
 }
 
 /**
- * The user authorizes the plan as it stands.
+ * The user authorizes the plan as it stands (the original whole-plan /approve).
  * @returns {number} how many open change items it covers
  */
 export function authorize(plan, now) {
 	plan.authorized = now;
 	for (const item of plan.items) delete item.undone;
 	return openItems(plan, "change").length;
+}
+
+// ─── Approval per item (the Requests system) ───────────────────────────────
+// The agent no longer has to pack a plan to keep one authorization. Each change
+// item is approved on its own and waits in the user's Requests until then. The
+// old whole-plan authorization above still works: while it holds, no item waits.
+
+/** Change items that wait for the user's approval: not covered by whole-plan authorization, not approved one by one. */
+export function waiting(plan) {
+	return openItems(plan, "change").filter((item) => item.approved === undefined && plan.authorized === undefined);
+}
+
+/** Whether this change item may run now: approval switched off, whole-plan /approve, or its own approval. */
+export function mayRun(plan, item, yolo = false) {
+	if (yolo || isAuthorized(plan) || item.approved !== undefined) return true;
+	// A standing duty approved once may be carried out again and again.
+	return false;
+}
+
+/**
+ * Approve change items one by one. `ids` names which ones; left out, all open
+ * change items. Proposals and questions are not plan items and never appear here.
+ * @returns {{ approved: string[], unknown: string[] }} ids approved, and ids that named no open change item
+ */
+export function approve(plan, now, ids) {
+	const open = openItems(plan, "change");
+	const wanted = ids === undefined ? open.map((item) => item.id) : ids.filter((id) => typeof id === "string" && id !== "");
+	const approved = [];
+	const unknown = [];
+	for (const id of wanted) {
+		const item = open.find((entry) => entry.id === id);
+		if (item === undefined) {
+			unknown.push(id);
+			continue;
+		}
+		item.approved = now;
+		delete item.undone;
+		approved.push(id);
+	}
+	return { approved, unknown };
 }

@@ -11,12 +11,14 @@
 // the windows block) as parts of their own. Then what has come since: the reply and what its calls returned.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { assessmentPath, loadAssessment } from "../assessment.mjs";
+import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
+import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
 import { estimate } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath } from "../plan.mjs";
+import { listRequests } from "../requests.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
 import { short, width } from "./text.mjs";
@@ -142,6 +144,34 @@ export function planView({ brainDir, yolo }) {
 	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]]], items };
 }
 
+/** What waits for the user: change items, questions of taste, and changes to the agent's own prompt. */
+export function requestsView({ brainDir, yolo }) {
+	const all = listRequests(brainDir, { yolo });
+	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
+	const items = all.map((request) => ({
+		key: `request:${request.id}`,
+		head: [
+			[request.kind === "approval" ? "● " : request.kind === "question" ? "? " : "◆ ", request.kind === "approval" ? "warn" : "tool"],
+			[`${request.id}  `, "tool"],
+			[`[${request.kind}] `, "muted"],
+			[request.text, ""],
+		],
+		body: [
+			...(request.detail ?? []),
+			request.kind === "question" ? `answer with /answer ${request.id} words` : `/approve ${request.id} approves it · /deny ${request.id} turns it down`,
+		].join("\n"),
+		copy: `${request.id} [${request.kind}] ${request.text}`,
+	}));
+	const approvals = all.some((request) => request.kind === "approval");
+	return {
+		header: [
+			[[all.length === 1 ? "1 request waits for you" : `${all.length} requests wait for you`, "warn"]],
+			[[approvals ? "  /approve ID ... · /deny ID [why] · /answer ID words" : "  /answer ID words · /deny ID [why]", "muted"]],
+		],
+		items,
+	};
+}
+
 /** The project's files as a tree whose folders open and fold. `e` opens a file itself. */
 export function treeView({ root, brainDir }, isOpen) {
 	const files = projectFiles(root);
@@ -194,21 +224,33 @@ export function treeView({ root, brainDir }, isOpen) {
 	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root}`, "bold"], ["  (without what git ignores and the brain folder; ← names the graph's nodes about a file)", "muted"]]], items };
 }
 
-/** The assessment, a paragraph to an item, so that `e` opens the file where the paragraph is. */
-export function assessmentView({ brainDir }) {
-	const file = assessmentPath(brainDir);
-	const { text, written } = loadAssessment(brainDir);
-	if (text === "") return { header: [], items: [note("  No assessment yet. The agent writes one when it knows the project.")] };
-	const items = text
-		.split(/\n\s*\n/)
-		.map((paragraph) => paragraph.trim())
-		.filter((paragraph) => paragraph !== "")
-		.map((paragraph, index) => {
-			const first = paragraph.split("\n")[0];
-			const more = paragraph.includes("\n") || width(first) > 100;
-			return { key: `paragraph:${index}`, head: [[first, ""]], ...(more ? { body: paragraph } : {}), copy: paragraph, target: { file, line: lineOf(file, first) } };
-		});
-	return { header: [[["The agent's assessment of the project", "bold"], [written ? `  · written ${stamp(written)}` : "", "muted"]]], items };
+/** The books: the assessment of the project and the practice, one entry to an item, so that `e` opens the file where it is. */
+export function booksView({ brainDir }) {
+	// Until the agent's first book operation the entries live only in assessment.md; the view opens that.
+	const store = booksPath(brainDir);
+	const file = existsSync(store) ? store : assessmentPath(brainDir);
+	const book = loadBooks(brainDir);
+	const entry = (item) => {
+		const first = item.text.split("\n")[0];
+		const more = item.text.includes("\n") || width(first) > 100;
+		const target = file === store ? { file, line: jsonLine(file, "id", item.id) } : { file, line: lineOf(file, first) };
+		return {
+			key: `entry:${item.id}`,
+			head: [[`${item.id}  `, item.status === "done" ? "muted" : "tool"], [first, item.status === "done" ? "muted" : ""]],
+			...(more ? { body: item.text } : {}),
+			copy: bookLine(item),
+			target,
+		};
+	};
+	const items = [];
+	for (const [kind, title] of [["assessment", "Assessment of the project"], ["practice", "Practice: how the agent works"]]) {
+		const mine = book.items.filter((item) => item.kind === kind);
+		if (mine.length === 0) continue;
+		items.push(heading(title));
+		items.push(...mine.filter((item) => item.status === "open").map(entry), ...mine.filter((item) => item.status === "done").map(entry));
+	}
+	if (items.length === 0) return { header: [], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works.")] };
+	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice shows the second book on the terminal", "muted"]]], items };
 }
 
 // ─── Diff ───────────────────────────────────────────────────────────────────
