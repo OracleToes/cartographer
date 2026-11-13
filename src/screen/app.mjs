@@ -27,8 +27,9 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
+import { archiveReports, contextPath, deleteReports, foldReports, loadContext, recallReport, reviseNote, shelveForUser, unarchiveReports, unshelveForUser } from "../context.mjs";
+import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
-import { foldReports, loadContext, recallReport, reviseNote, shelveForUser, unshelveForUser } from "../context.mjs";
 import { booksPath } from "../books.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, loadPlan, openItems, planPath } from "../plan.mjs";
@@ -41,7 +42,7 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { atlasView, booksView, contextView, diffView, editorCommand, handsView, ledgerView, planView, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
+import { atlasView, booksView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
@@ -104,6 +105,9 @@ const COMMANDS = [
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
+	["archive", "take a report's record line out of the kept block; the report stays on disk"],
+	["unarchive", "bring an archived report's line back into the record"],
+	["delete", "remove a report for good: its record line and its file"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "keep a file in view from the next collapse on: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -147,7 +151,7 @@ export const KEYS_HELP = [
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, the system prompt's prompt.json, a tool where it is defined, a shelved file",
-	"  f, x, a          in Context's Hands view: fold a report out of view or bring it back; take a shelved file off the shelf; shelve a file (a puts /shelve in the prompt)",
+	"  f, v, d, x, a    in Context's Hands view: fold a report out of view or bring it back; archive it out of the record; delete it for good (d again); take a shelved file off the shelf; shelve a file (a puts /shelve in the prompt)",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
 	"  :                type a command",
@@ -278,6 +282,7 @@ export async function runScreen(session, options, runTerminal) {
 		tab: "chat",
 		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
 		shell: undefined, // the shell window whose output the Output view shows
+		deleteArm: undefined, // a report marked for deleting in Hands, waiting for the second d
 		mode: "type",
 		selected: undefined, // a stop of the Chat tab
 		pending: "", // the first key of a command of two (z, then R)
@@ -476,7 +481,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
+			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
 		if (id === "context.hands") return handsView({ root, brainDir });
@@ -661,32 +666,100 @@ export async function runScreen(session, options, runTerminal) {
 		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the agent's words are edited · the talk the context keeps says the same");
 	};
 	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
+	/** What the user has said anew in the editor, by the text it was sent with. The tab shows the new words where the old stood; the sizes stay those of what was sent. */
+	const messageEdits = new Map();
+	/** A message edited here is also edited in the Chat tab, when it stands there by the same words. */
+	const syncChat = (base, now, type) => {
+		const item = chat.items.findLast((entry) => (type === undefined || entry.type === type) && entry.text === base);
+		if (item !== undefined) chat.revise(item.key, now);
+	};
+	/** The Context tab's messages: surgery on what shows and on the talk the collapse keeps; the stored conversation is never rewritten. */
+	const editMessage = (item) => {
+		const full = item.copy ?? item.body;
+		if (typeof full !== "string" || full === "") return flash("nothing to edit here");
+		// A message of yours was sent with a stamp of its own; the words are what stands without it, and that is what is edited.
+		let base = full;
+		let suffix = "";
+		if (item.editKind === "chat-you") {
+			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(full);
+			if (found !== null) {
+				suffix = found[0];
+				base = full.slice(0, found.index);
+			}
+		}
+		// What the agent said to you, where the part is its words: the saying is edited, not the rendering of the call.
+		if (typeof item.chat === "string") base = item.chat;
+		const file = scratch("message.md", base);
+		if (!runEditor(file)) return;
+		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
+		if (now === base || now === "") return flash("the message stands as it was");
+		const shown = typeof item.chat === "string" ? full.split(base).join(now) : now + suffix;
+		messageEdits.set(full, shown);
+		reviseNote(brainDir, base, now);
+		syncChat(base, now, item.editKind === "chat-you" ? "user" : item.editKind === "chat-agent" ? "agent" : undefined);
+		refresh(viewId(), true);
+		flash(item.editKind === "chat-you" ? "your message is edited · what follows reads the edited words" : "edited where it shows, and in the talk the collapse keeps · what was sent stays as it was");
+	};
 	const editContext = () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
-		if (item.key === "system") {
-			const file = join(options.coreDir ?? "", "prompt.json");
-			if (file === join("", "prompt.json") || !existsSync(file)) return flash("prompt.json, in the core folder, is not there");
-			if (!runEditor(file)) return;
-			session.refreshWording?.();
-			refresh(viewId(), true);
-			return flash("prompt.json is read anew: the next request says what it says now");
+		switch (item.editKind) {
+			case "prompt": {
+				const file = promptSource();
+				if (file === undefined) return flash("the source of the prompt is not here");
+				if (!runEditor(file)) return;
+				return flash("the prompt's wording is code: the next run of carto reads it as it is now");
+			}
+			case "tool": {
+				const name = String(item.key).startsWith("tool:") ? String(item.key).slice(5) : String(item.key);
+				const found = toolSource(name);
+				if (found === undefined) return flash(`no source file defines the ${name} tool`);
+				if (!runEditor(found.file, found.line)) return;
+				return flash(`${name}'s description is code: the next run of carto reads it as it is now`);
+			}
+			case "tools":
+				return flash("the tools are one block; Enter opens it to a line per tool, and e on one opens where it is defined");
+			case "assessment": {
+				const file = assessmentPath(brainDir);
+				if (!runEditor(file)) return;
+				refresh(viewId(), true);
+				return flash("edited; the copy at the top of the context is rewritten at the next collapse, or /pin now");
+			}
+			case "store": {
+				if (!runEditor(contextPath(brainDir))) return;
+				refresh(viewId(), true);
+				return flash("the store of what the collapse keeps, edited by hand · take care: a file that does not parse falls back to a fresh one");
+			}
+			case "chat-you":
+			case "chat-agent":
+				return editMessage(item);
+			case "reply":
+				return flash("the reply is being written; e on it works once it is done");
+			case "result":
+				return flash("tool work cannot be edited: e opens a message of the user or the agent");
+			case "state":
+				return flash("the state block is written anew for every request; what it reads is editable: e on Atlas, Ledger, Plan or Assessment in the Carto tab");
+			case "windows":
+				return flash("the windows block is written anew for every request, from the windows themselves");
+			case "carto":
+				return flash("what Cartographer writes into a message cannot be edited");
+			default: {
+				// Hands: a shelved file is its file; a report is its file in .atlas/reports.
+				if (typeof item.path === "string" && item.path !== "") {
+					if (!existsSync(item.path)) return flash("the shelved file is not there");
+					if (!runEditor(item.path)) return;
+					refresh(viewId(), true);
+					return flash("edited; the shelf reads it anew at the next collapse");
+				}
+				if (typeof item.key === "string" && item.key.startsWith("report:")) {
+					const file = join(brainDir, "reports", `${item.key.slice(7)}.md`);
+					if (!existsSync(file)) return flash("the report's file is not there");
+					if (!runEditor(file)) return;
+					return flash("the report's file is edited; the record line keeps the summary it was written with");
+				}
+				return flash("that is what was sent, and what was sent cannot be changed");
+			}
 		}
-		if (typeof item.key === "string" && item.key.startsWith("tool:")) {
-			const name = item.key.slice(5);
-			const found = toolSource(name);
-			if (found === undefined) return flash(`no source file defines the ${name} tool`);
-			if (!runEditor(found.file, found.line)) return;
-			return flash(`${name}'s description is code: the next run of carto reads it as it is now`);
-		}
-		if (typeof item.key === "string" && item.key.startsWith("shelf:")) {
-			const file = item.path;
-			if (file === undefined || !existsSync(file)) return flash("the shelved file is not there");
-			if (!runEditor(file)) return;
-			refresh(viewId(), true);
-			return void flash("edited; the shelf reads it anew at the next collapse");
-		}
-		return flash("that is what was sent, and what was sent cannot be changed");
 	};
 	const edit = () => {
 		if (state.tab === "chat") return editChat();
@@ -791,14 +864,34 @@ export async function runScreen(session, options, runTerminal) {
 			return second === undefined ? undefined : command(second);
 		}
 		if (key === "z") return void (state.pending = "z");
-		// The Hands view of the Context tab: the same operations the agent's `context` tool has.
+		// The Hands view of the Context tab: the same operations the agent's `context` tool has, and the ones
+		// only the user has: archiving a report out of the record, and deleting one for good.
 		if (viewId() === "context.hands") {
 			const item = pageOf().list.selected();
-			if (key === "f" && typeof item?.key === "string" && item.key.startsWith("report:")) {
+			if (key === "f" && item?.kind === "report" && item.archived !== true && typeof item.key === "string" && item.key.startsWith("report:")) {
 				const id = item.key.slice(7);
 				const said = loadContext(brainDir).dropped.includes(id) ? recallReport(brainDir, id) : foldReports(brainDir, [id]);
 				flash(said.replace(/\n+/g, " "));
 				refresh(viewId(), true);
+				return;
+			}
+			if (key === "v" && item?.kind === "report" && typeof item.key === "string" && item.key.startsWith("report:")) {
+				const id = item.key.slice(7);
+				flash(item.archived === true ? unarchiveReports(brainDir, [id]) : archiveReports(brainDir, [id]));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "d" && item?.kind === "report" && typeof item.key === "string" && item.key.startsWith("report:")) {
+				const id = item.key.slice(7);
+				// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
+				if (state.deleteArm?.id === id && Date.now() - state.deleteArm.at < 6000) {
+					state.deleteArm = undefined;
+					flash(deleteReports(brainDir, [id]));
+					refresh(viewId(), true);
+					return;
+				}
+				state.deleteArm = { id, at: Date.now() };
+				flash(`Press d again: ${id} goes for good`);
 				return;
 			}
 			if (key === "x" && typeof item?.key === "string" && item.key.startsWith("shelf:")) {

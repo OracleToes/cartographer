@@ -20,7 +20,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser } from "./context.mjs";
+import { archiveReports, clearFront, contextPath, deleteReports, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unarchiveReports, unshelveForUser } from "./context.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -990,6 +990,8 @@ export async function runTerminal(session, options) {
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
+						"  /archive ID …, /unarchive ID …  take a report's line out of the kept block for good, or bring it back; the report stays on disk either way",
+						"  /delete ID …  remove a report for good: its record line and its file; nothing recalls it again",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1526,6 +1528,25 @@ export async function runTerminal(session, options) {
 				} catch (error) {
 					line(`! ${error.message}`);
 				}
+				return true;
+			}
+			case "archive":
+			case "unarchive": {
+				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				if (ids.length === 0) {
+					line(`  /${name} ID … ${name === "archive" ? "takes a report's record line out of the kept block for good (the report stays, recall by id finds it)" : "brings an archived report's line back into the record"}.`);
+					return true;
+				}
+				line(`  ${name === "archive" ? archiveReports(options.brainDir, ids) : unarchiveReports(options.brainDir, ids)}`);
+				return true;
+			}
+			case "delete": {
+				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				if (ids.length === 0) {
+					line("  /delete ID … removes a report for good: its record line and its file. Nothing recalls it again. /archive hides the line and keeps the report.");
+					return true;
+				}
+				line(`  ${deleteReports(options.brainDir, ids)}`);
 				return true;
 			}
 			case "send": {

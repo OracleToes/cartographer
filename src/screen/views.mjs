@@ -376,6 +376,17 @@ const pretty = (value) => {
 		return String(value);
 	}
 };
+/** The words of a `chat` call, when its arguments carry them. */
+function chatSaid(args) {
+	try {
+		const parsed = typeof args === "string" ? JSON.parse(args) : args;
+		const said = parsed?.text;
+		return typeof said === "string" && said.trim() !== "" ? said : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** A call as it reads: its name, then each argument, long text as text and not as one JSON string. */
 function callText(name, args) {
 	let parsed = args;
@@ -418,7 +429,9 @@ function partsOfMessage(message, toolNames) {
 		const calls = message.tool_calls ?? [];
 		const body = [typeof message.reasoning_content === "string" && message.reasoning_content.trim() !== "" ? `(thinking)\n${message.reasoning_content.trim()}` : "", text, ...calls.map((call) => callText(call.function?.name ?? "?", call.function?.arguments))].filter((part) => part !== "").join("\n\n");
 		const names = calls.map((call) => call.function?.name ?? "?");
-		parts.push({ cat: "agent", title: names.length === 0 ? "Agent · note" : `Agent · ${text !== "" ? "note and " : ""}${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}`, text: body, preview: firstWords(text !== "" ? text : calls.map((call) => String(call.function?.arguments ?? "")).join(" ")) });
+		// A message whose only work is to say something to the user: its words can be edited as words (e).
+		const said = calls.length === 1 && calls[0].function?.name === "chat" ? chatSaid(calls[0].function?.arguments) : undefined;
+		parts.push({ cat: "agent", title: names.length === 0 ? "Chat · Agent · note" : `Chat · Agent · ${text !== "" ? "note and " : ""}${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}`, text: body, preview: firstWords(text !== "" ? text : calls.map((call) => String(call.function?.arguments ?? "")).join(" ")), ...(said !== undefined ? { chat: said } : {}) });
 	} else if (message.role === "tool") {
 		// A task's context continues the main agent's, and its brief stands where the result of the `task` call would.
 		if (text.startsWith("You are now the task")) parts.push({ cat: "carto", title: "The task's brief", text });
@@ -426,7 +439,7 @@ function partsOfMessage(message, toolNames) {
 	} else if (text !== "") {
 		if (text.startsWith("<cartographer>")) parts.push({ cat: "carto", title: "Cartographer's note", text });
 		else if (text.startsWith("<context>") || /^Cartographer: /.test(text)) parts.push({ cat: "carto", title: "Cartographer", text });
-		else parts.push({ cat: "you", title: "You", text });
+		else parts.push({ cat: "you", title: "Chat · You", text });
 	}
 	return [...parts, ...tail];
 }
@@ -457,7 +470,7 @@ export function contextBar(parts, windowSize, cols) {
  * @param {ReturnType<ReturnType<typeof import("../engine.mjs").createEngine>["window"]>} sent  what the engine holds of the newest request
  * @param {{ windowSize: number, cols: number, writing?: any }} options  writing: the reply as far as it is written
  */
-export function contextView(sent, { windowSize, cols, writing, isOpen }) {
+export function contextView(sent, { windowSize, cols, writing, isOpen, edits }) {
 	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to the model in this run of carto yet. Say something, and what the agent sees shows here.")] };
 	const { payload } = sent;
 	const messages = payload.messages ?? [];
@@ -489,7 +502,8 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 			...calls.map((call) => callText(call.name, call.arguments)),
 		].join("\n\n");
 		const names = calls.map((call) => call.name);
-		add("reply", { cat: "agent", title: `${sent.reply === undefined ? "The reply, as it is being written" : "The reply"}${names.length > 0 ? ` · ${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}` : " · note"}`, text, preview: firstWords(content.filter((part) => part.type === "text").map((part) => part.text).join(" ")) }, { since: true });
+		const said = calls.length === 1 && calls[0].name === "chat" && typeof calls[0].arguments?.text === "string" && calls[0].arguments.text.trim() !== "" ? calls[0].arguments.text : undefined;
+		add("reply", { cat: "agent", title: `${sent.reply === undefined ? "The reply, as it is being written" : "The reply"}${names.length > 0 ? ` · ${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}` : " · note"}`, text, preview: firstWords(content.filter((part) => part.type === "text").map((part) => part.text).join(" ")), ...(said !== undefined ? { chat: said } : {}) }, { since: true });
 		for (const call of calls) {
 			const result = sent.results.get(call.id);
 			if (result !== undefined) add(`result:${call.id}`, { cat: "result", title: `Result of ${call.name}`, text: result }, { since: true });
@@ -525,14 +539,36 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 	if (sent.collapsedSince) header.push([["! The context was collapsed after this request was sent: the next request starts from what the collapse kept, not from this.", "warn"]]);
 	header.push([], [["Every part, in the order the model reads it. Enter opens one, + all of them.", "faint"]]);
 
+	/** What e does on a part: the kinds of thing it can open, or the reason it refuses. */
+	const editOf = (part) => {
+		if (part.key === "system") return { editKind: "prompt" };
+		if (part.key === "tools") return { editKind: "tools" };
+		if (typeof part.key === "string" && part.key.startsWith("tool:")) return { editKind: "tool" };
+		if (part.cat === "top") return { editKind: "assessment" };
+		if (part.cat === "kept") return { editKind: "store" };
+		if (part.cat === "you") return { editKind: "chat-you" };
+		if (part.cat === "agent") return { editKind: "chat-agent" };
+		if (part.key === "reply") return sent.reply === undefined ? { editKind: "reply" } : { editKind: "chat-agent" };
+		if (part.cat === "result") return { editKind: "result" };
+		if (part.cat === "state") return { editKind: "state" };
+		if (part.cat === "windows") return { editKind: "windows" };
+		if (part.cat === "carto") return { editKind: "carto" };
+		return {};
+	};
 	const items = [];
-	const one = (part, extra = {}) => ({
-		key: part.key,
-		head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(part.text)}`, "faint"]],
-		body: part.text === "" ? "(empty)" : part.text,
-		copy: part.text,
-		...extra,
-	});
+	const one = (part, extra = {}) => {
+		// What the user has said anew in the editor stands where the original stood; the sizes stay those of what was sent.
+		const text = edits?.get(part.text) ?? part.text;
+		return {
+			key: part.key,
+			head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(text)}`, "faint"]],
+			body: text === "" ? "(empty)" : text,
+			copy: text,
+			...editOf(part),
+			...(part.chat !== undefined ? { chat: part.chat } : {}),
+			...extra,
+		};
+	};
 	for (const [index, part] of parts.entries()) {
 		if (index === inRequest) items.push({ key: "since", plain: true, head: [["── since that request: what the next one will hold as well ──", "muted"]] });
 		items.push(one(part, part.key === "tools" ? { folder: true } : {}));
@@ -547,6 +583,7 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 					head: [["· ", "muted"], [short(estimate(JSON.stringify(tool))).padStart(5), "muted"], [`  ${name}`, ""], [`  ${firstWords(tool.function?.description ?? "")}`, "faint"]],
 					body: text,
 					copy: text,
+					editKind: "tool",
 				});
 			}
 		}
@@ -595,7 +632,7 @@ export function handsView({ root, brainDir }) {
 	const store = loadContext(brainDir);
 	const header = [
 		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and the reports of finished work", "muted"]],
-		[["On a report: f folds it out of view, or brings it back. On the shelf: x takes a file off. a shelves one.", "faint"]],
+		[["On a report: f folds it out of view or brings it back, v archives it out of the record, d deletes it (d again). On the shelf: x takes a file off. a shelves one.", "faint"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · in view from the next collapse on, and read by every task at its start"));
@@ -603,17 +640,22 @@ export function handsView({ root, brainDir }) {
 	for (const item of store.shelf) {
 		items.push({
 			key: `shelf:${item.path}`,
+			kind: "shelf",
 			head: [[`${shelfLabel(item)}  `, ""], [`about ${short(estimate(shelfText(root, item)))} tokens`, "muted"]],
 			body: () => shelfText(root, item),
 			path: join(root, item.path),
 		});
 	}
-	items.push(heading("  The reports of finished work"));
-	if (store.records.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
-	for (const record of store.records) {
+	const standing = store.records.filter((record) => record.archived !== true);
+	const archived = store.records.filter((record) => record.archived === true);
+	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d deletes it (press d again)"));
+	if (standing.length === 0 && archived.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
+	for (const record of standing) {
 		const folded = store.dropped.includes(record.id);
 		items.push({
 			key: `report:${record.id}`,
+			kind: "report",
+			archived: false,
 			folded,
 			head: [
 				[`${record.id}  `, folded ? "muted" : "bold"],
@@ -622,6 +664,22 @@ export function handsView({ root, brainDir }) {
 			],
 			body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
 		});
+	}
+	if (archived.length > 0) {
+		items.push(heading("  Archived · the record no longer lists them; recall by id still finds them"));
+		for (const record of archived) {
+			items.push({
+				key: `report:${record.id}`,
+				kind: "report",
+				archived: true,
+				head: [
+					[`${record.id}  `, "muted"],
+					["· archived  ", "muted"],
+					[recordLine(record), "faint"],
+				],
+				body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
+			});
+		}
 	}
 	return { header, items };
 }
@@ -668,4 +726,14 @@ export function shellsOutView({ session }, name) {
 		{ key: "term", plain: true, head: lines.length === 0 ? [["  (nothing has been printed yet)", "muted"]] : lines.map((line) => [line || " ", ""]) },
 	];
 	return { header, items };
+}
+
+/**
+ * Where the wording of the system prompt lives: the source that builds it. e on the System prompt part opens
+ * it there — the prompt is code, not an overwrite file, and the next run of carto reads what it says.
+ * @returns {string | undefined}
+ */
+export function promptsSource() {
+	const file = fileURLToPath(new URL("../prompt.mjs", import.meta.url));
+	return existsSync(file) ? file : undefined;
 }

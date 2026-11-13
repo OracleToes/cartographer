@@ -11,7 +11,7 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addRecord, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unshelveForUser, updateContext, withoutTags } from "../src/context.mjs";
+import { addRecord, archiveReports, deleteReports, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unarchiveReports, unshelveForUser, updateContext, writeFront, withoutTags } from "../src/context.mjs";
 import { TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
@@ -5209,7 +5209,7 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	const sent = { task: false, payload, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, used: 6100, collapsedSince: false };
 	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
-	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "You", "Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them");
+	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them, the chat told from the rest");
 	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    37  Tools · 1: read  "], "each is one line: its colour, its size, what it is, how it begins");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
@@ -5217,13 +5217,27 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	assert.deepEqual(view.items.filter((item) => item.key?.startsWith("tool:")).map((item) => item.key), [], "folded, the tools are one part; a view that opens them is asked with isOpen");
 	assert.match(byKey("Assessment and graph").body, /^<project>\n[\s\S]*\n<\/project>$/, "the block Cartographer puts in front is a part of its own");
 	assert.match(byKey("What the last collapse kept").body, /^<context>\n[\s\S]*\n<\/context>$/, "so is what a collapse kept");
-	assert.equal(byKey("You").body, "Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "and the user's message is what is left");
-	assert.equal(byKey("Agent · note and call: task").body, "I should look.\n\ncall task\n  brief:\n    Find the config\n    and say where", "a call reads as a call: its arguments one by one, long text as text");
+	const you = byKey("Chat · You");
+	assert.equal(you.body, "Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "and the user's message is what is left");
+	assert.equal(you.editKind, "chat-you", "a message of the user says what e does on it");
+	const agent = byKey("Chat · Agent · note and call: task");
+	assert.equal(agent.body, "I should look.\n\ncall task\n  brief:\n    Find the config\n    and say where", "a call reads as a call: its arguments one by one, long text as text");
+	assert.equal(agent.editKind, "chat-agent", "a message of the agent is editable as well");
 	assert.match(byKey("State block").body, /^<state>\n[\s\S]*\n<\/state>$/, "the state block is cut off the result it was added to");
 	assert.match(byKey("Windows block").body, /^<windows>\n[\s\S]*\n<\/windows>$/, "and the windows block");
 	hasNot(byKey("Result of task").body, "<state>", "which is then only the result");
 	assert.equal(byKey("The reply").body, "(thinking, not kept in the context)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the request: the reply");
 	assert.equal(byKey("Result of chat").body, "Shown to the user.", "and what its call returned");
+
+	// e on the tab: each part says what it opens, and what the user has said anew stands where the original stood.
+	assert.deepEqual(view.items.map((item) => item.editKind).filter(Boolean), ["prompt", "tools", "assessment", "store", "chat-you", "chat-agent", "result", "state", "windows", "chat-agent", "result"], "every part says what e does on it");
+	const touched = contextView(sent, { windowSize: 20_000, cols: 40, edits: new Map([["Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "Where is the config, exactly?\n\n[sent Thu 12 Nov 2026, 14:02]"]]) });
+	assert.equal(touched.items.find((item) => item.editKind === "chat-you").body, "Where is the config, exactly?\n\n[sent Thu 12 Nov 2026, 14:02]", "what was said anew stands where the original stood, its stamp with it");
+	assert.equal(touched.items.find((item) => item.editKind === "chat-you").head[2][0], "  Chat · You", "and the title is the chat's, not the part's kind");
+	const said = contextView({ ...sent, reply: { role: "assistant", content: [{ type: "toolCall", id: "c3", name: "chat", arguments: { text: "Here you are, said anew." } }] }, results: new Map([["c3", "Shown."]]) }, { windowSize: 20_000, cols: 40 });
+	const saidPart = said.items.find((item) => item.editKind === "chat-agent" && item.chat !== undefined);
+	assert.ok(saidPart, "a message whose only work is to speak carries its words for e");
+	assert.equal(saidPart.chat, "Here you are, said anew.", "so that the saying is edited, and not the rendering of the call");
 
 	// Opened, the tools part gives a line to each tool, so that one description can be read and edited.
 	const opened = contextView(sent, { windowSize: 20_000, cols: 40, isOpen: (key) => key === "tools" });
@@ -5383,6 +5397,21 @@ test("screen: e says a message anew, Hands folds and recalls, and a shell window
 			[0.4, "a", false],
 			["/shelve", " README.md"],
 			[0.8, "<ESC>", false],
+			// e from the Context tab itself: the first Chat · You part of the request, edited where it shows.
+			["COMMANDS", "5[[[", false],
+			["What the main agent sees", "j", false],
+			[0.3, "j", false],
+			[0.3, "j", false],
+			[0.3, "e", false],
+			[0.8, "", false],
+			// Hands again: v archives the report out of the record, and d, twice, deletes it for good.
+			["What the main agent sees", "]]]", false],
+			["Your hands on what the agent keeps", "j", false],
+			[0.4, "v", false],
+			["· archived", "", false],
+			[0.4, "d", false],
+			["d again", "d", false],
+			[4.5, "", false],
 			// The Shells tab: the window's output as a terminal emulator sees it, the newest at the bottom.
 			["COMMANDS", "4", false],
 			["shell window", "<ENTER>", false],
@@ -5403,6 +5432,17 @@ test("screen: e says a message anew, Hands folds and recalls, and a shell window
 		has(hands, "t1  · in view", "Hands lists the report");
 		has(at("· folded"), "t1  · folded", "f folds it, and says so on its line");
 		has(at("README.md"), "README.md", "a put /shelve in the prompt, and the file stands on the shelf");
+		// The edit from the Context tab: the Chat · You part says the new words where the original stood.
+		const again = result.shots.find((shot) => shot.includes("Chat · You") && shot.includes("(said anew)"));
+		assert.ok(again, "e works on the messages of the context as well:\n" + result.shots.join("\n────\n"));
+		const saidStore = JSON.parse(readFileSync(join(root, ".atlas", "carto-context.json"), "utf8"));
+		has(saidStore.chat.filter((entry) => entry.who === "user").at(-1).text, "said anew", "the talk says the new words");
+		has(at("· archived"), "t1  · archived", "v archives the report out of the record");
+		assert.ok(result.shots.some((shot) => shot.includes("d again")), "the first d asks before it deletes");
+		const empty = result.shots.find((shot) => shot.includes("No work has been finished yet"));
+		assert.ok(empty, "the second d deletes it:\n" + result.shots.join("\n────\n"));
+		assert.ok(!empty.includes("t1  ·"), "and the list no longer holds the report:\n" + empty);
+		assert.ok(!existsSync(join(root, ".atlas", "reports", "t1.md")), "the report's file is gone with it");
 		const out = at("Output of run");
 		has(out, "beat", "the window's output, as it was printed");
 		assert.match(out, /Enter goes back to the list; \/send run line types into it/, "and the view says how to type into the window");
@@ -5737,6 +5777,10 @@ test("the user's hands: /shelve, /unshelve, /fold, /recall and /send do for the 
 			"/recall nope",
 			"/send run echo typed by the user",
 			"/send gone hi",
+			"/archive t1",
+			"/unarchive t1",
+			"/delete t1",
+			"/delete t1",
 		) });
 		ok(result, "the run");
 		has(result.stdout, "notes.txt is marked for the shelf (about ", "/shelve marks a file for the shelf");
@@ -5747,6 +5791,10 @@ test("the user's hands: /shelve, /unshelve, /fold, /recall and /send do for the 
 		has(result.stdout, "There is no report nope. /context lists the kept ones.", "/recall of an unknown id says so");
 		has(result.stdout, "typed into run: echo typed by the user", "/send types a line into a window that runs");
 		has(result.stdout, 'There is no window "gone"', "/send to a window there is not says so");
+		has(result.stdout, "t1 archived: the record line leaves the kept block, the report stays on disk, recall by id still finds it.", "/archive hides the line and keeps the report");
+		has(result.stdout, "t1 back in the record", "/unarchive brings it back");
+		has(result.stdout, "t1 deleted: the record line is gone and its file is gone from", "/delete removes record and file");
+		has(result.stdout, "There is no report t1. /context lists the kept ones.", "deleting what is gone says so");
 	} finally {
 		await server.close();
 	}
@@ -5804,6 +5852,20 @@ test("screen: Hands lists the shelf and the reports with the agent's operations,
 	assert.match(said, /stands in its place again/, "recall brings a folded report back into view");
 	assert.match(unshelveForUser(brainDir, "keep.txt"), /Taken off the shelf/, "unshelve takes a file off");
 	assert.throws(() => unshelveForUser(brainDir, "keep.txt"), /not on the shelf/, "and says so when it is not there");
+
+	// Archive: the record line leaves what the collapse keeps, the report stays, recall still finds it.
+	assert.match(archiveReports(brainDir, ["t1"]), /t1 archived/, "v archives a report out of the record");
+	const front = writeFront(brainDir, root, { shelfTokens: 12_000, chatWindow: 8_000 }, { now: Date.now(), reason: "a test" });
+	assert.ok(!front.text.includes("Read the tree"), "the kept block no longer lists the archived line:\n" + front.text);
+	assert.match(unarchiveReports(brainDir, ["t1"]), /back in the record/, "v brings it back");
+	const back = writeFront(brainDir, root, { shelfTokens: 12_000, chatWindow: 8_000 }, { now: Date.now(), reason: "a test" });
+	has(back.text, "Read the tree", "and the record lists it again");
+	const archived = handsView({ root, brainDir }).items.find((item) => item.key === "report:t1");
+	assert.equal(archived.archived, false, "the view says it stands again");
+	assert.match(deleteReports(brainDir, ["t1"]), /t1 deleted/, "d deletes a report for good");
+	assert.ok(!existsSync(join(brainDir, "reports", "t1.md")), "and the file is gone with it");
+	assert.equal(loadContext(brainDir).records.length, 0, "and the record holds it no more");
+	assert.match(deleteReports(brainDir, ["t1"]), /There is no report t1/, "deleting what is gone says so");
 
 	// The chat tab's messages: the user's and the agent's words can be said anew, tool work cannot.
 	const chat = createChat({});

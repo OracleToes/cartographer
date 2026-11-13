@@ -29,7 +29,7 @@
 // A task has the same means for its own steps, and only for those: what stands in
 // front of its brief is the main agent's and stays as it is (see `dressTask`).
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { TASK_HEADER } from "./prompt.mjs";
 import { stamp } from "./time.mjs";
@@ -180,17 +180,20 @@ export const recordLine = (record) =>
 	`${record.id} · ${stamp(record.at)} · ${record.mode}${record.item ? ` ${record.item}` : ""} · asked: ${record.brief} → ${record.failed ? "did not end well: " : record.undone ? "not done: " : ""}${record.outcome}${record.changed ? ` · ${record.changed === 1 ? "1 file" : `${record.changed} files`} changed` : ""}`;
 
 function recordText(records) {
-	if (records.length === 0) return { text: "No task has finished yet.", listed: 0 };
+	// A record the user has archived stands out of the block for good (its report stays, and recall knows the id);
+	// only what is listed here costs the model a reading.
+	const shown = records.filter((record) => record.archived !== true);
+	if (shown.length === 0) return { text: records.length === 0 ? "No task has finished yet." : "No task stands in the record; older ones are archived (recall by id brings one back).", listed: 0 };
 	const lines = [];
 	let used = 0;
-	for (const record of [...records].reverse()) {
+	for (const record of [...shown].reverse()) {
 		const line = recordLine(record);
 		if (used + estimate(line) > RECORD_MAX_TOKENS && lines.length > 0) break;
 		used += estimate(line);
 		lines.unshift(line);
 	}
-	const older = records.length - lines.length;
-	if (older > 0) lines.unshift(`(${older} earlier ${older === 1 ? "task is" : "tasks are"} not listed, ${records[0].id} to ${records[older - 1].id}; their reports can still be recalled.)`);
+	const older = shown.length - lines.length;
+	if (older > 0) lines.unshift(`(${older} earlier ${older === 1 ? "task is" : "tasks are"} not listed, ${shown[0].id} to ${shown[older - 1].id}; their reports can still be recalled.)`);
 	return { text: lines.join("\n"), listed: lines.length - (older > 0 ? 1 : 0) };
 }
 
@@ -591,6 +594,63 @@ export function taskState(store, conversationId) {
 
 // ─── The user's own hands on the context ────────────────────────────────────
 
+/**
+ * The user archives reports: their record lines leave the block the collapse keeps, so a project with a
+ * thousand finished tasks does not read a thousand one-liners. The report stays on disk and recall by id
+ * still finds it. Returns the line to show.
+ */
+export function archiveReports(brainDir, ids) {
+	const store = loadContext(brainDir);
+	const known = ids.filter((id) => store.records.some((record) => record.id === id));
+	const open = ids.filter((id) => !known.includes(id));
+	if (known.length === 0) return `There is no report ${ids.join(", ")}. /context lists the kept ones.`;
+	updateContext(brainDir, (next) => {
+		for (const record of next.records) if (known.includes(record.id)) record.archived = true;
+		next.dropped = [...new Set([...next.dropped, ...known])];
+	});
+	return `${known.join(", ")} archived: the record ${known.length === 1 ? "line leaves" : "lines leave"} the kept block, the report ${known.length === 1 ? "stays" : "stay"} on disk, recall by id still finds ${known.length === 1 ? "it" : "them"}. ${open.length > 0 ? `No report ${open.join(", ")}.` : ""}`.trim();
+}
+
+/** The user brings archived reports back into the record. Returns the line to show. */
+export function unarchiveReports(brainDir, ids) {
+	const store = loadContext(brainDir);
+	const held = ids.filter((id) => store.records.some((record) => record.id === id && record.archived === true));
+	const rest = ids.filter((id) => !held.includes(id));
+	if (held.length === 0) return `${ids.join(", ")} ${ids.length === 1 ? "is" : "are"} not archived.`;
+	updateContext(brainDir, (next) => {
+		for (const record of next.records) if (held.includes(record.id)) delete record.archived;
+	});
+	return `${held.join(", ")} back in the record: the next collapse lists ${held.length === 1 ? "its" : "their"} line${held.length === 1 ? "" : "s"} again. ${rest.length > 0 ? `${rest.join(", ")} ${rest.length === 1 ? "was" : "were"} not archived.` : ""}`.trim();
+}
+
+/**
+ * The user deletes reports for good: the record line and the report's file are gone, and nothing recalls
+ * them again. Returns the line to show.
+ */
+export function deleteReports(brainDir, ids) {
+	const store = loadContext(brainDir);
+	const known = ids.filter((id) => store.records.some((record) => record.id === id));
+	const open = ids.filter((id) => !known.includes(id));
+	if (known.length === 0) return `There is no report ${ids.join(", ")}. /context lists the kept ones.`;
+	updateContext(brainDir, (next) => {
+		next.records = next.records.filter((record) => !known.includes(record.id));
+		next.dropped = next.dropped.filter((entry) => !known.includes(entry));
+	});
+	const gone = [];
+	for (const id of known) {
+		const file = join(reportsDir(brainDir), `${id}.md`);
+		try {
+			unlinkSync(file);
+			gone.push(id);
+		} catch {
+			// The file was already gone; the record is deleted all the same.
+		}
+	}
+	return `${known.join(", ")} deleted: the record ${known.length === 1 ? "line is" : "lines are"} gone and ${gone.length > 0 ? `${gone.length === 1 ? "its file is" : `${gone.length} files are`} gone from ${reportsDir(brainDir)}` : "their files were already gone"}. Nothing recalls ${known.length === 1 ? "it" : "them"} again. ${open.length > 0 ? `No report ${open.join(", ")}.` : ""}`.trim();
+}
+
+/** The user's message, as it shows in the talk, was edited: the line the context keeps is rewritten to match. */
+
 /** Two shelf items are the same file. */
 const sameItem = (a, b) => a.path === b.path;
 // The same operations the agent has with `context`, for the person watching: /fold, /recall, /shelve and
@@ -601,9 +661,12 @@ const sameItem = (a, b) => a.path === b.path;
 export function foldReports(brainDir, ids) {
 	const store = loadContext(brainDir);
 	const unknown = ids.filter((id) => !store.records.some((record) => record.id === id));
-	const foldable = ids.filter((id) => store.records.some((record) => record.id === id) && !store.dropped.includes(id));
+	const foldable = ids.filter((id) => {
+		const record = store.records.find((entry) => entry.id === id);
+		return record !== undefined && record.archived !== true && !store.dropped.includes(id);
+	});
 	if (foldable.length === 0) {
-		const open = store.records.filter((record) => !store.dropped.includes(record.id)).map((record) => record.id);
+		const open = store.records.filter((record) => record.archived !== true && !store.dropped.includes(record.id)).map((record) => record.id);
 		return unknown.length === ids.length
 			? `There is no report ${ids.join(", ")}. The kept ones: ${store.records.map((record) => record.id).join(", ") || "none yet"}.`
 			: `${ids.join(", ")} ${ids.length === 1 ? "is" : "are"} already out of view.${open.length > 0 ? ` In full: ${open.join(", ")}.` : ""}`;
