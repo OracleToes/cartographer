@@ -102,7 +102,7 @@ const SECTIONS = [
 	],
 	[
 		"talking",
-        "Talking to the user. Anything you say to the user must be sent with chat or ask: an answer, the plan in a few lines, what was done. Plain text — a reply you write without a tool call — never reaches them; it is a note to yourself, standing in your context as \"Note to self,\" and you go on from it. So a turn that ends with plain text you actually meant for the user has failed silently: the user read nothing. Before you finish a turn, if your last words were meant to be read, they have to be inside a chat call, not sitting loose in the turn.",
+		"Talking to the user. Anything you say to the user must be sent with chat or ask: an answer, the plan in a few lines, what was done. Plain text — a reply you write without a tool call — never reaches them; it is a note to yourself, standing in your context as \"Note to self,\" and you go on from it. So a turn that ends with plain text you actually meant for the user has failed silently: the user read nothing. Before you finish a turn, if your last words were meant to be read, they have to be inside a chat call, not sitting loose in the turn.",
 	],
 	[
 		"taste",

@@ -2,7 +2,7 @@
 //
 // Read in this order, later ones winning:
 //   1. defaults
-//   2. <core>/config.json            the install's settings, shared by every project
+//   2. <core>/config.json            the install's settings, shared by every project (CARTO_CONFIG names another file)
 //   3. <project>/.atlas/config.json  one project's own settings
 //   4. CARTO_SERVER, CARTO_MODEL     environment
 //   5. --url, --model                command line
@@ -95,7 +95,9 @@ function readJson(path) {
  * @param {{ brainDir: string, flags: { url?: string, model?: string }, env?: NodeJS.ProcessEnv }} input
  */
 export function loadConfig({ brainDir, flags, env = process.env }) {
-	const corePath = join(CORE_DIR, "config.json");
+	// The install's settings stand next to the code; CARTO_CONFIG names another file in their place, so that a
+	// checkout with settings of its own (the tests, or a second install sharing one copy) can read none at all.
+	const corePath = env.CARTO_CONFIG ? env.CARTO_CONFIG : join(CORE_DIR, "config.json");
 	const projectPath = join(brainDir, "config.json");
 	const config = {
 		...DEFAULTS,

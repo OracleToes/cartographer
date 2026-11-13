@@ -44,6 +44,12 @@ const CARTO = join(CORE, "bin", "carto");
 process.env.CARTO_WRITE_LINES ??= "1000000";
 process.env.CARTO_WRITE_CREATES_ONLY ??= "0";
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "carto-test-")));
+// The tests must not read the install's own settings: this checkout may hold a config.json of the user's own
+// (yolo, bwrap, the context window), which turned half the suite red on such an install. Every carto these
+// tests spawn reads an empty one instead, so the defaults are what is under test.
+const EMPTY_CONFIG = join(scratch, "empty-config.json");
+writeFileSync(EMPTY_CONFIG, "{}\n");
+process.env.CARTO_CONFIG = EMPTY_CONFIG;
 const only = process.argv[2];
 
 const tests = [];
@@ -227,11 +233,12 @@ test("launch: the command works through a symlink, as install.sh sets it up", as
 
 test("launch: without settings it says how to configure, and leaves nothing in the project", async () => {
 	const root = makeProject("no-config");
-	const result = await carto(root, undefined, [], { env: { CARTO_SERVER: "", CARTO_MODEL: "" } });
-	if (existsSync(join(CORE, "config.json"))) return "this install has a config.json";
+	// This test's own config: a file that is not there, whatever the install has.
+	const noConfig = join(scratch, "no-such-config.json");
+	const result = await carto(root, undefined, [], { env: { CARTO_SERVER: "", CARTO_MODEL: "", CARTO_CONFIG: noConfig } });
 	assert.equal(result.code, 1, `expected exit 1:\n${result.all}`);
 	has(result.stderr, "No model server is configured.", "message");
-	has(result.stderr, join(CORE, "config.json"), "names the file to write");
+	has(result.stderr, noConfig, "names the file to write");
 	assert.ok(!existsSync(join(root, ".atlas")), "a run that cannot start must not create the brain");
 });
 
@@ -3761,7 +3768,7 @@ test("chat: what the agent says to the user goes through `chat`; plain text is a
 		ok(result, "a session with chat");
 		const chat = server.requests[0].tools.find((tool) => tool.function.name === "chat");
 		assert.deepEqual(chat?.function.parameters.required, ["text"], "the model is offered `chat`, which takes a text");
-		has(server.requests[0].messages[0].content, "The user reads only what you send with `chat`: an answer, the plan in a few lines, what was done.", "and the prompt says what it is for");
+		has(server.requests[0].messages[0].content, "Anything you say to the user must be sent with chat or ask: an answer, the plan in a few lines, what was done.", "and the prompt says what it is for");
 
 		// Said with `chat`: on the screen as it is, and the turn ends with that reply.
 		has(result.stdout, "› say: Hello there.\nHello there.\n  context ", "what `chat` says is the answer on the screen");
