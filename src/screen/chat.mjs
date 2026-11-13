@@ -257,6 +257,25 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		},
 		/** The reply that is being written at a depth, as far as it has come. */
 		liveMessage: (depth) => live.get(depth)?.message,
+		/**
+		 * Whether a message as it shows can be edited with e: the words of the user and of the agent. Tool work
+		 * (a run of calls, a call with what it returned) cannot, nor what Cartographer printed.
+		 */
+		editable(key) {
+			const item = items.find((entry) => entry.key === key);
+			return item?.type === "user" || item?.type === "agent" || item?.type === "note";
+		},
+		/** A message said anew, as it shows. The conversation's stored entries cannot change; this changes the tab. */
+		revise(key, text) {
+			const item = items.find((entry) => entry.key === key);
+			if (item === undefined || (item.type !== "user" && item.type !== "agent" && item.type !== "note")) return false;
+			const said = String(text ?? "").replace(/\s+$/, "");
+			if (said === "" || said === item.text) return false;
+			item.text = said;
+			delete item.md;
+			touch();
+			return true;
+		},
 		toggleRow(key, index, to) {
 			const item = items.find((entry) => entry.key === key);
 			const row = item?.rows?.[index];

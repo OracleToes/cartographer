@@ -74,7 +74,9 @@ async function checkServer(config) {
 		throw new ConfigError(`The model server has no model named "${config.model}". It has: ${listed.map((entry) => entry.id).join(", ")}.`);
 	}
 	const size = (match ?? lone)?.meta?.n_ctx;
-	return Number.isInteger(size) && size > 0 ? size : undefined;
+	// Every model the server serves, for /model and for resuming a session whose stored model is another one.
+	const models = listed.map((entry) => entry.id);
+	return { context: Number.isInteger(size) && size > 0 ? size : undefined, models: models.length > 0 ? models : undefined };
 }
 
 /** Ask one question on the terminal. Ctrl-C and Ctrl-D count as "no". */
@@ -124,11 +126,11 @@ export async function main(argv) {
 		checkProject(project.root, { allowHome: flags.here === true });
 		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
 		const config = loadConfig({ brainDir: brainPath, flags });
-		const serverContext = await checkServer(config);
+		const served = await checkServer(config);
 		let contextNote = "";
-		if (serverContext !== undefined && serverContext < config.contextWindow) {
-			contextNote = ` · context ${serverContext} tokens (the server's limit; the settings say ${config.contextWindow})`;
-			config.contextWindow = serverContext;
+		if (served?.context !== undefined && served.context < config.contextWindow) {
+			contextNote = ` · context ${served.context} tokens (the server's limit; the settings say ${config.contextWindow})`;
+			config.contextWindow = served.context;
 		}
 		const interactive = flags.message === undefined && process.stdin.isTTY === true;
 		// A brain in the wrong folder is easy to make and annoying to notice later, so the first time is confirmed.
@@ -155,17 +157,18 @@ export async function main(argv) {
 		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
 		const { YOLO_LINE } = await import("./plan.mjs");
-		const runner = createRunner({ off: flags.noBwrap === true });
+		const runner = createRunner({ off: flags.noBwrap === true || config.bwrap === false });
 		say(sandboxLine(runner));
-		// Whether change items run without /approve. Never read from a file: the user says it anew at each start.
-		const gate = { yolo: flags.yolo === true };
+		// Whether change items run without /approve. The settings hold the default (--yolo overrides it for one
+		// run); switching it while carto runs (/yolo) is never remembered.
+		const gate = { yolo: flags.yolo === true || config.yolo === true };
 		if (gate.yolo) say(YOLO_LINE);
 		if (adopted) say("The ledger file ledger.json is now carto-ledger.json; its entries are unchanged.");
 
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, coreDir: CORE_DIR, config, runner, gate });
+		session = await openSession({ root: project.root, brainDir, coreDir: CORE_DIR, config, runner, gate, servedModels: served?.models });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
@@ -176,6 +179,7 @@ export async function main(argv) {
 			root: project.root,
 			brainDir,
 			coreDir: CORE_DIR,
+			servedModels: served?.models,
 			runner,
 			gate,
 			wakeMin: config.wakeMin,

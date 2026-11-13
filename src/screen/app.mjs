@@ -24,10 +24,11 @@
 // everything Cartographer has to say, exactly as it does line by line.
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { atlasPath } from "../atlas.mjs";
+import { foldReports, loadContext, recallReport, reviseNote, shelveForUser, unshelveForUser } from "../context.mjs";
 import { booksPath } from "../books.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, loadPlan, openItems, planPath } from "../plan.mjs";
@@ -40,7 +41,7 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { atlasView, booksView, contextView, diffView, editorCommand, ledgerView, planView, requestsView, shellsView, textView, treeView } from "./views.mjs";
+import { atlasView, booksView, contextView, diffView, editorCommand, handsView, ledgerView, planView, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
@@ -64,14 +65,19 @@ const VIEWS = {
 		{ id: "session", name: "This session" },
 		{ id: "git", name: "git HEAD" },
 	],
+	shells: [
+		{ id: "list", name: "List" },
+		{ id: "out", name: "Output" },
+	],
 	context: [
 		{ id: "window", name: "Window" },
 		{ id: "main", name: "Main agent" },
 		{ id: "parts", name: "Parts" },
+		{ id: "hands", name: "Hands" },
 	],
 };
 /** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.books", "diff.last", "diff.session", "diff.git", "shells", "context.window", "context.main", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.books", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = { carto: 2000, diff: 5000, shells: 700, context: 700 };
 /** The marks of the spinner that turns while the agent works, and how long each stands. */
@@ -95,7 +101,13 @@ const COMMANDS = [
 	["report", "the last task's report in full; /report t12 shows a kept one"],
 	["stop", "stop what the agent is doing; shell windows keep running"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
+	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
+	["fold", "take a kept report out of the context's view, leaving its one line"],
+	["recall", "bring a kept report back into view in full"],
+	["shelve", "keep a file in view from the next collapse on: /shelve PATH [lines]"],
+	["unshelve", "take a shelved file off the shelf, or all of them"],
+	["send", "type a line into a shell window: /send NAME line"],
 	["collapse", "collapse the context now"],
 	["new", "start a fresh context with nothing kept in view"],
 	["pin", "rewrite the copy of assessment and graph at the top of the context"],
@@ -130,11 +142,12 @@ export const KEYS_HELP = [
 	"  1 to 5           go to a tab",
 	"  [ and ]          the previous and the next view inside Carto, Diff and Context (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter on a call goes to the tab where that work lives",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter on a call goes to the tab where that work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file",
+	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, the system prompt's prompt.json, a tool where it is defined, a shelved file",
+	"  f, x, a          in Context's Hands view: fold a report out of view or bring it back; take a shelved file off the shelf; shelve a file (a puts /shelve in the prompt)",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
 	"  :                type a command",
@@ -263,7 +276,8 @@ export async function runScreen(session, options, runTerminal) {
 
 	const state = {
 		tab: "chat",
-		view: { carto: "atlas", diff: "last", context: "window" },
+		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
+		shell: undefined, // the shell window whose output the Output view shows
 		mode: "type",
 		selected: undefined, // a stop of the Chat tab
 		pending: "", // the first key of a command of two (z, then R)
@@ -458,12 +472,14 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.tree") return treeView(env, isOpen);
 		if (id === "carto.books") return booksView(env);
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
-		if (id === "shells") return shellsView(env);
+		if (id === "shells.list") return shellsView(env);
+		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0) });
+			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
+		if (id === "context.hands") return handsView({ root, brainDir });
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -605,20 +621,82 @@ export async function runScreen(session, options, runTerminal) {
 			tui.requestRender(true);
 		}
 	};
+	/** Hand the terminal to the editor over `file`; false when the editor could not be run. */
+	const runEditor = (file, line) => {
+		const editor = process.env.VISUAL || process.env.EDITOR || "vi";
+		const done = lend(() => spawnSync(editorCommand(editor, file, line), { stdio: "inherit", shell: true }));
+		if (done.error !== undefined || (done.status !== 0 && done.status !== null)) {
+			const why = done.error?.message ?? `it ended with exit ${done.status}`;
+			chat.print(`! The editor could not be run (${editor}): ${why}. Set $EDITOR to the editor you use.\n`);
+			flash(`the editor could not be run: ${why}`);
+			return false;
+		}
+		return true;
+	};
+	/** A file to edit a thing in, under the brain's scratch folder. */
+	const scratch = (name, text) => {
+		const dir = join(brainDir, "scratch");
+		mkdirSync(dir, { recursive: true });
+		const file = join(dir, name);
+		writeFileSync(file, `${text}\n`);
+		return file;
+	};
+	/** e in the Chat tab: the words of the user and of the agent can be said anew; tool work cannot. */
+	const editChat = () => {
+		const line = chatBody.lines()[selectedRow()];
+		if (line === undefined) return flash("nothing is selected: j and k select");
+		if (!chat.editable(line.item)) {
+			return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "tool work cannot be edited: e opens a message of the user or the agent");
+		}
+		const item = chat.items.find((entry) => entry.key === line.item);
+		const file = scratch("message.md", item.text);
+		if (!runEditor(file)) return;
+		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
+		if (now === item.text || now === "") return flash("the message stands as it was");
+		const was = item.text;
+		inPlace(() => chat.revise(item.key, now));
+		// What the talk keeps is rewritten to match, so what comes after reads the edited words. A note of the
+		// agent stands nowhere in the talk, so for one the edit is in the tab only.
+		if (item.type !== "note") reviseNote(brainDir, was, now);
+		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the agent's words are edited · the talk the context keeps says the same");
+	};
+	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
+	const editContext = () => {
+		const item = pageOf().list.selected();
+		if (item === undefined) return flash("nothing is selected");
+		if (item.key === "system") {
+			const file = join(options.coreDir ?? "", "prompt.json");
+			if (file === join("", "prompt.json") || !existsSync(file)) return flash("prompt.json, in the core folder, is not there");
+			if (!runEditor(file)) return;
+			session.refreshWording?.();
+			refresh(viewId(), true);
+			return flash("prompt.json is read anew: the next request says what it says now");
+		}
+		if (typeof item.key === "string" && item.key.startsWith("tool:")) {
+			const name = item.key.slice(5);
+			const found = toolSource(name);
+			if (found === undefined) return flash(`no source file defines the ${name} tool`);
+			if (!runEditor(found.file, found.line)) return;
+			return flash(`${name}'s description is code: the next run of carto reads it as it is now`);
+		}
+		if (typeof item.key === "string" && item.key.startsWith("shelf:")) {
+			const file = item.path;
+			if (file === undefined || !existsSync(file)) return flash("the shelved file is not there");
+			if (!runEditor(file)) return;
+			refresh(viewId(), true);
+			return void flash("edited; the shelf reads it anew at the next collapse");
+		}
+		return flash("that is what was sent, and what was sent cannot be changed");
+	};
 	const edit = () => {
-		if (state.tab === "chat") return flash("nothing to open here: e opens an item of tabs 2 and 3 in the editor");
+		if (state.tab === "chat") return editChat();
+		if (state.tab === "context") return editContext();
 		const item = pageOf().list.selected();
 		const target = item?.target ?? (fileOf(viewId()) !== undefined ? { file: fileOf(viewId()) } : undefined);
 		if (target === undefined) return flash("this line has no file to open");
 		if (target.folder) return flash("that is a folder: open it with Enter, and press e on a file");
 		if (!existsSync(target.file)) return flash(`${relative(root, target.file)} does not exist`);
-		const editor = process.env.VISUAL || process.env.EDITOR || "vi";
-		const done = lend(() => spawnSync(editorCommand(editor, target.file, target.line), { stdio: "inherit", shell: true }));
-		if (done.error !== undefined || (done.status !== 0 && done.status !== null)) {
-			const why = done.error?.message ?? `it ended with exit ${done.status}`;
-			chat.print(`! The editor could not be run (${editor}): ${why}. Set $EDITOR to the editor you use.\n`);
-			flash(`the editor could not be run: ${why}`);
-		}
+		if (!runEditor(target.file, target.line)) return;
 		brain.at = 0;
 		refresh(viewId(), true);
 	};
@@ -713,6 +791,31 @@ export async function runScreen(session, options, runTerminal) {
 			return second === undefined ? undefined : command(second);
 		}
 		if (key === "z") return void (state.pending = "z");
+		// The Hands view of the Context tab: the same operations the agent's `context` tool has.
+		if (viewId() === "context.hands") {
+			const item = pageOf().list.selected();
+			if (key === "f" && typeof item?.key === "string" && item.key.startsWith("report:")) {
+				const id = item.key.slice(7);
+				const said = loadContext(brainDir).dropped.includes(id) ? recallReport(brainDir, id) : foldReports(brainDir, [id]);
+				flash(said.replace(/\n+/g, " "));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "x" && typeof item?.key === "string" && item.key.startsWith("shelf:")) {
+				try {
+					flash(unshelveForUser(brainDir, item.key.slice(6)));
+				} catch (error) {
+					flash(error.message);
+				}
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "a") {
+				setMode("type");
+				prompt.insertTextAtCursor("/shelve ");
+				return;
+			}
+		}
 		if (key === "escape" || key === "i" || key === "a") return void setMode("type");
 		// As in vi: a colon starts a command, a slash a search.
 		if (key === ":") {
@@ -754,6 +857,16 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "-") return void inPlace(() => chat.setAll(false));
 			// A key that is no command says so, once it is a key that types: the screen heard it.
 			if (key !== undefined && [...key].length === 1) flash(`${key === " " ? "Space" : key} is not a command · ? lists them`);
+			return;
+		}
+		// In Shells: Enter opens the selected window's output as a terminal emulator sees it, and goes back.
+		if (state.tab === "shells" && (key === "enter" || key === " " || key === "o")) {
+			if (state.view.shells === "out") return void setView("list");
+			const item = pageOf().list.selected();
+			if (typeof item?.key === "string" && item.key.startsWith("window:")) {
+				state.shell = item.key.slice(7);
+				setView("out");
+			}
 			return;
 		}
 		const cols = innerCols();

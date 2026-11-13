@@ -76,7 +76,7 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, runner, gate = { yolo: false } }) {
+export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, runner, gate = { yolo: false }, servedModels }) {
 	const context = BACKGROUND_CONTEXT;
 	const model = {
 		id: config.model,
@@ -100,12 +100,16 @@ export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, 
 		},
 	};
 	const models = createModels();
+	// The provider knows every model the server serves, not only the configured one: a session stored under
+	// an older model must still start (the conversation keeps the model it began with until /model changes
+	// it), and /model can switch to any of the others without a restart.
+	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
 	const provider = createProvider({
 		id: PROVIDER,
 		name: "local model server",
 		baseUrl: config.server,
 		auth: { apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "local" } }) } },
-		models: [model],
+		models: known.map((id) => (id === config.model ? model : { ...model, id, name: id })),
 		api: openAICompletionsApi(),
 	});
 	// What the session tells the screen that is not in any conversation: how far the server is with reading a
@@ -413,10 +417,28 @@ export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, 
 	const main = await harness.root(context, {
 		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
 	});
+	// The settings say which model this session is on. A conversation keeps the model it began with, so a change
+	// in the settings would otherwise never take hold (the stored one won, or, if the server had dropped it, the
+	// run stopped with no_model). At the start, then, the conversation is set to the configured model; /model
+	// switches it for the rest of the run, and every model the server serves is registered so any of them resolves.
+	const held = (await main.agent(context)).model;
+	if (held === undefined || (held.provider === PROVIDER && held.modelId !== config.model)) {
+		await main.configure({ model: { provider: PROVIDER, modelId: config.model } }, context);
+	}
 	return {
 		harness,
 		main,
 		context,
+		/** The model the main conversation is on, as { provider, modelId }. */
+		model: async () => (await main.agent(context)).model,
+		/** Switch the model of the main conversation, and so of every task forked after. Undefined when the name is not served. */
+		setModel: async (modelId, ctx = context) => {
+			if (!known.includes(modelId)) return false;
+			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
+			return true;
+		},
+		/** The model names the server was serving when the session opened. */
+		servedModels: [...known],
 		windows,
 		wakes,
 		engine,

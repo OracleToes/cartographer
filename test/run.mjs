@@ -11,7 +11,7 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { droppable, dressTask, KEPT_AS, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
+import { addRecord, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unshelveForUser, updateContext, withoutTags } from "../src/context.mjs";
 import { TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
@@ -5214,6 +5214,7 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
 	has(byKey("Tools · 1").body, '── read ──\nRead files.\nparameters: {\n  "type": "object"', "the tools as they are sent");
+	assert.deepEqual(view.items.filter((item) => item.key?.startsWith("tool:")).map((item) => item.key), [], "folded, the tools are one part; a view that opens them is asked with isOpen");
 	assert.match(byKey("Assessment and graph").body, /^<project>\n[\s\S]*\n<\/project>$/, "the block Cartographer puts in front is a part of its own");
 	assert.match(byKey("What the last collapse kept").body, /^<context>\n[\s\S]*\n<\/context>$/, "so is what a collapse kept");
 	assert.equal(byKey("You").body, "Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "and the user's message is what is left");
@@ -5223,6 +5224,14 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	hasNot(byKey("Result of task").body, "<state>", "which is then only the result");
 	assert.equal(byKey("The reply").body, "(thinking, not kept in the context)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the request: the reply");
 	assert.equal(byKey("Result of chat").body, "Shown to the user.", "and what its call returned");
+
+	// Opened, the tools part gives a line to each tool, so that one description can be read and edited.
+	const opened = contextView(sent, { windowSize: 20_000, cols: 40, isOpen: (key) => key === "tools" });
+	const tool = opened.items.find((item) => item.key === "tool:read");
+	assert.ok(tool, "the tools part unfolds to a line per tool");
+	assert.equal(tool.depth, 1, "a tool of the block stands one step in");
+	assert.equal(tool.body, "Read files.\n\nparameters: {\n  \"type\": \"object\",\n  \"properties\": {\n    \"paths\": {\n      \"type\": \"array\"\n    }\n  }\n}", "a tool's body is its description and its parameters, as the server got them");
+	assert.equal(opened.items.filter((item) => item.key?.startsWith("tool:")).length, 1, "just the tools of this request");
 
 	// The top: whose window, the bar, the legend.
 	const top = view.header.map((line) => line.map(([part]) => part).join(""));
@@ -5343,6 +5352,60 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		assert.match(left, /▎› task\(p1\): read: a\.txt[^\n]*\n\s*\n {3}▾ 3 calls · t1 · \d+s\s*\n/, `leaving leaves the conversation on the terminal:\n${left.slice(-1500)}`);
 		has(left, "Copied the session", "to its end");
 		hasNot(left, "1 Chat  2 Carto", "without the screen around it");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: e says a message anew, Hands folds and recalls, and a shell window shows its output as a terminal does", async () => {
+	const root = makeProject("screen-hands");
+	const server = await startStandIn();
+	const editor = join(scratch, "hands-editor.sh");
+	const opened = join(scratch, "hands-editor-args.txt");
+	writeFileSync(editor, `#!/bin/sh\necho "$@" >> ${opened}\nprintf ' (said anew)' >> "$1"\n`);
+	chmodSync(editor, 0o755);
+	try {
+		ok(await carto(root, server, ["--yolo"], { input: lines(planMessage(RUN_ITEM)) }), "a plan");
+		const result = await cartoOnScreen(root, server, ["--yolo", "--no-bwrap"], [
+			["Type a message", "task(p1): shell[window=run,wait=0]: while :; do echo beat; sleep 0.2; done\\nshell: echo from run\\n"],
+			["report t1", ""],
+			// e on the user's message: g selects the first stop (what Cartographer printed at the start),
+			// and j moves to the next: what the user typed.
+			["resting", "<ESC>", false],
+			["COMMANDS", "gjj", false],
+			[0.4, "e", false],
+			[0.8, "5", false],
+			// The Hands view of the Context tab: fold the report, bring it back, shelve a file.
+			["What the main agent sees", "]]]", false],
+			["Your hands on what the agent keeps", "f", false],
+			["· folded", "", false],
+			["COMMANDS", "f", false],
+			[0.4, "a", false],
+			["/shelve", " README.md"],
+			[0.8, "<ESC>", false],
+			// The Shells tab: the window's output as a terminal emulator sees it, the newest at the bottom.
+			["COMMANDS", "4", false],
+			["shell window", "<ENTER>", false],
+			["Output of run", "i", false],
+			["type a message", "/quit"],
+			[1.5, "", false],
+		], { rows: 34, env: { EDITOR: editor } });
+		if (result === undefined) return "python3 is needed for a terminal";
+		const at = (text) => result.shots.find((shot) => shot.includes(text)) ?? assert.fail(`no screen shows ${JSON.stringify(text)}:\n${result.shots.join("\n────\n")}`);
+		const edited = at("your message is edited");
+		has(edited, "said anew", "e opened the user's message in the editor, and the tab says it anew");
+		const calls = readFileSync(opened, "utf8").trim().split("\n");
+		assert.match(calls.at(-1), /\.atlas\/scratch\/message\.md$/, "the editor was handed the message's scratch file");
+		const store = JSON.parse(readFileSync(join(root, ".atlas", "carto-context.json"), "utf8"));
+		const said = store.chat.filter((entry) => entry.who === "user").at(-1);
+		has(said.text, "(said anew)", "the talk the context keeps was rewritten to match");
+		const hands = at("Your hands on what the agent keeps");
+		has(hands, "t1  · in view", "Hands lists the report");
+		has(at("· folded"), "t1  · folded", "f folds it, and says so on its line");
+		has(at("README.md"), "README.md", "a put /shelve in the prompt, and the file stands on the shelf");
+		const out = at("Output of run");
+		has(out, "beat", "the window's output, as it was printed");
+		assert.match(out, /Enter goes back to the list; \/send run line types into it/, "and the view says how to type into the window");
 	} finally {
 		await server.close();
 	}
@@ -5628,6 +5691,151 @@ test("repeat: a reply that writes the same thing over and over is cut off; the a
 	} finally {
 		await server.close();
 	}
+});
+
+test("model: /model lists what the server serves, switches by name or by number, and a stored model never bricks the session", async () => {
+	const root = makeProject("model");
+	const server = await startStandIn({ models: ["model-a", "model-b"] });
+	try {
+		const first = await carto(root, server, ["--model", "model-a"], { input: lines("say: hi", "/model", "/model 2", "/status") });
+		ok(first, "the first run");
+		has(first.stdout, "  Models  on model-a  ·  the server serves:\n    1  model-a  ← on\n    2  model-b\n", "/model lists the models the server serves, and which is on");
+		has(first.stdout, "● model  model-a → model-b\n", "/model 2 switches by number");
+		has(first.stdout, "· model model-b · idle\n", "/status says which model the session is on");
+		const under = await carto(root, server, ["--model", "model-b"], { input: lines("/status") });
+		ok(under, "resumed under the model the settings now name");
+		has(under.stdout, "· model model-b · idle\n", "the model stored in the session does not brick it");
+		const back = await carto(root, server, ["--model", "model-a"], { input: lines("/status") });
+		ok(back, "resumed under the first model again");
+		has(back.stdout, "· model model-a · idle\n", "the settings decide which model the session is on at each start");
+		const wrong = await carto(root, server, ["--model", "model-c"], { input: lines("/status") });
+		assert.notEqual(wrong.code, 0, "a model the server does not serve is refused at the start");
+		has(wrong.stderr, 'The model server has no model named "model-c"', "and says what is served");
+		const bad = await carto(root, server, ["--model", "model-a"], { input: lines("/model 9") });
+		ok(bad, "a number off the list");
+		has(bad.stdout, 'The server has no model "9". It serves: model-a, model-b. /model lists them.', "and says what is served");
+	} finally {
+		await server.close();
+	}
+});
+
+test("the user's hands: /shelve, /unshelve, /fold, /recall and /send do for the user what the agent's calls do", async () => {
+	const root = makeProject("hands");
+	writeFileSync(join(root, "notes.txt"), "alpha\nbeta\ngamma\n");
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, ["--no-bwrap"], { input: lines(
+			planMessage(RUN_ITEM),
+			"/approve",
+			`task(p1): shell[window=run,wait=0]: while :; do echo beat; sleep 0.2; done\nshell: echo from run`,
+			"/shelve notes.txt",
+			"/unshelve notes.txt",
+			"/unshelve notes.txt",
+			"/fold t1",
+			"/fold t1",
+			"/recall t1",
+			"/recall nope",
+			"/send run echo typed by the user",
+			"/send gone hi",
+		) });
+		ok(result, "the run");
+		has(result.stdout, "notes.txt is marked for the shelf (about ", "/shelve marks a file for the shelf");
+		has(result.stdout, "Taken off the shelf: notes.txt.", "/unshelve takes it off again");
+		has(result.stdout, "notes.txt is not on the shelf. The shelf is empty.", "and says so when there is nothing to take");
+		has(result.stdout, "out of view, the record line stands in its place", "/fold takes a report out of view");
+		has(result.stdout, "t1 stands in its place again, in view.", "/recall brings it back");
+		has(result.stdout, "There is no report nope. /context lists the kept ones.", "/recall of an unknown id says so");
+		has(result.stdout, "typed into run: echo typed by the user", "/send types a line into a window that runs");
+		has(result.stdout, 'There is no window "gone"', "/send to a window there is not says so");
+	} finally {
+		await server.close();
+	}
+});
+
+test("settings: yolo and bwrap start from the settings, and a switch while running is not remembered", async () => {
+	const root = makeProject("switches");
+	const server = await startStandIn();
+	try {
+		const plain = await carto(root, server, [], { input: lines("/status") });
+		ok(plain, "a run with no settings of its own");
+		hasNot(plain.stdout, YOLO_LINE, "yolo is off by default");
+		hasNot(plain.stdout, "sandbox: OFF", "and the sandbox is whatever this machine can do");
+		writeFileSync(join(root, ".atlas", "config.json"), JSON.stringify({ yolo: true, bwrap: false }));
+		const set = await carto(root, server, [], { input: lines("/status") });
+		ok(set, "the settings say yolo on and bwrap off");
+		has(set.stdout, YOLO_LINE, "yolo comes from the settings");
+		has(set.stdout, "sandbox: OFF · tasks run commands directly on this machine", "bwrap false starts with the sandbox off");
+		const off = await carto(root, server, [], { input: lines("/yolo off", "/status") });
+		ok(off, "/yolo off during the run");
+		has(off.stdout, "approval: on · change items wait for /approve again", "and ends it for the run");
+		const again = await carto(root, server, [], { input: lines("/status") });
+		ok(again, "the next run");
+		has(again.stdout, YOLO_LINE, "reads the settings again: the switch was never remembered");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: Hands lists the shelf and the reports with the agent's operations, and Shells has an Output view", async () => {
+	const { handsView, shellsOutView } = await import("../src/screen/views.mjs");
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const root = makeProject("hands-view");
+	writeFileSync(join(root, "keep.txt"), "kept line\n");
+	const brainDir = join(root, ".atlas");
+	addRecord(brainDir, { id: "t1", at: Date.now(), mode: "look", brief: "Read the tree", report: "The tree has 5 files.", changed: 0 });
+	updateContext(brainDir, (store) => {
+		store.shelf.push({ path: "keep.txt" });
+		store.dropped.push("t1");
+	});
+	const view = handsView({ root, brainDir });
+	const titles = view.items.filter((item) => !item.plain).map((item) => item.key);
+	assert.deepEqual(titles, ["shelf:keep.txt", "report:t1"], "the shelf, then the reports, each selectable");
+	const report = view.items.find((item) => item.key === "report:t1");
+	assert.equal(report.folded, true, "a report that is folded says so");
+	has(report.head.map(([part]) => part).join(""), "t1", "with its record line");
+	const shelf = view.items.find((item) => item.key === "shelf:keep.txt");
+	assert.match(shelf.body(), /^== keep\.txt .{0,20}\n1  kept line$/, "opened, a shelved file is its text, numbered as the shelf keeps it");
+	assert.deepEqual(view.items.filter((item) => item.plain && item.head[0][0].includes("The reports of finished work")).length, 1, "and a heading stands over each kind");
+
+	// The operations behind the keys, as the terminal commands call them.
+	assert.match(shelveForUser(root, brainDir, { shelfTokens: 1000 }, "keep.txt"), /marked for the shelf/, "shelving marks a file, again for one that is on it");
+	assert.match(foldReports(brainDir, ["t1"]), /already out of view/, "a report that is folded folds no further");
+	const said = recallReport(brainDir, "t1");
+	assert.match(said, /stands in its place again/, "recall brings a folded report back into view");
+	assert.match(unshelveForUser(brainDir, "keep.txt"), /Taken off the shelf/, "unshelve takes a file off");
+	assert.throws(() => unshelveForUser(brainDir, "keep.txt"), /not on the shelf/, "and says so when it is not there");
+
+	// The chat tab's messages: the user's and the agent's words can be said anew, tool work cannot.
+	const chat = createChat({});
+	chat.user("hello");
+	chat.print("  A notice.\n");
+	chat.seal();
+	chat.entry(0, { model: [{ role: "assistant", content: [{ type: "text", text: "Here you are." }], stopReason: "end-turn", usage: {}, provider: "x", model: "x", api: "x", timestamp: 1 }] });
+	const mine = chat.items[0];
+	const printed = chat.items[1];
+	const agent = chat.items.at(-1);
+	assert.deepEqual([chat.editable(mine.key), chat.editable(printed.key), chat.editable(agent.key)], [true, false, true], "the user's words and the agent's are editable, what Cartographer printed is not");
+	assert.equal(chat.revise(mine.key, "hello, said anew"), true, "a message is said anew");
+	assert.equal(mine.text, "hello, said anew", "and the tab shows the new words");
+	updateContext(brainDir, (store) => {
+		store.chat.push({ who: "user", at: 1, text: "hello" });
+	});
+	assert.equal(reviseNote(brainDir, "hello", "hello, said anew"), true, "the talk the context keeps is rewritten to match an edit");
+	assert.equal(loadContext(brainDir).chat.at(-1).text, "hello, said anew", "and the edited words are what it holds");
+	assert.equal(chat.revise(mine.key, ""), false, "an empty message is not taken");
+	assert.equal(chat.revise(printed.key, "nope"), false, "what cannot be edited is not");
+	assert.equal(chat.revise(999, "nope"), false, "nor one that is not there");
+
+	// The shells' Output view: a window's kept lines, the newest at the bottom, as a terminal emulator sees them.
+	const { createWindows } = await import("../src/windows.mjs");
+	const windows = createWindows({ root, brainDir, config: { shellRead: [], treeDepth: 1, windowTail: 10 }, runner: { off: true } });
+	await windows.run("term", "echo from the window", { waitMs: 3000 });
+	const out = shellsOutView({ session: { windows } }, "term");
+	has(out.header[0].map(([part]) => part).join(""), "Output of term", "the view says which window it shows");
+	has(out.items[0].head.map(([part]) => part).join(""), "from the window", "and shows what it printed");
+	const nothing = shellsOutView({ session: { windows } }, "nope");
+	has(nothing.header[0].map(([part]) => part).join(""), "Output of term", "a window there is not falls back to the newest");
+	windows.shutdown();
 });
 
 async function until(condition, what, timeoutMs = 15_000) {

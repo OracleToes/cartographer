@@ -588,3 +588,87 @@ export function taskState(store, conversationId) {
 	store.tasks[conversationId] ??= {};
 	return store.tasks[conversationId];
 }
+
+// ─── The user's own hands on the context ────────────────────────────────────
+
+/** Two shelf items are the same file. */
+const sameItem = (a, b) => a.path === b.path;
+// The same operations the agent has with `context`, for the person watching: /fold, /recall, /shelve and
+// /unshelve on the terminal, and the keys of the Context tab in the full screen. Nothing here is a tool; the
+// user is the one the requests are for, and these change the stored context exactly as the agent's calls do.
+
+/** The user folds reports out of view, leaving their record lines. Returns the line to show. */
+export function foldReports(brainDir, ids) {
+	const store = loadContext(brainDir);
+	const unknown = ids.filter((id) => !store.records.some((record) => record.id === id));
+	const foldable = ids.filter((id) => store.records.some((record) => record.id === id) && !store.dropped.includes(id));
+	if (foldable.length === 0) {
+		const open = store.records.filter((record) => !store.dropped.includes(record.id)).map((record) => record.id);
+		return unknown.length === ids.length
+			? `There is no report ${ids.join(", ")}. The kept ones: ${store.records.map((record) => record.id).join(", ") || "none yet"}.`
+			: `${ids.join(", ")} ${ids.length === 1 ? "is" : "are"} already out of view.${open.length > 0 ? ` In full: ${open.join(", ")}.` : ""}`;
+	}
+	updateContext(brainDir, (next) => {
+		next.dropped = [...new Set([...next.dropped, ...foldable])];
+	});
+	const said = foldable.map((id) => `${id}: ${recordLine(store.records.find((record) => record.id === id))}`).join("\n  ");
+	return `${unknown.length > 0 ? `no report ${unknown.join(", ")}; ` : ""}out of view, the record line stands in ${foldable.length === 1 ? "its" : "their"} place:\n  ${said}\n/recall ${foldable.join(" ")} brings ${foldable.length === 1 ? "it" : "them"} back.`;
+}
+
+/** The user recalls a kept report. One that is only folded stands in view again; one that is not is printed for the user to read, and stays out of the model's view. Returns the line to show, or undefined. */
+export function recallReport(brainDir, id) {
+	const store = loadContext(brainDir);
+	if (!store.records.some((record) => record.id === id)) return undefined;
+	if (store.dropped.includes(id)) {
+		updateContext(brainDir, (next) => {
+			next.dropped = next.dropped.filter((entry) => entry !== id);
+		});
+		return `${id} stands in its place again, in view.`;
+	}
+	const report = loadReport(brainDir, id);
+	return `${id} is in view already. As it stands:\n${report ?? "(its file is gone)"}`;
+}
+
+/** The user shelves a file, as the agent does: in view from the next collapse on. Throws ShelfError. */
+export function shelveForUser(root, brainDir, config, path, lines) {
+	const { item, tokens } = shelfItem(root, path, lines);
+	const store = loadContext(brainDir);
+	const others = store.shelf.filter((entry) => !sameItem(entry, item));
+	const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry)), 0) + tokens;
+	if (total > config.shelfTokens) {
+		throw new ShelfError(`${shelfLabel(item)} is about ${count(tokens)} tokens, and the shelf would then hold ${count(total)} of at most ${count(config.shelfTokens)}. Shelve a range of lines instead, or take something off first${others.length > 0 ? `: ${others.map(shelfLabel).join(", ")}` : ""}.`);
+	}
+	updateContext(brainDir, (next) => {
+		const at = next.shelf.findIndex((entry) => sameItem(entry, item));
+		if (at >= 0) next.shelf[at] = item;
+		else next.shelf.push(item);
+	});
+	return `${shelfLabel(item)} is marked for the shelf (about ${count(tokens)} tokens; the shelf then holds ${count(total)} of ${count(config.shelfTokens)}). From the next collapse on it stands at the start, and every task begins with it read.`;
+}
+
+/** The user takes a file, or everything, off the shelf. Throws ShelfError for a name that is not on it. */
+export function unshelveForUser(brainDir, path) {
+	const store = loadContext(brainDir);
+	const gone = path === "all" ? [...store.shelf] : store.shelf.filter((entry) => entry.path === path || entry.path === path.replace(/^\.\//, ""));
+	if (gone.length === 0) throw new ShelfError(`${path} is not on the shelf.${store.shelf.length > 0 ? ` On it: ${store.shelf.map(shelfLabel).join(", ")}.` : " The shelf is empty."}`);
+	updateContext(brainDir, (next) => {
+		next.shelf = next.shelf.filter((entry) => !gone.some((other) => sameItem(other, entry)));
+	});
+	return `Taken off the shelf: ${gone.map(shelfLabel).join(", ")}. A copy that stands in the context stays until the next collapse.`;
+}
+
+/** A message, as it shows, was edited in the editor: the line the talk keeps is rewritten to match. A note of the agent stands nowhere in the talk, so there is nothing to rewrite for one. */
+export function reviseNote(brainDir, from, to) {
+	const said = String(from ?? "").trim();
+	const next = String(to ?? "").trim();
+	if (said === "" || next === "" || said === next) return false;
+	let changed = false;
+	updateContext(brainDir, (store) => {
+		const at = store.chat.findLastIndex((entry) => entry.text === said);
+		if (at >= 0) {
+			store.chat[at] = { ...store.chat[at], text: next };
+			changed = true;
+		}
+	});
+	return changed;
+}

@@ -47,6 +47,12 @@ const DEFAULTS = {
 	// so a project is assembled one small, exact edit at a time. Adjustable per install/project.
 	writeLines: 60,
 	writeCreatesOnly: true,
+	// Whether change items run without asking for approval. --yolo overrides for one run; /yolo switches it
+	// while carto runs, and that switch is never remembered.
+	yolo: false,
+	// Whether the tasks' commands run in the bubblewrap sandbox. --no-bwrap overrides for one run; /bwrap
+	// switches it while carto runs, and that switch is never remembered.
+	bwrap: true,
 	// Whether a reply that writes the same character or phrase over and over is cut off.
 	repeatCut: true,
 	// Whether the server is asked how far it is with reading the prompt (llama.cpp's return_progress).
@@ -124,7 +130,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	if (config.chatWindow + config.shelfTokens > config.contextWindow / 2) throw new ConfigError("config: chatWindow and shelfTokens together must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= 0)) throw new ConfigError("config: collapseMinutes must be a number of minutes, 0 or more");
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < 30 || config.collapseFull > 95) throw new ConfigError("config: collapseFull must be a whole number from 30 to 95 (percent)");
-	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
+	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
 	if (!Number.isInteger(config.writeLines) || config.writeLines < 1) throw new ConfigError("config: writeLines must be a whole number of lines, 1 or more");
 	if (!["auto", "truecolor", "256", "none"].includes(config.colors)) throw new ConfigError('config: colors must be "auto", "truecolor", "256" or "none"');
 	if (!["auto", "dark", "light"].includes(config.theme)) throw new ConfigError('config: theme must be "auto", "dark" or "light"');

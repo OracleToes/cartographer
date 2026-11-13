@@ -20,7 +20,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, isFront, loadReport, recordLine, shelfLabel } from "./context.mjs";
+import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser } from "./context.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -986,8 +986,12 @@ export async function runTerminal(session, options) {
 						"  /shells   the shell windows: what runs in each, for how long, and its newest lines",
 						"  /kill     /kill NAME closes a shell window and ends what runs in it; /kill all closes every one",
 						"  /stop     stop what the agent is doing (Ctrl-C does the same); shell windows keep running",
+						"  /model    the models the server serves; /model NAME (or a number) switches to one",
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
+						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
+						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
+						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
 						"  /status   where the brain is and how full the context is",
 						"  /quit     leave; unfinished work continues the next time carto starts here",
@@ -1439,7 +1443,8 @@ export async function runTerminal(session, options) {
 				const view = await main.context(context);
 				const last = view.messages.filter((message) => message.role === "assistant").at(-1);
 				const size = last?.usage ? (last.usage.input ?? 0) + (last.usage.cacheRead ?? 0) + (last.usage.output ?? 0) : 0;
-				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · ${busy ? "working" : "idle"}`);
+				const on = await session.model?.();
+				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${on?.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
 				if (options.runner !== undefined) line(`  ${sandboxLine(options.runner)}`);
 				const all = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
 				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === "busy").length} busy · /shells shows them`);
@@ -1448,6 +1453,92 @@ export async function runTerminal(session, options) {
 				if (set.length > 0) {
 					const due = wakes.nextDue();
 					line(`  ${plural(set.length, "wake")} set${due === undefined ? "" : `, the next in ${took(due)}`} · /wakes shows them`);
+				}
+				return true;
+			}
+			case "model": {
+				// The list comes from the server each time: llama-swap serves what is loaded now.
+				let served = session.servedModels ?? [config.model];
+				try {
+					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(5000) });
+					const body = await response.json().catch(() => undefined);
+					const listed = (body?.data ?? []).map((entry) => entry?.id).filter((id) => typeof id === "string");
+					if (listed.length > 0) served = listed;
+				} catch {
+					// The server did not answer: the names from the start are shown.
+				}
+				const on = await session.model?.();
+				const current = on?.modelId ?? config.model;
+				if (argument === undefined) {
+					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
+					served.forEach((id, index) => line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}`));
+					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too."));
+					return true;
+				}
+				const byNumber = /^\d+$/.test(argument) ? served[Number(argument) - 1] : undefined;
+				const wanted = byNumber ?? served.find((id) => id === argument);
+				if (wanted === undefined) {
+					line(`  The server has no model "${argument}". It serves: ${served.join(", ")}. /model lists them.`);
+					return true;
+				}
+				if (wanted === current) {
+					line(`  Already on ${wanted}.`);
+					return true;
+				}
+				if (!(await session.setModel(wanted))) {
+					line(`  ${wanted} is not a model of this session. /model lists what the server serves.`);
+					return true;
+				}
+				line(`${bold("●")} model  ${current} → ${wanted}${busy ? " · the answer being written finishes on the old one" : ""}`);
+				return true;
+			}
+			case "fold": {
+				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				if (ids.length === 0) {
+					line("  /fold ID takes a report out of view, leaving its one line: the same `fold` the agent does with `context`. /context lists what is in view.");
+					return true;
+				}
+				const said = foldReports(options.brainDir, ids);
+				line(`  ${said}`);
+				return true;
+			}
+			case "recall": {
+				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				if (ids.length === 0) {
+					line("  /recall ID brings a kept report back in full, into view. /context lists the kept ones.");
+					return true;
+				}
+				for (const id of ids) {
+					const said = recallReport(options.brainDir, id);
+					line(said === undefined ? `  There is no report ${id}. /context lists the kept ones.` : `  ${said}`);
+				}
+				return true;
+			}
+			case "shelve":
+			case "unshelve": {
+				if (argument === undefined) {
+					line(`  /${name} PATH [lines] ${name === "shelve" ? "keeps a file in view from the next collapse on" : "takes a file off the shelf (all takes every one)"}.`);
+					return true;
+				}
+				try {
+					const said = name === "shelve" ? shelveForUser(options.root, options.brainDir, config, argument, tail) : unshelveForUser(options.brainDir, argument);
+					line(`  ${said}`);
+				} catch (error) {
+					line(`! ${error.message}`);
+				}
+				return true;
+			}
+			case "send": {
+				if (argument === undefined || tail === "") {
+					line("  /send NAME line types a line into a shell window, as you. /shells lists the windows.");
+					return true;
+				}
+				if (windows === undefined) return true;
+				try {
+					await windows.send(argument, tail, { waitMs: 1000 });
+					line(dim(`  typed into ${argument}: ${tail}`));
+				} catch (error) {
+					line(`! ${error.message}`);
 				}
 				return true;
 			}

@@ -67,8 +67,8 @@ ctx ▮▮▮▯▯▯▯▯ 41k/100k · 1 goal · plan 2/5 · approved · 1 win
 | **1 Chat** | What you and the agent say to each other, in full. What the agent does in between is folded: a run of calls is one line, `▸ 14 calls · t3 · 1m 12s`. The run that is going on is open by itself and shows its newest calls, and the reply that is being written is shown as it grows, whatever it holds: a note, a message to you, or the arguments of a call, such as the file a `write` is about to create |
 | **2 Carto** | The agent's brain, one view at a time: Atlas (the graph, a node to a line), Ledger, Plan, Tree (the project's files, with folders that open), Assessment |
 | **3 Diff** | What was changed, a file to a line, each opening to its own part of the patch: by the last step, in this session, or against the project's own git `HEAD` |
-| **4 Shells** | The shell windows, live: what runs in each and for how long. Opened, a window shows its newest lines as they come |
-| **5 Context** | What the agent sees: the request it was last sent, part by part. See [The Context tab](#the-context-tab) |
+| **4 Shells** | The shell windows, live: what runs in each and for how long. Opened, a window shows its newest lines as they come; the Output view shows one window the way a terminal emulator does, its newest lines at the bottom |
+| **5 Context** | What the agent sees: the request it was last sent, part by part, and your own hands on what the agent keeps. See [The Context tab](#the-context-tab) |
 
 Tabs 2 to 5 are lists of items that fold. One item is selected, and the keys act on it: open it, fold it, open it in your editor, copy it. They are read again while they show: the brain every two seconds, Diff every five, Shells and Context more often.
 
@@ -82,13 +82,14 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | In the commands mode | |
 |---|---|
 | `1` to `5` | Go to a tab |
-| `[` and `]` | The previous and the next view inside Carto, Diff and Context (`H` and `L` do the same) |
+| `[` and `]` | The previous and the next view inside Carto, Diff, Shells and Context (`H` and `L` do the same) |
 | `j`, `k` | Move down and up over the items. `g` and `G` go to the first and the last |
-| Enter, Space, `o` | Open what is selected, or fold it. `l` opens, `h` folds. In Chat, Enter on a call goes to the tab where that work lives (`write` and `edit` to Diff, `shell` and `window` to Shells, `plan`, `ledger`, `atlas` and `assess` to Carto, `context` to Context); a `read`, `search`, `list` or `task` opens in place to what it returned |
+| Enter, Space, `o` | Open what is selected, or fold it. `l` opens, `h` folds. In Chat, Enter on a call goes to the tab where that work lives (`write` and `edit` to Diff, `shell` and `window` to Shells, `plan`, `ledger`, `atlas` and `assess` to Carto, `context` to Context); a `read`, `search`, `list` or `task` opens in place to what it returned. In Shells, Enter on a window opens the Output view, and Enter there goes back to the list |
 | `+` and `-` | Open everything, fold everything (`zR` and `zM` do the same) |
 | Ctrl-D, Ctrl-U | Scroll half a page. Ctrl-F and Ctrl-B a page, Ctrl-E and Ctrl-Y a row |
 | `/` | Search the tab that shows. Enter or Down goes to the next match, Up to the one before, Esc closes the search |
-| `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item, a node or an entry of the books at the line where it stands in its file. The row under the tabs names the file |
+| `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item, a node or an entry of the books at the line where it stands in its file. In Chat, a message of yours or of the agent (see [Saying a message anew](#saying-a-message-anew)); tool work cannot be edited, and neither can what Cartographer printed. In Context, the system prompt's `prompt.json`, a tool of the unfolded Tools part where it is defined, and a shelved file. The row under the tabs names the file, where there is one |
+| `f`, `x`, `a` | In the Hands view of Context, what the agent's `context` tool does: `f` folds the report out of view or brings it back, `x` takes a shelved file off the shelf, `a` puts `/shelve` in the place to type |
 | `y`, `Y` | Copy what is selected; copy the whole tab |
 | `r` | Read the tab again |
 | `:` | Type a command |
@@ -149,7 +150,7 @@ In tmux, exact colours need tmux to know that the terminal outside has them: `se
 #### The Context tab
 
 ```
- Window  Main agent  Parts    [ ] change view
+ Window  Main agent  Parts  Hands    [ ] change view
 What the main agent sees  ·  about 41k of 100k tokens (41%)  ·  the server counted 41k
 request 23 of this run, sent 14:02 (just now), as the server got it · part sizes are estimates
 ■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□□
@@ -168,13 +169,15 @@ request 23 of this run, sent 14:02 (just now), as the server got it · part size
 
 The **Window** view is the request the agent was last sent, exactly as the server got it, in the order the model reads it. While a task runs it is the task's request, because the task is then the one that is working; **Main agent** always shows the main agent's. Each part is one line: its colour, about how many tokens it is, what it is, and how it begins. Enter opens a part to its full text, and `+` opens all of them, which makes the tab the whole context window, word for word, to scroll through; `-` folds it again. What is open stays open as new requests come in, so you can watch a part change.
 
-The parts are the system prompt, the tools with their descriptions and schemas, and then every message. The blocks that Cartographer adds to messages are parts of their own, cut off the message they ride on: the copy of the assessment and the graph, what the last collapse kept, the state block, the windows block. Below a rule follows what has come since that request and will be in the next one: the reply, as far as it is written while it is being written, and what its calls returned.
+The parts are the system prompt, the tools with their descriptions and schemas, and then every message. The tools are one part, as the model reads them as one block; opened, it gives a line to each tool, so that one description can be read, copied, and opened in the editor where it is defined. The blocks that Cartographer adds to messages are parts of their own, cut off the message they ride on: the copy of the assessment and the graph, what the last collapse kept, the state block, the windows block. Below a rule follows what has come since that request and will be in the next one: the reply, as far as it is written while it is being written, and what its calls returned.
 
 The row of squares is the whole window from its first token to its last, each square the same number of tokens, coloured by the part that lies there, with the free space at the end. It is a row and not a grid because the context is a row. The list under it says what each colour is, how many tokens, and what share of the window.
 
 The sizes of the parts are estimates, four characters to a token; the first line also gives the server's own count after its last reply. After a collapse at rest the view still shows the last request, which was sent before the collapse, and says so: nothing has been sent since.
 
 **Parts** is what `/context` prints: the sizes as the context engine counts them, the kept reports, and when the next collapse is due.
+
+**Hands** is yours: what the agent keeps with its `context` tool, with the same operations offered to you. It lists the shelf, in view from the next collapse on and read by every task at its start, and the reports of finished work, each with its record line and whether it stands in view or is folded. `f` on a report folds it out of view, leaving its record line, or brings it back; `x` on a shelved file takes it off; `a` puts `/shelve` in the place to type. The typed commands `/fold`, `/recall`, `/shelve`, `/unshelve` and `/collapse` do the same things from any tab; `/context` shows the sizes behind them.
 
 
 **Copying.** Drag over text to select it, and it is copied when you let go: the margin, the edge of a block and the spaces a row is filled with are left out. Whole things are copied with a command or a key:
@@ -191,7 +194,11 @@ Those also write a file under `.atlas/export/`, and the line they print names it
 
 **What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. Otherwise the main agent reads it after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
 
-What the full screen does not do yet: it does not replay earlier sessions (Chat starts with this run of carto), and the Shells tab cannot type into a window.
+#### Saying a message anew
+
+`e` on a message of yours or of the agent, in Chat, opens it in your editor. What comes back stands in the tab in its place, and the talk that the context keeps is rewritten to match, so what comes after reads the edited words — for what the agent writes outside a `chat` call, which the talk does not hold, the edit is on the screen only. The conversation's own record is never rewritten: what was sent to the model was sent, and a collapse decides what of it is kept. Tool work — a run of calls, a call with what it returned — and what Cartographer printed cannot be edited; `e` on those says so. The scratch file lives at `.atlas/scratch/message.md`.
+
+What the full screen does not do yet: it does not replay earlier sessions (Chat starts with this run of carto).
 
 ### The plain terminal
 
@@ -253,6 +260,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2` |
 | `requests  4 requests wait for you` | `/requests` lists them: change items, questions of taste, prompt proposals |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: change items run without `/approve` |
+| `● model  model-a → model-b` | You switched the model with `/model`: the conversation goes on where it was, and a task forked after runs on the new one |
 | `context … · … read for this answer` | How full the context is, and how many tokens the server had to read rather than reuse for the last answer |
 
 | Command | |
@@ -261,6 +269,10 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/report`, `/report t12` | The last task's report in full, or the kept report with that id |
 | `/context` | What the agent's context holds, part by part with sizes; the kept reports; when it was last collapsed and when it will be next |
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
+| `/fold ID …` | What the agent does with `fold`: take a kept report out of view, leaving its one line |
+| `/recall ID …` | Bring a kept report back into view in full |
+| `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
+| `/model`, `/model NAME` | The models the server serves, and which is on; a name or a number from the list switches. A task forked after runs on it too |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, whether its change items are approved, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
@@ -272,16 +284,17 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/prompt` | The agent's approved changes to its own prompt, and the targets a proposal can aim at. `/prompt reset TARGET` puts one piece back to its built-in wording |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
-| `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. For when you are watching; see [Without approval](#without-approval-yolo) |
+| `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. The settings can hold the default (`yolo`); a switch while running is never remembered. See [Without approval](#without-approval-yolo) |
 | `/wakes`, `/wakes remove ID`, `/wakes remove all` | What the agent has set to wake itself, and taking one or all of them away |
 | `/diff` | What the last change task did to the files, as a patch; or a shell window, when that is the newest step. `/diff all` shows a long patch in full |
 | `/undo` | Take the last step back: a change task, or what a shell window changed with no task around. Again for the one before it |
-| `/bwrap` | How the tasks' commands run. `/bwrap off` runs them without the sandbox, `/bwrap on` with it again |
+| `/bwrap` | How the tasks' commands run. `/bwrap off` runs them without the sandbox, `/bwrap on` with it again. The settings can hold the default (`bwrap`); a switch while running is never remembered |
 | `/shells` | The shell windows: what runs in each, for how long, and its newest lines |
 | `/kill NAME`, `/kill all` | Close a shell window, or all of them, and end what runs there |
+| `/send NAME line` | Type a line into a shell window, as you; `/shells` lists the windows |
 | `/stop`, Ctrl-C | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
 | `/new` | Start a fresh context: the current assessment and graph, and nothing else in view. The record of finished tasks, the shelf and the talk start empty; the reports stay in `.atlas/reports/` |
-| `/status` | Messages in view, context size, working or idle, how many shell windows are open, how many wakes are set, whether approval is off |
+| `/status` | Messages in view, context size, which model is on, working or idle, how many shell windows are open, how many wakes are set, whether approval is off |
 | `/quit`, Ctrl-C when idle | Leave |
 
 ### How the agent talks to you
@@ -319,6 +332,8 @@ carto --no-bwrap                         # run the tasks' commands without the s
 carto --here                             # use the current folder as the project, whatever is above it
 carto --url URL --model NAME             # another server or model for this run
 ```
+
+The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on.
 
 ### Which folder is the project
 
@@ -451,7 +466,7 @@ Limits of this version:
 
 ### Without approval (yolo)
 
-`carto --yolo`, or `/yolo on` in a session, switches the gate off: the agent's change items run without `/approve`. It is meant for when you are present and watching the screen. `/yolo off` switches it back on, and `/yolo` shows the setting.
+`carto --yolo`, or `/yolo on` in a session, switches the gate off: the agent's change items run without `/approve`. It is meant for when you are present and watching the screen. `/yolo off` switches it back on, and `/yolo` shows the setting. The settings can hold the default: `"yolo": true` in `config.json` starts every run switched off from approval, and `--yolo` overrides it for one run the other way. A `/yolo` switch while carto runs is never remembered: the next start reads the settings again.
 
 What it changes:
 
@@ -610,6 +625,7 @@ When a command creates more than 40 files, the record names folders instead of f
 
 ```
 carto --no-bwrap        for the whole session
+"bwrap": false          in the settings, for every run until changed
 /bwrap off              from now on; /bwrap on switches back; /bwrap shows which it is
 ```
 
@@ -625,11 +641,11 @@ What you give up:
 - The plan's `network` mark means nothing: every command has the network.
 - A command can also change the project's `.git` folder and the brain in `.atlas/`, checkpoints included. In the sandbox both are read-only.
 
-The switch is not stored. Every start is sandboxed again unless you pass `--no-bwrap`, and that includes a task that was cut off by a kill and is resumed: its remaining commands run in the sandbox. `/bwrap` waits until the agent has stopped, because a running task was told how its commands run when it started. A window keeps the way it was opened, so a switch in either direction closes every open window, with what runs there; the same name is a new window afterwards.
+The switch is not stored. Every start is sandboxed again unless you pass `--no-bwrap` or the settings say `"bwrap": false`, and that includes a task that was cut off by a kill and is resumed: its remaining commands run in the sandbox. `/bwrap` waits until the agent has stopped, because a running task was told how its commands run when it started. A window keeps the way it was opened, so a switch in either direction closes every open window, with what runs there; the same name is a new window afterwards.
 
 While the sandbox is off, the prompt reads `[no sandbox] ›`, each command's result line says `no sandbox`, and `/approve` repeats it. The agent is told in the state block and each change task in its brief; both are asked to stay inside the project folder unless you asked for something outside it. That is a request to the model, not a barrier.
 
-**Without bubblewrap.** When `bwrap` is missing, or cannot start a sandbox on the machine, the header says so (`no sandbox: … · tasks cannot run commands`), `shell` is refused, and the agent is told to say how to run what it wrote. Looking, writing and editing work as before. `--no-bwrap` or `/bwrap off` runs commands on such a machine, without a sandbox.
+**Without bubblewrap.** When `bwrap` is missing, or cannot start a sandbox on the machine, the header says so (`no sandbox: … · tasks cannot run commands`), `shell` is refused, and the agent is told to say how to run what it wrote. Looking, writing and editing work as before. `--no-bwrap`, the settings' `"bwrap": false`, or `/bwrap off` runs commands on such a machine, without a sandbox.
 
 Limits:
 
@@ -941,6 +957,8 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `taskTurns` | 30 | Replies one task may make, notes included, before it is ended without a report |
 | `askMinutes` | 0 | Minutes an `ask` waits for your answer before the agent is told there was none. 0: without limit |
 | `screen` | true | Whether `carto` on a terminal takes the whole screen. false: the plain terminal, as with `--plain` |
+| `yolo` | false | Whether change items run without `/approve` from the start. `--yolo` overrides it for one run; `/yolo` switches it while carto runs and is never remembered |
+| `bwrap` | true | Whether the tasks' commands run in the bubblewrap sandbox. `--no-bwrap` overrides it for one run; `/bwrap` switches it while carto runs and is never remembered |
 | `repeatCut` | true | Whether a reply that writes the same thing over and over is cut off |
 | `prefill` | true | Whether the server is asked how far it is with reading the prompt |
 | `prefillTokens` | 1000 | From how many tokens to read anew the reading is shown in the strip |
@@ -967,7 +985,7 @@ In build order:
 1. **Plugins** under `.atlas/plugins/`: the agent testing the project by extending its own harness.
 2. **Heat and focus for the graph**, so that a large graph shows the part in use.
 
-And smaller things, named where they belong above: the full screen does not replay earlier sessions and cannot type into a shell window; the reading of the prompt is not shown for the read-ahead after a collapse.
+And smaller things, named where they belong above: the full screen does not replay earlier sessions; the reading of the prompt is not shown for the read-ahead after a collapse.
 
 ## Tests
 
@@ -1000,7 +1018,9 @@ And smaller things, named where they belong above: the full screen does not repl
 - what you type while a task runs: sent to the task once, told to the main agent, kept as talk;
 - a reply that repeats itself: cut off for the main agent and for a task, the one retry, the stop at the second time, the setting;
 - the full screen, on a real terminal read through a small emulator (`test/vt.py`): the tabs (with the Requests view and the Books view of the brain), the two modes, a run of calls folded and opened with the keys, a call leading to its tab, the items of Diff and Carto opening, `e` handing the right file and line to the editor, the Context tab folded and wholly opened, pasted text with and without the terminal's marks, the list of commands under a slash and one Enter sending a completed command, Up bringing back what was sent, Tab going to the next tab or completing, the sheet of keys, the search under a slash, Escape and a key arriving as one, dragging over a message and what is copied then, the strip, a question, the reading of a long prompt, `/copy session` to the clipboard sequence and to a file, a click on a tab and on an item, the conversation left on the terminal on leaving, and the terminal's modes switched off again; the look: the margin, a background for each kind of block and none for the agent's words, the bars from edge to edge, the selection by its background, Markdown, a palette made again from the background the terminal answers, Ctrl-T leaving no line behind; and without a terminal: measuring and wrapping text, the names of keys in both encodings, lines that arrive at once taken as pasted, the Chat tab's folding, live text and transcript, the list that the other tabs are made of, the views read from a filled brain, the Context tab built from a request, and the palette itself (the levels of text, hues of one lightness, blocks that stay readable on a low-contrast theme, 256 colours and none);
-- the sandbox switch: `--no-bwrap` and `/bwrap`, a command reaching beyond the project, what the agent, the task and the screen are told, the system prompt staying the same across a switch, the windows closed by a switch, `/stop`, `/kill` and a kill of `carto` with the sandbox off.
+- the sandbox switch: `--no-bwrap`, the `bwrap` setting and `/bwrap`, a command reaching beyond the project, what the agent, the task and the screen are told, the system prompt staying the same across a switch, the windows closed by a switch, `/stop`, `/kill` and a kill of `carto` with the sandbox off; the `yolo` setting holding the default and a `/yolo` switch not remembered;
+- the model: `/model` listing what the server serves and switching by name or number, `/status` naming the model, a session resumed under a changed setting starting on the configured model instead of the stored one, a model the server does not serve refused at the start;
+- your hands on the context: `/shelve`, `/unshelve`, `/fold`, `/recall` and `/send` doing for you what the agent's `context` and window calls do, the Hands view of the Context tab with `f`, `x` and `a`, `e` on a message of yours or of the agent saying it anew (tool work refused) and rewriting the talk the context keeps, the tools part unfolding to a line per tool, and the Shells tab's Output view showing a window's kept lines.
 
 The stand-in is not a model. The tests show that the program does the right thing when the model behaves; they say nothing about how a model behaves.
 

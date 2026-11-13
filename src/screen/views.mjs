@@ -9,13 +9,14 @@
 // as the server got it and in the order the model reads it: the system prompt, the tools, then every message, with
 // the blocks Cartographer adds (the copy of the assessment and the graph, what a collapse kept, the state block,
 // the windows block) as parts of their own. Then what has come since: the reply and what its calls returned.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
 import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate } from "../context.mjs";
+import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
@@ -456,7 +457,7 @@ export function contextBar(parts, windowSize, cols) {
  * @param {ReturnType<ReturnType<typeof import("../engine.mjs").createEngine>["window"]>} sent  what the engine holds of the newest request
  * @param {{ windowSize: number, cols: number, writing?: any }} options  writing: the reply as far as it is written
  */
-export function contextView(sent, { windowSize, cols, writing }) {
+export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to the model in this run of carto yet. Say something, and what the agent sees shows here.")] };
 	const { payload } = sent;
 	const messages = payload.messages ?? [];
@@ -465,6 +466,8 @@ export function contextView(sent, { windowSize, cols, writing }) {
 	const rest = messages[0]?.role === "system" ? messages.slice(1) : messages;
 	if (messages[0]?.role === "system") add("system", { cat: "system", title: "System prompt", text: contentText(messages[0].content) });
 	const tools = payload.tools ?? [];
+	// The tools are one part, as the model reads them as one block; opened (Enter), it gives a line to each tool,
+	// so that one description can be read, copied, and opened in the editor (e, which finds where it is defined).
 	if (tools.length > 0) {
 		const text = tools.map((tool) => `── ${tool.function?.name ?? "?"} ──\n${tool.function?.description ?? ""}\nparameters: ${pretty(tool.function?.parameters ?? {})}`).join("\n\n");
 		add("tools", { cat: "tools", title: `Tools · ${tools.length}: ${tools.map((tool) => tool.function?.name).join(", ")}`, text, preview: "" }, { tokens: estimate(JSON.stringify(tools)) });
@@ -523,14 +526,30 @@ export function contextView(sent, { windowSize, cols, writing }) {
 	header.push([], [["Every part, in the order the model reads it. Enter opens one, + all of them.", "faint"]]);
 
 	const items = [];
+	const one = (part, extra = {}) => ({
+		key: part.key,
+		head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(part.text)}`, "faint"]],
+		body: part.text === "" ? "(empty)" : part.text,
+		copy: part.text,
+		...extra,
+	});
 	for (const [index, part] of parts.entries()) {
 		if (index === inRequest) items.push({ key: "since", plain: true, head: [["── since that request: what the next one will hold as well ──", "muted"]] });
-		items.push({
-			key: part.key,
-			head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(part.text)}`, "faint"]],
-			body: part.text === "" ? "(empty)" : part.text,
-			copy: part.text,
-		});
+		items.push(one(part, part.key === "tools" ? { folder: true } : {}));
+		// The tools part stands for the block the model reads; unfolded, a line for each tool of it.
+		if (part.key === "tools" && isOpen?.("tools")) {
+			for (const tool of tools) {
+				const name = tool.function?.name ?? "?";
+				const text = `${tool.function?.description ?? ""}\n\nparameters: ${pretty(tool.function?.parameters ?? {})}`;
+				items.push({
+					key: `tool:${name}`,
+					depth: 1,
+					head: [["· ", "muted"], [short(estimate(JSON.stringify(tool))).padStart(5), "muted"], [`  ${name}`, ""], [`  ${firstWords(tool.function?.description ?? "")}`, "faint"]],
+					body: text,
+					copy: text,
+				});
+			}
+		}
 	}
 	return { header, items, parts };
 }
@@ -562,3 +581,91 @@ export const isFolder = (path) => {
 		return false;
 	}
 };
+
+// ─── The user's hands on the context ────────────────────────────────────────
+
+/**
+ * The Context tab's fourth view: what the agent keeps with its `context` tool — the shelf and the reports —
+ * with the same operations offered to the user: a report folds out of view or comes back (f), a file comes off
+ * the shelf (x), a file is shelved (a, which puts /shelve in the prompt). The typed commands /fold, /recall,
+ * /shelve, /unshelve and /collapse do the same things from the prompt.
+ * @param {{ root: string, brainDir: string }} env
+ */
+export function handsView({ root, brainDir }) {
+	const store = loadContext(brainDir);
+	const header = [
+		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and the reports of finished work", "muted"]],
+		[["On a report: f folds it out of view, or brings it back. On the shelf: x takes a file off. a shelves one.", "faint"]],
+	];
+	const items = [];
+	items.push(heading("  The shelf · in view from the next collapse on, and read by every task at its start"));
+	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `context`, action shelve."));
+	for (const item of store.shelf) {
+		items.push({
+			key: `shelf:${item.path}`,
+			head: [[`${shelfLabel(item)}  `, ""], [`about ${short(estimate(shelfText(root, item)))} tokens`, "muted"]],
+			body: () => shelfText(root, item),
+			path: join(root, item.path),
+		});
+	}
+	items.push(heading("  The reports of finished work"));
+	if (store.records.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
+	for (const record of store.records) {
+		const folded = store.dropped.includes(record.id);
+		items.push({
+			key: `report:${record.id}`,
+			folded,
+			head: [
+				[`${record.id}  `, folded ? "muted" : "bold"],
+				[folded ? "· folded  " : "· in view  ", folded ? "muted" : "ok"],
+				[recordLine(record), folded ? "faint" : ""],
+			],
+			body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
+		});
+	}
+	return { header, items };
+}
+
+/**
+ * Where a tool of the context is defined: cartographer's own source, by its `name: "…"` line. `e` on a tool
+ * part of the Context tab opens it there.
+ * @returns {{ file: string, line: number } | undefined}
+ */
+export function toolSource(name) {
+	const dir = fileURLToPath(new URL("../tools", import.meta.url));
+	try {
+		for (const entry of readdirSync(dir).sort()) {
+			if (!entry.endsWith(".mjs")) continue;
+			const file = join(dir, entry);
+			const text = readFileSync(file, "utf8");
+			const at = text.indexOf(`name: "${name}"`);
+			if (at >= 0) return { file, line: text.slice(0, at).split("\n").length };
+		}
+	} catch {
+		// The folder is not there, or cannot be read: no source to open.
+	}
+	return undefined;
+}
+
+/** The shell windows as a terminal emulator sees them: the newest lines of a window, the newest at the bottom. */
+export function shellsOutView({ session }, name) {
+	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+	const pick = all.find((win) => win.name === name) ?? all.at(-1);
+	if (pick === undefined) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
+	const lines = (session.windows?.linesFrom(pick.name, 0) ?? []).slice(-400);
+	const what =
+		pick.state === "busy"
+			? [["busy", "warn"], [`  $ ${pick.command ?? ""}`, "bold"], [pick.asks ? "  · may be waiting for input" : "", "warn"]]
+			: pick.state === "gone"
+				? [["gone", "err"], [`  ${pick.why ?? ""}`, "muted"]]
+				: [["free", "ok"]];
+	const header = [
+		[["Output of ", "bold"], [pick.name, "bold"], ["  ·  ", "muted"], ...what, [`${pick.cwd && pick.cwd !== "." ? `  in ${pick.cwd}/` : ""}${pick.sandbox === false ? "  · no sandbox" : pick.network ? "  · network" : ""}`, "muted"]],
+		[["The newest lines, as the window keeps them; the view follows on its own.", "faint"]],
+		[["Enter goes back to the list; /send " + pick.name + " line types into it.", "faint"]],
+	];
+	const items = [
+		{ key: "term", plain: true, head: lines.length === 0 ? [["  (nothing has been printed yet)", "muted"]] : lines.map((line) => [line || " ", ""]) },
+	];
+	return { header, items };
+}
