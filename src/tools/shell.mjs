@@ -1,8 +1,8 @@
-// The `shell` and `window` tools: commands in shell windows (src/windows.mjs).
+// The `shell` tool: commands in shell windows (src/windows.mjs).
 //
-// `shell` types a command into a named window and waits a while for it. `window`
-// deals with a window that is open: read it, wait for it, send its program a line,
-// stop what runs there, close it.
+// `shell` types a command into a named window and waits a while for it (action run,
+// the default). Its other actions deal with a window that is open: read it, wait for
+// it, send its program a line, stop what runs there, close it.
 //
 // Typing into a window, a command or input, is for a task that carries out a change
 // item of the authorized plan; src/harness.mjs refuses everyone else before this code
@@ -13,12 +13,14 @@
 // When the user has switched the sandbox off, a new window runs on the machine itself.
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
-import { REFUSALS } from "../prompt.mjs";
+import { describe, REFUSALS } from "../prompt.mjs";
 import { SandboxError } from "../sandbox.mjs";
 import { ago, took } from "../time.mjs";
 import { WAIT_MAX, WindowError } from "../windows.mjs";
 
-export const WINDOW_ACTIONS = ["read", "wait", "send", "stop", "close"];
+export const SHELL_ACTIONS = ["run", "read", "wait", "send", "stop", "close"];
+/** The actions that only deal with a window that is open. */
+export const WINDOW_ACTIONS = SHELL_ACTIONS.slice(1);
 /** The window a command goes to when none is named. */
 export const MAIN_WINDOW = "main";
 
@@ -38,9 +40,9 @@ export function statusLine(result, { noNetwork = false } = {}) {
 		case "done":
 			return `exit ${result.exit} · ${after} · window ${name}${place}${result.exit !== 0 && noNetwork ? " · this window has no network" : ""}`;
 		case "time":
-			return `still running after ${after} in window ${name}: the command keeps going there, and you can go on with other work. The windows block at the end of each request shows how it is doing. \`window\` waits for it, sends it input, stops it or closes it. \`shell\` with another window name runs something beside it.`;
+			return `still running after ${after} in window ${name}: the command keeps going there, and you can go on with other work. The windows block at the end of each request shows how it is doing. The same tool's actions wait for it, send it input, stop it or close it. A run with another window name runs something beside it.`;
 		case "asks":
-			return `still running after ${after} in window ${name}. Its last line has no line end, so the program may be waiting for input: \`window\` with send types a line into it.`;
+			return `still running after ${after} in window ${name}. Its last line has no line end, so the program may be waiting for input: action send types a line into it.`;
 		case "quiet":
 			return `this is what the program in window ${name} printed, and it has been quiet for a second since; it is still running`;
 		case "until":
@@ -82,78 +84,54 @@ const waitOf = (given, fallback) => Math.min(Number.isFinite(given) && given >= 
 export function shellTool({ config, runner, windows, runOf }) {
 	return defineTool({
 		name: "shell",
-		description: [
-			"Type a command into a shell window of the project and get what it printed and its exit status. Use it to run and test what you wrote, and to move or delete files.",
-			`A window is a bash that stays open under a name. Its folder and its environment stay from one command to the next, so \`cd\` and \`export\` last. Leave \`window\` out for the window ${MAIN_WINDOW}.`,
-			`The call waits for the command to end, at most \`wait\` seconds. A command that has not ended by then keeps running in its window, and the call returns what it printed so far. So start a server, a watcher or a long build in a window of its own name with a small \`wait\`, go on with other work, and watch it in the windows block at the end of each request. \`window\` waits for it, answers it, stops it or closes it.`,
-			"A window stays open after your task ends, with what runs in it. Say in your report which windows you left running and why; close the ones nobody needs.",
-			"Unless your brief says the sandbox is off, a window is a sandbox: it can write inside the project directory and nowhere else, `.git` and `.atlas` there are read-only, the user's home folder is not visible, and there is no network unless the plan item is marked network.",
-			"`exit` in a command ends the window's own shell and so closes the window; to give a status, end with `false` or `(exit 3)`.",
-			"Long output is shown as its start and its end; pipe through grep, head or tail to pick what you need.",
-			"Files that git ignores are not in Cartographer's checkpoints, so deleting or overwriting one cannot be undone.",
-		].join(" "),
+		description: describe("shell"),
 		parameters: obj({
-			command: str({ description: "The command line, as you would type it in bash" }),
-			window: opt(str({ description: `Name of the window to type it into, a short word such as server or tests. A name that is not open yet opens a new window. Default: ${MAIN_WINDOW}.` })),
-			wait: opt(int({ description: `Seconds to wait for the command to end before returning. Default ${config.shellWait}, at most ${WAIT_MAX}. 0 returns at once.` })),
-		}),
-		// The output is bounded by src/sandbox.mjs, which keeps its end. These limits are above that bound, so the
-		// harness never cuts a result, and with it the line that says how the command ended.
-		outputLimits: { maxBytes: 64_000, maxLines: 1000 },
-		executionMode: "sequential",
-		// Not run a second time after a crash: the command may have done half its work. The task is told it was interrupted.
-		replay: "unsafe",
-		execute: async (args, api, callContext) => {
-			const run = runOf(api.conversationId);
-			if (run?.mode !== "change") return refuse(REFUSALS.lookTaskRuns);
-			if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available.why));
-			if (typeof args.command !== "string" || args.command.trim() === "") return refuse("`command` is empty: give the command line to run.");
-			const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
-			let result;
-			try {
-				result = await windows.run(name, args.command, { network: run.network === true, waitMs: waitOf(args.wait, config.shellWait) * 1000, signal: callContext.abortSignal });
-			} catch (error) {
-				if (error instanceof WindowError) return refuse(error.message);
-				if (error instanceof SandboxError) return refuse(REFUSALS.noSandbox(error.message));
-				throw error;
-			}
-			const failed = ((result.reason === "done" || result.reason === "closed") && result.exit !== 0) || result.reason === "stopped";
-			return {
-				isError: failed,
-				output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]` }],
-				details: details(result),
-			};
-		},
-	});
-}
-
-/**
- * @param {{ config: { shellWait: number }, windows: ReturnType<typeof import("../windows.mjs").createWindows>, runOf: (conversationId: string) => { mode: string, network?: boolean } | undefined }} input
- */
-export function windowTool({ config, windows, runOf }) {
-	return defineTool({
-		name: "window",
-		description: [
-			"Deal with a shell window that `shell` opened. You need no call to see how a window is doing: every request ends with the windows as they are at that moment, between <windows> and </windows>.",
-			"read: more of the window's output than that block shows. wait: return when its command ends, when a line containing `until` appears, or after `seconds`. send: type `text` as a line into the program that is running there, for a program that asks a question or reads commands. stop: press Ctrl-C. close: end the window and everything running in it.",
-			"read, wait, stop and close work for the main agent and for every task. send is for a change task, like `shell`.",
-		].join(" "),
-		parameters: obj({
-			window: str({ description: "The window's name" }),
-			action: oneOf(WINDOW_ACTIONS, { description: "What to do with it" }),
+			action: opt(
+				oneOf(SHELL_ACTIONS, {
+					description:
+						"run (the default): type `command` into the window. read: more of its output. wait: return when its command ends, prints `until`, or after `seconds`. send: type `text` as a line into the program that runs there. stop: press Ctrl-C. close: end the window and everything in it.",
+				}),
+			),
+			command: opt(str({ description: "run: the command line, as you would type it in bash" })),
+			window: opt(str({ description: `Name of the window, a short word such as server or tests. A name that is not open yet opens a new window. Default: ${MAIN_WINDOW}.` })),
+			wait: opt(int({ description: `run: seconds to wait for the command to end before returning. Default ${config.shellWait}, at most ${WAIT_MAX}. 0 returns at once.` })),
 			text: opt(str({ description: "send: the line to type. The line end is added." })),
 			seconds: opt(int({ description: `wait: the longest to wait. Default ${config.shellWait}, at most ${WAIT_MAX}. send: how long to wait for the program's answer, default 5.` })),
 			until: opt(str({ description: "wait: return as soon as a new line of output contains this text, such as the line a server prints when it is ready." })),
 			lines: opt(int({ description: "read: how many lines, counted from the end. Default 40, at most 400." })),
 		}),
+		// The output is bounded by src/sandbox.mjs, which keeps its end. These limits are above that bound, so the
+		// harness never cuts a result, and with it the line that says how the command ended.
 		outputLimits: { maxBytes: 64_000, maxLines: 1000 },
 		executionMode: "sequential",
-		// After a restart no window is left, so a call that runs again finds none and says so.
-		replay: "safe",
+		// Not run a second time after a crash: the command may have done half its work. For the window actions a
+		// re-run would find no window after a restart and say so, but one setting covers both.
+		replay: "unsafe",
 		execute: async (args, api, callContext) => {
-			const name = typeof args.window === "string" ? args.window.trim() : "";
-			const action = args.action;
-			if (!WINDOW_ACTIONS.includes(action)) return refuse(`\`action\` is one of ${WINDOW_ACTIONS.join(", ")}.`);
+			const action = SHELL_ACTIONS.includes(args.action) ? args.action : "run";
+			if (action === "run") {
+				const run = runOf(api.conversationId);
+				if (run?.mode !== "change") return refuse(REFUSALS.lookTaskRuns);
+				if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available.why));
+				if (typeof args.command !== "string" || args.command.trim() === "") return refuse("`command` is empty: give the command line to run.");
+				const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
+				let result;
+				try {
+					result = await windows.run(name, args.command, { network: run.network === true, waitMs: waitOf(args.wait, config.shellWait) * 1000, signal: callContext.abortSignal });
+				} catch (error) {
+					if (error instanceof WindowError) return refuse(error.message);
+					if (error instanceof SandboxError) return refuse(REFUSALS.noSandbox(error.message));
+					throw error;
+				}
+				const failed = ((result.reason === "done" || result.reason === "closed") && result.exit !== 0) || result.reason === "stopped";
+				return {
+					isError: failed,
+					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]` }],
+					details: details(result),
+				};
+			}
+			const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : "";
+			if (name === "") return refuse("`window` is missing: name the window to deal with.");
 			const out = (result, isError = false, extra = {}) => ({
 				isError,
 				output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[${statusLine(result)}]` }],
@@ -190,7 +168,7 @@ export function windowTool({ config, windows, runOf }) {
 					if (!result.ended) {
 						return {
 							isError: true,
-							output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[the command in window ${name} did not end on Ctrl-C. \`window\` with close ends the window and everything in it.]` }],
+							output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[the command in window ${name} did not end on Ctrl-C. \`shell\` with action close ends the window and everything in it.]` }],
 							details: details(result, { action }),
 						};
 					}

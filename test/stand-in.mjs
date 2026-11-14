@@ -83,7 +83,7 @@ function lookCall(directive) {
 		const options = Object.fromEntries((window[1] ?? "").split(",").filter(Boolean).map((pair) => pair.split("=")));
 		const [, , name, action, rest] = window;
 		return {
-			name: "window",
+			name: "shell",
 			args: {
 				window: name,
 				action,

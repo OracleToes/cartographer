@@ -24,7 +24,7 @@ import { loadTop, pin } from "./top.mjs";
 import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
-import { shellTool, windowTool } from "./tools/shell.mjs";
+import { shellTool } from "./tools/shell.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
@@ -34,7 +34,7 @@ const PROVIDER = "local";
 const LOOK = new Set(["read", "search", "list"]);
 const CHANGE = new Set(["write", "edit"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
-const types = (call) => call.name === "shell" || (call.name === "window" && call.arguments?.action === "send");
+const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === "run" || call.arguments?.action === "send");
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
 // The book tool guards its own books inside the tool (a task may use its context operations);
 // the rest of the main agent's tools are wrapped here.
@@ -239,7 +239,6 @@ export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, 
 		...lookTools(root),
 		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
 		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-		windowTool({ config, windows, runOf: (conversationId) => runs.get(conversationId) }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.

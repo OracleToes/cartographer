@@ -1414,7 +1414,7 @@ const NO_SANDBOX = () => (findSandbox().ok ? undefined : `no sandbox on this mac
 const RUN_ITEM = { action: "add", mode: "change", text: "Run things" };
 const NET_ITEM = { action: "add", mode: "change", network: true, text: "Fetch things" };
 /** The text of every result the server was sent for a call of tool `name`, in order, each once. */
-function resultsOf(server, name, book) {
+function resultsOf(server, name, book, action) {
 	const seen = new Map();
 	for (const request of server.requests) {
 		const calls = new Map();
@@ -1423,11 +1423,12 @@ function resultsOf(server, name, book) {
 			if (message.role === "tool") {
 				const fn = calls.get(message.tool_call_id);
 				if (fn?.name !== name) continue;
-				if (book !== undefined) {
-					let args = {};
-					try { args = JSON.parse(fn.arguments ?? "{}"); } catch {}
-					if (args.book !== book) continue;
-				}
+				let args = {};
+				try { args = JSON.parse(fn.arguments ?? "{}"); } catch {}
+				if (book !== undefined && args.book !== book) continue;
+				// A window action of the one shell tool: everything but run, the default.
+				if (action === "window" && (args.action === undefined || args.action === "run")) continue;
+				if (action !== undefined && action !== "window" && (args.action ?? "run") !== action) continue;
 				seen.set(message.tool_call_id, messageText(message));
 			}
 		}
@@ -1843,7 +1844,7 @@ test("shell: only a change task of the authorized plan types into a window; the 
 		assert.match(outputs[2], new RegExp(`^${root}/src\\n\\[exit 0`), "and the next command starts there");
 		assert.match(outputs[3], /^before\n\[still running after 1\.0 s in window main: the command keeps going there, and you can go on with other work\. The windows block at the end of each request shows how it is doing\. `window` waits for it, sends it input, stops it or closes it\. `shell` with another window name runs something beside it\.\]$/, "a command that takes longer than the call waits: it keeps running");
 		assert.match(outputs[4], /^Refused: Window main is busy with `echo before; sleep 30; echo after` \(running \d s\)\. To run this beside it, give `shell` another `window` name\./, "the window is busy meanwhile");
-		assert.match(resultsOf(server, "window")[0], /^\^C\n\[stopped with Ctrl-C: exit 130 · window main is free\]$/, "`window` stops it");
+		assert.match(resultsOf(server, "shell", undefined, "window")[0], /^\^C\n\[stopped with Ctrl-C: exit 130 · window main is free\]$/, "`window` stops it");
 		assert.match(outputs[5], /^to-stderr\n\[exit 3 · \d+\.\d s · window main, in src\/ · this window has no network\]$/, "errors are part of the output; a failure names the missing network");
 		assert.match(outputs[6], /^1\n2\n[\s\S]*\n\[\d+ lines left out here: the output was 6000 lines\.[^\n]*\]\n[\s\S]*\n5999\n6000\n\[exit 0/, `long output is cut in the middle:\n${outputs[6].slice(0, 300)} … ${outputs[6].slice(-300)}`);
 		assert.equal(outputs[6].split("\n").length, HEAD_LINES + TAIL_LINES + 2, "and bounded, with the line on how it ended still there");
@@ -1909,7 +1910,7 @@ test("windows: the main agent and every task see the windows at the end of each 
 			),
 		});
 		ok(result, "a session with windows");
-		const answers = resultsOf(server, "window").filter((text) => !text.includes("Tool call blocked"));
+		const answers = resultsOf(server, "shell", undefined, "window").filter((text) => !text.includes("Tool call blocked"));
 		assert.equal(answers[0], 'Refused: There is no window "main". No window is open: `shell` opens one when it runs a command.', "before any window is open");
 
 		// The task's result says what it left running.
@@ -2185,7 +2186,7 @@ test("windows: a message from the user ends a wait, so that the agent reads it",
 			[3, "/quit"],
 		]);
 		if (result === undefined) return "python3 is needed for a terminal";
-		const waited = resultsOf(server, "window").at(-1);
+		const waited = resultsOf(server, "shell", undefined, "window").at(-1);
 		assert.match(waited, /^\(no new output\)\n\[the wait ended after \d\.\d s because the user wrote a message; the command is still running in window bg\]$/, `the wait ends early and says why:\n${waited}`);
 		assert.match(result.screen, /▸ window bg {2}wait\n[\s\S]*\n {2}→ still running after \d\.\d s(?: · no sandbox)?\n/, "the screen shows the wait, then how it ended");
 		has(result.screen, "\nare you there\n", "and the agent answers the message");
@@ -2322,7 +2323,7 @@ test("bwrap: with the sandbox off a command reaches beyond the project; the agen
 		has(result.stdout, "sandbox: OFF · tasks run commands directly on this machine", "the header says that the sandbox is off");
 		has(result.stdout, "● plan  authorized by you: 1 change item may run · the sandbox is OFF: their commands run directly on this machine\n", "so does the authorization");
 		assert.equal(readFileSync(outside, "utf8"), "beyond\n", "a command wrote outside the project");
-		const outputs = resultsOf(server, "shell");
+		const outputs = resultsOf(server, "shell", undefined, "run");
 		assert.match(outputs[0], /^secret=TOKEN-456\n\[exit 0 · /, "it runs with the user's own environment");
 		assert.match(outputs[1], /^before\n\[still running after 1\.0 s in window main: /, "a command that takes longer keeps running here too");
 		assert.match(outputs[2], /^\(no output\)\n\[exit 3 · \d+\.\d s · window main\]$/, "a failure, and no missing network is named");
@@ -2560,9 +2561,9 @@ test("terminal: one line per tool call", () => {
 	assert.equal(describeCall({ name: "book", arguments: { book: "plan", ops: [{ action: "add", mode: "change" }, { action: "done", id: "p2" }, { action: "clear" }] } }), "plan add change · done p2 · clear");
 	assert.equal(describeCall({ name: "shell", arguments: { command: "python -m pytest\n  -q", window: "tests" } }), "$ python -m pytest -q  (window tests)");
 	assert.equal(describeCall({ name: "shell", arguments: { command: "ls", window: "main" } }), "$ ls");
-	assert.equal(describeCall({ name: "window", arguments: { window: "server", action: "wait", until: "ready" } }), 'window server  wait  until "ready"');
-	assert.equal(describeCall({ name: "window", arguments: { window: "repl", action: "send", text: "yes" } }), 'window repl  send  "yes"');
-	assert.equal(describeCall({ name: "window", arguments: { window: "server", action: "close" } }), "window server  close");
+	assert.equal(describeCall({ name: "shell", arguments: { window: "server", action: "wait", until: "ready" } }), 'window server  wait  until "ready"');
+	assert.equal(describeCall({ name: "shell", arguments: { window: "repl", action: "send", text: "yes" } }), 'window repl  send  "yes"');
+	assert.equal(describeCall({ name: "shell", arguments: { window: "server", action: "close" } }), "window server  close");
 	const shellResult = (details, text = "x", isError = false) => describeResult({ role: "toolResult", toolName: "shell", isError, details, content: [{ type: "text", text }] });
 	assert.equal(shellResult({ exit: 0, seconds: 0.4, last: "3 passed" }), "exit 0 · 0.4 s · 3 passed");
 	assert.equal(shellResult({ exit: 1, seconds: 12.3, last: "" }, "x", true), "exit 1 · 12 s");
@@ -2570,8 +2571,8 @@ test("terminal: one line per tool call", () => {
 	assert.equal(shellResult({ running: true, asks: true, seconds: 1.6, last: "name?" }), "may be waiting for input after 1.6 s · name?");
 	assert.equal(shellResult({ closed: true, exit: 3, seconds: 0.1, last: "" }, "x", true), "exit 3 · the window closed");
 	assert.equal(shellResult({ exit: 0, seconds: 0.2, sandbox: false, last: "ok" }), "exit 0 · 0.2 s · no sandbox · ok");
-	assert.equal(describeResult({ role: "toolResult", toolName: "window", details: { window: "server", action: "read", running: true, seconds: 0, lines: 12, last: "tick" }, content: [{ type: "text", text: "x" }] }), "12 lines · still running · tick");
-	assert.equal(describeResult({ role: "toolResult", toolName: "window", details: { window: "server", action: "close", closed: true }, content: [{ type: "text", text: "Window server is closed." }] }), "closed");
+	assert.equal(describeResult({ role: "toolResult", toolName: "shell", details: { window: "server", action: "read", running: true, seconds: 0, lines: 12, last: "tick" }, content: [{ type: "text", text: "x" }] }), "12 lines · still running · tick");
+	assert.equal(describeResult({ role: "toolResult", toolName: "shell", details: { window: "server", action: "close", closed: true }, content: [{ type: "text", text: "Window server is closed." }] }), "closed");
 	assert.equal(shellResult(undefined, "<harness>\n[error] Tool shell was aborted\n</harness>", true), "stopped");
 	assert.equal(shellResult(undefined, "<harness>\n[error] Tool shell was interrupted by a restart and may have partially run\n</harness>", true), "cut off by a restart, and not run again");
 	assert.equal(shellResult(undefined, "Refused: `command` is empty: give the command line to run.", true), "refused: `command` is empty: give the command line to run.");
@@ -3556,7 +3557,7 @@ test("wake: a window wake ends the main agent's wait on a window, and says why",
 		ok(result, "a session with a window wake");
 		assert.ok(Date.now() - started < 20_000, "the wait ended long before its 25 seconds");
 		has(result.stdout, '● wake  + w1 when window srv prints a line with "ERROR", once · the server failed\n', "what was set");
-		const waited = resultsOf(server, "window")[0];
+		const waited = resultsOf(server, "shell", undefined, "window")[0];
 		assert.match(waited, /\[the wait ended after \d(?:\.\d)? s because your wake w1 fired \(when window srv prints a line with "ERROR"\): ERROR disk full; the command is still running in window srv/, `the wait says what ended it:\n${waited}`);
 		has(waited, "all fine\n", "a line without the text did not end it");
 		const next = server.requests.find((request) => (stateOf(request) ?? "").includes("Fired during this turn"));
@@ -3581,7 +3582,7 @@ test("wake: a wake that fires while a task runs is held until the task has repor
 			input: lines(planMessage(RUN_ITEM), "/approve", 'wake: {"action":"set","note":"look at the queue","every":1} || task(p1): shell[window=bg,wait=0]: sleep 4; echo through\\nwindow[seconds=20]: bg wait'),
 		});
 		ok(result, "a session with a wake during a task");
-		const waited = resultsOf(server, "window")[0];
+		const waited = resultsOf(server, "shell", undefined, "window")[0];
 		assert.match(waited, /^through\n\[exit 0 · \d\.\d s · window bg/, `the task waited until its command ended:\n${waited}`);
 		const fired = "Wake w1 (every 1 s): its time came. That was its last time, so it is removed. Your note: look at the queue";
 		has(result.stdout, `◆ ${fired}  (the agent is working: it reads this at its next step)\n`, "the screen shows the firing when it happens");
@@ -3628,7 +3629,7 @@ test("wake: a task can neither set a wake nor sleep; what the tool refuses", asy
 			input: lines('task: wake: {"action":"set","note":"n","every":60} +++ sleep', 'wake: {"action":"set","note":"too soon","every":5}', 'wake: {"action":"remove","id":"w3"}', 'wake: {"action":"set","every":60}', 'wake: {"action":"remove"}', 'wake: {"action":"set","note":"in a minute","every":60} || wake: {"action":"set","note":"the sources","path":"src","times":0}', 'wake: {"action":"remove","id":"all"}'),
 		});
 		ok(result, "a session with refused wakes");
-		has(resultsOf(server, "wake")[0], "Tool call blocked: Wakes belong to the main agent. If something should be watched after this task, say what in your report. To wait for a command inside this task, use `window` with wait.");
+		has(resultsOf(server, "wake")[0], "Tool call blocked: Wakes belong to the main agent. If something should be watched after this task, say what in your report. To wait for a command inside this task, use `shell` with action wait.");
 		has(resultsOf(server, "sleep")[0], "Tool call blocked: A task does not sleep. You are still the task. When its work is finished, call `return` with your report; until then, go on with the brief.");
 		has(result.stdout, "● wake  not changed: `every` is 5; it is a whole number of seconds from 60 to 604800. A wake costs a whole turn, so 1 m is the least.\n", "the default least interval is a minute, and the screen shows a refusal");
 		has(result.stdout, "● wake  not changed: No wake is set.\n", "removing what is not there");
@@ -4826,7 +4827,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 		assert.ok(server.asides.length >= 3, `the question was sent: ${server.asides.length} requests on the side`);
 		const questions = server.asides.filter((aside) => aside.max_tokens === 16);
 		for (const aside of questions) assert.equal(aside.tool_choice, "none", "every question says that no tool can be the answer");
-		for (const aside of questions) assert.ok(aside.tools.length === 15 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
+		for (const aside of questions) assert.ok(aside.tools.length === 14 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
 		assert.deepEqual(questions.map((aside) => aside.response_format !== undefined), [true, false, false], `the form of the answer is tried once, then left out:\n${JSON.stringify(questions.map((aside) => Object.keys(aside)))}`);
 		assert.equal(result.stdout.split("the model server refused the form the answer must have").length - 1, 1, `the user is told once:\n${result.stdout}`);
 		has(result.stdout, "does it need to write something down first? no · ", "and the question is answered all the same");
@@ -4857,7 +4858,7 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.ok(existsSync(join(root, ".atlas", "reports", "t1.md")), "the report is still on disk");
 		assert.equal(store.next, 2, "and ids are not reused");
 		// The tools: one more, and each a flat object (a schema with a choice at its root breaks tool calls on llama.cpp with Qwen).
-		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "atlas", "book", "chat", "edit", "list", "read", "return", "search", "shell", "sleep", "task", "wake", "window", "write"]);
+		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "atlas", "book", "chat", "edit", "list", "read", "return", "search", "shell", "sleep", "task", "wake", "write"]);
 		for (const tool of fresh.tools) assert.equal(tool.function.parameters.anyOf ?? tool.function.parameters.oneOf, undefined, `${tool.function.name} is a flat object`);
 		const book = fresh.tools.find((tool) => tool.function.name === "book").function.parameters;
 		assert.equal(book.type, "object");
@@ -5417,7 +5418,7 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		const context = at("What the main agent sees");
 		assert.match(context, /\nWhat the main agent sees {2}· {2}about [\d.]+k of 100k tokens \(\d+%\) {2}· {2}the server counted [\d.]+k\nrequest \d+ of this run, sent \d\d:\d\d \([^)]*\), as the server got it · part sizes are estimates\n/, `the Context tab says whose window it is, how full, and which request it shows:\n${context}`);
 		assert.match(context, /\n■+□+\n■ System prompt \.+ +[\d.]+k +[\d.]+% +■ Tools \.+ +[\d.]+k +[\d.]+%/, `then the window as one row, and what each part of it is:\n${context}`);
-		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 15: /, `then every part as one line, folded:\n${context}`);
+		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 14: /, `then every part as one line, folded:\n${context}`);
 		assert.match(at("You are in one of two roles at any time."), /\n▾ ■ +[\d.]+k {2}System prompt/, "+ opens every part: the tab is then the whole window, word for word");
 		const end = at("since that request");
 		has(end, "── since that request: what the next one will hold as well ──", "the reply and what its calls returned follow what was sent");

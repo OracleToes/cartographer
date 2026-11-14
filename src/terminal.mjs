@@ -77,11 +77,13 @@ export function describeCall(call) {
 	switch (call.name) {
 		case "task":
 			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, 100)}`;
-		case "shell":
+		case "shell": {
+			// A command typed into a window, or one of the window actions; run is the default and needs no name of its own.
+			if (args.action !== undefined && args.action !== "run") {
+				const more = args.action === "send" ? `  ${oneLine(JSON.stringify(args.text ?? ""), 60)}` : args.action === "wait" && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), 50)}` : "";
+				return `window ${oneLine(args.window, 30)}  ${args.action}${more}`;
+			}
 			return `$ ${oneLine(args.command, 100)}${typeof args.window === "string" && args.window !== "" && args.window !== "main" ? `  (window ${oneLine(args.window, 30)})` : ""}`;
-		case "window": {
-			const more = args.action === "send" ? `  ${oneLine(JSON.stringify(args.text ?? ""), 60)}` : args.action === "wait" && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), 50)}` : "";
-			return `window ${oneLine(args.window, 30)}  ${args.action ?? "?"}${more}`;
 		}
 		case "write":
 			return `write ${oneLine(args.path, 90)}`;
@@ -125,7 +127,7 @@ export function describeCall(call) {
 export function describeResult(message) {
 	const text = textOf(message);
 	// A command that ran: how it ended, how long it took, and the last thing it printed.
-	if ((message.toolName === "shell" || message.toolName === "window") && message.details?.seconds !== undefined) {
+	if (message.toolName === "shell" && message.details?.seconds !== undefined) {
 		const { exit, running, asks, stopped, closed, seconds, last, sandbox, action, lines } = message.details;
 		const time = `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
 		const how = closed
@@ -141,7 +143,7 @@ export function describeResult(message) {
 							: "nothing is running there";
 		return `${how}${sandbox === false ? " · no sandbox" : ""}${last ? ` · ${oneLine(last, 70)}` : ""}`;
 	}
-	if (message.toolName === "window" && message.details?.closed) return "closed";
+	if (message.details?.window !== undefined && message.details?.closed) return "closed";
 	// What a task did about its own context, in the tool's own words.
 	if (message.toolName === "book" && message.details?.book === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), 110);
 	// The harness's own words for a call the user stopped, or one that a restart cut off.
@@ -392,11 +394,11 @@ export async function runTerminal(session, options) {
 					if (depth === 0 && call.name === "task" && before !== undefined) afterCall.set(before.id, `${bold("▸")} ${text}`);
 					else if (depth === 0 && call.name === "task") line(`${bold("▸")} ${text}`);
 					// So is a wait of the main agent for a window: it can take minutes.
-					else if (depth === 0 && call.name === "window" && call.arguments?.action === "wait") {
+					else if (depth === 0 && call.name === "shell" && call.arguments?.action === "wait") {
 						line(`${bold("▸")} ${text}`);
 						pendingCalls.set(call.id, { text, shown: true });
 					}
-					else if (depth > 0 && (call.name === "shell" || (call.name === "window" && ["wait", "send"].includes(call.arguments?.action))) && !commandShown) {
+					else if (depth > 0 && (call.name === "shell" && ["run", "send", "wait"].includes(call.arguments?.action ?? "run")) && !commandShown) {
 						commandShown = true;
 						line(`${bar}${text}`);
 						pendingCalls.set(call.id, { text, shown: true });
