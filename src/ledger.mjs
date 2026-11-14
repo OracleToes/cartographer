@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ago, since } from "./time.mjs";
+import { applyEntryOp, flat } from "./rows.mjs";
 
 export const KINDS = ["goal", "question", "note"];
 const PREFIX = { goal: "g", question: "q", note: "n" };
@@ -25,7 +26,6 @@ export class LedgerError extends Error {}
 const ledgerPath = (brainDir) => join(brainDir, "carto-ledger.json");
 const empty = () => ({ version: 1, next: 1, items: [] });
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const flat = (text) => String(text).replace(/\s+/g, " ").trim();
 
 /**
  * Before the file had its own name, Cartographer kept its ledger in `ledger.json`, a name the Orchestrator
@@ -88,23 +88,6 @@ export function saveLedger(brainDir, ledger) {
 
 export const open = (ledger, kind) => ledger.items.filter((item) => item.status === "open" && item.archived !== true && (kind === undefined || item.kind === kind));
 
-function find(ledger, id) {
-	const wanted = flat(id ?? "");
-	const item = ledger.items.find((entry) => entry.id === wanted);
-	if (item === undefined) {
-		const ids = open(ledger).map((entry) => entry.id);
-		throw new LedgerError(`There is no entry ${wanted || "(no id given)"}. Open entries: ${ids.length > 0 ? ids.join(", ") : "none"}.`);
-	}
-	return item;
-}
-
-function checked(value, what) {
-	if (typeof value !== "string" || value.trim() === "") throw new LedgerError(`${what} is required and was left out or empty.`);
-	const text = flat(value);
-	if (text.length > TEXT_MAX) throw new LedgerError(`${what} is ${text.length} characters; the limit is ${TEXT_MAX}. Say it in one line, or split it into two entries.`);
-	return text;
-}
-
 /** An entry's age is said once it is an hour old: before that it tells the agent nothing. */
 const AGE_FROM = 3_600_000;
 
@@ -119,57 +102,48 @@ export function entryLine(item, now) {
 	return `${item.id}  ${item.text}${doneWhen}${outcome}${age !== undefined && age >= AGE_FROM ? ` · added ${ago(age)}` : ""}`;
 }
 
+/** How this book speaks: see src/rows.mjs. */
+const LEDGER_SPEC = {
+	Error: LedgerError,
+	kinds: KINDS,
+	prefix: PREFIX,
+	textMax: TEXT_MAX,
+	addTextLabel: "`text` (the entry itself, one line in your words)",
+	textRequired: (what) => `${what} is required and was left out or empty.`,
+	textTooLong: (what, length) => `${what} is ${length} characters; the limit is ${TEXT_MAX}. Say it in one line, or split it into two entries.`,
+	itemsMax: OPEN_MAX,
+	limitCount: (ledger) => open(ledger).length,
+	limitText: () => `The ledger has ${OPEN_MAX} open entries, which is its limit. Close or remove some before adding more.`,
+	findId: (id) => flat(id ?? ""),
+	findIds: (ledger) => open(ledger).map((entry) => entry.id),
+	findText: (wanted, ids) => `There is no entry ${wanted || "(no id given)"}. Open entries: ${ids.length > 0 ? ids.join(", ") : "none"}.`,
+	show: (item) => `${item.kind} ${entryLine(item)}`,
+	closedWord: "closed",
+	alreadyText: (id) => `${id} was already closed.`,
+	outcome: (op, checked) => (op.text !== undefined && flat(op.text) !== "" ? checked(op.text, "`text` (how it ended)") : undefined),
+	markClosed: true,
+	doneFollow: (item) =>
+		item.kind === "goal" ? " Tell the user what was achieved against its done-when line, and ask whether that is what they wanted." : "",
+	addFields: (op, kind, checked) =>
+		kind === "goal" ? { doneWhen: checked(op.done_when, "`done_when` (how you and the user will know the goal is reached)") } : {},
+	addBefore: false,
+	editFields: (item, op, hasText, checked) => {
+		const hasDoneWhen = op.done_when !== undefined && flat(op.done_when) !== "";
+		if (!hasText && !hasDoneWhen) throw new LedgerError("An edit needs `text`, `done_when`, or both: the new wording.");
+		if (hasDoneWhen && item.kind !== "goal") throw new LedgerError(`${item.id} is a ${item.kind}; only a goal has a done-when line.`);
+		return hasDoneWhen ? { doneWhen: checked(op.done_when, "`done_when`") } : {};
+	},
+	editTextRequired: false,
+	reorder: false,
+	unknownAction: (op) => `Unknown action ${JSON.stringify(op?.action)}; the actions are add, done, edit, remove.`,
+};
+
 /**
- * Apply one operation to `ledger` (changed in place).
- * @returns {{ line: string, shown: string }} what the agent is told, and what the user is shown
+ * Apply one operation to the ledger (changed in place).
+ * @returns {{ line: string, shown: string }} what the agent is told and what the user is shown
  */
 export function applyOp(ledger, op, now) {
-	switch (op?.action) {
-		case "add": {
-			if (!KINDS.includes(op.kind)) throw new LedgerError(`\`kind\` is ${JSON.stringify(op.kind)}; it is one of ${KINDS.join(", ")}.`);
-			const text = checked(op.text, "`text` (the entry itself, one line in your words)");
-			const item = { id: `${PREFIX[op.kind]}${ledger.next}`, kind: op.kind, text };
-			if (op.kind === "goal") {
-				item.doneWhen = checked(op.done_when, "`done_when` (how you and the user will know the goal is reached)");
-			}
-			Object.assign(item, { status: "open", added: now });
-			if (open(ledger).length >= OPEN_MAX) {
-				throw new LedgerError(`The ledger has ${OPEN_MAX} open entries, which is its limit. Close or remove some before adding more.`);
-			}
-			ledger.next++;
-			ledger.items.push(item);
-			return { line: `${item.id} added.`, shown: `+ ${op.kind} ${entryLine(item)}` };
-		}
-		case "done": {
-			const item = find(ledger, op.id);
-			if (item.status === "done") return { line: `${item.id} was already closed.`, shown: `✓ ${item.kind} ${entryLine(item)}` };
-			item.status = "done";
-			item.closed = now;
-			if (op.text !== undefined && flat(op.text) !== "") item.outcome = checked(op.text, "`text` (how it ended)");
-			const follow =
-				item.kind === "goal"
-					? " Tell the user what was achieved against its done-when line, and ask whether that is what they wanted."
-					: "";
-			return { line: `${item.id} closed.${follow}`, shown: `✓ ${item.kind} ${entryLine(item)}` };
-		}
-		case "edit": {
-			const item = find(ledger, op.id);
-			const hasText = op.text !== undefined && flat(op.text) !== "";
-			const hasDoneWhen = op.done_when !== undefined && flat(op.done_when) !== "";
-			if (!hasText && !hasDoneWhen) throw new LedgerError("An edit needs `text`, `done_when`, or both: the new wording.");
-			if (hasDoneWhen && item.kind !== "goal") throw new LedgerError(`${item.id} is a ${item.kind}; only a goal has a done-when line.`);
-			if (hasText) item.text = checked(op.text, "`text`");
-			if (hasDoneWhen) item.doneWhen = checked(op.done_when, "`done_when`");
-			return { line: `${item.id} reworded.`, shown: `~ ${item.kind} ${entryLine(item)}` };
-		}
-		case "remove": {
-			const item = find(ledger, op.id);
-			ledger.items.splice(ledger.items.indexOf(item), 1);
-			return { line: `${item.id} removed.`, shown: `- ${item.kind} ${entryLine(item)}` };
-		}
-		default:
-			throw new LedgerError(`Unknown action ${JSON.stringify(op?.action)}; the actions are add, done, edit, remove.`);
-	}
+	return applyEntryOp(ledger, op, LEDGER_SPEC, now);
 }
 
 /** Drop the oldest closed entries beyond the number kept. */
