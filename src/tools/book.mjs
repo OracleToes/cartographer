@@ -8,7 +8,7 @@
 // `context` tool let it; the other books belong to the main agent, and are refused with the same words
 // the old per-tool refusals used.
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { arr, bool, lit, obj, oneOf, opt, str, union, unknown } from "@earendil-works/pi-schema";
+import { arr, bool, compile, lit, obj, oneOf, opt, str, union, unknown } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, SECTION_MAX, STILL_TASK, TOOL_MAX } from "../prompt.mjs";
 import { applyOp, KINDS, LedgerError, loadLedger, open, openCounts, prune, saveLedger, TEXT_MAX as LEDGER_TEXT_MAX } from "../ledger.mjs";
 import { applyPlanOp, authorizationLine, ITEM_MAX, loadPlan, PlanError, savePlan } from "../plan.mjs";
@@ -351,18 +351,10 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-// The root stays flat for llama.cpp's Qwen tool-call path. The selected book narrows the operation
-// schema with JSON Schema conditionals; each tagged operation then requires exactly the fields it uses.
+// The root stays flat for llama.cpp's Qwen tool-call path. The full internal schema uses conditionals so the
+// selected book narrows every action to exactly its valid fields; the model-facing schema is deliberately small.
 const line = (description, maxLength) => str({ minLength: 1, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
 const entryId = (description = "The entry (g1, q5, n7).") => line(description);
-
-// The book description gives one compact example per branch. Do not send the many field/operation descriptions
-// again inside the schema: they add hundreds of repeated tokens, while the conditional constraints remain intact.
-const compactSchema = (value) => {
-	if (Array.isArray(value)) return value.map(compactSchema);
-	if (value === null || typeof value !== "object") return value;
-	return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "description").map(([key, child]) => [key, compactSchema(child)]));
-};
 
 const LEDGER_OP = union([
 	obj(
@@ -442,19 +434,34 @@ const BOOK_CONDITIONS = [
  * @param {{ root: string, brainDir: string, config: object, engine: object, gate?: { yolo: boolean } }} input
  */
 export function bookTool({ root, brainDir, config, engine, gate }) {
+	const validationSchema = obj(
+		{
+			book: oneOf(["ledger", "plan", "prompt", "books", "context"], {
+				description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), prompt (a proposed change to your own prompt), books (entries about the project and your practice), context (fold, recall, shelve, note).",
+			}),
+			ops: opt(arr(unknown(), { description: "Operations for the selected book." })),
+			text: opt(line("The whole assessment, for the legacy write form.")),
+		},
+		{ allOf: BOOK_CONDITIONS },
+	);
+	const validate = compile(validationSchema, { coerce: true });
+	const parameters = obj({
+		book: oneOf(["ledger", "plan", "prompt", "books", "context"]),
+		ops: opt(arr(obj({ action: str() }, { open: true }), { minItems: 1 })),
+		text: opt(str()),
+	});
 	return defineTool({
 		name: "book",
 		description: describe("book"),
-		parameters: compactSchema(obj(
-			{
-				book: oneOf(["ledger", "plan", "prompt", "books", "context"], {
-					description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), prompt (a proposed change to your own prompt), books (entries about the project and your practice), context (fold, recall, shelve, note).",
-				}),
-				ops: opt(arr(unknown(), { description: "Operations for the selected book." })),
-				text: opt(line("The whole assessment, for the legacy write form.")),
-			},
-			{ allOf: BOOK_CONDITIONS },
-		)),
+		parameters,
+		prepareArguments(args) {
+			const result = validate.parse(args);
+			if (result.ok) return result.value;
+			const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
+			const errors = result.errors.map((error) => `  - ${path(error.path)}: ${error.message}`).join("\n");
+			// Do not echo the arguments: malformed text can be very large and the agent already has its original call.
+			throw new Error(`Validation failed for tool "book":\n${errors}`);
+		},
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
 		// and the rest of the books change nothing when the same words are written twice.

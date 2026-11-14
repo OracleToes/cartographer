@@ -1063,10 +1063,17 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 test("tool schemas: every action accepts only its own valid shape", () => {
 	const bookDefinition = bookTool({});
 	const bookSchema = JSON.stringify(bookDefinition.parameters);
-	assert.ok(bookSchema.length < 8000, `the conditional schema stays compact (got ${bookSchema.length} characters)`);
-	assert.equal(bookSchema.includes("description"), false, "examples live once in the tool description, not repeated on every schema branch");
+	assert.ok(bookSchema.length < 400, `the model-facing schema stays compact (got ${bookSchema.length} characters)`);
+	assert.equal(bookSchema.includes("allOf"), false, "the model-facing schema does not repeat the conditional branches");
 	for (const name of ["ledger", "plan", "prompt", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a compact ${name} example`);
-	const book = compile(bookDefinition.parameters);
+	const acceptsBook = (args) => {
+		try {
+			bookDefinition.prepareArguments(args);
+			return true;
+		} catch {
+			return false;
+		}
+	};
 	for (const [args, valid, note] of [
 		[{ book: "plan", ops: [{ action: "add", mode: "change", text: "build it" }] }, true, "plan add"],
 		[{ book: "plan", ops: [{ action: "add", mode: "change" }] }, false, "plan add without text"],
@@ -1079,7 +1086,7 @@ test("tool schemas: every action accepts only its own valid shape", () => {
 		[{ book: "context", ops: [{ action: "shelve", path: "src/a.mjs", text: "wrong" }] }, false, "context operation with unrelated field"],
 		[{ book: "books", ops: [{ action: "add", kind: "assessment", text: "the project" }] }, true, "books add"],
 		[{ book: "books", text: "legacy assessment", ops: [{ action: "add", kind: "assessment", text: "also this" }] }, false, "ambiguous legacy and operation forms"],
-	]) assert.equal(book.check(args), valid, note);
+	]) assert.equal(acceptsBook(args), valid, note);
 
 	const shell = compile(shellTool({ config: { shellWait: 5 }, runner: { mode: "none" }, windows: {}, runOf: () => undefined }).parameters);
 	for (const [args, valid, note] of [
@@ -1113,12 +1120,18 @@ test("plan: a missing item text shows the exact call and a corrected example", a
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ brainDir: dir });
 	has(tool.description, "Plan add needs `text`", "the book description states the required field");
-	assert.equal(tool.parameters.anyOf ?? tool.parameters.oneOf, undefined, "the root remains a flat object");
-	const planBranch = tool.parameters.allOf.find((branch) => branch.if?.properties?.book?.const === "plan");
-	assert.ok(planBranch, "book=plan selects a conditional schema branch");
-	const planAdd = planBranch.then.properties.ops.items.anyOf.find((branch) => branch.properties.action.const === "add");
-	assert.deepEqual(planAdd.required, ["action", "mode", "text"], "plan add structurally requires its needed fields");
-	assert.equal(planAdd.properties.lines, undefined, "the plan variant excludes the unrelated shelve field");
+	assert.equal(tool.parameters.anyOf ?? tool.parameters.oneOf, undefined, "the model-facing root remains a flat object");
+	assert.throws(
+		() => tool.prepareArguments({ book: "plan", ops: [{ action: "add", mode: "change" }] }),
+		/ops\.0\.text: missing/,
+		"the full conditional schema remains active in local validation",
+	);
+	const oversized = "x".repeat(5000);
+	assert.throws(
+		() => tool.prepareArguments({ book: "plan", ops: [{ action: "remove", text: oversized }] }),
+		(error) => error.message.includes("ops.0.id: missing") && error.message.includes("ops.0.text: unknown field") && !error.message.includes(oversized),
+		"local schema errors reject extra fields without echoing a large argument into context",
+	);
 	const args = { book: "plan", ops: [{ action: "add", mode: "change", lines: "Build the die", name: "Build", target: "plan" }] };
 	const result = await tool.execute(args, { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID });
 	const text = result.output[0].text;
@@ -4944,8 +4957,9 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
 		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "prompt", "books", "context"]);
 		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays flat");
-		const planBranch = book.allOf.find((branch) => branch.if?.properties?.book?.const === "plan");
-		assert.deepEqual(planBranch.then.properties.ops.items.anyOf.find((branch) => branch.properties.action.const === "add").required, ["action", "mode", "text"], "the transmitted plan add branch requires its fields");
+		assert.ok(JSON.stringify(book).length < 400, "the transmitted book schema is a compact dispatch shape");
+		assert.deepEqual(book.properties.ops.items.required, ["action"], "the compact dispatch shape keeps the action tag required");
+		assert.equal(book.properties.ops.items.additionalProperties, undefined, "operation fields are left to local conditional validation");
 	} finally {
 		await server.close();
 	}
