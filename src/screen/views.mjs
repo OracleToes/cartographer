@@ -9,17 +9,26 @@
 // as the server got it and in the order the model reads it: the system prompt, the tools, then every message, with
 // the blocks Cartographer adds (the copy of the assessment and the graph, what a collapse kept, the state block,
 // the windows block) as parts of their own. Then what has come since: the reply and what its calls returned.
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { POLICY } from "../config.mjs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { assessmentPath, loadAssessment } from "../assessment.mjs";
+import { fileURLToPath } from "node:url";
+import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
+import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate } from "../context.mjs";
+import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, curatedRows, curatedRowLine } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath } from "../plan.mjs";
+import { listRequests } from "../requests.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
 import { short, width } from "./text.mjs";
+
+const PROJECT_BLOCK = new RegExp(`^${POLICY.markup.project.open}\\n[\\s\\S]*?\\n${POLICY.markup.project.close}\\n*`);
+const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.context.close}\\n*`);
+const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.state.close}`);
+const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.windows.close}\\s*$`);
 
 const heading = (text) => ({ key: `heading:${text}`, plain: true, head: [[text, "heading"]] });
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
@@ -60,6 +69,7 @@ export function atlasView({ root, brainDir }) {
 		].filter((line) => line !== undefined && line !== "");
 		return {
 			key: `node:${node.name}`,
+			archived: node.archived === true,
 			head: [
 				[node.kind ? `${node.kind.replace("_", " ")} ` : "", "muted"],
 				[node.name, "bold"],
@@ -67,6 +77,7 @@ export function atlasView({ root, brainDir }) {
 				[node.files.length > 0 ? `  [${node.files.join(", ")}]` : "", "tool"],
 				[node.links.length > 0 ? `  → ${node.links.join(", ")}` : "", "muted"],
 				[old ? "  (may be out of date)" : "", "warn"],
+				[node.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 			],
 			body: body.join("\n"),
 			target: { file, line: jsonLine(file, "name", node.name) },
@@ -86,25 +97,31 @@ export function ledgerView({ brainDir }) {
 	const items = [];
 	const entry = (item) => ({
 		key: `entry:${item.id}`,
-		head: [[`${item.id}  `, item.status === "done" ? "muted" : "tool"], [item.text, item.status === "done" ? "muted" : ""], [item.kind === "goal" && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"]],
+		archived: item.archived === true,
+		head: [
+			[`${item.id}  `, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : "tool"],
+			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
+			[item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"],
+			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
+		],
 		body: [
 			item.text,
-			item.kind === "goal" && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
-			item.status === "done" && item.outcome ? `outcome: ${item.outcome}` : undefined,
-			`${item.by === "user" ? "written by you" : "written by the agent"}${when(item.added) ? ` · added ${when(item.added)}` : ""}${item.status === "done" && when(item.closed) ? ` · closed ${when(item.closed)}` : ""}`,
+			item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
+			item.status === POLICY.enums.entryStatus.done && item.outcome ? `outcome: ${item.outcome}` : undefined,
+			`${item.by === "user" ? "written by you" : "written by the agent"}${when(item.added) ? ` · added ${when(item.added)}` : ""}${item.status === POLICY.enums.entryStatus.done && when(item.closed) ? ` · closed ${when(item.closed)}` : ""}`,
 		]
 			.filter((line) => line !== undefined)
 			.join("\n"),
 		copy: entryLine(item, now),
 		target: { file, line: jsonLine(file, "id", item.id) },
 	});
-	for (const [kind, title] of [["goal", "Goals"], ["question", "Questions for you"], ["note", "Notes"]]) {
-		const open = ledger.items.filter((item) => item.kind === kind && item.status === "open");
+	for (const [kind, title] of [[POLICY.enums.ledgerKind.goal, "Goals"], [POLICY.enums.ledgerKind.question, "Questions for you"], [POLICY.enums.ledgerKind.note, "Notes"]]) {
+		const open = ledger.items.filter((item) => item.kind === kind && item.status === POLICY.enums.entryStatus.open);
 		if (open.length === 0) continue;
 		items.push(heading(title));
 		items.push(...open.map(entry));
 	}
-	const done = ledger.items.filter((item) => item.status !== "open");
+	const done = ledger.items.filter((item) => item.status !== POLICY.enums.entryStatus.open);
 	if (done.length > 0) {
 		items.push(heading("Closed"));
 		items.push(...done.map(entry));
@@ -121,16 +138,18 @@ export function planView({ brainDir, yolo }) {
 	if (plan === undefined || plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes one when a goal needs changes.")] };
 	const items = plan.items.map((item) => ({
 		key: `item:${item.id}`,
+		archived: item.archived === true,
 		head: [
-			[item.status === "done" ? "✓ " : "○ ", item.status === "done" ? "ok" : "warn"],
+			[item.status === POLICY.enums.entryStatus.done ? "✓ " : "○ ", item.status === POLICY.enums.entryStatus.done ? "ok" : "warn"],
 			[`${item.id} `, "tool"],
 			[`[${item.mode}${item.network ? ", network" : ""}${item.standing ? ", standing" : ""}] `, "muted"],
-			[item.text, item.status === "done" ? "muted" : ""],
-			[item.status === "done" && item.outcome ? `  → ${item.outcome}` : "", "muted"],
+			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
+			[item.status === POLICY.enums.entryStatus.done && item.outcome ? `  → ${item.outcome}` : "", "muted"],
+			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 		],
 		body: [
 			item.text,
-			item.status === "done" ? `done${when(item.closed) ? ` ${when(item.closed)}` : ""}${item.outcome ? `: ${item.outcome}` : ""}` : "open",
+			item.status === POLICY.enums.entryStatus.done ? `done${when(item.closed) ? ` ${when(item.closed)}` : ""}${item.outcome ? `: ${item.outcome}` : ""}` : "open",
 			item.undone ? "undone by you: the files are as they were before this item ran" : undefined,
 		]
 			.filter((line) => line !== undefined)
@@ -138,8 +157,39 @@ export function planView({ brainDir, yolo }) {
 		copy: itemLine(item),
 		target: { file, line: jsonLine(file, "id", item.id) },
 	}));
-	const waits = !yolo && plan.authorized === undefined && plan.items.some((item) => item.status === "open" && item.mode === "change");
+	const waits = !yolo && plan.authorized === undefined && plan.items.some((item) => item.status === POLICY.enums.entryStatus.open && item.mode === POLICY.enums.planMode.change);
 	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]]], items };
+}
+
+/** What waits for the user: change items and questions of taste. */
+export function requestsView({ brainDir, yolo }) {
+	const all = listRequests(brainDir, { yolo });
+	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
+	const items = all.map((request) => ({
+		key: `request:${request.id}`,
+		head: [
+			[request.kind === "approval" ? "● " : "? ", request.kind === "approval" ? "warn" : "tool"],
+			[`${request.id}  `, "tool"],
+			[`[${request.kind}] `, "muted"],
+			[request.text, ""],
+		],
+		body: [
+			...(request.detail ?? []),
+			request.kind === POLICY.enums.ledgerKind.question
+				? `answer with /answer ${request.id} words · d forgets the question`
+				: `a approves it · n turns it down · d forgets it, and the agent is not told`,
+		].join("\n"),
+		copy: `${request.id} [${request.kind}] ${request.text}`,
+	}));
+	const approvals = all.some((request) => request.kind === "approval");
+	return {
+		header: [
+			[[all.length === 1 ? "1 request waits for you" : `${all.length} requests wait for you`, "warn"]],
+			[["  a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "muted"]],
+			[[approvals ? "  /approve ID ... · /deny ID [why] · /delete ID · /answer ID words" : "  /answer ID words · /deny ID [why] · /delete ID", "muted"]],
+		],
+		items,
+	};
 }
 
 /** The project's files as a tree whose folders open and fold. `e` opens a file itself. */
@@ -182,7 +232,7 @@ export function treeView({ root, brainDir }, isOpen) {
 			let size = "";
 			try {
 				const bytes = statSync(join(root, path)).size;
-				size = bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+				size = bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`;
 			} catch {
 				size = "gone";
 			}
@@ -194,21 +244,33 @@ export function treeView({ root, brainDir }, isOpen) {
 	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root}`, "bold"], ["  (without what git ignores and the brain folder; ← names the graph's nodes about a file)", "muted"]]], items };
 }
 
-/** The assessment, a paragraph to an item, so that `e` opens the file where the paragraph is. */
-export function assessmentView({ brainDir }) {
-	const file = assessmentPath(brainDir);
-	const { text, written } = loadAssessment(brainDir);
-	if (text === "") return { header: [], items: [note("  No assessment yet. The agent writes one when it knows the project.")] };
-	const items = text
-		.split(/\n\s*\n/)
-		.map((paragraph) => paragraph.trim())
-		.filter((paragraph) => paragraph !== "")
-		.map((paragraph, index) => {
-			const first = paragraph.split("\n")[0];
-			const more = paragraph.includes("\n") || width(first) > 100;
-			return { key: `paragraph:${index}`, head: [[first, ""]], ...(more ? { body: paragraph } : {}), copy: paragraph, target: { file, line: lineOf(file, first) } };
-		});
-	return { header: [[["The agent's assessment of the project", "bold"], [written ? `  · written ${stamp(written)}` : "", "muted"]]], items };
+/** The books: the assessment of the project and the practice, one entry to an item, so that `e` opens the file where it is. */
+export function booksView({ brainDir }) {
+	// Until the agent's first book operation the entries live only in assessment.md; the view opens that.
+	const store = booksPath(brainDir);
+	const file = existsSync(store) ? store : assessmentPath(brainDir);
+	const book = loadBooks(brainDir);
+	const entry = (item) => {
+		const first = item.text.split("\n")[0];
+		const more = item.text.includes("\n") || width(first) > POLICY.limits.screen.rowWrapChars;
+		const target = file === store ? { file, line: jsonLine(file, "id", item.id) } : { file, line: lineOf(file, first) };
+		return {
+			key: `entry:${item.id}`,
+			head: [[`${item.id}  `, item.status === POLICY.enums.entryStatus.done ? "muted" : "tool"], [first, item.status === POLICY.enums.entryStatus.done ? "muted" : ""]],
+			...(more ? { body: item.text } : {}),
+			copy: bookLine(item),
+			target,
+		};
+	};
+	const items = [];
+	for (const [kind, title] of [[POLICY.enums.bookKind.assessment, "Assessment of the project"], [POLICY.enums.bookKind.practice, "Practice: how the agent works"]]) {
+		const mine = book.items.filter((item) => item.kind === kind);
+		if (mine.length === 0) continue;
+		items.push(heading(title));
+		items.push(...mine.filter((item) => item.status === POLICY.enums.entryStatus.open).map(entry), ...mine.filter((item) => item.status === POLICY.enums.entryStatus.done).map(entry));
+	}
+	if (items.length === 0) return { header: [], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works.")] };
+	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice shows the second book on the terminal", "muted"]]], items };
 }
 
 // ─── Diff ───────────────────────────────────────────────────────────────────
@@ -287,15 +349,15 @@ export function diffView({ root, brainDir, started }, which) {
 // ─── Shells ─────────────────────────────────────────────────────────────────
 
 export function shellsView({ session }) {
-	const all = session.windows?.list(200) ?? [];
+	const all = session.windows?.list(POLICY.limits.screen.windowsListed) ?? [];
 	if (all.length === 0) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const one = (text) => (text.length > 70 ? `${text.slice(0, 70)}…` : text).replace(/\s+/g, " ");
+	const one = (text) => (text.length > POLICY.limits.screen.viewSummaryChars ? `${text.slice(0, POLICY.limits.screen.viewSummaryChars)}…` : text).replace(/\s+/g, " ");
 	const items = all.map((win) => {
 		const marks = win.sandbox === false ? " · no sandbox" : win.network ? " · network" : "";
 		const state =
-			win.state === "gone"
+			win.state === POLICY.enums.windowStates.gone
 				? [["gone", "err"], [`  ${win.why}`, "muted"]]
-				: win.state === "busy"
+				: win.state === POLICY.enums.windowStates.busy
 					? [["busy", "warn"], [` ${took(win.running)}`, ""], [`  $ ${one(win.command ?? "")}`, "bold"], [win.asks ? "  may be waiting for input" : "", "warn"]]
 					: [["free", "ok"], [win.last ? `  last: $ ${one(win.last.command)} → exit ${win.last.exit}, ${ago(win.last.ago)}` : "  nothing was run in it yet", "muted"]];
 		return {
@@ -333,6 +395,17 @@ const pretty = (value) => {
 		return String(value);
 	}
 };
+/** The words of a `chat` call, when its arguments carry them. */
+function chatSaid(args) {
+	try {
+		const parsed = typeof args === "string" ? JSON.parse(args) : args;
+		const said = parsed?.text;
+		return typeof said === "string" && said.trim() !== "" ? said : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** A call as it reads: its name, then each argument, long text as text and not as one JSON string. */
 function callText(name, args) {
 	let parsed = args;
@@ -345,12 +418,12 @@ function callText(name, args) {
 	}
 	const lines = [`call ${name}`];
 	for (const [key, value] of Object.entries(parsed ?? {})) {
-		if (typeof value === "string" && (value.includes("\n") || value.length > 80)) lines.push(`  ${key}:`, ...value.split("\n").map((line) => `    ${line}`));
+		if (typeof value === "string" && (value.includes("\n") || value.length > POLICY.limits.screen.jsonLongValueChars)) lines.push(`  ${key}:`, ...value.split("\n").map((line) => `    ${line}`));
 		else lines.push(`  ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
 	}
 	return lines.join("\n");
 }
-const firstWords = (text) => text.replace(/\s+/g, " ").trim().slice(0, 160);
+const firstWords = (text) => text.replace(/\s+/g, " ").trim().slice(0, POLICY.limits.screen.contextSummaryChars);
 
 /**
  * One message of a request cut into what Cartographer added to it and what it is itself.
@@ -366,24 +439,26 @@ function partsOfMessage(message, toolNames) {
 		to.push({ cat, title, text: found[0].trim() });
 		text = text.slice(0, found.index) + text.slice(found.index + found[0].length);
 	};
-	take(/^<project>\n[\s\S]*?\n<\/project>\n*/, "top", "Assessment and graph, as copied at the last collapse", parts);
-	take(/<context>\nWritten by Cartographer[\s\S]*?\n<\/context>\n*/, "kept", "What the last collapse kept", parts);
-	take(/\n*<state>\nWritten by Cartographer[\s\S]*?\n<\/state>/, "state", "State block: the time, the tree, the ledger, the plan", tail);
-	take(/\n*<windows>\nWritten by Cartographer[\s\S]*?\n<\/windows>\s*$/, "windows", "Windows block: the shell windows as they are", tail);
+	take(PROJECT_BLOCK, "top", "Assessment and graph, as copied at the last collapse", parts);
+	take(CONTEXT_BLOCK, "kept", "What the last collapse kept", parts);
+	take(STATE_BLOCK, "state", "State block: the time, the tree, the ledger, the plan", tail);
+	take(WINDOWS_BLOCK, "windows", "Windows block: the shell windows as they are", tail);
 	text = text.trim();
 	if (message.role === "assistant") {
 		const calls = message.tool_calls ?? [];
 		const body = [typeof message.reasoning_content === "string" && message.reasoning_content.trim() !== "" ? `(thinking)\n${message.reasoning_content.trim()}` : "", text, ...calls.map((call) => callText(call.function?.name ?? "?", call.function?.arguments))].filter((part) => part !== "").join("\n\n");
 		const names = calls.map((call) => call.function?.name ?? "?");
-		parts.push({ cat: "agent", title: names.length === 0 ? "Agent · note" : `Agent · ${text !== "" ? "note and " : ""}${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}`, text: body, preview: firstWords(text !== "" ? text : calls.map((call) => String(call.function?.arguments ?? "")).join(" ")) });
+		// A message whose only work is to say something to the user: its words can be edited as words (e).
+		const said = calls.length === 1 && calls[0].function?.name === "chat" ? chatSaid(calls[0].function?.arguments) : undefined;
+		parts.push({ cat: "agent", title: names.length === 0 ? "Chat · Agent · note" : `Chat · Agent · ${text !== "" ? "note and " : ""}${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}`, text: body, preview: firstWords(text !== "" ? text : calls.map((call) => String(call.function?.arguments ?? "")).join(" ")), ...(said !== undefined ? { chat: said } : {}) });
 	} else if (message.role === "tool") {
 		// A task's context continues the main agent's, and its brief stands where the result of the `task` call would.
 		if (text.startsWith("You are now the task")) parts.push({ cat: "carto", title: "The task's brief", text });
 		else if (text !== "") parts.push({ cat: "result", title: `Result of ${toolNames.get(message.tool_call_id) ?? "a call"}`, text });
 	} else if (text !== "") {
-		if (text.startsWith("<cartographer>")) parts.push({ cat: "carto", title: "Cartographer's note", text });
-		else if (text.startsWith("<context>") || /^Cartographer: /.test(text)) parts.push({ cat: "carto", title: "Cartographer", text });
-		else parts.push({ cat: "you", title: "You", text });
+		if (text.startsWith(POLICY.markup.note.open)) parts.push({ cat: "carto", title: "Cartographer's note", text });
+		else if (text.startsWith(POLICY.markup.context.open) || /^Cartographer: /.test(text)) parts.push({ cat: "carto", title: "Cartographer", text });
+		else parts.push({ cat: "you", title: "Chat · You", text });
 	}
 	return [...parts, ...tail];
 }
@@ -414,7 +489,7 @@ export function contextBar(parts, windowSize, cols) {
  * @param {ReturnType<ReturnType<typeof import("../engine.mjs").createEngine>["window"]>} sent  what the engine holds of the newest request
  * @param {{ windowSize: number, cols: number, writing?: any }} options  writing: the reply as far as it is written
  */
-export function contextView(sent, { windowSize, cols, writing }) {
+export function contextView(sent, { windowSize, cols, writing, isOpen, edits, deleted }) {
 	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to the model in this run of carto yet. Say something, and what the agent sees shows here.")] };
 	const { payload } = sent;
 	const messages = payload.messages ?? [];
@@ -423,6 +498,8 @@ export function contextView(sent, { windowSize, cols, writing }) {
 	const rest = messages[0]?.role === "system" ? messages.slice(1) : messages;
 	if (messages[0]?.role === "system") add("system", { cat: "system", title: "System prompt", text: contentText(messages[0].content) });
 	const tools = payload.tools ?? [];
+	// The tools are one part, as the model reads them as one block; opened (Enter), it gives a line to each tool,
+	// so that one description can be read, copied, and opened in the editor (e, which finds where it is defined).
 	if (tools.length > 0) {
 		const text = tools.map((tool) => `── ${tool.function?.name ?? "?"} ──\n${tool.function?.description ?? ""}\nparameters: ${pretty(tool.function?.parameters ?? {})}`).join("\n\n");
 		add("tools", { cat: "tools", title: `Tools · ${tools.length}: ${tools.map((tool) => tool.function?.name).join(", ")}`, text, preview: "" }, { tokens: estimate(JSON.stringify(tools)) });
@@ -444,7 +521,8 @@ export function contextView(sent, { windowSize, cols, writing }) {
 			...calls.map((call) => callText(call.name, call.arguments)),
 		].join("\n\n");
 		const names = calls.map((call) => call.name);
-		add("reply", { cat: "agent", title: `${sent.reply === undefined ? "The reply, as it is being written" : "The reply"}${names.length > 0 ? ` · ${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}` : " · note"}`, text, preview: firstWords(content.filter((part) => part.type === "text").map((part) => part.text).join(" ")) }, { since: true });
+		const said = calls.length === 1 && calls[0].name === "chat" && typeof calls[0].arguments?.text === "string" && calls[0].arguments.text.trim() !== "" ? calls[0].arguments.text : undefined;
+		add("reply", { cat: "agent", title: `${sent.reply === undefined ? "The reply, as it is being written" : "The reply"}${names.length > 0 ? ` · ${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}` : " · note"}`, text, preview: firstWords(content.filter((part) => part.type === "text").map((part) => part.text).join(" ")), ...(said !== undefined ? { chat: said } : {}) }, { since: true });
 		for (const call of calls) {
 			const result = sent.results.get(call.id);
 			if (result !== undefined) add(`result:${call.id}`, { cat: "result", title: `Result of ${call.name}`, text: result }, { since: true });
@@ -480,15 +558,57 @@ export function contextView(sent, { windowSize, cols, writing }) {
 	if (sent.collapsedSince) header.push([["! The context was collapsed after this request was sent: the next request starts from what the collapse kept, not from this.", "warn"]]);
 	header.push([], [["Every part, in the order the model reads it. Enter opens one, + all of them.", "faint"]]);
 
+	/** What e does on a part: the kinds of thing it can open, or the reason it refuses. */
+	const editOf = (part) => {
+		if (part.key === "system") return { editKind: "prompt" };
+		if (part.key === "tools") return { editKind: "tools" };
+		if (typeof part.key === "string" && part.key.startsWith("tool:")) return { editKind: "tool" };
+		if (part.cat === "top") return { editKind: POLICY.enums.bookKind.assessment };
+		if (part.cat === "kept") return { editKind: "store" };
+		if (part.cat === "you") return { editKind: "chat-you" };
+		if (part.cat === "agent") return { editKind: "chat-agent" };
+		if (part.key === "reply") return sent.reply === undefined ? { editKind: "reply" } : { editKind: "chat-agent" };
+		if (part.cat === "result") return { editKind: "result" };
+		if (part.cat === "state") return { editKind: "state" };
+		if (part.cat === "windows") return { editKind: "windows" };
+		if (part.cat === "carto") return { editKind: "carto" };
+		return {};
+	};
 	const items = [];
+	const one = (part, extra = {}) => {
+		// What the user has said anew in the editor stands where the original stood; the sizes stay those of what was sent.
+		const text = edits?.get(part.text) ?? part.text;
+		return {
+			key: part.key,
+			head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(text)}`, "faint"]],
+			body: text === "" ? "(empty)" : text,
+			copy: text,
+			...editOf(part),
+			...(part.chat !== undefined ? { chat: part.chat } : {}),
+			...extra,
+		};
+	};
 	for (const [index, part] of parts.entries()) {
 		if (index === inRequest) items.push({ key: "since", plain: true, head: [["── since that request: what the next one will hold as well ──", "muted"]] });
-		items.push({
-			key: part.key,
-			head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(part.text)}`, "faint"]],
-			body: part.text === "" ? "(empty)" : part.text,
-			copy: part.text,
-		});
+		// A part the user has deleted stands out of the list, but the sizes above stay those of what was sent:
+		// the agent reads it until the next collapse, and then the talk that replaced it keeps nothing of it.
+		if (deleted !== undefined && (deleted.has(part.text) || (part.chat !== undefined && deleted.has(part.chat)))) continue;
+		items.push(one(part, part.key === "tools" ? { folder: true } : {}));
+		// The tools part stands for the block the model reads; unfolded, a line for each tool of it.
+		if (part.key === "tools" && isOpen?.("tools")) {
+			for (const tool of tools) {
+				const name = tool.function?.name ?? "?";
+				const text = `${tool.function?.description ?? ""}\n\nparameters: ${pretty(tool.function?.parameters ?? {})}`;
+				items.push({
+					key: `tool:${name}`,
+					depth: 1,
+					head: [["· ", "muted"], [short(estimate(JSON.stringify(tool))).padStart(5), "muted"], [`  ${name}`, ""], [`  ${firstWords(tool.function?.description ?? "")}`, "faint"]],
+					body: text,
+					copy: text,
+					editKind: "tool",
+				});
+			}
+		}
 	}
 	return { header, items, parts };
 }
@@ -520,3 +640,143 @@ export const isFolder = (path) => {
 		return false;
 	}
 };
+
+// ─── The user's hands on the context ────────────────────────────────────────
+
+/**
+ * The Context tab's fourth view: what the agent keeps with its `context` tool — the shelf and the reports —
+ * with the same operations offered to the user: a report folds out of view or comes back (f), a file comes off
+ * the shelf (x), a file is shelved (a, which puts /shelve in the prompt). The typed commands /fold, /recall,
+ * /shelve, /unshelve and /collapse do the same things from the prompt.
+ * @param {{ root: string, brainDir: string }} env
+ */
+export function handsView({ root, brainDir }) {
+	const store = loadContext(brainDir);
+	const header = [
+		[["Your hands on what the agent keeps", "bold"], ["  ·  curated rows, the shelf, and reports of finished work", "muted"]],
+		[["On rows: v archives or restores, d deletes (d again); curated rows are edited with /row. On a report: f folds or recalls. On the shelf: x takes an item off.", "faint"]],
+	];
+	const items = [];
+	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
+	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `context`, action shelve."));
+	for (const item of store.shelf) {
+		items.push({
+			key: `shelf:${shelfLabel(item)}`,
+			kind: "shelf",
+			head: [[`${shelfLabel(item)} · ${item.id}  `, ""], [`about ${short(estimate(shelfText(root, item, brainDir)))} rendered tokens`, "muted"]],
+			body: () => shelfText(root, item, brainDir),
+			...(item.path === undefined ? {} : { path: join(root, item.path) }),
+		});
+	}
+	const curated = curatedRows(store);
+	const livingCurated = curated.filter((row) => row.archived !== true);
+	const archivedCurated = curated.filter((row) => row.archived === true);
+	items.push(heading("  Curated rows · independent notes kept in the context (edit with /row)"));
+	if (livingCurated.length === 0 && archivedCurated.length === 0) items.push(note("  No curated rows yet. Use /row add TEXT to keep one."));
+	for (const row of livingCurated) items.push({
+		key: `curated:${row.id}`,
+		kind: "curated",
+		archived: false,
+		head: [[`${row.id}  `, "bold"], [curatedRowLine(row), ""]],
+		body: row.text,
+	});
+	if (archivedCurated.length > 0) {
+		items.push(heading("  Archived curated rows"));
+		for (const row of archivedCurated) items.push({
+			key: `curated:${row.id}`,
+			kind: "curated",
+			archived: true,
+			head: [[`${row.id}  `, "muted"], ["· archived  ", "muted"], [curatedRowLine(row), "faint"]],
+			body: row.text,
+		});
+	}
+	const standing = composedRows(store).filter((record) => record.archived !== true);
+	const archived = composedRows(store).filter((record) => record.archived === true);
+	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d deletes it (press d again)"));
+	if (standing.length === 0 && archived.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
+	for (const record of standing) {
+		const folded = store.dropped.includes(record.id);
+		items.push({
+			key: `report:${record.id}`,
+			kind: "report",
+			archived: false,
+			folded,
+			head: [
+				[`${record.id}  `, folded ? "muted" : "bold"],
+				[folded ? "· folded  " : "· in view  ", folded ? "muted" : "ok"],
+				[recordLine(record), folded ? "faint" : ""],
+			],
+			body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
+		});
+	}
+	if (archived.length > 0) {
+		items.push(heading("  Archived · the record no longer lists them; recall by id still finds them"));
+		for (const record of archived) {
+			items.push({
+				key: `report:${record.id}`,
+				kind: "report",
+				archived: true,
+				head: [
+					[`${record.id}  `, "muted"],
+					["· archived  ", "muted"],
+					[recordLine(record), "faint"],
+				],
+				body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
+			});
+		}
+	}
+	return { header, items };
+}
+
+/**
+ * Where a tool of the context is defined: cartographer's own source, by its `name: "…"` line. `e` on a tool
+ * part of the Context tab opens it there.
+ * @returns {{ file: string, line: number } | undefined}
+ */
+export function toolSource(name) {
+	const dir = fileURLToPath(new URL("../tools", import.meta.url));
+	try {
+		for (const entry of readdirSync(dir).sort()) {
+			if (!entry.endsWith(".mjs")) continue;
+			const file = join(dir, entry);
+			const text = readFileSync(file, "utf8");
+			const at = text.indexOf(`name: "${name}"`);
+			if (at >= 0) return { file, line: text.slice(0, at).split("\n").length };
+		}
+	} catch {
+		// The folder is not there, or cannot be read: no source to open.
+	}
+	return undefined;
+}
+
+/** The shell windows as a terminal emulator sees them: the newest lines of a window, the newest at the bottom. */
+export function shellsOutView({ session }, name) {
+	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+	const pick = all.find((win) => win.name === name) ?? all.at(-1);
+	if (pick === undefined) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
+	const lines = (session.windows?.linesFrom(pick.name, 0) ?? []).slice(-POLICY.limits.screen.shellViewLines);
+	const what =
+		pick.state === POLICY.enums.windowStates.busy
+			? [["busy", "warn"], [`  $ ${pick.command ?? ""}`, "bold"], [pick.asks ? "  · may be waiting for input" : "", "warn"]]
+			: pick.state === POLICY.enums.windowStates.gone
+				? [["gone", "err"], [`  ${pick.why ?? ""}`, "muted"]]
+				: [["free", "ok"]];
+	const header = [
+		[["Output of ", "bold"], [pick.name, "bold"], ["  ·  ", "muted"], ...what, [`${pick.cwd && pick.cwd !== "." ? `  in ${pick.cwd}/` : ""}${pick.sandbox === false ? "  · no sandbox" : pick.network ? "  · network" : ""}`, "muted"]],
+		[["The newest lines, as the window keeps them; the view follows on its own.", "faint"]],
+		[["Enter goes back to the list; /send " + pick.name + " line types into it.", "faint"]],
+	];
+	const items = [
+		{ key: "term", plain: true, head: lines.length === 0 ? [["  (nothing has been printed yet)", "muted"]] : lines.map((line) => [line || " ", ""]) },
+	];
+	return { header, items };
+}
+
+/**
+ * Where the built-in system prompt lives: source code reviewed and changed by the developer.
+ * @returns {string | undefined}
+ */
+export function promptsSource() {
+	const file = fileURLToPath(new URL("../prompt.mjs", import.meta.url));
+	return existsSync(file) ? file : undefined;
+}

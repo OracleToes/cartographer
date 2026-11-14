@@ -1,3 +1,4 @@
+import { POLICY } from "./config.mjs";
 // Notes that Cartographer writes into the conversation itself, to wake the agent.
 //
 // The agent works only while it answers a message. When something happens while it
@@ -11,9 +12,9 @@
 // not fill the context with "nothing happened".
 import { took } from "./time.mjs";
 
-const OPEN = "<cartographer>";
+const OPEN = POLICY.markup.note.open;
 const HEAD = "Written by Cartographer, not by the user.";
-const CLOSE = "</cartographer>";
+const CLOSE = POLICY.markup.note.close;
 
 const textOf = (message) => (typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.map((part) => part.text ?? "").join("") : "");
 
@@ -22,7 +23,7 @@ export const isNote = (message) => textOf(message).startsWith(`${OPEN}\n${HEAD}`
 
 const first = (command) => {
 	const line = String(command ?? "").split("\n")[0];
-	return line.length > 80 ? `${line.slice(0, 80)}…` : line;
+	return line.length > POLICY.limits.wakes.noteSummaryChars ? `${line.slice(0, POLICY.limits.wakes.noteSummaryChars)}…` : line;
 };
 
 /** One line on what happened, for the note and for the screen. */

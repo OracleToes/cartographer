@@ -17,10 +17,11 @@
 //   target    { file, line? }: what `e` opens in the editor
 //   copy      what `y` copies; a function is called when it is needed. Default: the head and the body
 //   plain     true: a line that is only read, never selected (a heading)
+import { POLICY } from "../config.mjs";
 import { cut, lineText, width, wrap } from "./text.mjs";
 
 /** The most rows one opened body shows before it says how many more there are; opening everything lifts this. */
-const BODY_ROWS = 400;
+const BODY_ROWS = POLICY.limits.screen.listBodyRows;
 
 export function createList() {
 	/** What is open: in "some" mode the keys in `opened`; in "all" mode everything but the keys in `closed`. */
@@ -163,7 +164,7 @@ export function createList() {
 			return true;
 		},
 		/** Everything the tab shows now, as text. */
-		text(cols = 200) {
+		text(cols = POLICY.limits.screen.listColumns) {
 			return api.lines(cols).map((line) => lineText(line.spans).trimEnd()).join("\n");
 		},
 		/** What `y` copies for the selected item. */

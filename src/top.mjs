@@ -19,14 +19,17 @@
 // message of every request, for the main agent and for tasks alike: a task's
 // prompt must begin exactly as the main agent's does. It is never stored in the
 // conversation.
+import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAssessment, textHash } from "./assessment.mjs";
 import { loadAtlas, nodeChanges, nodeHashes, renderOutline } from "./atlas.mjs";
+import { practiceText } from "./books.mjs";
 import { stamp } from "./time.mjs";
 
-const OPEN = "<project>";
-const CLOSE = "</project>";
+const OPEN = POLICY.markup.project.open;
+const CLOSE = POLICY.markup.project.close;
+const TOP_BLOCK = new RegExp(`${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
 const HEAD = "Written by Cartographer from your own records of this project";
 
 export const topPath = (brainDir) => join(brainDir, "carto-top.json");
@@ -56,23 +59,25 @@ export function pin(brainDir, { now = Date.now(), reason }) {
 	// A graph that cannot be read is not copied: the last good copy stays.
 	if (atlas === undefined) return { changed: false, error };
 	const assessment = loadAssessment(brainDir).text;
+	const practice = practiceText(brainDir);
 	const nodes = nodeHashes(atlas);
 	const old = loadTop(brainDir);
-	if (old !== undefined && old.assessment === textHash(assessment) && JSON.stringify(old.nodes) === JSON.stringify(nodes)) return { changed: false };
-	const text = [
+	// A change to the practice entries re-pins the copy too; with none written the block is byte for byte
+	// the old one, so a project that has not used the books keeps the wording the server already read.
+	if (old !== undefined && old.assessment === textHash(assessment) && (old.practice ?? textHash("")) === textHash(practice) && JSON.stringify(old.nodes) === JSON.stringify(nodes)) return { changed: false };
+	const parts = [
 		OPEN,
 		`${HEAD}, as they stood on ${stamp(now)} (${reason}). What was written since is listed in the state block at the end of the request.`,
 		"",
 		"Your assessment",
 		assessment === "" ? "None written yet." : assessment,
-		"",
-		`Your graph (${atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`})`,
-		renderOutline(atlas),
-		CLOSE,
-	].join("\n");
+	];
+	if (practice !== "") parts.push("", "Your practice", practice);
+	parts.push("", `Your graph (${atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`})`, renderOutline(atlas), CLOSE);
+	const text = parts.join("\n");
 	const path = topPath(brainDir);
 	const temp = `${path}.${process.pid}.tmp`;
-	writeFileSync(temp, `${JSON.stringify({ version: 1, at: new Date(now).toISOString(), reason, assessment: textHash(assessment), nodes, text }, null, "\t")}\n`);
+	writeFileSync(temp, `${JSON.stringify({ version: 1, at: new Date(now).toISOString(), reason, assessment: textHash(assessment), practice: textHash(practice), nodes, text }, null, "\t")}\n`);
 	renameSync(temp, path);
 	return { changed: true };
 }
@@ -117,5 +122,5 @@ export function withTop(messages, block) {
 
 /** Text with the copy removed (for the tests' stand-in, which obeys what the user wrote). */
 export function withoutTop(text) {
-	return text.replace(/<project>\nWritten by Cartographer[\s\S]*?\n<\/project>\n*/g, "");
+	return text.replace(TOP_BLOCK, "");
 }

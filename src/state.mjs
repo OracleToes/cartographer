@@ -1,30 +1,29 @@
-// The state block: what the main agent is shown at the end of every request.
+// The state block: the current shared project/brain state appended to every request.
 //
-// It holds the things that must always be current: the time, the tree of the project's
-// files, what was written to the atlas since the copy at the top of the context was
-// made, the open ledger entries, the plan with whether the user has authorized it, and
-// what the agent should be doing next. It is built fresh for each request and added
-// to the last message of that request only; it is never stored in the conversation.
-// So the agent sees exactly one copy, the newest, whatever happened to the
-// conversation in between (a fresh context, a compaction, an edit by hand).
+// It holds the time, project tree, atlas changes, open ledger entries, plan and authorization,
+// and the next direction. It is built fresh for each request and appended only to that request;
+// it is never stored as conversation history. A focused context also receives its one-line purpose
+// and the forget-threshold reminder, so it sees the same current brain while retaining its own work window.
 //
 // Cost: the block sits at the very end of the prompt, so the server re-reads only the
 // block itself (some hundreds of tokens, most of them the tree), not what comes before it.
 //
-// A task does not get the block. Its prompt is the main agent's stored conversation
-// plus the brief.
+// Every request receives a fresh block. A focused context gets the shared project/brain state
+// plus its own purpose and reminder that its working conversation will be forgotten.
+import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
 import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
 import { loadLedger, open, renderLedger } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, openItems, openOnce, openStanding, renderPlan } from "./plan.mjs";
+import { requestLines } from "./requests.mjs";
 import { eventLine } from "./wake.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, sinceTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
 import { isNote } from "./wake.mjs";
 
-const OPEN = "<state>";
-const CLOSE = "</state>";
+const OPEN = POLICY.markup.state.open;
+const CLOSE = POLICY.markup.state.close;
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const HEAD = "Written by Cartographer, not by the user. This is the current state; it replaces any state you saw before.";
 
@@ -32,11 +31,11 @@ const FIRST = "Answer the user's newest message first.";
 /** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
 const MAP =
 	"You need not sit idle meanwhile: in the same reply you may start a look task that maps a part of the project the graph says nothing about, and has what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is yours to decide.";
-const names = (list, max = 12) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
+const names = (list, max = POLICY.limits.state.listedNames) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
 
 /** What the block says the agent should do next. One situation, one instruction. `yolo`: approval is switched off. */
 function direction(ledger, plan, yolo = false) {
-	const goals = open(ledger, "goal").length > 0;
+	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
 	if (plan === undefined || plan.items.length === 0) {
 		if (goals) {
 			return `${FIRST} Beyond that, work toward the open goals. If reaching one needs changes to the project, find out what you need with look tasks, then write the plan. When a goal is reached, close it and tell the user what was achieved.`;
@@ -62,15 +61,22 @@ function direction(ledger, plan, yolo = false) {
 		return `${FIRST} Beyond that, nothing of the plan is left to do once.${standing}${noGoal}`;
 	}
 	if (next === undefined) {
-		const check = goals ? " Check each open goal against its done-when line. Before you close one, bring the assessment up to date with `assess` if the work changed your picture of the project: the copy at the top of your context is rewritten when a goal closes. Close the goals that are reached, tell the user what was achieved and how to try it, and clear the plan." : " Tell the user what was done and how to try it, and clear the plan.";
+		const check = goals ? " Check each open goal against its done-when line. Before you close one, bring the assessment up to date with `book`'s books if the work changed your picture of the project: the copy at the top of your context is rewritten when a goal closes. Close the goals that are reached, tell the user what was achieved and how to try it, and clear the plan." : " Tell the user what was done and how to try it, and clear the plan.";
 		return `${FIRST} Every item of the plan is done.${check} If something is still missing, add items for it.`;
 	}
 	if (waits) {
 		const wait = "Change items wait for the user: show them the plan in a few lines and ask them to type /approve.";
-		if (next.mode === "look") return `${FIRST} Beyond that, carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
+		if (next.mode === POLICY.enums.planMode.look) return `${FIRST} Beyond that, carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
 		return `${FIRST} ${wait} Do not start ${next.id} before that.${noGoal} ${MAP}`;
 	}
 	return `${FIRST} Beyond that, carry out the plan: ${next.id} is next. Call \`task\` with its id and a brief, and mark it done when the report and the record of changed files show that it is.${standing}${noGoal}`;
+}
+
+/** The current purpose and forget boundary for a focused context. */
+function focusDirection(task) {
+	const purpose = String(task?.purpose ?? task?.brief ?? "the assigned work").replace(/\s+/g, " ").trim();
+	const item = task?.item === undefined ? "" : ` Assigned plan item: ${task.item}.`;
+	return `Focus${item}\nI am ${purpose}. This is the same Cartographer agent in a temporary working context, not another worker. Keep useful findings in the shared books, atlas, or report before returning; anything not kept may be forgotten. The orchestrating context alone changes the plan.`;
 }
 
 /** Said while the user has switched approval off. Here and not in the system prompt, because the user can change it while the session runs. */
@@ -138,18 +144,20 @@ function clock(messages, now) {
 	return began === at ? `${said} ${newest}` : `${said} ${newest} You have been working since their message of ${ago(now - messages[began].timestamp)}.`;
 }
 
-const short = (command, max = 80) => {
+const short = (command, max = POLICY.limits.state.commandSummaryChars) => {
 	const [line, ...more] = String(command ?? "").split("\n");
 	return line.length > max ? `${line.slice(0, max)}…` : more.length > 0 ? `${line} …` : line;
 };
 
-const WINDOWS_OPEN = "<windows>";
-const WINDOWS_CLOSE = "</windows>";
+const WINDOWS_OPEN = POLICY.markup.windows.open;
+const WINDOWS_CLOSE = POLICY.markup.windows.close;
+const WINDOWS_BLOCK = new RegExp(`\\n*${WINDOWS_OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${WINDOWS_CLOSE}`, "g");
+const STATE_BLOCK = new RegExp(`\\n*${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}`, "g");
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const WINDOWS_HEAD = "Written by Cartographer, not by the user. The shell windows as they are at this moment:";
 /** Lines of output shown for a window that is busy, unless the settings say otherwise; a free one shows FREE_TAIL. */
-export const WINDOW_TAIL = 10;
-const FREE_TAIL = 3;
+export const WINDOW_TAIL = DEFAULTS.windowTail;
+const FREE_TAIL = POLICY.limits.state.freeWindowTail;
 
 /**
  * The shell windows as they stand: what runs in each, for how long, and its newest lines. A block of its own at the
@@ -172,7 +180,7 @@ export function windowsBlock(windows, { tail = WINDOW_TAIL } = {}) {
 
 /** Text with any windows block removed. */
 export function withoutWindows(text) {
-	return text.replace(/\n*<windows>\nWritten by Cartographer[\s\S]*?\n<\/windows>/g, "");
+	return text.replace(WINDOWS_BLOCK, "");
 }
 
 /**
@@ -183,20 +191,20 @@ export function windowLines(windows, tail = {}) {
 	const lines = [];
 	for (const win of windows) {
 		const marks = `${win.sandbox === false ? " · no sandbox" : win.network ? " · network" : ""}`;
-		if (win.state === "gone") {
+		if (win.state === POLICY.enums.windowStates.gone) {
 			lines.push(`  ${win.name} · gone: ${win.why}${win.command ? `, and \`${short(win.command)}\` ended with it` : ""}. \`window\` close clears this line.`);
 			continue;
 		}
 		const place = win.cwd !== "." ? `, in ${win.cwd}/` : "";
-		if (win.state === "busy") {
+		if (win.state === POLICY.enums.windowStates.busy) {
 			const asks = win.asks ? ` · nothing printed for ${took(win.quiet)} and its last line has no line end: it may be waiting for input` : "";
 			lines.push(`  ${win.name} · busy for ${took(win.running)} with \`${short(win.command)}\`${place}${marks}${asks}`);
-			for (const line of win.tail.slice(-(tail.busy ?? WINDOW_TAIL))) lines.push(`    | ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
+			for (const line of win.tail.slice(-(tail.busy ?? WINDOW_TAIL))) lines.push(`    | ${line.length > POLICY.limits.state.outputLineChars ? `${line.slice(0, POLICY.limits.state.outputLineChars)}…` : line}`);
 		} else {
 			const last = win.last ? ` · last: \`${short(win.last.command)}\` ended with exit ${win.last.exit}, ${ago(win.last.ago)}` : " · nothing was run in it yet";
 			lines.push(`  ${win.name} · free${place}${marks}${last}`);
 			// The command line itself is already above; show what it printed last.
-			for (const line of win.tail.filter((entry) => !entry.startsWith("$ ")).slice(-(tail.free ?? FREE_TAIL))) lines.push(`    | ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
+			for (const line of win.tail.filter((entry) => !entry.startsWith("$ ")).slice(-(tail.free ?? FREE_TAIL))) lines.push(`    | ${line.length > POLICY.limits.state.outputLineChars ? `${line.slice(0, POLICY.limits.state.outputLineChars)}…` : line}`);
 		}
 	}
 	return lines;
@@ -213,7 +221,7 @@ function atlasText(brainDir, root, config, now) {
 	const linked = atlas.nodes.length === 0 ? "" : ` Files a node links to: ${linkedCount(atlas, tree.files)} of ${tree.files.length}.`;
 	lines.push(
 		`Graph: ${atlas.nodes.length === 0 ? "no nodes yet" : atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`}.${linked} Assessment: ${
-			assessment.text === "" ? "none yet. Write one with `assess` once you know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
+			assessment.text === "" ? "none yet. Write one with `book`'s books once you know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
 		}`,
 	);
 	const since = sinceTop(brainDir, atlas, assessment.text);
@@ -223,12 +231,12 @@ function atlasText(brainDir, root, config, now) {
 	if (changed.length > 0) lines.push(changed.join(" "));
 	if (since.assessment && assessment.text !== "") {
 		// The agent's own rewrite is in its context as the call that made it. An edit by hand is not, so it is shown.
-		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("You rewrote the assessment since that copy: your `assess` call holds the text that counts.");
+		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("You rewrote the assessment since that copy: your `book` call holds the text that counts.");
 		else lines.push(`The assessment was edited outside this conversation since that copy, probably by the user. It now reads:\n${assessment.text}`);
 	}
 	const stale = staleNodes(root, atlas, now);
 	if (stale.length > 0) {
-		lines.push(`May be out of date: ${stale.slice(0, 12).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > 12 ? `; and ${stale.length - 12} more` : ""}. Have a task check each against its files, then rewrite the node, or confirm it when it still holds.`);
+		lines.push(`May be out of date: ${stale.slice(0, POLICY.limits.terminal.staleNodes).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > POLICY.limits.terminal.staleNodes ? `; and ${stale.length - POLICY.limits.terminal.staleNodes} more` : ""}. Have a task check each against its files, then rewrite the node, or confirm it when it still holds.`);
 	}
 	return `${head}${lines.join("\n")}\n\n`;
 }
@@ -236,9 +244,10 @@ function atlasText(brainDir, root, config, now) {
 /**
  * @param {string} brainDir
  * @param {{ mode: "sandbox" | "direct" | "none", available?: { why?: string } }} [runner]  how commands run now (src/sandbox.mjs)
- * @param {{ root?: string, config?: { treeDepth?: number }, messages?: readonly any[], now?: number, wakes?: string[], yolo?: boolean }} [more]
+ * @param {{ root?: string, config?: { treeDepth?: number }, messages?: readonly any[], now?: number, wakes?: string[], yolo?: boolean, requests?: boolean, context?: string }} [more]
  *   wakes: the agent's wake triggers, one line each; yolo: the user has switched approval off
- *   context: the lines about the context itself, ready made
+ *   context: the lines about the context itself, ready made; requests: whether to list what waits for the user
+ *     (only the live agent's block lists it; a plain read of the state, as /context and the tests do, does not)
  *   root: the project, for the tree and the atlas (left out, the block has neither); messages: the request's messages;
  * @returns {string} the block, tags included
  */
@@ -250,20 +259,25 @@ export function stateBlock(brainDir, runner, more = {}) {
 	let body;
 	if (ledger === undefined) {
 		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell the user; until they repair the file, the ledger cannot be shown or changed.`;
-	} else {
-		// No plan, no section: the instruction below says when to write one.
-		let planText = "";
-		if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell the user; until they repair the file, no plan item can run.\n\n`;
-		else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
-		body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${direction(ledger, plan, more.yolo === true)}`;
-	}
+		} else {
+			// No plan, no section: the instruction below says when to write one.
+			let planText = "";
+			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell the user; until they repair the file, no plan item can run.\n\n`;
+			else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
+			// What waits for the user: approvals of change items, questions of taste, and proposed edits to the
+			// prompt. Put at the very end, so the shape of the block before it stays as it was. The agent keeps
+			// working on whatever does not depend on one.
+			const waiting = more.requests === true ? requestLines(brainDir, { yolo: more.yolo === true }) : "";
+			const requests = waiting === "" ? "" : `\n\nRequests\nThese wait for the user; carry on with what does not depend on them:\n${waiting}\n`;
+			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${more.task === undefined ? direction(ledger, plan, more.yolo === true) : focusDirection(more.task)}${requests}`;
+		}
 	// How full the context is and what on the shelf is not as shown (src/context.mjs).
 	return `${OPEN}\n${HEAD}\n\n${front}${more.context ?? ""}${body}\n${CLOSE}`;
 }
 
 /** Text with any state block removed (for display, and for the tests' stand-in). */
 export function withoutState(text) {
-	return text.replace(/\n*<state>\nWritten by Cartographer[\s\S]*?\n<\/state>/g, "");
+	return text.replace(STATE_BLOCK, "");
 }
 
 /**

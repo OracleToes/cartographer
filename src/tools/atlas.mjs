@@ -1,3 +1,4 @@
+import { POLICY } from "../config.mjs";
 // The `atlas` tool: how the agent and its tasks write the graph (src/atlas.mjs),
 // and how the main agent moves the tree it is shown (src/tree.mjs).
 import { isAuthorized, loadPlan } from "../plan.mjs";
@@ -7,9 +8,9 @@ import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, KINDS, loadAtlas, saveA
 import { DEPTH_MAX } from "../tree.mjs";
 import { projectFiles } from "./look.mjs";
 
-const name = () => str({ description: "The node's name: short and stable, such as dice_roll." });
-const links = (what) => opt(arr(str(), { description: `Names of other nodes ${what}.` }));
-const files = (what) => opt(arr(str(), { description: `Paths of files or folders in the project ${what}.` }));
+const name = () => str({ description: "Short and stable, such as dice_roll." });
+const links = (what) => opt(arr(str(), { description: `Node names to ${what}.` }));
+const files = (what) => opt(arr(str(), { description: `Project paths to ${what}.` }));
 
 // One object shape per action, told apart by `action`; the fields an action cannot work without are required, so
 // a grammar-constrained server cannot leave them out. Keep `action` first, then the required fields, then the
@@ -17,27 +18,39 @@ const files = (what) => opt(arr(str(), { description: `Paths of files or folders
 const Op = union([
 	obj(
 		{
-			action: lit("note"),
+			action: lit(POLICY.enums.atlasActions.add),
 			name: name(),
-			gist: str({ description: `One line that says what this is, at most ${GIST_MAX} characters.` }),
-			kind: opt(oneOf(KINDS, { description: "component: a part of the project and what it does. finding: something established. dead_end: something tried and ruled out, kept so it is not tried again. Leave out for a plain node." })),
-			detail: opt(str({ description: `Anything longer worth keeping, at most ${DETAIL_MAX} characters. Shown only by look.` })),
+			gist: str({ description: `One line, at most ${GIST_MAX} characters.` }),
+			kind: opt(oneOf(KINDS, { description: "component: a part and what it does. finding: something established. dead_end: tried and ruled out. Leave out for a plain node." })),
+			detail: opt(str({ description: `Longer detail, at most ${DETAIL_MAX} characters; \`look\` shows it.` })),
 			links: links("this one relates to; added to the links it has"),
 			files: files("this node is about; added to the ones it has"),
 		},
-		{ description: "Write a node, or rewrite the one of that name. A node needs no file and no link." },
+		{ description: "Write a new node by that name. A node needs no file and no link." },
 	),
-	obj({ action: lit("link"), name: name(), links: links("to link to"), files: files("to link to") }, { description: "Add links to a node, without rewriting it." }),
-	obj({ action: lit("unlink"), name: name(), links: links("to stop linking to"), files: files("to stop linking to") }, { description: "Take links off a node." }),
-	obj(
-		{ action: lit("confirm"), names: arr(str(), { description: "Nodes that were checked against their files and still hold." }) },
-		{ description: "Say that nodes marked as possibly out of date are still true, after their files were looked at." },
-	),
-	obj({ action: lit("remove"), name: name() }, { description: "Delete a node and every link to it." }),
-	obj({ action: lit("look"), name: str({ description: "A node's name, or a path: for a path, the nodes that link to it." }) }, { description: "Read one node in full: gist, detail, its files and whether they changed, links both ways." }),
 	obj(
 		{
-			action: lit("tree"),
+			action: lit(POLICY.enums.atlasActions.edit),
+			name: name(),
+			gist: str({ description: `One line, at most ${GIST_MAX} characters.` }),
+			kind: opt(oneOf(KINDS, { description: "component: a part and what it does. finding: something established. dead_end: tried and ruled out. Leave out for a plain node." })),
+			detail: opt(str({ description: `Longer detail, at most ${DETAIL_MAX} characters; \`look\` shows it.` })),
+			links: links("this one relates to; added to the links it has"),
+			files: files("this node is about; added to the ones it has"),
+		},
+		{ description: "Rewrite the node of that name: the gist is replaced, links and files are added to the ones it has." },
+	),
+	obj({ action: lit(POLICY.enums.atlasActions.link), name: name(), links: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.validation.nonEmptyArrayMinItems, description: "Node names to link to." })), files: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.validation.nonEmptyArrayMinItems, description: "Project paths to link to." })) }, { anyOf: [{ required: ["links"] }, { required: ["files"] }], description: "Add links to a node, without rewriting it." }),
+	obj({ action: lit(POLICY.enums.atlasActions.unlink), name: name(), links: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.validation.nonEmptyArrayMinItems, description: "Node names to stop linking to." })), files: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.validation.nonEmptyArrayMinItems, description: "Project paths to stop linking to." })) }, { anyOf: [{ required: ["links"] }, { required: ["files"] }], description: "Take links off a node." }),
+	obj(
+		{ action: lit(POLICY.enums.atlasActions.confirm), names: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.validation.nonEmptyArrayMinItems, description: "Nodes that were checked against their files and still hold." }) },
+		{ description: "Say that nodes marked as possibly out of date are still true, after their files were looked at." },
+	),
+	obj({ action: lit(POLICY.enums.atlasActions.remove), name: name() }, { description: "Delete a node and every link to it." }),
+	obj({ action: lit(POLICY.enums.atlasActions.look), name: str({ description: "A node's name, or a path: for a path, the nodes that link to it." }) }, { description: "Read one node in full: gist, detail, its files and whether they changed, links both ways." }),
+	obj(
+		{
+			action: lit(POLICY.enums.atlasActions.tree),
 			anchor: opt(str({ description: 'The folder the tree is drawn from. "." is the project root.' })),
 			depth: opt(int({ description: `How many levels are drawn below the anchor, 1 to ${DEPTH_MAX}.` })),
 		},
@@ -52,16 +65,14 @@ export function atlasTool({ root, brainDir, gate }) {
 	return defineTool({
 		name: "atlas",
 		description: [
-			"Your map of this project, kept across sessions. Its graph holds what you have understood: a node says what a part does, what was found out, or what was tried and ruled out, and links to the files it is about and to other nodes.",
-			"Write a node for what you would want to know when you come back to this project with an empty context; not every file needs one. Tasks write nodes too.",
-			"When a file a node links to changes, the node is marked as possibly out of date until it is rewritten or confirmed.",
+			"Your map of this project, kept across sessions: a graph of nodes, each linked to the files it is about. One operation of each; operations are applied in order, and one that cannot be applied is reported while the others are saved. A node a changed file links to is marked as possibly out of date until it is rewritten or confirmed.",
 		].join(" "),
 		parameters: obj({
 			ops: arr(Op, { description: "Operations, applied in order. Each stands on its own: one that cannot be applied is reported, and the others are saved." }),
 		}),
 		executionMode: "sequential",
 		// Safe to run again after a crash: the file remembers the last call it applied.
-		replay: "safe",
+		replay: POLICY.enums.toolReplay.safe,
 		execute: async (args, api) => {
 			const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 			const ops = Array.isArray(args.ops) ? args.ops : [];
@@ -75,7 +86,7 @@ export function atlasTool({ root, brainDir, gate }) {
 			// A file link that names nothing yet makes the file, when the project may be changed at all.
 			const { plan } = loadPlan(brainDir);
 			const mayCreate = gate?.yolo === true || (plan !== undefined && isAuthorized(plan));
-			const who = { root, now: new Date(api.now()).toISOString(), by: main ? "main" : "task", main, files: () => projectFiles(root), created: [], mayCreate };
+			const who = { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate };
 			const lines = [];
 			const settle = [];
 			const shown = [];
@@ -83,7 +94,7 @@ export function atlasTool({ root, brainDir, gate }) {
 			let changed = false;
 			for (const [index, op] of ops.entries()) {
 				// What only reads is answered again; what writes was done before the restart.
-				if (rerun && op?.action !== "look") {
+				if (rerun && op?.action !== POLICY.enums.atlasActions.look) {
 					lines.push(`Op ${index + 1} (${opLabel(op)}) was already applied, before a restart.`);
 					applied++;
 					continue;

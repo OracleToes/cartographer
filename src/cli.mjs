@@ -1,9 +1,10 @@
 // `carto`, run from a project folder.
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, CORE_DIR, loadConfig } from "./config.mjs";
+import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
+import { forkCatalogNamespace } from "./catalog.mjs";
 
 const HELP = `carto: Cartographer, run from a project folder.
 
@@ -14,6 +15,7 @@ const HELP = `carto: Cartographer, run from a project folder.
   --url URL             model server for this run (an OpenAI-compatible /v1 address)
   --model NAME          model name for this run
   --here                treat the current folder as the project, whatever is above it
+  --fork-brain          mark this copied brain as an independent namespace and rebind its internal refs
   --no-bwrap            run the tasks' commands without the sandbox: directly on this
                         machine, as you, able to reach whatever you can. Also: /bwrap
   --yolo                let the agent carry out change items without /approve, also
@@ -40,6 +42,7 @@ function parse(argv) {
 		else if (arg === "--model") flags.model = value();
 		else if (arg === "-p" || arg === "--print") flags.message = value();
 		else if (arg === "--here") flags.here = true;
+		else if (arg === "--fork-brain") flags.forkBrain = true;
 		else if (arg === "--no-bwrap") flags.noBwrap = true;
 		else if (arg === "--yolo") flags.yolo = true;
 		else if (arg === "--plain") flags.plain = true;
@@ -60,7 +63,7 @@ function parse(argv) {
 async function checkServer(config) {
 	let response;
 	try {
-		response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(5000) });
+		response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
 	} catch (error) {
 		throw new ConfigError(`The model server at ${config.server} does not answer (${error.cause?.code ?? error.message}). Is it running?`);
 	}
@@ -74,7 +77,9 @@ async function checkServer(config) {
 		throw new ConfigError(`The model server has no model named "${config.model}". It has: ${listed.map((entry) => entry.id).join(", ")}.`);
 	}
 	const size = (match ?? lone)?.meta?.n_ctx;
-	return Number.isInteger(size) && size > 0 ? size : undefined;
+	// Every model the server serves, for /model and for resuming a session whose stored model is another one.
+	const models = listed.map((entry) => entry.id);
+	return { context: Number.isInteger(size) && size > 0 ? size : undefined, models: models.length > 0 ? models : undefined };
 }
 
 /** Ask one question on the terminal. Ctrl-C and Ctrl-D count as "no". */
@@ -124,11 +129,11 @@ export async function main(argv) {
 		checkProject(project.root, { allowHome: flags.here === true });
 		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
 		const config = loadConfig({ brainDir: brainPath, flags });
-		const serverContext = await checkServer(config);
+		const served = await checkServer(config);
 		let contextNote = "";
-		if (serverContext !== undefined && serverContext < config.contextWindow) {
-			contextNote = ` · context ${serverContext} tokens (the server's limit; the settings say ${config.contextWindow})`;
-			config.contextWindow = serverContext;
+		if (served?.context !== undefined && served.context < config.contextWindow) {
+			contextNote = ` · context ${served.context} tokens (the server's limit; the settings say ${config.contextWindow})`;
+			config.contextWindow = served.context;
 		}
 		const interactive = flags.message === undefined && process.stdin.isTTY === true;
 		// A brain in the wrong folder is easy to make and annoying to notice later, so the first time is confirmed.
@@ -141,6 +146,7 @@ export async function main(argv) {
 		}
 		const { brainDir, created } = setUpBrain(project.root);
 		release = lockBrain(brainDir);
+		const forked = flags.forkBrain === true ? forkCatalogNamespace(brainDir) : undefined;
 		const { adoptOldLedger } = await import("./ledger.mjs");
 		const adopted = adoptOldLedger(brainDir);
 
@@ -155,17 +161,19 @@ export async function main(argv) {
 		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
 		const { YOLO_LINE } = await import("./plan.mjs");
-		const runner = createRunner({ off: flags.noBwrap === true });
+		const runner = createRunner({ off: flags.noBwrap === true || config.bwrap === false });
 		say(sandboxLine(runner));
-		// Whether change items run without /approve. Never read from a file: the user says it anew at each start.
-		const gate = { yolo: flags.yolo === true };
+		// Whether change items run without /approve. The settings hold the default (--yolo overrides it for one
+		// run); switching it while carto runs (/yolo) is never remembered.
+		const gate = { yolo: flags.yolo === true || config.yolo === true };
 		if (gate.yolo) say(YOLO_LINE);
 		if (adopted) say("The ledger file ledger.json is now carto-ledger.json; its entries are unchanged.");
+		if (forked) say(`Independent brain namespace created (${forked.previous} → ${forked.namespace}); internal references were rebound.`);
 
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
@@ -175,6 +183,7 @@ export async function main(argv) {
 			config,
 			root: project.root,
 			brainDir,
+			servedModels: served?.models,
 			runner,
 			gate,
 			wakeMin: config.wakeMin,
@@ -192,7 +201,7 @@ export async function main(argv) {
 		// Work that is still running is not waited for: it is stored, and continues at the next start.
 		// The shell windows are ended by the process's exit (src/windows.mjs), not closed here: closing would
 		// clear the record that lets the next start say which windows were running something and are gone.
-		setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
+		setTimeout(() => process.exit(process.exitCode ?? 0), POLICY.timing.gracefulExitMs).unref();
 		if (session !== undefined) await session.harness.close(session.context).catch(() => {});
 		process.exit(process.exitCode ?? 0);
 	}
