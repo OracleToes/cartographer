@@ -364,7 +364,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 				obj({
 					action: oneOf(ACTIONS, {
 						description:
-							"The ledger, plan and books take add, edit, done, remove (before on the books positions an entry; clear empties the plan). The context takes one action per operation: recall, shelve, unshelve, fold, note (in a task), collapse.",
+							"The ledger, plan and books take add, edit, done, remove (before on the books positions an entry; clear empties the plan). The context takes one action per operation.",
 					}),
 					id: opt(str({ description: "The entry, item or report the operation works on (g1, p2, a3, t12); in a task, a step (s3)." })),
 					kind: opt(str({ description: "For add: a goal, question or note in the ledger; assessment or practice in the books." })),

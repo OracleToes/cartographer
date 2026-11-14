@@ -7,9 +7,9 @@ import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, KINDS, loadAtlas, saveA
 import { DEPTH_MAX } from "../tree.mjs";
 import { projectFiles } from "./look.mjs";
 
-const name = () => str({ description: "The node's name: short and stable, such as dice_roll." });
-const links = (what) => opt(arr(str(), { description: `Names of other nodes ${what}.` }));
-const files = (what) => opt(arr(str(), { description: `Paths of files or folders in the project ${what}.` }));
+const name = () => str({ description: "Short and stable, such as dice_roll." });
+const links = (what) => opt(arr(str(), { description: `Node names to ${what}.` }));
+const files = (what) => opt(arr(str(), { description: `Project paths to ${what}.` }));
 
 // One object shape per action, told apart by `action`; the fields an action cannot work without are required, so
 // a grammar-constrained server cannot leave them out. Keep `action` first, then the required fields, then the
@@ -19,9 +19,9 @@ const Op = union([
 		{
 			action: lit("add"),
 			name: name(),
-			gist: str({ description: `One line that says what this is, at most ${GIST_MAX} characters.` }),
-			kind: opt(oneOf(KINDS, { description: "component: a part of the project and what it does. finding: something established. dead_end: something tried and ruled out, kept so it is not tried again. Leave out for a plain node." })),
-			detail: opt(str({ description: `Anything longer worth keeping, at most ${DETAIL_MAX} characters. Shown only by look.` })),
+			gist: str({ description: `One line, at most ${GIST_MAX} characters.` }),
+			kind: opt(oneOf(KINDS, { description: "component: a part and what it does. finding: something established. dead_end: tried and ruled out. Leave out for a plain node." })),
+			detail: opt(str({ description: `Longer detail, at most ${DETAIL_MAX} characters; \`look\` shows it.` })),
 			links: links("this one relates to; added to the links it has"),
 			files: files("this node is about; added to the ones it has"),
 		},
@@ -31,9 +31,9 @@ const Op = union([
 		{
 			action: lit("edit"),
 			name: name(),
-			gist: str({ description: `One line that says what this is, at most ${GIST_MAX} characters.` }),
-			kind: opt(oneOf(KINDS, { description: "component: a part of the project and what it does. finding: something established. dead_end: something tried and ruled out, kept so it is not tried again. Leave out for a plain node." })),
-			detail: opt(str({ description: `Anything longer worth keeping, at most ${DETAIL_MAX} characters. Shown only by look.` })),
+			gist: str({ description: `One line, at most ${GIST_MAX} characters.` }),
+			kind: opt(oneOf(KINDS, { description: "component: a part and what it does. finding: something established. dead_end: tried and ruled out. Leave out for a plain node." })),
+			detail: opt(str({ description: `Longer detail, at most ${DETAIL_MAX} characters; \`look\` shows it.` })),
 			links: links("this one relates to; added to the links it has"),
 			files: files("this node is about; added to the ones it has"),
 		},
@@ -64,9 +64,7 @@ export function atlasTool({ root, brainDir, gate }) {
 	return defineTool({
 		name: "atlas",
 		description: [
-			"Your map of this project, kept across sessions. Its graph holds what you have understood: a node says what a part does, what was found out, or what was tried and ruled out, and links to the files it is about and to other nodes.",
-			"Write a node for what you would want to know when you come back to this project with an empty context; not every file needs one. Tasks write nodes too.",
-			"When a file a node links to changes, the node is marked as possibly out of date until it is rewritten or confirmed.",
+			"Your map of this project, kept across sessions: a graph of nodes, each linked to the files it is about. One operation of each; operations are applied in order, and one that cannot be applied is reported while the others are saved. A node a changed file links to is marked as possibly out of date until it is rewritten or confirmed.",
 		].join(" "),
 		parameters: obj({
 			ops: arr(Op, { description: "Operations, applied in order. Each stands on its own: one that cannot be applied is reported, and the others are saved." }),

@@ -2856,7 +2856,7 @@ test("state: the time, the age of what is old, the tree, and what the atlas hold
 	// The tree and the atlas.
 	pin(dir, { now, reason: "the first start" });
 	has(block(), "\n\nTree\nFrom the project root, 3 levels deep: 5 files in all.\nsrc/\n", "the tree");
-	has(block(), "\n\nAtlas\nGraph: no nodes yet. Assessment: none yet. Write one with `assess` once you know what the project is and how it is built.\n\nLedger\n", "an empty atlas");
+	has(block(), "\n\nAtlas\nGraph: no nodes yet. Assessment: none yet. Write one with `book`'s books once you know what the project is and how it is built.\n\nLedger\n", "an empty atlas");
 	const atlas = loadAtlas(dir).atlas;
 	applyAtlasOp(atlas, { action: "add", name: "adder", gist: "adds", files: ["src/math.js"] }, { root, now: new Date(now).toISOString(), by: "task", main: false });
 	saveAtlas(dir, atlas);
@@ -2871,7 +2871,7 @@ test("state: the time, the age of what is old, the tree, and what the atlas hold
 	saveAssessment(dir, "By hand.");
 	has(block(), "The assessment was edited outside this conversation since that copy, probably by the user. It now reads:\nBy hand.\n", "an edit by hand is shown in full");
 	noteAssessed(dir, "By hand.");
-	has(block(), "You rewrote the assessment since that copy: your `assess` call holds the text that counts.", "the agent's own rewrite is only mentioned");
+	has(block(), "You rewrote the assessment since that copy: your `book` call holds the text that counts.", "the agent's own rewrite is only mentioned");
 	hasNot(block(), "It now reads", "and not repeated");
 	pin(dir, { now, reason: "goal g1 was closed" });
 	hasNot(block(), "since that copy", "after a new copy nothing is newer");
@@ -3013,7 +3013,7 @@ test("assessment: the main agent writes it and a task cannot; it reaches the top
 		has(first.stdout, "● assessment written, 41 characters  (/assessment shows it)", "on the screen");
 		const before = server.requests.at(-1);
 		has(firstMessage(before), "Your assessment\nNone written yet.\n", "the copy at the top is not replaced by the write");
-		has(stateOf(before), "You rewrote the assessment since that copy: your `assess` call holds the text that counts.", "the state block says the copy is behind");
+		has(stateOf(before), "You rewrote the assessment since that copy: your `book` call holds the text that counts.", "the state block says the copy is behind");
 		hasNot(stateOf(before), "Two files, no build step.", "without repeating the text");
 		// What makes the write cheap: the start of the conversation is the same in every request.
 		assert.equal(new Set(server.requests.map((request) => withoutState(firstMessage(request)))).size, 1, "the first message is the same in every request");
@@ -4279,7 +4279,7 @@ test("context: /collapse puts one block in place of the work so far; the agent i
 		assert.deepEqual(next.messages[0], last.messages[0], "the prompt is the same");
 		assert.deepEqual(next.tools, last.tools, "and so are the tools");
 		const front = frontOf(next);
-		assert.match(front, /^<context>\nWritten by Cartographer, not by the user\. Your context was collapsed on [^\n]* \(the user asked for it\)\. What you had in view before is gone except for what stands here: one line for each finished task, your shelf, and the last of your talk with the user\. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them\.\n\nFinished tasks \(`context` with action recall and the id brings a report back in full\)\nt1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\n\nYour shelf is empty\.\n\nYour talk with the user, word for word; what was said before it is gone\n/);
+		assert.match(front, /^<context>\nWritten by Cartographer, not by the user\. Your context was collapsed on [^\n]* \(the user asked for it\)\. What you had in view before is gone except for what stands here: one line for each finished task, your shelf, and the last of your talk with the user\. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them\.\n\nFinished tasks \(`book` with book context, action recall and the id brings a report back in full\)\nt1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\n\nYour shelf is empty\.\n\nYour talk with the user, word for word; what was said before it is gone\n/);
 		assert.match(front, /\n\[user · [^\]]*\] task: read: src\/math\.js\n\[you · [^\]]*\] Report received: REPORT\n== src\/math\.js \(lines 1-4 of 4\)\n\[user · [^\]]*\] say: hello there\n\[you · [^\]]*\] hello there\n<\/context>$/, "the talk, word for word, and nothing after it");
 		hasNot(rawText(next.messages[1]), "MARKER-ONLY-IN-FILE", "no file text");
 		assert.ok(rawText(next.messages[1]).startsWith("<project>\nWritten by Cartographer"), "the copy of the assessment and graph stands before it");

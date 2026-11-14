@@ -63,7 +63,7 @@ function direction(ledger, plan, yolo = false) {
 		return `${FIRST} Beyond that, nothing of the plan is left to do once.${standing}${noGoal}`;
 	}
 	if (next === undefined) {
-		const check = goals ? " Check each open goal against its done-when line. Before you close one, bring the assessment up to date with `assess` if the work changed your picture of the project: the copy at the top of your context is rewritten when a goal closes. Close the goals that are reached, tell the user what was achieved and how to try it, and clear the plan." : " Tell the user what was done and how to try it, and clear the plan.";
+		const check = goals ? " Check each open goal against its done-when line. Before you close one, bring the assessment up to date with `book`'s books if the work changed your picture of the project: the copy at the top of your context is rewritten when a goal closes. Close the goals that are reached, tell the user what was achieved and how to try it, and clear the plan." : " Tell the user what was done and how to try it, and clear the plan.";
 		return `${FIRST} Every item of the plan is done.${check} If something is still missing, add items for it.`;
 	}
 	if (waits) {
@@ -214,7 +214,7 @@ function atlasText(brainDir, root, config, now) {
 	const linked = atlas.nodes.length === 0 ? "" : ` Files a node links to: ${linkedCount(atlas, tree.files)} of ${tree.files.length}.`;
 	lines.push(
 		`Graph: ${atlas.nodes.length === 0 ? "no nodes yet" : atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`}.${linked} Assessment: ${
-			assessment.text === "" ? "none yet. Write one with `assess` once you know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
+			assessment.text === "" ? "none yet. Write one with `book`'s books once you know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
 		}`,
 	);
 	const since = sinceTop(brainDir, atlas, assessment.text);
@@ -224,7 +224,7 @@ function atlasText(brainDir, root, config, now) {
 	if (changed.length > 0) lines.push(changed.join(" "));
 	if (since.assessment && assessment.text !== "") {
 		// The agent's own rewrite is in its context as the call that made it. An edit by hand is not, so it is shown.
-		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("You rewrote the assessment since that copy: your `assess` call holds the text that counts.");
+		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("You rewrote the assessment since that copy: your `book` call holds the text that counts.");
 		else lines.push(`The assessment was edited outside this conversation since that copy, probably by the user. It now reads:\n${assessment.text}`);
 	}
 	const stale = staleNodes(root, atlas, now);

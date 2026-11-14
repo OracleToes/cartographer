@@ -327,7 +327,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 			OPEN,
 			`${HEAD} Your context was collapsed on ${stamp(now)} (${reason}). What you had in view before is gone except for what stands here: one line for each finished task, your shelf, and the last of your talk with the user. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them.`,
 			"",
-			"Finished tasks (`context` with action recall and the id brings a report back in full)",
+			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
 			record.text,
 			"",
 			shelf.shown.length === 0 ? "Your shelf is empty." : `Your shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`,

@@ -64,7 +64,7 @@ export const TOOLS = {
 	ask: "Ask the user a question and wait for the answer, which comes back as this call's result. Use it only when nothing can go on without their answer. For a matter of taste or a choice that others do not depend on, record a question in the ledger instead and keep working; the user answers it in the Requests view. With `choices`, a number picks one.",
 	return: "End this task. `report` is all the main agent gets: put in it what you found or changed, with file paths and line numbers, and what you left undone. `done` says whether the brief is carried out; returning early with `done` false and a clear finding is a good outcome. Call `return` in your last reply, and in no other way end a task.",
 	task: "Start one task: one thing, done atomically. Give a `brief` that says exactly what to do and what its report must contain. The task is a fork of you, with your context and your tools; only its report comes back. One task per reply when you can. For a change item of the plan, give its `item` id; a change item that waits for approval cannot start. Prefer a task with a clear brief to doing it yourself.",
-	book: "Write to your books; `book` says which. `ledger`: goals, questions for the user, notes — add, edit, done, remove. `plan`: the work for the open goals, look or change; a change item waits for the user's approval — add, edit, done, remove, clear. `books`: short entries about this project (assessment) and about how you work (practice); the same verbs, and `text` replaces the whole assessment. `prompt`: propose a change to your own prompt, for the user to approve. `context`: fold a finished report back to its record line, recall one, shelve a file to keep in view across collapses, or, in a task, note what must survive one. One `ops` call holds several operations, applied in order, each standing on its own. What each book is for, and when to write to it, the sections say.",
+	book: "Write to your books; `book` says which. `ledger`: goals, questions for the user, notes — add, edit, done, remove. `plan`: the work for the open goals, look or change; a change item waits for the user's approval — add, edit, done, remove, clear. `books`: short entries about this project (assessment) and about how you work (practice); the same verbs, and `text` replaces the whole assessment. `prompt`: propose a change to your own prompt, for the user to approve. `context`: fold a finished report back to its record line, recall one, shelve a file to keep in view across collapses, or, in a task, note what must survive one. What each book is for, and when to write to it, the sections say.",
 	atlas: "Your map of the project's parts, as nodes that link to files and to each other. `add` a node with a one-line `gist` (or `edit`, `remove`, `confirm`, `link`, `unlink`, `look`, `tree`); tasks write nodes themselves while the knowledge is fresh. A node a changed file links to is marked as possibly out of date until a task confirms it. The tree of files is drawn for you in the state block.",
 	prompt: "Propose a change to your own prompt. Name a section or a tool's description, give the whole new wording (within its budget) and what you observed that misled you. Nothing changes until the user approves it in the Requests view; approved wording holds from the next collapse or start. Add a section, reword one, drop one, or reword a tool's description.",
 	read: "Read text files of the project with line numbers. Ask for several files in one call when you know which you need; a range reads part of a long file. Only a task reads files.",
@@ -317,7 +317,7 @@ export const ASK_TASK = (reason) =>
 		"<cartographer>",
 		`Written by Cartographer, not by the user. ${reason}, so your steps since the brief are about to be collapsed.`,
 		"",
-		"You keep: the brief, the notes you wrote (plain text, and `context` with action note), your shelf, and one line for each call you made.",
+		"You keep: the brief, the notes you wrote (plain text, and `book` with book context, action note), your shelf, and one line for each call you made.",
 		"You lose from view: the results of your calls.",
 		"",
 		'Is there something in those results that your report needs and that your notes do not hold yet? Answer {"handoff": true} to get one reply to write it down first. Answer {"handoff": false} to collapse now.',
@@ -334,10 +334,10 @@ export const HANDOFF_NOTE = (reason) =>
 		"<cartographer>",
 		`Written by Cartographer, not by the user. Nobody typed this. Your context will be collapsed when this turn ends (${reason}), and you asked for a turn first.`,
 		"",
-		"Write what must not be lost with `ledger`, `atlas` or `assess`, and put a file you keep needing on your shelf with `context`. What you write as plain text is lost. Then end the turn: call `sleep`, or `chat` if the user should hear something.",
+		"Write what must not be lost with `book` (its ledger, its books for the assessment) or `atlas`, and put a file you keep needing on your shelf with `book`'s context operations. What you write as plain text is lost. Then end the turn: call `sleep`, or `chat` if the user should hear something.",
 		"</cartographer>",
 	].join("\n");
 
 /** Put at the end of one request of a task that answered true. */
 export const TASK_HANDOFF =
-	"<cartographer>\nWritten by Cartographer, not by the user. Your steps will be collapsed after this reply, and you asked for a reply first. Call `context` with action note now and put into `text` what your report needs from the results above: findings with file paths and line numbers. Results you have not noted are gone after this reply.\n</cartographer>";
+	"<cartographer>\nWritten by Cartographer, not by the user. Your steps will be collapsed after this reply, and you asked for a reply first. Call `book` with book context and action note now, and put into `text` what your report needs from the results above: findings with file paths and line numbers. Results you have not noted are gone after this reply.\n</cartographer>";
