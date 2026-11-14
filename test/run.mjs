@@ -1625,7 +1625,7 @@ test("windows: a command outlives the call that started it; wait, read, send, st
 		// A command that has not ended when the call returns keeps running.
 		const first = await run("server", "for i in 1 2 3 4 5 6; do echo tick $i; sleep 0.3; done; echo ready", 400);
 		assert.deepEqual([first.reason, first.state, first.exit], ["time", "busy", undefined], "the call returns, the command goes on");
-		await assert.rejects(run("server", "echo no", 100), (error) => error instanceof WindowError && /^Window server is busy with `for i in 1 2 3 4 5 6; do echo tick \$i; sleep 0\.3; done; echo ready` \(running \d s\)\. To run this beside it, give `shell` another `window` name\. To deal with what is running, use `window`: wait for it, stop it, or send it a line of input\.$/.test(error.message), "a busy window takes no second command, and says what to do");
+		await assert.rejects(run("server", "echo no", 100), (error) => error instanceof WindowError && /^Window server is busy with `for i in 1 2 3 4 5 6; do echo tick \$i; sleep 0\.3; done; echo ready` \(running \d s\)\. To run this beside it, give `shell` another `window` name\. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input\.$/.test(error.message), "a busy window takes no second command, and says what to do");
 		assert.equal((await run("main", "echo beside")).text, "beside", "another window works meanwhile");
 		result = await windows.wait("server", { waitMs: 10_000, until: "tick 4" });
 		assert.equal(result.reason, "until", "a wait can end at a line");
@@ -1836,13 +1836,13 @@ test("shell: only a change task of the authorized plan types into a window; the 
 		has(result.stdout, "plan  2 change items wait for you (1 with network access): /plan shows the plan, /approve authorizes it", "and so does the line that asks for /approve");
 		has(result.stdout, "  p2 Fetch things  · its commands reach the network\n", "and the authorization");
 
-		const outputs = resultsOf(server, "shell").filter((text) => !text.includes("Tool call blocked"));
+		const outputs = resultsOf(server, "shell", undefined, "run").filter((text) => !text.includes("Tool call blocked"));
 		assert.equal(outputs.length, 13, `thirteen commands were answered:\n${outputs.join("\n---\n")}`);
 		assert.match(outputs[0], /^print\("hello from app"\)\n\[exit 0 · \d+\.\d s · window main\]$/, "the output, then the exit status, the time and the window");
 		assert.equal(readFileSync(join(root, "made.txt"), "utf8"), "made\n", "the command wrote into the project");
 		assert.match(outputs[1], new RegExp(`^${root}/src\\ndeep\\s+main\\.js\\s+math\\.js\\n\\[exit 0 · \\d+\\.\\d s · window main, in src/\\]$`), "a command that changes the folder: the status line says where the window is now (ls prints in columns: it is on a terminal)");
 		assert.match(outputs[2], new RegExp(`^${root}/src\\n\\[exit 0`), "and the next command starts there");
-		assert.match(outputs[3], /^before\n\[still running after 1\.0 s in window main: the command keeps going there, and you can go on with other work\. The windows block at the end of each request shows how it is doing\. `window` waits for it, sends it input, stops it or closes it\. `shell` with another window name runs something beside it\.\]$/, "a command that takes longer than the call waits: it keeps running");
+		assert.match(outputs[3], /^before\n\[still running after 1\.0 s in window main: the command keeps going there, and you can go on with other work\. The windows block at the end of each request shows how it is doing\. The same tool's actions wait for it, send it input, stop it or close it\. A run with another window name runs something beside it\.\]$/, "a command that takes longer than the call waits: it keeps running");
 		assert.match(outputs[4], /^Refused: Window main is busy with `echo before; sleep 30; echo after` \(running \d s\)\. To run this beside it, give `shell` another `window` name\./, "the window is busy meanwhile");
 		assert.match(resultsOf(server, "shell", undefined, "window")[0], /^\^C\n\[stopped with Ctrl-C: exit 130 · window main is free\]$/, "`window` stops it");
 		assert.match(outputs[5], /^to-stderr\n\[exit 3 · \d+\.\d s · window main, in src\/ · this window has no network\]$/, "errors are part of the output; a failure names the missing network");

@@ -425,7 +425,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 				win = await open(name, network === true);
 			} else {
 				if (win.state === "busy") {
-					throw new WindowError(`Window ${name} is busy with ${busyLine(win)}. To run this beside it, give \`shell\` another \`window\` name. To deal with what is running, use \`window\`: wait for it, stop it, or send it a line of input.`);
+					throw new WindowError(`Window ${name} is busy with ${busyLine(win)}. To run this beside it, give \`shell\` another \`window\` name. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input.`);
 				}
 				// The terminal closes every window when the user switches the sandbox; this is for a switch it did not see.
 				if (win.sandbox !== (runner.mode === "sandbox")) {
