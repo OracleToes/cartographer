@@ -112,7 +112,7 @@ const COMMANDS = [
 	["unarchive", "bring an archived row back into what the agent reads"],
 	["delete", "a row is gone for good, and the agent is not told: a report, curated row, ledger entry, plan item, or node"],
 	["recall", "bring a kept report back into view in full"],
-	["shelve", "keep a file in view from the next collapse on: /shelve PATH [lines]"],
+	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
 	["send", "type a line into a shell window: /send NAME line"],
 	["collapse", "collapse the context now"],

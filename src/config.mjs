@@ -104,7 +104,7 @@ export const POLICY = freezeTree({
 		plan: { itemChars: 300, items: 30 },
 		atlas: { nameChars: 40, gistChars: 200, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
 		assessment: { textChars: 3000 },
-		context: { recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, curatedRowChars: 3000, curatedRows: 80, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
+		context: { recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, shelfDiffLines: 120, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, curatedRowChars: 3000, curatedRows: 80, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
 		git: { errorChars: 400, maxBufferBytes: 256 * 1024 * 1024, checkoutBatchItems: 200, undoTimestampToleranceMs: 1000, checkpointBufferBytes: 64 * 1024 * 1024 },
 		checkpoints: { changeRecordLines: 40, folderCollapseFiles: 3 },
 		engine: { serverErrorChars: 300, handoffErrorChars: 120, noteChars: 2000, askMaxTokens: 16 },

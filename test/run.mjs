@@ -4654,7 +4654,7 @@ test("context: at rest the context is collapsed once enough would go, and not be
 	}
 });
 
-test("context: the shelf: a marked file changes nothing now, stands in the block from the next collapse, and every task begins with it read", async () => {
+test("context: shelving snapshots a file into active view now, carries it through collapse, and starts every task with it read", async () => {
 	const root = makeProject("context-shelf", { git: false });
 	configure(root, { shelfTokens: 1000, chatWindow: 1000 });
 	const server = await startStandIn();
@@ -4691,12 +4691,13 @@ test("context: the shelf: a marked file changes nothing now, stands in the block
 		has(result.stdout, "● context  nothing done: src is a directory: the shelf holds files, or line ranges of files.", "a directory");
 		has(result.stdout, '● context  nothing done: `lines` is a range like "10-80"; leave it out for the whole file.', "a bad range");
 
-		// Marking changed nothing in view: the request after it holds the answer and no file text.
+		// The successful shelf result puts the snapshot in active conversation immediately, before the collapse block.
 		const marked = server.requests.find((request) => messageText(request.messages.at(-1)).startsWith("say: marked"));
 		assert.equal(frontOf(marked), undefined, "no block yet");
-		hasNot(marked.messages.slice(0, -1).map(rawText).join("\n"), "MARKER-ONLY-IN-FILE", "the file is not in view yet");
+		has(marked.messages.slice(0, -1).map(rawText).join("\n"), "MARKER-ONLY-IN-FILE", "the tool result adds the file snapshot immediately");
 		has(stateOf(marked), "\nContext\n", "the state block has a part on the context");
-		has(stateOf(marked), "\nMarked for your shelf, in view from the next collapse on: src/math.js, long.txt (lines 10-12).\n", "which says what waits");
+		has(stateOf(marked), "\nNew or updated shelf snapshots, in view now and carried into the next collapse:\n", "the state includes the new snapshots immediately");
+		has(stateOf(marked), "== src/math.js (lines 1-4 of 4)\n1  export function add(a, b) {\n2    // MARKER-ONLY-IN-FILE", "the snapshot is readable before collapse");
 		assert.match(stateOf(marked), /\nYour context holds about [\d,]+ of 100,000 tokens\.\n/, "and how full it is");
 
 		// From the collapse on the files stand in the block, with their line numbers.
@@ -4712,7 +4713,8 @@ test("context: the shelf: a marked file changes nothing now, stands in the block
 		has(result.stdout, "● context  unshelved long.txt (lines 10-12)\n", "taken off");
 		has(result.stdout, "● context  nothing done: README.md is not on your shelf. On it: src/math.js.", "what is not on it");
 		has(stateOf(server.requests.at(-1)), "\nTaken off your shelf, gone from view at the next collapse: long.txt (lines 10-12).\n", "the state block says it");
-		assert.deepEqual(contextStore(root).shelf, [{ path: "src/math.js" }]);
+		assert.equal(contextStore(root).shelf[0].path, "src/math.js");
+		assert.equal(contextStore(root).shelf[0].type, "file");
 		// /context shows the shelf.
 		assert.match(result.stdout, /\n    shelf +\d+   src\/math\.js, long\.txt \(lines 10-12\)\n/, "/context names what stands on it now");
 		has(result.stdout, "\n  taken off the shelf, gone at the next collapse: long.txt (lines 10-12)\n", "and what leaves");
@@ -4729,7 +4731,9 @@ test("context: a shelved file that changed is said in the state block, and one t
 		writeFileSync(join(root, "src", "math.js"), "export const add = (a, b) => a + b;\n");
 		const changed = await carto(root, server, [], { input: "say: one\n" });
 		ok(changed, "second run");
-		has(stateOf(server.requests.at(-1)), "\nChanged since your shelf was written, so the copy on the shelf is old: src/math.js.\n", "the change is said");
+		has(stateOf(server.requests.at(-1)), "Changes since the saved shelf snapshots", "pending changes are reported");
+		has(stateOf(server.requests.at(-1)), "- 2    // MARKER-ONLY-IN-FILE", "the diff shows removed snapshot lines");
+		has(stateOf(server.requests.at(-1)), "+ 1  export const add = (a, b) => a + b;", "and added current lines");
 		has(frontOf(server.requests.at(-1)), "2    // MARKER-ONLY-IN-FILE", "the block itself is not rewritten: that would be read again in full");
 		rmSync(join(root, "src", "main.js"));
 		const gone = await carto(root, server, [], { input: "/collapse\nsay: two\n" });
@@ -4737,8 +4741,10 @@ test("context: a shelved file that changed is said in the state block, and one t
 		has(gone.stdout, "  taken off the shelf: src/main.js (the file is gone)\n", "the user is told");
 		const front = frontOf(server.requests.at(-1));
 		has(front, "\nYour shelf: 1 item, as the files were at the collapse\n== src/math.js (lines 1-1 of 1)\n1  export const add = (a, b) => a + b;\n(src/main.js was taken off the shelf: the file is gone.)\n", "the new block has the file as it is now, and says what left");
-		hasNot(stateOf(server.requests.at(-1)) ?? "", "Changed since your shelf was written", "nothing is old now");
-		assert.deepEqual(contextStore(root).shelf, [{ path: "src/math.js" }]);
+		hasNot(stateOf(server.requests.at(-1)) ?? "", "Changes since the saved shelf snapshots", "the collapse reset the snapshot baseline");
+		assert.equal(contextStore(root).shelf.length, 1);
+		assert.equal(contextStore(root).shelf[0].path, "src/math.js");
+		assert.match(contextStore(root).shelf[0].snapshot, /export const add/);
 	} finally {
 		await server.close();
 	}
@@ -4913,8 +4919,11 @@ test("context: a task can collapse its own steps, and can hand a shelved file on
 		has(result.stdout, "◂ shelf  the task added src/math.js  (/context shows the shelf)\n", "the user is told");
 		const main = mainRequests(server);
 		const report = main.find((request) => rawText(request.messages.at(-1)).startsWith("REPORT"));
-		has(messageText(report.messages.at(-1)), "\n\nThe task put on your shelf: src/math.js. In view from the next collapse on.\n\nThis report is kept as t1.", "the agent is told under the report");
-		assert.deepEqual(contextStore(root).shelf, [{ path: "src/math.js" }], "handed on: one of the two");
+		has(messageText(report.messages.at(-1)), "The task put on your shelf; these snapshots are in view now and will stand at the next collapse: src/math.js.\n\n== src/math.js (lines 1-4 of 4)", "the agent immediately receives the handed-off snapshot");
+		has(messageText(report.messages.at(-1)), "This report is kept as t1.", "the report marker remains");
+		assert.equal(contextStore(root).shelf[0].path, "src/math.js", "handed on: one of the two");
+		assert.equal(contextStore(root).shelf[0].type, "file", "the shelf stores a typed file item");
+		assert.match(contextStore(root).shelf[0].snapshot, /MARKER-ONLY-IN-FILE/, "and its exact snapshot");
 		// And from the next collapse on it is in view.
 		has(frontOf(server.requests.at(-1)), "Your shelf: 1 item, as the files were at the collapse\n== src/math.js (lines 1-4 of 4)\n", "in the block");
 		hasNot(frontOf(server.requests.at(-1)), "== src/main.js", "the other is not");
@@ -5992,7 +6001,7 @@ test("the user's hands: /shelve, /unshelve, /fold, /recall and /send do for the 
 			"/delete t1",
 		) });
 		ok(result, "the run");
-		has(result.stdout, "notes.txt is marked for the shelf (about ", "/shelve marks a file for the shelf");
+		has(result.stdout, "notes.txt is on the shelf (about ", "/shelve adds a typed file snapshot immediately");
 		has(result.stdout, "Taken off the shelf: notes.txt.", "/unshelve takes it off again");
 		has(result.stdout, "notes.txt is not on the shelf. The shelf is empty.", "and says so when there is nothing to take");
 		has(result.stdout, "out of view, the record line stands in its place", "/fold takes a report out of view");
@@ -6054,7 +6063,9 @@ test("context: curated rows share the tagged row projection, defer visibility in
 	assert.ok(loadContext(brainDir).front.rows.some((row) => row.id === "c2"), "deferred removal leaves the current projection intact");
 	assert.match(contextLines(brainDir, root, { window: 100_000 }), /c2 \(deleted\)/, "the state block explains a pending removal");
 	const { item } = shelfItem(root, "report:t1", undefined, brainDir);
+	assert.equal(item.type, "reference");
 	assert.equal(item.ref.type, "report");
+	assert.match(item.snapshot, /The full report body\./, "the typed reference persists the exact snapshot");
 	assert.match(shelfText(root, item, brainDir), /The full report body\./, "a report reference resolves to its full stored content");
 });
 
@@ -6080,7 +6091,7 @@ test("screen: Hands lists the shelf and the reports with the agent's operations,
 	assert.deepEqual(view.items.filter((item) => item.plain && item.head[0][0].includes("The reports of finished work")).length, 1, "and a heading stands over each kind");
 
 	// The operations behind the keys, as the terminal commands call them.
-	assert.match(shelveForUser(root, brainDir, { shelfTokens: 1000 }, "keep.txt"), /marked for the shelf/, "shelving marks a file, again for one that is on it");
+	assert.match(shelveForUser(root, brainDir, { shelfTokens: 1000 }, "keep.txt"), /snapshot is available now[\s\S]*kept line/, "shelving snapshots a file immediately, including one that is already on the shelf");
 	assert.match(foldReports(brainDir, ["t1"]), /already out of view/, "a report that is folded folds no further");
 	const said = recallReport(brainDir, "t1");
 	assert.match(said, /stands in its place again/, "recall brings a folded report back into view");

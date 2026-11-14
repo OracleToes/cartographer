@@ -657,7 +657,7 @@ export function handsView({ root, brainDir }) {
 		[["On rows: v archives or restores, d deletes (d again); curated rows are edited with /row. On a report: f folds or recalls. On the shelf: x takes an item off.", "faint"]],
 	];
 	const items = [];
-	items.push(heading("  The shelf · in view from the next collapse on, and read by every task at its start"));
+	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
 	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `context`, action shelve."));
 	for (const item of store.shelf) {
 		items.push({

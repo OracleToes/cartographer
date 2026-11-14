@@ -100,6 +100,8 @@ Implementation is authorized. Keep the stages sequenced and add or update tests 
 - Expose pending file changes as a diff in the state block; at collapse, incorporate the current contents and reset the comparison baseline.
 - Add or update focused tests without running them yet.
 
+**Progress (2026-11-13):** shelf items now carry explicit `file`/`reference` types and persisted snapshots (legacy path/reference entries are normalized when read). Successful book, user, and task shelf additions place the exact snapshot in active context immediately; task handoffs carry that snapshot too. Persistent snapshot sizes are charged to `shelfTokens`, while over-cap adds leave the prior shelf untouched. The state block shows pending snapshot changes as a bounded line diff, and collapse refreshes the baseline from current content. Focused acceptance assertions cover immediate visibility, range snapshots, capacity/error cases, task handoff, diffs, deletion, and reset at collapse. Syntax checks and `git diff --check` passed; tests were intentionally not run per instruction.
+
 **Exit:** test coverage addresses immediate visibility, persistence through collapse, ranges, cap accounting, diffs, updates/deletions, and failure behavior.
 
 ### Stage 4 — on-demand tool-schema lifecycle

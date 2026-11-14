@@ -315,7 +315,7 @@ export function createEngine({ root, brainDir, config }) {
 			const before = state.used;
 			updateContext(brainDir, (store) => {
 				const task = taskState(store, conversationId);
-				task.cut = { steps: messages.length - steps.start, block: taskBlock(root, config, steps, task, { reason: why }), at: Date.now() };
+				task.cut = { steps: messages.length - steps.start, block: taskBlock(root, brainDir, config, steps, task, { reason: why }), at: Date.now() };
 				task.pending = undefined;
 				task.reason = undefined;
 			});

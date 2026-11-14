@@ -118,7 +118,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			// What the task shelved for the main agent goes onto its shelf, and the task's own context state ends.
 			const handed = endTaskContext(root, brainDir, config, child);
 			let text = textOf({ content: result.output });
-			if (handed.added.length > 0) text += `\n\nThe task put on your shelf: ${handed.added.join(", ")}. In view from the next collapse on.`;
+			if (handed.added.length > 0) text += `\n\nThe task put on your shelf; these snapshots are in view now and will stand at the next collapse: ${handed.added.join(", ")}.\n\n${handed.snapshots.join("\n\n")}`;
 			if (handed.refused.length > 0) text += `\n\nThe task wanted on your shelf, but it would not fit: ${handed.refused.join(", ")}.`;
 			// The report is kept under an id, and one line of it goes into the record a collapse keeps
 			// (src/context.mjs). The id is taken once, also when this call runs again after a restart.

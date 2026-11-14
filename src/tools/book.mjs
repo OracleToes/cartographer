@@ -237,12 +237,13 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 					if (at >= 0) list[at] = entry;
 					else list.push(entry);
 				});
+				store = loadContext(brainDir);
 				const size = `about ${count(tokens)} tokens; the shelf then holds ${count(total)} of ${count(config.shelfTokens)}`;
 				shown.push(`shelved ${shelfLabel(item)} · about ${count(tokens)} tokens${handOn ? " · handed on to the main agent at the end" : ""}`);
 				lines.push(
 					main
-						? `${shelfLabel(item)} is marked for your shelf (${size}). Nothing changed in your context now. From the next collapse on it stands at the start, and every task begins with it read.`
-						: `${shelfLabel(item)} is on your shelf (${size}). It stays in view when your steps are collapsed.${handOn ? " When you return, it goes onto the main agent's shelf as well." : ""}`,
+						? `${shelfLabel(item)} is on your shelf (${size}). Its snapshot is in view now and will stand at the start after the next collapse; every task begins with it read.\n\n${item.snapshot}`
+						: `${shelfLabel(item)} is on your shelf (${size}). Its snapshot is in view now and stays when your steps are collapsed.${handOn ? " When you return, it goes onto the main agent's shelf as well." : ""}\n\n${item.snapshot}`,
 				);
 				continue;
 			}

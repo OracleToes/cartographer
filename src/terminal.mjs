@@ -1078,7 +1078,7 @@ export async function runTerminal(session, options) {
 				const store = sizes.store;
 				const waiting = store.shelf.filter((item) => !(sizes.front?.shelf ?? []).some((entry) => sameShelfItem(entry, item)));
 				const leaving = (sizes.front?.shelf ?? []).filter((entry) => !store.shelf.some((item) => sameShelfItem(entry, item)));
-				if (waiting.length > 0) line(`  marked for the shelf, in view from the next collapse: ${waiting.map(shelfLabel).join(", ")}`);
+				if (waiting.length > 0) line(`  new shelf snapshots, in view now and carried into the next collapse: ${waiting.map(shelfLabel).join(", ")}`);
 				if (leaving.length > 0) line(`  taken off the shelf, gone at the next collapse: ${leaving.map(shelfLabel).join(", ")}`);
 				if (composedRows(store).length > 0) {
 					line(`  kept reports: ${composedRows(store).length} (${composedRows(store)[0].id} to ${composedRows(store).at(-1).id}); the newest:`);
@@ -1588,7 +1588,7 @@ export async function runTerminal(session, options) {
 			case "shelve":
 			case "unshelve": {
 				if (argument === undefined) {
-					line(`  /${name} PATH [lines] ${name === "shelve" ? "keeps a file in view from the next collapse on" : "takes a file off the shelf (all takes every one)"}.`);
+					line(`  /${name} PATH [lines] ${name === "shelve" ? "snapshots a file into view now and carries it through collapse" : "takes a file off the shelf (all takes every one)"}.`);
 					return true;
 				}
 				try {

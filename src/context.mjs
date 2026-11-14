@@ -68,6 +68,23 @@ const oneLine = (text, max) => {
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
 const hashOf = (text) => createHash("sha1").update(text).digest("hex").slice(0, 16);
+
+/** A compact line diff for the state block; very large changes are clipped without hiding that fact. */
+function shelfDiff(before, after) {
+	const oldLines = String(before ?? "").split("\n");
+	const newLines = String(after ?? "").split("\n");
+	let start = 0;
+	while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) start++;
+	let oldEnd = oldLines.length;
+	let newEnd = newLines.length;
+	while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) { oldEnd--; newEnd--; }
+	const changed = [
+		...oldLines.slice(start, oldEnd).map((line) => `- ${line}`),
+		...newLines.slice(start, newEnd).map((line) => `+ ${line}`),
+	];
+	const limit = POLICY.limits.context.shelfDiffLines;
+	return changed.length > limit ? [...changed.slice(0, limit), `… ${changed.length - limit} more diff lines omitted`].join("\n") : changed.join("\n");
+}
 export const textOf = (message) =>
 	typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") : "";
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
@@ -146,7 +163,10 @@ export function loadContext(brainDir) {
 		}
 		delete store.records;
 		for (const key of ["chat", "shelf", "dropped"]) if (!Array.isArray(store[key])) store[key] = base[key];
+		const typeShelfItem = (item) => item?.ref !== undefined ? { ...item, type: "reference" } : { ...item, type: "file" };
+		store.shelf = store.shelf.map(typeShelfItem);
 		if (store.tasks === null || typeof store.tasks !== "object" || Array.isArray(store.tasks)) store.tasks = {};
+		for (const task of Object.values(store.tasks)) if (Array.isArray(task?.shelf)) task.shelf = task.shelf.map(typeShelfItem);
 		const highestReport = Math.max(0, ...composedRows(store).map((row) => reportNumber(row.id)));
 		const highestCurated = Math.max(0, ...curatedRows(store).map((row) => contextRowNumber(row.id)));
 		if (!Number.isInteger(store.next) || store.next <= highestReport) store.next = highestReport + 1;
@@ -425,13 +445,18 @@ const referenceOf = (given) => {
 	return match === null ? undefined : { type: match[1], id: match[2] };
 };
 
-/** One shelved item as the agent reads it: either a referenced entity or a file's lines. */
-export function shelfText(root, item, brainDir) {
+/** Resolve the current full content of a typed shelf item. */
+function resolveShelfText(root, item, brainDir) {
 	if (item.ref !== undefined) {
 		const content = SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref.id);
 		return content === undefined ? `== ${shelfLabel(item)} ==\nNot found. The referenced item is no longer available.` : `== ${shelfLabel(item)} ==\n${content}`;
 	}
 	return item.from === undefined ? readOne(root, item.path, 1, SHELF_MAX_LINES) : readOne(root, item.path, item.from, Math.min(SHELF_MAX_LINES, item.to - item.from + 1));
+}
+
+/** The saved snapshot is what stays in view; resolution is only used to detect changes or refresh at collapse. */
+export function shelfText(root, item, brainDir) {
+	return typeof item.snapshot === "string" ? item.snapshot : resolveShelfText(root, item, brainDir);
 }
 
 export const shelfLabel = (item) => item.ref === undefined ? `${item.path}${item.from === undefined ? "" : ` (lines ${item.from}-${item.to})`}` : `${item.ref.type}:${item.ref.id}`;
@@ -446,10 +471,10 @@ export const sameShelfItem = (a, b) => a.ref !== undefined || b.ref !== undefine
 export function shelfItem(root, given, lines, brainDir) {
 	const ref = referenceOf(given);
 	if (ref !== undefined && SHELF_RESOLVERS[ref.type] !== undefined) {
-		const item = { ref };
-		const text = shelfText(root, item, brainDir);
+		const item = { type: "reference", ref };
+		const text = resolveShelfText(root, item, brainDir);
 		if (/\nNot found\. /.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" "));
-		return { item, tokens: estimate(text) };
+		return { item: { ...item, snapshot: text }, tokens: estimate(text) };
 	}
 	let path;
 	try {
@@ -460,10 +485,10 @@ export function shelfItem(root, given, lines, brainDir) {
 	}
 	if (!existsSync(path.abs)) throw new ShelfError(`${path.rel} does not exist. The tree in the state block shows the files.`);
 	if (!statSync(path.abs).isFile()) throw new ShelfError(`${path.rel} is a directory: the shelf holds files, or line ranges of files.`);
-	const item = { path: path.rel, ...parseLines(lines) };
-	const text = shelfText(root, item, brainDir);
+	const item = { type: "file", path: path.rel, ...parseLines(lines) };
+	const text = resolveShelfText(root, item, brainDir);
 	if (!/^== .* \(lines \d+-\d+ of \d+\)\n/.test(text) && !/\n\(empty file\)$/.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" ") || `${path.rel} cannot be read.`);
-	return { item, tokens: estimate(text) };
+	return { item: { ...item, snapshot: text }, tokens: estimate(text) };
 }
 
 /** The shelf's items with their full current content, in order, up to `max` tokens. */
@@ -472,7 +497,7 @@ function shelfBlock(root, items, max, brainDir) {
 	const left = [];
 	let used = 0;
 	for (const item of items) {
-		const text = shelfText(root, item, brainDir);
+		const text = resolveShelfText(root, item, brainDir);
 		const size = estimate(text);
 		if (/\nNot found\. /.test(text)) {
 			left.push({ item, why: item.ref === undefined ? "the file is gone" : "the reference is no longer available" });
@@ -483,7 +508,8 @@ function shelfBlock(root, items, max, brainDir) {
 			continue;
 		}
 		used += size;
-		shown.push({ item, text, hash: hashOf(text) });
+		const refreshed = { ...item, snapshot: text };
+		shown.push({ item: refreshed, text, hash: hashOf(text) });
 	}
 	return { shown, left, tokens: used };
 }
@@ -618,11 +644,25 @@ export function contextLines(brainDir, root, { used, window }) {
 	}
 	const shown = store.front?.shelf ?? [];
 	const waiting = store.shelf.filter((item) => !shown.some((entry) => sameShelfItem(entry, item)));
+	const updated = store.shelf.filter((item) => shown.some((entry) => sameShelfItem(entry, item) && typeof item.snapshot === "string" && entry.hash !== hashOf(item.snapshot)));
 	const leaving = shown.filter((entry) => !store.shelf.some((item) => sameShelfItem(item, entry)));
-	const changed = shown.filter((entry) => store.shelf.some((item) => sameShelfItem(item, entry)) && hashOf(shelfText(root, entry, brainDir)) !== entry.hash);
-	if (waiting.length > 0) lines.push(`Marked for your shelf, in view from the next collapse on: ${waiting.map(shelfLabel).join(", ")}.`);
+	if (waiting.length > 0 || updated.length > 0) {
+		lines.push("New or updated shelf snapshots, in view now and carried into the next collapse:");
+		for (const item of [...waiting, ...updated]) lines.push(shelfText(root, item, brainDir));
+	}
 	if (leaving.length > 0) lines.push(`Taken off your shelf, gone from view at the next collapse: ${leaving.map(shelfLabel).join(", ")}.`);
-	if (changed.length > 0) lines.push(`Changed since your shelf was written, so the copy on the shelf is old: ${changed.map(shelfLabel).join(", ")}.`);
+	const changes = store.shelf.flatMap((item) => {
+		if (typeof item.snapshot !== "string") return [];
+		const current = resolveShelfText(root, item, brainDir);
+		if (current === item.snapshot) return [];
+		return [{ item, current }];
+	});
+	if (changes.length > 0) {
+		lines.push("Changes since the saved shelf snapshots (the snapshots stay as they were until collapse):");
+		for (const { item, current } of changes) {
+			lines.push(`== ${shelfLabel(item)} ==\n${shelfDiff(item.snapshot, current)}`);
+		}
+	}
 	return lines.length === 0 ? "" : `Context\n${lines.join("\n")}\n\n`;
 }
 
@@ -768,7 +808,7 @@ export function supersededBy(steps, args, dropped = {}) {
  * @param {{ notes?: string[], shelf?: object[] }} state
  * @param {{ reason: string }} input
  */
-export function taskBlock(root, config, steps, state, { reason }) {
+export function taskBlock(root, brainDir, config, steps, state, { reason }) {
 	const notes = [...(state.notes ?? []).map((note) => `- ${note}`), ...steps.notes.map((note) => `- ${note}`)];
 	// The newest notes win when there are too many.
 	let used = 0;
@@ -779,7 +819,8 @@ export function taskBlock(root, config, steps, state, { reason }) {
 		keptNotes.unshift(note);
 	}
 	const done = steps.results.slice(-POLICY.limits.context.resultRows).map((result) => `${result.id} ${callWords(result.call)} → ${result.isError ? "failed: " : ""}${oneLine(result.first, POLICY.limits.context.resultFirstChars)}`);
-	const shelf = shelfBlock(root, state.shelf ?? [], config.shelfTokens);
+	const shelf = shelfBlock(root, state.shelf ?? [], config.shelfTokens, brainDir);
+	state.shelf = shelf.shown.map((entry) => entry.item);
 	return [
 		NOTE_OPEN,
 		`${HEAD} ${reason}, so your steps up to here (${steps.replies === 1 ? "1 reply" : `${steps.replies} replies`}, ${steps.results.length === 1 ? "1 call" : `${steps.results.length} calls`}) were collapsed: their results are no longer in view. You are still the task, and the brief above still holds. What you kept:`,
@@ -941,7 +982,7 @@ export function recallReport(brainDir, id) {
 	return `${id} is in view already. As it stands:\n${report ?? "(its file is gone)"}`;
 }
 
-/** The user shelves a file, as the agent does: in view from the next collapse on. Throws ShelfError. */
+/** The user shelves a file, as the agent does: snapshot it now and carry it through collapse. Throws ShelfError. */
 export function shelveForUser(root, brainDir, config, path, lines) {
 	const { item, tokens } = shelfItem(root, path, lines, brainDir);
 	const store = loadContext(brainDir);
@@ -955,7 +996,7 @@ export function shelveForUser(root, brainDir, config, path, lines) {
 		if (at >= 0) next.shelf[at] = item;
 		else next.shelf.push(item);
 	});
-	return `${shelfLabel(item)} is marked for the shelf (about ${count(tokens)} tokens; the shelf then holds ${count(total)} of ${count(config.shelfTokens)}). From the next collapse on it stands at the start, and every task begins with it read.`;
+	return `${shelfLabel(item)} is on the shelf (about ${count(tokens)} tokens; the shelf then holds ${count(total)} of ${count(config.shelfTokens)}). Its snapshot is available now and stands at the start after the next collapse; every task begins with it read.\n\n${item.snapshot}`;
 }
 
 /** The user takes a file, or everything, off the shelf. Throws ShelfError for a name that is not on it. */
@@ -1005,13 +1046,14 @@ export function forgetChat(brainDir, text) {
 
 /**
  * What a task hands on to the main agent's shelf when it ends, and the cleaning up after it.
- * @returns {{ added: string[], refused: string[] }}
+ * @returns {{ added: string[], snapshots: string[], refused: string[] }}
  */
 export function endTaskContext(root, brainDir, config, conversationId) {
 	return updateContext(brainDir, (store) => {
 		const task = store.tasks[conversationId];
 		delete store.tasks[conversationId];
 		const added = [];
+		const snapshots = [];
 		const refused = [];
 		for (const { handOn, ...item } of (task?.shelf ?? []).filter((entry) => entry.handOn === true)) {
 			const others = store.shelf.filter((entry) => !sameShelfItem(entry, item));
@@ -1022,7 +1064,8 @@ export function endTaskContext(root, brainDir, config, conversationId) {
 			}
 			store.shelf = [...others, item];
 			added.push(shelfLabel(item));
+			snapshots.push(item.snapshot ?? resolveShelfText(root, item, brainDir));
 		}
-		return { added, refused };
+		return { added, snapshots, refused };
 	});
 }
