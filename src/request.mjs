@@ -7,8 +7,8 @@
 //   the user's messages and task reports   when they came (src/time.mjs)
 //   quiet wake turns    left out once a later wake has overtaken them (src/wake.mjs)
 //   replies without a call   marked as notes the agent wrote to itself
-//   the last message    the state block, for the main agent only, and after it the shell windows as they
-//                       are now, for the main agent and every task (src/state.mjs)
+//   the last message    the state block, with a task-purpose line for focused contexts, and after it the shell
+//                       windows as they are now, for the orchestrator and every focus (src/state.mjs)
 //
 // And what the context engine changes in what is sent, again without touching what is stored (src/context.mjs):
 //
@@ -83,8 +83,10 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 	let kept = withoutQuietWakes(messages);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
+	let focus;
 	if (!main) {
-		kept = dressTask(kept, conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId]);
+		focus = conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId];
+		kept = dressTask(kept, focus);
 		// Said once, at the end of this request only (src/engine.mjs).
 		if (note !== undefined) kept = [...kept, { role: "user", content: [{ type: "text", text: note }] }];
 	}
@@ -97,7 +99,9 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 			// A look that failed is taken again at the next tick.
 		}
 		const fired = wakes?.noteShown() ?? [];
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+			dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+	} else {
+		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {} }));
 	}
 	// The windows come last of all, in a task's request too: they change from one request to the next, and a
 	// task that left a command running sees how it is doing each time it thinks.

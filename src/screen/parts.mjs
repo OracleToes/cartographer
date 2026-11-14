@@ -9,12 +9,13 @@
 // Every row is the margin, the cells between the margins, and the margin again. A row of content has its block's
 // background between the margins; a row of chrome (the tabs, the strip, the place to type) has it edge to edge.
 import { CURSOR_MARKER, Editor, renderFakeCursor, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { POLICY } from "../config.mjs";
 import { cut, paint, paintStyled, sgr, width as cells, wrap } from "./text.mjs";
 
 /** Empty cells at the left and right edge of the screen; none on a screen too narrow to spare them. */
 export const marginOf = (width) => (width >= 30 ? 2 : 0);
 /** From how many rows on the screen has an empty row under the tabs, above the strip and under what is typed. */
-export const AIRY_ROWS = 16;
+export const AIRY_ROWS = POLICY.limits.screen.airyRows;
 
 const edge = (width, bg = "") => paint([], marginOf(width), bg);
 /** A row of chrome: its background runs over the margins. */

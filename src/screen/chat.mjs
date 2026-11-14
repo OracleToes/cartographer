@@ -17,31 +17,33 @@
 // This file is the model: items in, lines out. A line is { spans, bg?, styled?, … }: `bg` names the block it
 // belongs to, and `styled` is the line with its escape sequences when a Markdown renderer made it. It draws
 // nothing and knows no terminal (src/screen/app.mjs does).
+import { POLICY } from "../config.mjs";
 import { describeCall, describeResult } from "../terminal.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
-const LIVE_ROWS = 5;
+const LIVE_ROWS = POLICY.limits.screen.chatLiveRows;
 /** How many rows of the reply that is being written are shown. */
-const LIVE_TEXT_ROWS = 8;
+const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
 /** The most of one result that is kept for opening it in place. */
-const DETAIL_MAX = 20_000;
+const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
 /** The most rows an opened result shows; the rest is in the tab it leads to, or in /report. */
-const DETAIL_ROWS = 40;
+const DETAIL_ROWS = POLICY.limits.screen.chatDetailRows;
 /** Items kept; older ones leave the tab (they stay in the session and in the export of what is left). */
-const ITEMS_MAX = 1500;
+const ITEMS_MAX = POLICY.limits.screen.chatItems;
 
 /** An empty row between two blocks. One for all of them, so that it is painted once. */
 const BLANK = { spans: [] };
 
 /** The tab a call's work lives in, and the view inside it. */
-export function homeOf(name) {
+export function homeOf(name, args = {}) {
+	if (name === "book") name = args.book;
 	if (name === "write" || name === "edit") return { tab: "diff" };
-	if (name === "shell" || name === "window") return { tab: "shells" };
+	if (name === "shell") return { tab: "shells" };
 	if (name === "plan") return { tab: "carto", view: "plan" };
 	if (name === "ledger") return { tab: "carto", view: "ledger" };
 	if (name === "atlas") return { tab: "carto", view: "atlas" };
-	if (name === "assess") return { tab: "carto", view: "assessment" };
+	if (name === "assess" || name === "books") return { tab: "carto", view: "assessment" };
 	if (name === "context") return { tab: "context" };
 	return undefined;
 }
@@ -165,12 +167,12 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					const row = rows.get(message.toolCallId);
 					const text = textOf(message);
 					if (row === undefined || row.quiet) {
-						if (message.isError && row?.quiet) say({ type: "console", text: `! ${row.name ?? "chat"}: ${cut(plain(text).replace(/\n/g, " "), 300)}\n`, sealed: true });
+						if (message.isError && row?.quiet) say({ type: "console", text: `! ${row.name ?? "chat"}: ${cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.consoleErrorChars)}\n`, sealed: true });
 						continue;
 					}
 					row.state = message.isError ? "failed" : "done";
 					row.ended = now();
-					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), 200) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message);
+					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.taskErrorChars) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message);
 					row.detail = text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
 					row.details = message.details;
 					// What a task leaves behind is said in full: the report line, the files it changed, the plan item.
@@ -222,13 +224,13 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 				const { message } = live.get(deepest);
 				const call = callsOf(message).at(-1);
 				if (call?.name === "chat" || call?.name === "ask") return { what: "writing to you", depth: deepest, task };
-				if (call !== undefined) return { what: `writing ${cut(describeCall(call).replace(/\s+/g, " "), 50)}`, depth: deepest, task };
+				if (call !== undefined) return { what: `writing ${cut(describeCall(call).replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars)}`, depth: deepest, task };
 				if (textOf(message).trim() !== "") return { what: "writing a note", depth: deepest, task };
 				return { what: "thinking", depth: deepest, task };
 			}
 			// The call that runs now: inside a task, the task's own call and not the task.
 			const row = running.filter((entry) => entry !== taskRow).at(-1);
-			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), 50), depth: row.depth, task };
+			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars), depth: row.depth, task };
 			if (taskRow !== undefined) return { what: "between two steps", depth: 1, task };
 			return undefined;
 		},
@@ -257,6 +259,33 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		},
 		/** The reply that is being written at a depth, as far as it has come. */
 		liveMessage: (depth) => live.get(depth)?.message,
+		/**
+		 * Whether a message as it shows can be edited with e: the words of the user and of the agent. Tool work
+		 * (a run of calls, a call with what it returned) cannot, nor what Cartographer printed.
+		 */
+		editable(key) {
+			const item = items.find((entry) => entry.key === key);
+			return item?.type === "user" || item?.type === "agent" || item?.type === "note";
+		},
+	/** A message said anew, as it shows. The conversation's stored entries cannot change; this changes the tab. */
+	revise(key, text) {
+		const item = items.find((entry) => entry.key === key);
+		if (item === undefined || (item.type !== "user" && item.type !== "agent" && item.type !== "note")) return false;
+		const said = String(text ?? "").replace(/\s+$/, "");
+		if (said === "" || said === item.text) return false;
+		item.text = said;
+		delete item.md;
+		touch();
+		return true;
+	},
+	/** A message taken out of the tab (deleted in the Context window): gone where it stood. */
+	forget(key) {
+		const at = items.findIndex((entry) => entry.key === key);
+		if (at < 0) return false;
+		items.splice(at, 1);
+		touch();
+		return true;
+	},
 		toggleRow(key, index, to) {
 			const item = items.find((entry) => entry.key === key);
 			const row = item?.rows?.[index];
@@ -314,8 +343,8 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					if (!thinking) return;
 					const indent = row.depth > 0 ? "  │ ┊ " : "  ┊ ";
 					const text = wrap(row.text, inner - width(indent));
-					for (const piece of row.open ? text : text.slice(0, 2)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: "note" });
-					if (!row.open && text.length > 2) add([[indent, "faint"], [`… ${text.length - 2} more lines`, "faint"]], { ...ref, kind: "note" });
+					for (const piece of row.open ? text : text.slice(0, POLICY.limits.screen.notePreviewLines)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: "note" });
+					if (!row.open && text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [`… ${text.length - POLICY.limits.screen.notePreviewLines} more lines`, "faint"]], { ...ref, kind: "note" });
 					return;
 				}
 				add(callLine(row), { ...ref, kind: "call" });

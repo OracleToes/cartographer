@@ -6,11 +6,12 @@
 // The folder name `.atlas/` is shared with the Orchestrator pi extension, which keeps
 // its own files there (graph.json, ledger.json, working-direction.json). Cartographer
 // leaves those alone, and a folder that holds only those is not a Cartographer brain.
+import { POLICY } from "./config.mjs";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-export const BRAIN = ".atlas";
+export const BRAIN = POLICY.sentinels.brainDir;
 /** The file that makes an `.atlas/` folder a Cartographer brain. */
 const SESSION = "session.sqlite";
 
@@ -62,7 +63,7 @@ export function setUpBrain(root) {
 	// The session database changes constantly and belongs to this machine. The rest is yours to commit or not.
 	const ignore = join(brainDir, ".gitignore");
 	// So do what the context engine keeps (src/context.mjs) and the wakes the agent set: the state of one session.
-	const wanted = ["session.sqlite*", "carto.lock", "checkpoints.git/", "home/", "carto-context.json", "reports/", "carto-wakes.json", "export/"];
+	const wanted = ["session.sqlite*", "carto.lock", "checkpoints.git/", "home/", "carto-context.json", "reports/", "shelf/", "carto-wakes.json", "export/"];
 	const have = existsSync(ignore) ? readFileSync(ignore, "utf8") : "";
 	const lines = have.split("\n").map((line) => line.trim());
 	// A file that ignores everything (the Orchestrator extension writes one) already covers these.

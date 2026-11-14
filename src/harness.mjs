@@ -1,30 +1,29 @@
 // Opens one project's session: the Durable harness over `.atlas/session.sqlite`,
 // the model provider, and the tools with the rule of who may call what.
+import { POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { createRegistry, defineExtension, GenerationTask, Harness, hook, ROOT_CONVERSATION_ID, section, ToolTask } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+import { describe, LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+
 import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
+import { bookTool } from "./tools/book.mjs";
 import { returnTool } from "./tools/return.mjs";
 import { stamp } from "./time.mjs";
 import { chatTool } from "./tools/chat.mjs";
-import { contextTool } from "./tools/context.mjs";
 import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs";
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
 import { loadTop, pin } from "./top.mjs";
-import { assessTool } from "./tools/assess.mjs";
 import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
-import { ledgerTool } from "./tools/ledger.mjs";
 import { lookTools } from "./tools/look.mjs";
-import { planTool } from "./tools/plan.mjs";
-import { shellTool, windowTool } from "./tools/shell.mjs";
+import { shellTool } from "./tools/shell.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
@@ -34,11 +33,12 @@ const PROVIDER = "local";
 const LOOK = new Set(["read", "search", "list"]);
 const CHANGE = new Set(["write", "edit"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
-const types = (call) => call.name === "shell" || (call.name === "window" && call.arguments?.action === "send");
+const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run || call.arguments?.action === POLICY.enums.shellAction.send);
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
-const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, assess: REFUSALS.taskAssesses, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
-const MAIN_ONLY = Object.fromEntries(MAIN_TOOLS.map((name) => [name, MAIN_ONLY_TEXT[name]]));
-for (const name of MAIN_TOOLS) if (MAIN_ONLY[name] === undefined) throw new Error(`no refusal text for ${name}`);
+// The book tool guards its own books inside the tool (a task may use its context operations);
+// the rest of the main agent's tools are wrapped here.
+const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
+const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
@@ -49,15 +49,15 @@ for (const name of MAIN_TOOLS) if (MAIN_ONLY[name] === undefined) throw new Erro
 async function runOf(runs, api, context) {
 	const known = runs.get(api.conversationId);
 	if (known !== undefined) return known;
-	let run = { mode: "look" };
+	let run = { mode: POLICY.enums.planMode.look };
 	let cursor;
-	search: for (let page = 0; page < 50; page++) {
-		const result = await api.entries({}, 100, cursor, context);
+	search: for (let page = 0; page < POLICY.limits.taskHistory.apiMaxPages; page++) {
+		const result = await api.entries({}, POLICY.limits.taskHistory.apiEntryPage, cursor, context);
 		for (const entry of result.items) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
 			if (entry.kind === "carto.brief") {
-				if (entry.data?.mode === "change") run = { mode: "change", network: entry.data.network === true };
+				if (entry.data?.mode === POLICY.enums.planMode.change) run = { mode: POLICY.enums.planMode.change, network: entry.data.network === true };
 				break search;
 			}
 		}
@@ -73,7 +73,7 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false } }) {
+export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels }) {
 	const context = BACKGROUND_CONTEXT;
 	const model = {
 		id: config.model,
@@ -97,12 +97,16 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		},
 	};
 	const models = createModels();
+	// The provider knows every model the server serves, not only the configured one: a session stored under
+	// an older model must still start (the conversation keeps the model it began with until /model changes
+	// it), and /model can switch to any of the others without a restart.
+	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
 	const provider = createProvider({
 		id: PROVIDER,
 		name: "local model server",
 		baseUrl: config.server,
 		auth: { apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "local" } }) } },
-		models: [model],
+		models: known.map((id) => (id === config.model ? model : { ...model, id, name: id })),
 		api: openAICompletionsApi(),
 	});
 	// What the session tells the screen that is not in any conversation: how far the server is with reading a
@@ -212,37 +216,41 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		const error = [...(result.output ?? []).map((part) => part.text ?? ""), ...(result.diagnostics ?? []).filter((entry) => entry.severity === "error").map((entry) => entry.message)].join("\n").trim();
 		// The turn ends with this reply when every call in it is part of such a run.
 		const ends = [...pending.keys()].every((other) => (seen.get(other) ?? 0) + Math.max(0, pending.get(other) ?? 0) >= LOOP_MAX);
-		const loop = { total, ends, call: key.length > 200 ? `${key.slice(0, 200)}…` : key, error: error.length > 400 ? `${error.slice(0, 400)}…` : error };
+		const loop = { total, ends, call: key.length > POLICY.limits.loops.callKeyChars ? `${key.slice(0, POLICY.limits.loops.callKeyChars)}…` : key, error: error.length > POLICY.limits.loops.errorChars ? `${error.slice(0, POLICY.limits.loops.errorChars)}…` : error };
 		loops.set(api.conversationId, loop);
 		return {
 			...result,
 			diagnostics: [...(result.diagnostics ?? []), { severity: "warn", code: "carto_loop", message: LOOP_STOP(total) }],
 			details: { ...(result.details !== null && typeof result.details === "object" && !Array.isArray(result.details) ? result.details : {}), loop },
-			control: { terminate: true },
+			control: { ...POLICY.control.terminate },
 		};
 	};
+	// One flat list of tools for the main agent and every task: a fork shares the main conversation's
+	// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
+	// Tool descriptions are built into the tool definitions.
+	const sessionTools = [
+		chatTool({ brainDir }),
+		askTool({ brainDir, asks }),
+		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
+		returnTool({ root, brainDir, config }),
+		bookTool({ root, brainDir, config, engine, gate }),
+		atlasTool({ root, brainDir, gate }),
+		...lookTools(root),
+		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
+		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		forMain(wakeTool({ wakes, config })),
+		forMain(sleepTool({ wakes })),
+		// For the main agent and for a task, each about its own part of the context.
+	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
 	const core = defineExtension({
 		name: "cartographer",
 		// One section that never changes within a project: a change here makes the server read the whole prompt again.
+		// It is built from the named sections of src/prompt.mjs.
 		sections: [section("preamble", () => systemPrompt({ root }), { tag: false })],
-		tools: [
-			chatTool({ brainDir }),
-			askTool({ brainDir, asks }),
-			forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
-			returnTool({ brainDir }),
-			forMain(ledgerTool({ brainDir, engine })),
-			forMain(planTool({ brainDir, gate })),
-			atlasTool({ root, brainDir, gate }),
-			forMain(assessTool({ brainDir })),
-			...lookTools(root),
-			...changeTools({ root, brainDir }),
-			shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-			windowTool({ config, windows, runOf: (conversationId) => runs.get(conversationId) }),
-			forMain(wakeTool({ wakes, config })),
-			forMain(sleepTool({ wakes })),
-			// For the main agent and for a task, each about its own part of the context.
-			contextTool({ root, brainDir, config, engine }),
-		],
+		// One flat list of tools for the main agent and every task: a fork shares the main conversation's
+		// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
+		// Tool descriptions are built into the tool definitions.
+		tools: sessionTools,
 		hooks: [
 			hook(ToolTask, {
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
@@ -261,7 +269,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
 					// Writing is for a task that carries out a change item of the authorized plan, and for no one else.
 					// So is running a command. The answer is kept in `runs`, where the shell tool finds it.
-					if ((CHANGE.has(call.name) || types(call)) && (await runOf(runs, api, hookContext)).mode !== "change") {
+					if ((CHANGE.has(call.name) || types(call)) && (await runOf(runs, api, hookContext)).mode !== POLICY.enums.planMode.change) {
 						return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
 					}
 					return undefined;
@@ -281,18 +289,18 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 						// A round that holds `return` ends the task, whatever else it called. A `return` that was refused does not.
 						if (returning.has(id)) {
 							if (call.name === "return" && out.isError === true) returning.delete(id);
-							else return { ...told, control: { ...(told.control ?? {}), terminate: true } };
+							else return { ...told, control: { ...(told.control ?? {}), ...POLICY.control.terminate } };
 						}
 						if (lastOfRound) {
 							// What the user typed since the task's last reply.
 							const said = takeSaid();
 							if (said !== undefined) told = withText(told, said);
-							if (left >= 1 && left <= 3) told = withText(told, REPLIES_LEFT(left));
+							if (left >= 1 && left <= POLICY.limits.loops.warningReplies) told = withText(told, REPLIES_LEFT(left));
 						}
 						// The task has used its replies: this round is its last.
 						if (left <= 0 && told.control?.terminate !== true) {
 							ends.set(id, { why: "limit", replies: steps.get(id)?.n ?? 0 });
-							told = { ...told, control: { ...(told.control ?? {}), terminate: true } };
+							told = { ...told, control: { ...(told.control ?? {}), ...POLICY.control.terminate } };
 						}
 						return told === result ? undefined : told;
 					}
@@ -373,7 +381,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					const first = notedIn.get(id) !== step.key || step.key === undefined;
 					notedIn.set(id, step.key);
 					const left = limit - step.n;
-					const extra = main ? undefined : [takeSaid(), left <= 3 ? REPLIES_LEFT(left) : undefined].filter((line) => line !== undefined).join("\n\n");
+					const extra = main ? undefined : [takeSaid(), left <= POLICY.limits.loops.warningReplies ? REPLIES_LEFT(left) : undefined].filter((line) => line !== undefined).join("\n\n");
 					return { continue: noted({ main, first, extra: extra === "" ? undefined : extra }) };
 				},
 			}),
@@ -390,10 +398,28 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const main = await harness.root(context, {
 		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
 	});
+	// The settings say which model this session is on. A conversation keeps the model it began with, so a change
+	// in the settings would otherwise never take hold (the stored one won, or, if the server had dropped it, the
+	// run stopped with no_model). At the start, then, the conversation is set to the configured model; /model
+	// switches it for the rest of the run, and every model the server serves is registered so any of them resolves.
+	const held = (await main.agent(context)).model;
+	if (held === undefined || (held.provider === PROVIDER && held.modelId !== config.model)) {
+		await main.configure({ model: { provider: PROVIDER, modelId: config.model } }, context);
+	}
 	return {
 		harness,
 		main,
 		context,
+		/** The model the main conversation is on, as { provider, modelId }. */
+		model: async () => (await main.agent(context)).model,
+		/** Switch the model of the main conversation, and so of every task forked after. Undefined when the name is not served. */
+		setModel: async (modelId, ctx = context) => {
+			if (!known.includes(modelId)) return false;
+			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
+			return true;
+		},
+		/** The model names the server was serving when the session opened. */
+		servedModels: [...known],
 		windows,
 		wakes,
 		engine,

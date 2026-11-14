@@ -11,7 +11,7 @@
     "carto": "bin/carto"
   },
   "scripts": {
-    "test": "node test/run.mjs"
+    "test": "node DO_NOT_RUN_TESTS_UNTIL_FINAL_STAGE/run.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "1.5.2",

@@ -1,3 +1,4 @@
+import { POLICY } from "../config.mjs";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 // Text on a grid of terminal cells: how wide a string is, how it wraps, and lines made of styled spans.
@@ -213,9 +214,9 @@ export const bar = (part, cells = 8) => {
 /** 12345 → "12.3k", 950 → "950". */
 export const short = (n) => {
 	if (!Number.isFinite(n)) return "?";
-	if (n < 1000) return String(Math.round(n));
-	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
-	return `${Math.round(n / 1000)}k`;
+	if (n < POLICY.limits.format.countThousands) return String(Math.round(n));
+	if (n < POLICY.limits.format.countTenThousands) return `${(n / POLICY.limits.format.countThousands).toFixed(1)}k`;
+	return `${Math.round(n / POLICY.limits.format.countThousands)}k`;
 };
 
 /** 75 s → "1m 15s". */
@@ -233,8 +234,15 @@ export const span = (ms) => {
  * run such as a row of zeros in a table.
  * @returns {undefined | { unit: string, times: number }}
  */
-export function repeats(text, { chars = 80, phrases = 8, phraseMax = 40 } = {}) {
-	const tail = String(text ?? "").slice(-(phraseMax * phrases + 8));
+export function repeats(
+	text,
+	{
+		chars = POLICY.limits.loops.repeatMinChars,
+		phrases = POLICY.limits.loops.repeatPhrases,
+		phraseMax = POLICY.limits.loops.repeatPhraseMaxChars,
+	} = {},
+) {
+	const tail = String(text ?? "").slice(-(phraseMax * phrases + POLICY.limits.loops.repeatOverlapChars));
 	if (tail.length < chars) return undefined;
 	// One character.
 	const last = tail.at(-1);

@@ -1,25 +1,51 @@
 // The `wake` and `sleep` tools: how the main agent comes back to something (src/wakes.mjs), and how it rests.
+import { POLICY } from "../config.mjs";
 import { defineTool } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { took } from "../time.mjs";
-import { NOTE_MAX, wakeAbout, WakeError, wakeRepeats } from "../wakes.mjs";
+import { EVERY_MAX, NOTE_MAX, wakeAbout, WakeError, wakeRepeats } from "../wakes.mjs";
 
 /** @param {{ wakes: ReturnType<typeof import("../wakes.mjs").createWakes>, config: { wakeMin: number, wakesMax: number } }} input */
 export function wakeTool({ wakes, config }) {
 	const least = took(config.wakeMin * 1000);
-	// One flat object, like `window`. The parameters of a tool must be an object with properties at the top: a
-	// choice between shapes there (anyOf) is something chat templates and models handle badly, and the first
-	// version of this tool had one. So `note` and `id` cannot be marked required; `execute` asks for them.
-	const Parameters = obj({
-		action: oneOf(["set", "remove"], { description: "set: set a wake, with `note` and one of `every`, `path`, `window`. remove: take one back, with `id`." }),
-		note: opt(str({ description: `For set, required: what to look at or do when it fires, written for yourself. It is handed back to you then. One line, at most ${NOTE_MAX} characters.` })),
-		every: opt(int({ description: `For set: a number of seconds, ${config.wakeMin} or more. Alone: wake after this long, and again each time it passes. With path or window: the least time between two wakes, default ${config.wakeMin}.` })),
-		times: opt(int({ description: "For set: how often it fires before it is removed. Default 1. 0: until you remove it." })),
-		path: opt(str({ description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes you when it appears." })),
-		window: opt(str({ description: "For set: wake when this shell window prints something." })),
-		match: opt(str({ description: "For set, with window: only a line that contains this text counts, such as ERROR." })),
-		id: opt(str({ description: "For remove, required: the wake (w2), or all." })),
-	});
+	// Keep one flat object at the root for chat templates, but use `if`/`then` constraints to require each
+	// action's fields and reject fields that belong to the other action. The root never branches between shapes.
+	const Parameters = obj(
+		{
+			action: oneOf(POLICY.enums.wakeActions, { description: "set: set a wake, with `note` and exactly one trigger. remove: take one back, with `id`." }),
+			note: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: NOTE_MAX, pattern: "\\S", description: `For set, required: what to look at or do when it fires, written for yourself. One line, at most ${NOTE_MAX} characters.` })),
+			every: opt(int({ minimum: config.wakeMin, maximum: EVERY_MAX, description: `For set: a number of seconds, ${config.wakeMin} or more. Alone: wake after this long, and again each time it passes. With path or window: the least time between two wakes, default ${config.wakeMin}.` })),
+			times: opt(int({ minimum: POLICY.limits.wake.timesMin, description: `For set: how often it fires before it is removed. Default ${POLICY.limits.wake.timesDefault}. ${POLICY.limits.wake.timesMin}: until you remove it.` })),
+			path: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes you when it appears." })),
+			window: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set: wake when this shell window prints something." })),
+			match: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set, with window: only a line that contains this text counts, such as ERROR." })),
+			id: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: POLICY.patterns.wakeIdOrAll, description: "For remove, required: the wake (w2), or all." })),
+		},
+		{
+			allOf: [
+				{
+					if: { properties: { action: { const: POLICY.enums.actions.set } }, required: ["action"] },
+					then: {
+						required: ["note"],
+						anyOf: [
+							{ required: ["every"], not: { anyOf: [{ required: ["path"] }, { required: ["window"] }] } },
+							{ required: ["path"], not: { required: ["window"] } },
+							{ required: ["window"], not: { required: ["path"] } },
+						],
+						not: { required: ["id"] },
+					},
+				},
+				{
+					if: { properties: { action: { const: POLICY.enums.actions.set }, match: {} }, required: ["action", "match"] },
+					then: { required: ["window"] },
+				},
+				{
+					if: { properties: { action: { const: POLICY.enums.actions.remove } }, required: ["action"] },
+					then: { required: ["id"], not: { anyOf: [{ required: ["note"] }, { required: ["every"] }, { required: ["times"] }, { required: ["path"] }, { required: ["window"] }, { required: ["match"] }] } },
+				},
+			],
+		},
+	);
 	return defineTool({
 		name: "wake",
 		description: [
@@ -32,20 +58,20 @@ export function wakeTool({ wakes, config }) {
 		parameters: Parameters,
 		executionMode: "sequential",
 		// Not run a second time after a crash: the wake is in the file by then, and a second call would set another.
-		replay: "never",
+		replay: POLICY.enums.toolReplay.never,
 		execute: async (args) => {
 			const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 			try {
-				if (args.action === "set") {
+				if (args.action === POLICY.enums.actions.set) {
 					const wake = wakes.set(args);
 					const about = `${wakeAbout(wake)}, ${wakeRepeats(wake)}`;
-					const first = wake.kind === "time" ? ` It first fires in ${took(wake.every * 1000)}.` : "";
+					const first = wake.kind === POLICY.enums.wakeKinds.time ? ` It first fires in ${took(wake.every * 1000)}.` : "";
 					return {
 						output: [{ type: "text", text: `${wake.id} set: ${about}.${first} You are not waiting for it: go on with other work, or end your turn. \`wake\` with remove and ${wake.id} takes it back.` }],
 						details: { shown: [`+ ${wake.id} ${about} · ${wake.note}`] },
 					};
 				}
-				if (args.action === "remove") {
+				if (args.action === POLICY.enums.actions.remove) {
 					const id = typeof args.id === "string" ? args.id.trim() : "";
 					if (id === "") return fail(`remove needs \`id\`: the wake to take back, or all. ${wakes.list().length === 0 ? "No wake is set." : `Set: ${wakes.list().map((wake) => wake.id).join(", ")}.`}`);
 					const gone = wakes.remove(id);
@@ -61,7 +87,7 @@ export function wakeTool({ wakes, config }) {
 }
 
 /** What `sleep` answers. The run ends with it, so the model does not read this; it stands in the stored conversation. */
-export const RESTING = "Resting.";
+export const RESTING = POLICY.control.restingMessage;
 
 /** @param {{ wakes: ReturnType<typeof import("../wakes.mjs").createWakes> }} input */
 export function sleepTool({ wakes }) {
@@ -74,14 +100,14 @@ export function sleepTool({ wakes }) {
 		].join(" "),
 		parameters: obj({}),
 		executionMode: "sequential",
-		replay: "safe",
+		replay: POLICY.enums.toolReplay.safe,
 		execute: async () => {
 			const due = wakes.nextDue();
 			return {
 				output: [{ type: "text", text: RESTING }],
 				details: { shown: [`resting${due === undefined ? "" : ` · next wake in ${took(due)}`}`] },
 				// No further request: the turn is over.
-				control: { terminate: true },
+				control: { ...POLICY.control.terminate },
 			};
 		},
 	});

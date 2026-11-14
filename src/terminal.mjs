@@ -15,16 +15,20 @@
 // It is also where the user authorizes the plan (/approve) and takes a change task
 // back (/undo): the two things only the user can do. And it is what wakes the agent
 // when something happens in a shell window while the agent is not working.
+import { POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, isFront, loadReport, recordLine, shelfLabel } from "./context.mjs";
+import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem } from "./context.mjs";
+import { archiveRows, dropRows, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, renderPlan, savePlan, YOLO_LINE } from "./plan.mjs";
+import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { listRequests, approveRequests, denyRequest, answerQuestion } from "./requests.mjs";
+import { booksPath } from "./books.mjs";
 import { stateBlock, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, pin, sinceTop } from "./top.mjs";
@@ -41,11 +45,11 @@ import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
  * not dropped: it is told with the next one. So an agent that runs in circles is slowed down, and one that
  * watches over something for days is never stopped.
  */
-export const WAKE_BURST = 12;
-const KILLED = "the user closed it with /kill";
+export const WAKE_BURST = POLICY.limits.terminal.wakeBurst;
+const KILLED = POLICY.control.windowKilledReason;
 
 /** Lines of a patch shown by /diff before it is cut; `/diff all` shows everything. */
-const DIFF_LINES = 150;
+const DIFF_LINES = POLICY.limits.terminal.diffLines;
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 const textOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
@@ -56,61 +60,64 @@ const notesOf = (message) => (message?.content ?? []).flatMap((part) => (part.ty
 const chatOf = (message) => callsOf(message).flatMap((call) => (call.name === "chat" && typeof call.arguments?.text === "string" && call.arguments.text !== "" ? [call.arguments.text] : [])).join("\n\n");
 /** In front of each line of the agent's own text. */
 const GUTTER = "┊ ";
+const KEPT_REPORT_SUFFIX = new RegExp(`\\n\\n${POLICY.patterns.keptReport}$`);
 const oneLine = (text, max) => {
 	const flat = String(text ?? "").replace(/\s+/g, " ").trim();
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
-const count = (n) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+const count = (n) => (n >= POLICY.limits.format.countTenThousands ? `${Math.round(n / POLICY.limits.format.countThousands)}k` : n >= POLICY.limits.format.countThousands ? `${(n / POLICY.limits.format.countThousands).toFixed(1)}k` : String(n));
 
 /** A harness message without its wrapping. */
-const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?/, "").trim();
+const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?|^Tool call blocked: /, "").trim();
 
 /** One line that says what a tool call is doing. */
 export function describeCall(call) {
 	const args = call.arguments ?? {};
 	switch (call.name) {
 		case "task":
-			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, 100)}`;
-		case "shell":
-			return `$ ${oneLine(args.command, 100)}${typeof args.window === "string" && args.window !== "" && args.window !== "main" ? `  (window ${oneLine(args.window, 30)})` : ""}`;
-		case "window": {
-			const more = args.action === "send" ? `  ${oneLine(JSON.stringify(args.text ?? ""), 60)}` : args.action === "wait" && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), 50)}` : "";
-			return `window ${oneLine(args.window, 30)}  ${args.action ?? "?"}${more}`;
+			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, POLICY.limits.terminal.callSummary.taskBrief)}`;
+		case "shell": {
+			// A command typed into a window, or one of the window actions; run is the default and needs no name of its own.
+			if (args.action !== undefined && args.action !== POLICY.enums.shellAction.run) {
+				const more = args.action === POLICY.enums.shellAction.send ? `  ${oneLine(JSON.stringify(args.text ?? ""), POLICY.limits.terminal.callSummary.sendText)}` : args.action === POLICY.enums.shellAction.wait && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), POLICY.limits.terminal.callSummary.waitUntil)}` : "";
+				return `window ${oneLine(args.window, POLICY.limits.terminal.callSummary.windowName)}  ${args.action}${more}`;
+			}
+			return `$ ${oneLine(args.command, POLICY.limits.terminal.callSummary.shellCommand)}${typeof args.window === "string" && args.window !== "" && args.window !== POLICY.sentinels.mainWindow ? `  (window ${oneLine(args.window, POLICY.limits.terminal.callSummary.windowName)})` : ""}`;
 		}
 		case "write":
-			return `write ${oneLine(args.path, 90)}`;
+			return `write ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
 		case "edit":
-			return `edit ${oneLine(args.path, 90)}`;
-		case "plan":
-			return `plan ${(Array.isArray(args.ops) ? args.ops : []).map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()).join(" · ")}`;
+			return `edit ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
+		case "book": {
+			const ops = Array.isArray(args.ops) ? args.ops : [];
+			if (args.book === "ledger") return `ledger ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
+			if (args.book === "plan") return `plan ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()).join(" · ")}`;
+			if (args.book === "books") return typeof args.text === "string" ? `assess  ${count(String(args.text).length)} characters` : `assess ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
+			const op = ops[0] ?? {};
+			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", POLICY.limits.terminal.callSummary.contextOp)}${op.lines ? ` (lines ${oneLine(op.lines, POLICY.limits.terminal.callSummary.lineRange)})` : ""}`.trim();
+		}
 		case "read": {
 			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
 			const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
-			return `read ${oneLine(paths.join(", "), 90)}${range}`;
+			return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
 		}
 		case "search":
-			return `search /${oneLine(args.pattern, 50)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
+			return `search /${oneLine(args.pattern, POLICY.limits.terminal.callSummary.searchPattern)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
 		case "list":
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
-		case "ledger":
-			return `ledger ${(Array.isArray(args.ops) ? args.ops : []).map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
 		case "atlas":
 			return oneLine(
 				`atlas ${(Array.isArray(args.ops) ? args.ops : [])
 					.map((op) => `${op?.action ?? "?"} ${op?.name ?? (Array.isArray(op?.names) ? op.names.join(", ") : (op?.anchor ?? (op?.depth !== undefined ? `depth ${op.depth}` : "")))}`.trim())
 					.join(" · ")}`,
-				100,
+				POLICY.limits.terminal.callSummary.atlasCall,
 			);
-		case "assess":
-			return `assess  ${count(String(args.text ?? "").length)} characters`;
 		case "wake":
-			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", 80)}`.trim();
+			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
 			return "sleep";
-		case "context":
-			return `context ${args.action ?? "?"} ${oneLine(args.id ?? args.path ?? args.text ?? "", 70)}${args.lines ? ` (lines ${oneLine(args.lines, 20)})` : ""}`.trim();
 		default:
-			return `${call.name} ${oneLine(JSON.stringify(args), 80)}`;
+			return `${call.name} ${oneLine(JSON.stringify(args), POLICY.limits.terminal.callSummary.genericCall)}`;
 	}
 }
 
@@ -118,9 +125,9 @@ export function describeCall(call) {
 export function describeResult(message) {
 	const text = textOf(message);
 	// A command that ran: how it ended, how long it took, and the last thing it printed.
-	if ((message.toolName === "shell" || message.toolName === "window") && message.details?.seconds !== undefined) {
+	if (message.toolName === "shell" && message.details?.seconds !== undefined) {
 		const { exit, running, asks, stopped, closed, seconds, last, sandbox, action, lines } = message.details;
-		const time = `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+		const time = `${seconds < POLICY.limits.format.elapsedSecondPrecisionBelow ? seconds.toFixed(1) : Math.round(seconds)} s`;
 		const how = closed
 			? `${exit !== undefined ? `exit ${exit} · ` : ""}the window closed`
 			: action === "read"
@@ -132,21 +139,21 @@ export function describeResult(message) {
 						: stopped
 							? "stopped"
 							: "nothing is running there";
-		return `${how}${sandbox === false ? " · no sandbox" : ""}${last ? ` · ${oneLine(last, 70)}` : ""}`;
+		return `${how}${sandbox === false ? " · no sandbox" : ""}${last ? ` · ${oneLine(last, POLICY.limits.terminal.resultSummary.shellLast)}` : ""}`;
 	}
-	if (message.toolName === "window" && message.details?.closed) return "closed";
+	if (message.details?.window !== undefined && message.details?.closed) return "closed";
 	// What a task did about its own context, in the tool's own words.
-	if (message.toolName === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), 110);
+	if (message.toolName === "book" && message.details?.book === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), POLICY.limits.terminal.resultSummary.context);
 	// The harness's own words for a call the user stopped, or one that a restart cut off.
 	if (message.isError && /^Tool \w+ was aborted/.test(plain(text))) return "stopped";
 	if (message.isError && /^Tool \w+ was interrupted/.test(plain(text))) return "cut off by a restart, and not run again";
-	if (message.isError) return `refused: ${oneLine(plain(text).replace(/^Refused: /, ""), 110)}`;
+	if (message.isError) return `refused: ${oneLine(plain(text).replace(/^Refused: /, ""), POLICY.limits.terminal.resultSummary.refusal)}`;
 	// What was written to the graph; for a call that only read, the first line of what it got.
-	if (message.toolName === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], 90);
-	if (message.toolName === "search") return oneLine(text.split("\n")[0], 80);
-	if (message.toolName === "list") return oneLine(text.split("\n")[0], 80);
+	if (message.toolName === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
+	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
+	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
 	// "Wrote roll.py: 34 lines, a new file." The path is already on the line.
-	if (message.toolName === "write" || message.toolName === "edit") return oneLine(text.slice(text.indexOf(": ") + 2).replace(/\.$/, ""), 80);
+	if (message.toolName === "write" || message.toolName === "edit") return oneLine(text.slice(text.indexOf(": ") + 2).replace(/\.$/, ""), POLICY.limits.terminal.resultSummary.write);
 	const lines = text.split("\n").length;
 	return `${count(lines)} lines`;
 }
@@ -229,7 +236,7 @@ export async function runTerminal(session, options) {
 	// message came in is kept, its end at least, so that switching it on shows it.
 	let thinking = options.thinking !== false;
 	let held = "";
-	const HELD_MAX = 8000;
+	const HELD_MAX = POLICY.limits.terminal.heldInputChars;
 
 	let lastReport;
 	let lastUsage;
@@ -302,7 +309,7 @@ export async function runTerminal(session, options) {
 			const loop = message.role === "toolResult" ? message.details?.loop : undefined;
 			if (loop?.call === undefined || saidLoop[depth] === loop.call) continue;
 			saidLoop[depth] = loop.call;
-			const what = `the same call was sent ${loop.total} times and failed each time: ${oneLine(loop.call, 120)}`;
+			const what = `the same call was sent ${loop.total} times and failed each time: ${oneLine(loop.call, POLICY.limits.loops.callKeyChars)}`;
 			line(`${depth === 0 ? "" : dim("│ ")}! ${loop.ends === false ? `The agent is told to stop: ${what}` : `Cartographer ended the ${depth === 0 ? "turn" : "task"}: ${what}`}`);
 		}
 	};
@@ -359,7 +366,7 @@ export async function runTerminal(session, options) {
 					if (message.stopReason === "length") line(`! The agent's reply was cut off at the output limit (maxTokens in the settings). Say "continue" to let it go on.`);
 				} else if (text.trim() !== "" && thinking) {
 					// A task's own words, beside its calls or as a note of their own.
-					line(`${bar}${dim(oneLine(text, 110))}`);
+					line(`${bar}${dim(oneLine(text, POLICY.limits.terminal.resultSummary.taskStream))}`);
 				}
 				// A reply cut off at the output limit may end in half a call, which is never carried out.
 				let commandShown = false;
@@ -385,11 +392,11 @@ export async function runTerminal(session, options) {
 					if (depth === 0 && call.name === "task" && before !== undefined) afterCall.set(before.id, `${bold("▸")} ${text}`);
 					else if (depth === 0 && call.name === "task") line(`${bold("▸")} ${text}`);
 					// So is a wait of the main agent for a window: it can take minutes.
-					else if (depth === 0 && call.name === "window" && call.arguments?.action === "wait") {
+					else if (depth === 0 && call.name === "shell" && call.arguments?.action === POLICY.enums.shellAction.wait) {
 						line(`${bold("▸")} ${text}`);
 						pendingCalls.set(call.id, { text, shown: true });
 					}
-					else if (depth > 0 && (call.name === "shell" || (call.name === "window" && ["wait", "send"].includes(call.arguments?.action))) && !commandShown) {
+					else if (depth > 0 && (call.name === "shell" && ["run", "send", "wait"].includes(call.arguments?.action ?? "run")) && !commandShown) {
 						commandShown = true;
 						line(`${bar}${text}`);
 						pendingCalls.set(call.id, { text, shown: true });
@@ -397,15 +404,15 @@ export async function runTerminal(session, options) {
 				}
 			} else if (message.role === "toolResult") {
 				if (depth === 0 && message.toolName === "chat") {
-					if (message.isError) line(`${bold("●")} chat  not shown: ${oneLine(plain(textOf(message)), 200)}`);
+					if (message.isError) line(`${bold("●")} chat  not shown: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
 				} else if (depth === 0) {
 					if (message.toolName === "task") {
 						// Without the line that tells the agent the id: the report line here shows it.
-						const text = textOf(message).replace(/\n\nThis report is kept as t\d+\.$/, "");
+						const text = textOf(message).replace(KEPT_REPORT_SUFFIX, "");
 						if (message.isError && /was aborted/.test(text)) {
 							// A change task that was stopped has no record after it, but it may have written files already.
-							line(`${bold("◂")} task stopped${message.details?.mode === "change" ? " · it may have changed files already: /diff shows them, /undo takes them back" : ""}`);
-						} else if (message.isError) line(`${bold("◂")} ${oneLine(plain(text), 200)}`);
+							line(`${bold("◂")} task stopped${message.details?.mode === POLICY.enums.planMode.change ? " · it may have changed files already: /diff shows them, /undo takes them back" : ""}`);
+						} else if (message.isError) line(`${bold("◂")} ${oneLine(plain(text), POLICY.limits.terminal.messageSummaryChars)}`);
 						else {
 							lastReport = text;
 							line(`${bold("◂")} report${message.details?.report ? ` ${message.details.report}` : ""}  ${count(text.length)} characters${message.details?.done === false ? " · returned not done" : ""}  ${dim("(/report shows it)")}`);
@@ -423,7 +430,7 @@ export async function runTerminal(session, options) {
 							if (changes.length === 0) line(`${bold("◂")} no file was changed`);
 							else {
 								line(`${bold("◂")} changed ${changeSummary(changes)}  ${dim("(/diff shows the changes, /undo takes them back)")}`);
-								for (const text of changeRecord(changes, 12)) line(dim(text));
+								for (const text of changeRecord(changes, POLICY.limits.terminal.changeRecordLines)) line(dim(text));
 							}
 						}
 						// What shell windows changed before the task, with no task around them: a step of its own.
@@ -435,33 +442,41 @@ export async function runTerminal(session, options) {
 						const mapped = message.details?.atlas;
 						if (mapped !== undefined) {
 							const parts = [];
-							if (mapped.written?.length > 0) parts.push(`wrote ${oneLine(mapped.written.join(", "), 80)}`);
-							if (mapped.removed?.length > 0) parts.push(`removed ${oneLine(mapped.removed.join(", "), 60)}`);
-							if (mapped.stale?.length > 0) parts.push(`may now be out of date: ${oneLine(mapped.stale.join(", "), 60)}`);
+							if (mapped.written?.length > 0) parts.push(`wrote ${oneLine(mapped.written.join(", "), POLICY.limits.terminal.resultSummary.atlasWritten)}`);
+							if (mapped.removed?.length > 0) parts.push(`removed ${oneLine(mapped.removed.join(", "), POLICY.limits.terminal.resultSummary.atlasRemoved)}`);
+							if (mapped.stale?.length > 0) parts.push(`may now be out of date: ${oneLine(mapped.stale.join(", "), POLICY.limits.terminal.resultSummary.atlasStale)}`);
 							if (parts.length > 0) line(`${bold("◂")} atlas  ${parts.join(" · ")}  ${dim("(/atlas shows the graph)")}`);
 						}
-					} else if (message.toolName === "ledger" || message.toolName === "plan") {
-						const name = message.toolName;
+					} else if (message.toolName === "book") {
+						// One tool for the books; each keeps the words on the screen it had as a tool of its own.
+						const name = message.details?.book ?? "book";
+						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
-						if (message.isError || shown.length === 0) line(`${bold("●")} ${name}  not changed: ${oneLine(plain(textOf(message)), 200)}`);
-						// A goal's done-when line goes on a line of its own: together they are too long to read as one.
-						else for (const change of shown) line(`${bold("●")} ${name}  ${change.replace(/ \(done when: (.*)\)$/s, `\n${" ".repeat(name.length + 4)}done when: $1`)}`);
-						if (message.details?.pinned === true) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
-					} else if (message.toolName === "context") {
-						pendingCalls.delete(message.toolCallId);
-						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
-						if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), 200)}`);
-						else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, 160)}`);
+						if (name === "ledger" || name === "plan") {
+							if (message.isError || shown.length === 0) line(`${bold("●")} ${name}  not changed: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
+							// A goal's done-when line goes on a line of its own: together they are too long to read as one.
+							else for (const change of shown) line(`${bold("●")} ${name}  ${change.replace(/ \(done when: (.*)\)$/s, `\n${" ".repeat(name.length + 4)}done when: $1`)}`);
+							if (message.details?.pinned === true) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
+						} else if (name === "context") {
+							if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
+							else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, POLICY.limits.terminal.resultSummary.contextChange)}`);
+						} else if (name === "books" && !message.isError && shown.length > 0) {
+							for (const change of shown) line(`${bold("●")} ${change}  ${dim("(/assessment shows it)")}`);
+						} else {
+							if (call?.quiet && !message.isError) continue;
+							if (call?.shown && !call.quiet) line(`  ${dim(`→ ${describeResult(message)}`)}`);
+							else line(`${bold("▸")} ${call?.text ?? name}  ${dim(`→ ${describeResult(message)}`)}`);
+						}
 					} else if (message.toolName === "wake" || message.toolName === "sleep") {
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
-						if (message.isError || shown.length === 0) line(`${bold("●")} ${message.toolName}  ${message.toolName === "wake" ? "not changed" : "refused"}: ${oneLine(plain(textOf(message)), 200)}`);
-						else for (const change of shown) line(`${bold("●")} ${message.toolName === "sleep" ? dim(change) : `wake  ${oneLine(change, 160)}`}`);
-					} else if ((message.toolName === "atlas" || message.toolName === "assess") && !message.isError && (message.details?.shown?.length ?? 0) > 0) {
+						if (message.isError || shown.length === 0) line(`${bold("●")} ${message.toolName}  ${message.toolName === "wake" ? "not changed" : "refused"}: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
+						else for (const change of shown) line(`${bold("●")} ${message.toolName === "sleep" ? dim(change) : `wake  ${oneLine(change, POLICY.limits.terminal.resultSummary.wakeChange)}`}`);
+					} else if (message.toolName === "atlas" && !message.isError && (message.details?.shown?.length ?? 0) > 0) {
 						// What the main agent wrote to its map, one line each.
 						pendingCalls.delete(message.toolCallId);
-						for (const change of message.details.shown) line(`${bold("●")} ${message.toolName === "assess" ? `${change}  ${dim("(/assessment shows it)")}` : `atlas  ${oneLine(change, 150)}`}`);
+						for (const change of message.details.shown) line(`${bold("●")} atlas  ${oneLine(change, POLICY.limits.terminal.resultSummary.atlasChange)}`);
 					} else {
 						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);
@@ -485,7 +500,7 @@ export async function runTerminal(session, options) {
 	function windowStepLine(step) {
 		const who = step.names.length === 1 ? `window ${step.names[0]}` : `windows ${step.names.join(", ")}`;
 		line(`${bold("◂")} ${who} changed ${changeSummary(step.changes)} with no task running  ${dim("(/diff shows the changes, /undo takes them back)")}`);
-		for (const text of changeRecord(step.changes, 12)) line(dim(text));
+		for (const text of changeRecord(step.changes, POLICY.limits.terminal.changeRecordLines)) line(dim(text));
 	}
 
 	/** Print the main agent's reply as it is generated. */
@@ -520,7 +535,7 @@ export async function runTerminal(session, options) {
 		cutting = true;
 		cuts++;
 		const again = cuts > 1;
-		const what = `${JSON.stringify(oneLine(found.unit, 30))}, ${found.times} times over`;
+		const what = `${JSON.stringify(oneLine(found.unit, POLICY.limits.terminal.repeatedPhraseChars))}, ${found.times} times over`;
 		line(`! The ${depth > 0 ? "task" : "agent"}'s reply was repeating itself (${what}). Cartographer cut it off${again ? " again, and stopped the agent: say how it should go on. If this keeps happening, look at the model's sampling settings." : " and lets the agent try once more."}`);
 		cutDone = main
 			.abort(context)
@@ -541,6 +556,11 @@ export async function runTerminal(session, options) {
 	let busy = false;
 	let stopped = false;
 	let closing = false;
+	let paused = false; // the user's pause: the agent finishes what it is doing and gets nothing new until it is lifted
+	const heldInputs = []; // what the user wrote while it was paused, sent when it is lifted
+	/** Lines the user wrote while the agent worked, sent to join its run. A run that ends without reading them —
+	 * stopped, or failed — withdraws them unread; they are sent again when the run is over, so nothing said is lost. */
+	const steered = [];
 	let onIdle = () => {};
 	// Wakes the agent may still get at once (see WAKE_BURST), and since when the next one is being earned.
 	const spacing = (options.wakeMin ?? WAKE_MIN) * 1000;
@@ -595,7 +615,7 @@ export async function runTerminal(session, options) {
 						line(`! The agent used all its turns for this message (${detail ?? "the limit"}) without finishing. Say "continue" to let it go on.`);
 					} else if (reason !== "aborted") {
 						failed = true;
-						line(`! the run stopped: ${reason}${detail ? ` (${oneLine(detail, 300)})` : ""}`);
+						line(`! the run stopped: ${reason}${detail ? ` (${oneLine(detail, POLICY.limits.terminal.resultSummary.runFailure)})` : ""}`);
 					}
 				}
 				const nowBusy = live?.run !== undefined;
@@ -634,7 +654,7 @@ export async function runTerminal(session, options) {
 	/** A reason as the front block words it for the agent ("you asked for it"), worded for the user. */
 	const ofAgent = (reason) => reason.replace(/^you asked/, "the agent asked").replace(/ while you rested$/, " while it rested");
 	/** A reason as the engine words it for a task ("Your context held …"), worded for the user. */
-	const ofTask = (reason) => oneLine(reason, 80).replace(/^Your context/, "its context").replace(/^You asked/, "it asked");
+	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^Your context/, "its context").replace(/^You asked/, "it asked");
 	/** The question before a collapse and what came back. */
 	let saidFallback = false;
 	const askedLine = (event) => {
@@ -642,10 +662,10 @@ export async function runTerminal(session, options) {
 		// Said once: the server would not take the form of the answer, so the question is asked without it from here on.
 		if (event.fallback !== undefined && !saidFallback) {
 			saidFallback = true;
-			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, 160)}). From here on the question before a collapse is asked without it.`)}`);
+			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, POLICY.limits.terminal.resultSummary.handoffFallback)}). From here on the question before a collapse is asked without it.`)}`);
 		}
 		if (event.skipped) line(`${who}${dim("◆ not asked before collapsing: carto has only just started, and the question would make the server read the whole context first")}`);
-		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, 200)}). The context is collapsed without it.`);
+		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, POLICY.limits.terminal.messageSummaryChars)}). The context is collapsed without it.`);
 		else line(`${who}${dim(`◆ asked before collapsing (${event.task ? ofTask(event.reason) : event.reason}): does it need to write something down first? ${event.handoff ? "yes" : "no"} · ${(event.ms / 1000).toFixed(1)} s`)}`);
 	};
 	engine?.on((event) => {
@@ -670,7 +690,8 @@ export async function runTerminal(session, options) {
 	 * @returns {Promise<boolean>} whether something was done
 	 */
 	const rest = async ({ away = false, user = false, final = false } = {}) => {
-		if (engine === undefined || busy || stopped || closing) return false;
+		// Paused, the context is left as it stands, unless the user asked for the collapse themselves.
+		if (engine === undefined || busy || stopped || closing || (paused && !user)) return false;
 		const view = await main.context(context);
 		const would = engine.droppable(view.messages);
 		const due = engine.due();
@@ -707,6 +728,7 @@ export async function runTerminal(session, options) {
 		}
 		const { text, info } = engine.collapse({ reason });
 		await main.reset(text, context);
+		// A collapse is the boundary at which the prompt the agent approved for itself takes effect.
 		collapsedLine();
 		if (config.readAhead !== false && !final) {
 			const ahead = engine.readAhead(text, info.at);
@@ -716,7 +738,7 @@ export async function runTerminal(session, options) {
 					enqueue(async () => {
 						if (readingAhead === ahead) readingAhead = undefined;
 						if (stopped || result.aborted) return;
-						if (result.error !== undefined) line(dim(`  the server could not read the new context ahead (${oneLine(result.error, 160)}); the next answer reads it`));
+						if (result.error !== undefined) line(dim(`  the server could not read the new context ahead (${oneLine(result.error, POLICY.limits.terminal.resultSummary.readAheadError)}); the next answer reads it`));
 						else line(dim(`  read ahead by the server${result.tokens ? `: ${tokens(result.tokens)} tokens` : ""} in ${(result.ms / 1000).toFixed(1)} s, so the next answer starts at once`));
 						reprompt();
 					}),
@@ -734,8 +756,8 @@ export async function runTerminal(session, options) {
 			const cut = cutDone;
 			await cut;
 			await harness.waitForIdle(context);
-			for (let i = 0; i < 3; i++) {
-				await new Promise((resolve) => setTimeout(resolve, 20));
+			for (let i = 0; i < POLICY.timing.terminal.settleFlushPasses; i++) {
+				await new Promise((resolve) => setTimeout(resolve, POLICY.timing.terminal.inputFlushMs));
 				await queue;
 			}
 			if (cut === cutDone && !cutting) break;
@@ -799,7 +821,7 @@ export async function runTerminal(session, options) {
 				line(`› ${answer}`);
 				asks.answer(answer);
 			}
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			await new Promise((resolve) => setTimeout(resolve, POLICY.timing.terminal.taskFlushMs));
 		}
 	};
 
@@ -817,7 +839,7 @@ export async function runTerminal(session, options) {
 	const ledgerLine = () => {
 		const { ledger, error } = loadLedger(options.brainDir);
 		if (ledger === undefined) return line(`! The ledger cannot be read: ${error}. Repair the file; until then the agent works without it.`);
-		if (open(ledger, "goal").length === 0) line(dim(`ledger: ${openCounts(ledger)} · no goal yet: say what you want to achieve`));
+		if (open(ledger, POLICY.enums.ledgerKind.goal).length === 0) line(dim(`ledger: ${openCounts(ledger)} · no goal yet: say what you want to achieve`));
 		else line(dim(`ledger: ${openCounts(ledger)} · /ledger shows them`));
 	};
 
@@ -833,11 +855,11 @@ export async function runTerminal(session, options) {
 	let reminded;
 	const approvalLine = () => {
 		const { plan } = loadPlan(options.brainDir);
-		if (plan === undefined || !awaitsApproval(plan) || gate.yolo) {
+		if (plan === undefined || !planWaits(plan) || gate.yolo) {
 			reminded = undefined;
 			return;
 		}
-		const waiting = openItems(plan, "change");
+		const waiting = waitingItems(plan);
 		const mark = JSON.stringify(waiting.map((item) => [item.id, item.text, item.network === true, item.standing === true]));
 		const online = waiting.filter((item) => item.network === true).length;
 		const duties = waiting.filter((item) => item.standing === true).length;
@@ -848,6 +870,12 @@ export async function runTerminal(session, options) {
 	};
 
 	const submit = async (content) => {
+		// Paused, nothing new reaches the agent: what the user writes waits here, and goes when the pause is lifted.
+		if (paused && options.interactive && options.oneShot === undefined) {
+			heldInputs.push(content);
+			line(dim(`  (held: the agent is paused, ${plural(heldInputs.length, "line")} wait${heldInputs.length === 1 ? "s" : ""} · /pause or Ctrl-V lets them go)`));
+			return undefined;
+		}
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
 		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
@@ -904,7 +932,8 @@ export async function runTerminal(session, options) {
 	 * @returns the submission, or undefined when there was nothing to tell, the agent is busy, or the wake has to wait
 	 */
 	const wake = async () => {
-		if (busy || stopped || !(windows?.hasNews() || wakes?.hasNews())) return undefined;
+		// Paused, the agent is woken by nothing: what happened waits, and is told when the pause is lifted.
+		if (paused || busy || stopped || !(windows?.hasNews() || wakes?.hasNews())) return undefined;
 		const earned = Math.floor((Date.now() - creditAt) / spacing);
 		if (earned > 0) {
 			credit = Math.min(WAKE_BURST, credit + earned);
@@ -918,7 +947,7 @@ export async function runTerminal(session, options) {
 				retry = setTimeout(() => {
 					retry = undefined;
 					onRetry();
-				}, Math.max(50, creditAt + spacing - Date.now()));
+				}, Math.max(POLICY.timing.terminal.retryMinimumMs, creditAt + spacing - Date.now()));
 				retry.unref();
 			}
 			return undefined;
@@ -951,7 +980,10 @@ export async function runTerminal(session, options) {
 	let setPrompt = () => {};
 
 	const command = async (text) => {
-		const [name, argument] = text.slice(1).trim().split(/\s+/);
+		const [name, ...parts] = text.slice(1).trim().split(/\s+/);
+		const argument = parts[0];
+		const args = parts.filter((part) => part !== "");
+		const tail = args.slice(1).join(" ");
 		switch (name) {
 			case "help":
 				line(
@@ -963,7 +995,12 @@ export async function runTerminal(session, options) {
 						"  /atlas    the tree as the agent sees it, the graph's nodes, and where the file is",
 						"  /assessment  the agent's summary of the project, and where the file is",
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
-						"  /approve  authorize the plan as it stands: its change items may then run",
+						"  /requests what waits for you: change items, questions of taste, and ",
+						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
+						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
+						"  /answer   /answer ID words answers a question of taste",
+						"  /pause    hold everything new back from the agent while it finishes what it is doing; /pause or Ctrl-V again lets it go on",
+						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
 						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
 						"  /diff     what the last change task did to the files (/diff all: the whole patch)",
@@ -971,15 +1008,44 @@ export async function runTerminal(session, options) {
 						"  /bwrap    how tasks' commands run; /bwrap off runs them without the sandbox, /bwrap on with it",
 						"  /shells   the shell windows: what runs in each, for how long, and its newest lines",
 						"  /kill     /kill NAME closes a shell window and ends what runs in it; /kill all closes every one",
-						"  /stop     stop what the agent is doing (Ctrl-C does the same); shell windows keep running",
+						"  /stop     stop what the agent is doing (Ctrl-X does the same); shell windows keep running",
+						"  /model    the models the server serves; /model NAME (or a number) switches to one",
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
+						"  /row add TEXT, /row edit ID TEXT, /row done ID, /row remove ID  curate context rows (add --next after the action to defer visibility)",
+						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
+						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a curated row (c1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a curated row, a ledger entry, a plan item, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
+						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
 						"  /status   where the brain is and how full the context is",
 						"  /quit     leave; unfinished work continues the next time carto starts here",
 					].join("\n"),
 				);
 				return true;
+			case "requests": {
+				const all = listRequests(options.brainDir, { yolo: gate.yolo });
+				if (all.length === 0) line("  Nothing waits for you. /plan, /ledger and /requests show what the agent has written.");
+				else {
+					line(`  ${bold("Requests")}  ${plural(all.length, "request")} wait${all.length === 1 ? "s" : ""} for you:`);
+					for (const request of all) {
+						line(`    ${request.id}  [${request.kind}]  ${request.text}`);
+						for (const detail of request.detail ?? []) line(dim(`      ${detail}`));
+					}
+					line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
+				}
+				return true;
+			}
+			case "books":
+			case "practice": {
+				const { loadBooks, renderBook, BOOK_KINDS } = await import("./books.mjs");
+				const books = loadBooks(options.brainDir);
+				const kinds = name === "practice" ? ["practice"] : BOOK_KINDS;
+				for (const kind of kinds) line(`  ${bold(kind)}\n${renderBook(books, kind) || "    (empty)"}`);
+				line(dim(`  ${booksPath(options.brainDir)}`));
+				return true;
+			}
 			case "report": {
 				if (argument !== undefined) {
 					const kept = loadReport(options.brainDir, argument);
@@ -1002,7 +1068,7 @@ export async function runTerminal(session, options) {
 				else {
 					const t = sizes.front.tokens ?? {};
 					row("record", t.record, `${plural(sizes.front.kept?.tasks ?? 0, "finished task")}, one line each`);
-					row("shelf", t.shelf, (sizes.front.shelf ?? []).length === 0 ? "empty" : (sizes.front.shelf ?? []).map(shelfLabel).join(", "));
+					row("shelf", t.shelf, (sizes.front.shelf ?? []).length === 0 ? "empty" : (sizes.front.shelf ?? []).map((item) => `${shelfLabel(item)} [${item.id}]`).join(", "));
 					row("talk", t.talk, `${plural(sizes.front.kept?.talk ?? 0, "message")} between you and the agent, of at most ${tokens(config.chatWindow)} tokens`);
 				}
 				const since = view.messages.filter((message) => !isFront(message)).length;
@@ -1010,13 +1076,13 @@ export async function runTerminal(session, options) {
 				row("work", sizes.work, since === 0 ? `nothing since ${from}` : `${plural(since, "message")} since ${from}; a collapse frees about ${tokens(sizes.frees)}`);
 				row("state", sizes.state, "the state block, written anew for every request");
 				const store = sizes.store;
-				const waiting = store.shelf.filter((item) => !(sizes.front?.shelf ?? []).some((entry) => entry.path === item.path && entry.from === item.from && entry.to === item.to));
-				const leaving = (sizes.front?.shelf ?? []).filter((entry) => !store.shelf.some((item) => entry.path === item.path && entry.from === item.from && entry.to === item.to));
-				if (waiting.length > 0) line(`  marked for the shelf, in view from the next collapse: ${waiting.map(shelfLabel).join(", ")}`);
-				if (leaving.length > 0) line(`  taken off the shelf, gone at the next collapse: ${leaving.map(shelfLabel).join(", ")}`);
-				if (store.records.length > 0) {
-					line(`  kept reports: ${store.records.length} (${store.records[0].id} to ${store.records.at(-1).id}); the newest:`);
-					for (const record of store.records.slice(-5)) line(dim(`    ${oneLine(recordLine(record), 150)}`));
+				const waiting = store.shelf.filter((item) => !(sizes.front?.shelf ?? []).some((entry) => sameShelfItem(entry, item)));
+				const leaving = (sizes.front?.shelf ?? []).filter((entry) => !store.shelf.some((item) => sameShelfItem(entry, item)));
+				if (waiting.length > 0) line(`  new shelf snapshots, in view now and carried into the next collapse: ${waiting.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}`);
+				if (leaving.length > 0) line(`  taken off the shelf, gone at the next collapse: ${leaving.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}`);
+				if (composedRows(store).length > 0) {
+					line(`  kept reports: ${composedRows(store).length} (${composedRows(store)[0].id} to ${composedRows(store).at(-1).id}); the newest:`);
+					for (const record of composedRows(store).slice(-POLICY.limits.terminal.recentReports)) line(dim(`    ${oneLine(recordLine(record), POLICY.limits.terminal.resultSummary.reportLine)}`));
 				}
 				if (store.last !== undefined) line(`  last collapse: ${stamp(store.last.at)} (${ofAgent(store.last.reason)})${store.last.before !== undefined && store.last.after !== undefined ? `, about ${tokens(store.last.before)} → ${tokens(store.last.after)} tokens` : ""}`);
 				line(
@@ -1090,9 +1156,23 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "approve": {
+				// One or more ids: approve those requests, one item at a time. The agent goes on meanwhile and is
+				// told what changed; it does not have to have been waiting. With no ids the old whole-plan /approve
+				// still works, so a plan described in a few lines can be agreed to in one word.
+				if (args.length > 0) {
+					const done = approveRequests(options.brainDir, args);
+					const names = done.items;
+					if (names.length === 0) line(`  None of ${args.join(", ")} names a request that waits. /requests lists them.`);
+					else {
+						line(`${bold("●")} requests  approved ${names.join(", ")}`);
+						await send(`I approved ${names.join(", ")}. What waited on these requests can go on; everything else you were doing does not stop.`);
+					}
+					for (const id of done.unknown) line(dim(`  ${id} is not a request that waits. /requests lists them.`));
+					return true;
+				}
 				const { plan, error } = loadPlan(options.brainDir);
 				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
-				else if (openItems(plan, "change").length === 0) {
+				else if (openItems(plan, POLICY.enums.planMode.change).length === 0) {
 					line("  The plan has no open change item, so there is nothing to authorize. /plan shows it. The agent is told.");
 					// A model that described its plan in the chat instead of writing it would wait for an approval that cannot come.
 					await send(NOTHING_TO_APPROVE);
@@ -1102,15 +1182,41 @@ export async function runTerminal(session, options) {
 					const covered = authorize(plan, new Date().toISOString());
 					savePlan(options.brainDir, plan);
 					line(`${bold("●")} plan  authorized by you: ${plural(covered, "change item")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
-					for (const item of openItems(plan, "change")) line(dim(`  ${item.id} ${item.text}${item.network === true ? "  · its commands reach the network" : ""}${item.standing === true ? "  · standing: the agent may carry it out again and again" : ""}`));
+					for (const item of openItems(plan, POLICY.enums.planMode.change)) line(dim(`  ${item.id} ${item.text}${item.network === true ? "  · its commands reach the network" : ""}${item.standing === true ? "  · standing: the agent may carry it out again and again" : ""}`));
 					// The agent is told, so that it starts on the plan without another message from the user.
 					await send("I authorize the plan as it stands. Carry it out.");
 				}
 				return true;
 			}
+			case "deny": {
+				if (argument === undefined) {
+					line("  /deny ID [why] turns down one request. /requests lists the ids.");
+					return true;
+				}
+				const turned = denyRequest(options.brainDir, argument, tail);
+				if (turned === undefined) line(`  ${argument} is not a request that waits. /requests lists them.`);
+				else {
+					line(`${bold("●")} requests  ${argument} turned down${tail === "" ? "" : `: ${tail}`}`);
+					await send(`I turned down ${argument}: ${turned.text}. Do not carry it out${tail === "" ? "" : `; my reason was: ${tail}`}. Go on with whatever does not depend on it.`);
+				}
+				return true;
+			}
+			case "answer": {
+				if (argument === undefined || tail === "") {
+					line("  /answer ID words answers a question of taste. /requests lists the ids.");
+					return true;
+				}
+				const answered = answerQuestion(options.brainDir, argument, tail);
+				if (answered === undefined) line(`  ${argument} is not an open question. /requests lists them.`);
+				else {
+					line(`${bold("●")} requests  ${argument} answered: ${tail}`);
+					await send(`My answer to ${argument} (${answered.text}) is: ${tail}. Use it and go on with whatever does not depend on it.`);
+				}
+				return true;
+			}
 			case "yolo": {
 				const { plan } = loadPlan(options.brainDir);
-				const waiting = plan === undefined ? [] : openItems(plan, "change");
+				const waiting = plan === undefined ? [] : openItems(plan, POLICY.enums.planMode.change);
 				if (argument === undefined) {
 					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · change items wait for /approve"}`);
 					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets change items run without /approve"}`));
@@ -1213,14 +1319,15 @@ export async function runTerminal(session, options) {
 						let item = plan.items.find((entry) => entry.id === result.item);
 						const back = item === undefined;
 						if (back) {
-							item = { id: result.item, mode: "change", text: result.text, status: "open", added: now };
+							item = { id: result.item, mode: POLICY.enums.planMode.change, text: result.text, status: POLICY.enums.entryStatus.open, added: now };
 							plan.items.unshift(item);
-							const number = Number(result.item.slice(1));
+							const number = Number(result.item.slice(POLICY.idPrefixes.plan.length));
 							if (Number.isInteger(number) && number >= plan.next) plan.next = number + 1;
 						}
-						Object.assign(item, { status: "open", undone: now });
+						Object.assign(item, { status: POLICY.enums.entryStatus.open, undone: now });
 						delete item.outcome;
 						delete item.closed;
+						delete item.approved;
 						delete plan.authorized;
 						savePlan(options.brainDir, plan);
 						line(dim(`  ${item.id} is ${back ? "back in the plan, open" : "open again"}. ${gate.yolo ? "Approval is off, so the agent may carry it out again: tell it what you want instead." : "The plan needs /approve again before a change item runs. Tell the agent what you want instead."}`));
@@ -1260,7 +1367,7 @@ export async function runTerminal(session, options) {
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
 						const { plan } = loadPlan(options.brainDir);
-						const open = plan !== undefined && isAuthorized(plan) ? openItems(plan, "change").length : 0;
+						const open = plan !== undefined && isAuthorized(plan) ? openItems(plan, POLICY.enums.planMode.change).length : 0;
 						if (open > 0) line(`  The plan is authorized: its ${plural(open, "open change item")} will run without the sandbox.`);
 						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
 					}
@@ -1274,23 +1381,54 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "stop": {
+				if (!busy) {
+					line("  nothing runs: the agent rests (Ctrl-X does the same when something does)");
+					return true;
+				}
 				await main.abort(context);
 				line(dim("  stopped"));
 				runningLine();
 				return true;
 			}
+			case "pause": {
+				// The agent is not interrupted: it finishes the round it is on, and until the pause is lifted nothing
+				// new reaches it — no line the user writes (they wait below), no wake of its own, no auto-collapse.
+				const to = argument === "on" ? true : argument === "off" ? false : !paused;
+				if (to === paused) {
+					line(to ? "  already paused. /pause or Ctrl-V lets it go on." : "  nothing is paused.");
+					return true;
+				}
+				paused = to;
+				setPrompt();
+				if (paused) {
+					line(`${bold("●")} paused: the agent finishes what it is doing and gets nothing new · /pause or Ctrl-V lets it go on`);
+					return true;
+				}
+				const held = heldInputs.splice(0);
+				line(`${bold("●")} on again${held.length > 0 ? `: what you wrote is sent now (${plural(held.length, "line")})` : ", and what happened while it was paused is told"}`);
+				for (const text of held) {
+					const wasBusy = busy;
+					const submission = await submit(text);
+					if (submission === undefined) {
+						busy = wasBusy;
+						if (!busy) reader.prompt();
+					} else if (wasBusy) line(dim("  (sent; the agent reads it after its current step)"));
+				}
+				await wake();
+				return true;
+			}
 			case "shells": {
-				const all = windows?.list(8) ?? [];
+				const all = windows?.list(POLICY.limits.terminal.shellListTail) ?? [];
 				if (all.length === 0) line("  No shell window is open. A change task opens one when it runs a command.");
 				else {
-					for (const text of windowLines(all, { busy: 8, free: 4 })) line(text.replace(/ `window` close clears this line\.$/, " The agent is told."));
+					for (const text of windowLines(all, { busy: POLICY.limits.terminal.shellBusyTail, free: POLICY.limits.terminal.shellFreeTail })) line(text.replace(/ `window` close clears this line\.$/, " The agent is told."));
 					line(dim("  /kill NAME closes a window and ends what runs in it; /kill all closes every one."));
 				}
 				return true;
 			}
 			case "kill": {
 				// Only windows that are open. A line about one that is gone is the agent's to read and clear.
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (argument === undefined || argument === "") {
 					line(all.length === 0 ? "  No shell window is open." : `  /kill NAME closes one window, /kill all every one. Open: ${all.map((win) => win.name).join(", ")}.`);
 					return true;
@@ -1302,7 +1440,7 @@ export async function runTerminal(session, options) {
 				}
 				for (const win of chosen) {
 					windows.close(win.name, { why: KILLED });
-					line(`${bold("●")} closed window ${win.name}${win.state === "busy" ? `, and \`${oneLine(win.command, 80)}\` ended with it` : ""}`);
+					line(`${bold("●")} closed window ${win.name}${win.state === POLICY.enums.windowStates.busy ? `, and \`${oneLine(win.command, POLICY.limits.terminal.resultSummary.windowCommand)}\` ended with it` : ""}`);
 				}
 				if (!busy) line(dim("  The agent sees this the next time it works. Tell it why, if it matters."));
 				return true;
@@ -1314,12 +1452,12 @@ export async function runTerminal(session, options) {
 					line("  /wait is for piped input. Here the agent is woken by itself when a window's command ends or a wake fires.");
 					return true;
 				}
-				const until = Date.now() + (Number.isFinite(Number(argument)) && Number(argument) > 0 ? Number(argument) : 30) * 1000;
+				const until = Date.now() + (Number.isFinite(Number(argument)) && Number(argument) > 0 ? Number(argument) : POLICY.timing.terminal.waitDefaultSeconds) * 1000;
 				for (;;) {
 					await woken();
-					const pending = (windows?.list(0) ?? []).some((win) => win.state === "busy") || (wakes?.list().length ?? 0) > 0 || heldFor() !== undefined;
+					const pending = (windows?.list(0) ?? []).some((win) => win.state === POLICY.enums.windowStates.busy) || (wakes?.list().length ?? 0) > 0 || heldFor() !== undefined;
 					if (!pending || Date.now() >= until) break;
-					await new Promise((resolve) => setTimeout(resolve, 100));
+					await new Promise((resolve) => setTimeout(resolve, POLICY.timing.terminal.inputPollMs));
 				}
 				return true;
 			}
@@ -1341,15 +1479,156 @@ export async function runTerminal(session, options) {
 				const view = await main.context(context);
 				const last = view.messages.filter((message) => message.role === "assistant").at(-1);
 				const size = last?.usage ? (last.usage.input ?? 0) + (last.usage.cacheRead ?? 0) + (last.usage.output ?? 0) : 0;
-				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · ${busy ? "working" : "idle"}`);
+				const on = await session.model?.();
+				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${on?.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
 				if (options.runner !== undefined) line(`  ${sandboxLine(options.runner)}`);
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
-				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === "busy").length} busy · /shells shows them`);
+				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === POLICY.enums.windowStates.busy).length} busy · /shells shows them`);
 				if (gate.yolo) line(`  ${YOLO_LINE}`);
 				const set = wakes?.list() ?? [];
 				if (set.length > 0) {
 					const due = wakes.nextDue();
 					line(`  ${plural(set.length, "wake")} set${due === undefined ? "" : `, the next in ${took(due)}`} · /wakes shows them`);
+				}
+				return true;
+			}
+			case "model": {
+				// The list comes from the server each time: llama-swap serves what is loaded now.
+				let served = session.servedModels ?? [config.model];
+				try {
+					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
+					const body = await response.json().catch(() => undefined);
+					const listed = (body?.data ?? []).map((entry) => entry?.id).filter((id) => typeof id === "string");
+					if (listed.length > 0) served = listed;
+				} catch {
+					// The server did not answer: the names from the start are shown.
+				}
+				const on = await session.model?.();
+				const current = on?.modelId ?? config.model;
+				if (argument === undefined) {
+					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
+					served.forEach((id, index) => line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}`));
+					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too."));
+					return true;
+				}
+				const byNumber = /^\d+$/.test(argument) ? served[Number(argument) - 1] : undefined;
+				const wanted = byNumber ?? served.find((id) => id === argument);
+				if (wanted === undefined) {
+					line(`  The server has no model "${argument}". It serves: ${served.join(", ")}. /model lists them.`);
+					return true;
+				}
+				if (wanted === current) {
+					line(`  Already on ${wanted}.`);
+					return true;
+				}
+				if (!(await session.setModel(wanted))) {
+					line(`  ${wanted} is not a model of this session. /model lists what the server serves.`);
+					return true;
+				}
+				line(`${bold("●")} model  ${current} → ${wanted}${busy ? " · the answer being written finishes on the old one" : ""}`);
+				return true;
+			}
+			case "row": {
+				const action = argument;
+				const words = args.slice(1);
+				if (action === undefined) {
+					line("  /row add TEXT, edit ID TEXT, done ID [OUTCOME], remove ID, before ID [OTHER], archive ID, unarchive ID, delete ID. Prefix an action's arguments with --next to defer context visibility until collapse.");
+					return true;
+				}
+				const when = words[0] === "--next" ? POLICY.enums.contextVisibility.nextBoundary : POLICY.enums.contextVisibility.now;
+				const rest = words[0] === "--next" ? words.slice(1) : words;
+				try {
+					let said;
+					if (["add", "edit", "done", "remove", "before"].includes(action)) {
+						let op;
+						if (action === "add") op = { action, text: rest.join(" "), when };
+						else if (action === "edit") op = { action, id: rest[0], text: rest.slice(1).join(" "), when };
+						else if (action === "done") op = { action, id: rest[0], text: rest.slice(1).join(" "), when };
+						else if (action === "before") op = { action, id: rest[0], before: rest[1], when };
+						else op = { action, id: rest[0], when };
+						if (action !== "add" && !op.id) throw new ContextRowError(`${action} needs a row id.`);
+						const result = applyCuratedRowOp(options.brainDir, op);
+						said = `${result.line}${when === POLICY.enums.contextVisibility.nextBoundary ? " Saved now; context visibility changes at the next collapse." : " Saved and visible now."}`;
+					} else if (["archive", "unarchive", "delete"].includes(action)) {
+						if (!rest[0]) throw new ContextRowError(`${action} needs a row id.`);
+						said = applyContextRowAction(options.brainDir, rest[0], action, when);
+					} else {
+						line("  The row actions are add, edit, done, remove, before, archive, unarchive and delete.");
+						return true;
+					}
+					line(`  ${said}${when === POLICY.enums.contextVisibility.nextBoundary ? " The state block shows any pending difference." : ""}`);
+				} catch (error) {
+					if (!(error instanceof ContextRowError)) throw error;
+					line(`! ${error.message}`);
+				}
+				return true;
+			}
+			case "fold": {
+				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				if (ids.length === 0) {
+					line("  /fold ID takes a report out of view, leaving its one line: the same `fold` the agent does with `context`. /context lists what is in view.");
+					return true;
+				}
+				const said = foldReports(options.brainDir, ids);
+				line(`  ${said}`);
+				return true;
+			}
+			case "recall": {
+				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
+				if (ids.length === 0) {
+					line("  /recall ID brings a kept report back in full, into view. /context lists the kept ones.");
+					return true;
+				}
+				for (const id of ids) {
+					const said = recallReport(options.brainDir, id);
+					line(said === undefined ? `  There is no report ${id}. /context lists the kept ones.` : `  ${said}`);
+				}
+				return true;
+			}
+			case "shelve":
+			case "unshelve": {
+				if (argument === undefined) {
+					line(`  /${name} PATH [lines] ${name === "shelve" ? "saves a full backing snapshot and carries selected content through collapse" : "takes a shelf item off by path or stable ID (all takes every one)"}.`);
+					return true;
+				}
+				try {
+					const said = name === "shelve" ? shelveForUser(options.root, options.brainDir, config, argument, tail) : unshelveForUser(options.brainDir, argument);
+					line(`  ${said}`);
+				} catch (error) {
+					line(`! ${error.message}`);
+				}
+				return true;
+			}
+			case "archive":
+			case "unarchive": {
+				const ids = args;
+				if (ids.length === 0) {
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a curated row (c1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
+					return true;
+				}
+				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
+				return true;
+			}
+			case "delete": {
+				const ids = args;
+				if (ids.length === 0) {
+					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan item, a node of the graph. /archive hides a row and keeps it.");
+					return true;
+				}
+				line(`  ${dropRows(options.brainDir, ids)}`);
+				return true;
+			}
+			case "send": {
+				if (argument === undefined || tail === "") {
+					line("  /send NAME line types a line into a shell window, as you. /shells lists the windows.");
+					return true;
+				}
+				if (windows === undefined) return true;
+				try {
+					await windows.send(argument, tail, { waitMs: POLICY.timing.terminal.shellSendWaitMs });
+					line(dim(`  typed into ${argument}: ${tail}`));
+				} catch (error) {
+					line(`! ${error.message}`);
 				}
 				return true;
 			}
@@ -1364,16 +1643,16 @@ export async function runTerminal(session, options) {
 
 	/** A window keeps the way it was opened, so a switch of the sandbox closes every one. */
 	function closeForSwitch(to) {
-		const were = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+		const were = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (were.length === 0) return;
 		recordWindows();
 		windows.closeAll({ why: `the user switched the sandbox ${to}, which closes every window` });
-		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === "busy") ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
+		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
 	}
 
 	/** Which windows are still at work, said after the agent was stopped. */
 	function runningLine() {
-		const running = (windows?.list(0) ?? []).filter((win) => win.state === "busy");
+		const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
 		if (running.length > 0) line(dim(`  still running: ${running.map((win) => `window ${win.name}`).join(", ")} · /shells shows them, /kill NAME ends one, /kill all every one`));
 	}
 
@@ -1390,14 +1669,21 @@ export async function runTerminal(session, options) {
 	ledgerLine();
 	planLine();
 	atlasLine();
-	const lost = (windows?.list(0) ?? []).filter((win) => win.state === "gone");
+	const lost = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.gone);
 	if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
 	await follow(main.id, 0);
 	harness.resume();
 	if (busy) {
-		await settle();
-		usageLine();
-		approvalLine();
+		// The work that was going on when carto last went away goes on. The screen and the prompt must come up
+		// while it does, so that the user can talk into it and leave it; only piped input waits here, for its
+		// first line is part of the same queue. settle() waits for the queue, so it must not run inside it.
+		const finishing = async () => {
+			await settle();
+			usageLine();
+			approvalLine();
+		};
+		if (options.oneShot !== undefined || !options.interactive) await finishing();
+		else finishing().catch((error) => line(`! display error: ${error?.message ?? error}`));
 	}
 
 	// After this nothing more is printed. A watch waits for its running listener when stopped, and a listener waits
@@ -1453,6 +1739,7 @@ export async function runTerminal(session, options) {
 	const reader = ui !== undefined ? ui.reader : createInterface({ input: options.input, output: out, prompt: "› " });
 	ui?.attach({
 		busy: () => busy,
+		paused: () => paused,
 		thinking: () => thinking,
 		// What the server counted for the newest reply, also in the middle of a turn.
 		contextSize: () => engine?.usedBy(main.id) ?? contextSize,
@@ -1479,7 +1766,7 @@ export async function runTerminal(session, options) {
 	}
 	// The prompt says what is switched off, so that it cannot be forgotten.
 	setPrompt = () => {
-		const marks = [gate.yolo ? "yolo" : "", options.runner?.mode === "direct" ? "no sandbox" : ""].filter((mark) => mark !== "");
+		const marks = [gate.yolo ? "yolo" : "", paused ? "paused" : "", options.runner?.mode === "direct" ? "no sandbox" : ""].filter((mark) => mark !== "");
 		reader.setPrompt(marks.length > 0 ? `[${marks.join(", ")}] › ` : "› ");
 	};
 	setPrompt();
@@ -1492,6 +1779,16 @@ export async function runTerminal(session, options) {
 			endLine();
 			usageLine();
 			approvalLine();
+			// Lines the user wrote while the agent worked, which the run that just ended left unread, go out now:
+			// the agent reads them as the next thing. What it read stands in the conversation, and is not sent again.
+			for (const wait of [...steered]) {
+				const record = await wait.submission.status(context).catch(() => undefined);
+				if (record === undefined || record.status === "queued") continue;
+				steered.splice(steered.indexOf(wait), 1);
+				if (record.status !== "unanswered") continue;
+				const again = await submit(wait.content);
+				if (again !== undefined) steered.push({ content: wait.content, submission: again });
+			}
 			// Something may have happened in a window while the agent was finishing.
 			if (closing || (await wake()) !== undefined) return;
 			// The agent rests: the moment to collapse its context when that is due.
@@ -1547,7 +1844,7 @@ export async function runTerminal(session, options) {
 			unlisten?.();
 			if (busy) line(dim("Leaving. Unfinished work continues the next time carto starts here."));
 			else recordWindows();
-			const running = (windows?.list(0) ?? []).filter((win) => win.state === "busy");
+			const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
 			if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
 			await stop();
 			resolve(0);
@@ -1584,21 +1881,36 @@ export async function runTerminal(session, options) {
 				if (submission === undefined) {
 					busy = wasBusy;
 					if (!busy) reader.prompt();
-				} else if (wasBusy) line(dim("  (sent; the agent reads it after its current step, and a running task finishes first)"));
+				} else if (wasBusy) {
+					steered.push({ content: text, submission });
+					line(dim("  (sent; the agent reads it after its current step, and a running task finishes first)"));
+				}
 			});
 		});
+		// Bash-like: Ctrl-C clears what is typed on the line. With the line already clear, Ctrl-C twice in a row
+		// leaves the way /quit does; Ctrl-X stops the agent instead, and Ctrl-V pauses it.
+		let armedQuit = 0;
 		reader.on("SIGINT", () => {
-			if (!busy) return void leave();
-			enqueue(async () => {
-				await main.abort(context);
-				line(dim("  stopped (Ctrl-C again to leave)"));
-				runningLine();
-			});
+			const typed = typeof reader.line === "string" ? reader.line : "";
+			if (typed !== "") {
+				reader.line = "";
+				reader.cursor = 0;
+				out.write("\r\x1b[K");
+				if (!busy) reader.prompt(true);
+				return;
+			}
+			const now = Date.now();
+			if (now - armedQuit < POLICY.timing.terminal.quitConfirmMs) return void leave();
+			armedQuit = now;
+			line(dim(busy ? "  Ctrl-C again to leave; Ctrl-X stops the agent" : "  Ctrl-C again to leave"));
 		});
 		reader.on("close", () => void leave());
-		// Ctrl-T: show or hide the agent's own text. readline has no use for the key.
+		// Ctrl-T: show or hide the agent's own text. readline has no use for the key; nor for Ctrl-X and Ctrl-V.
 		(ui !== undefined ? ui.keys : options.input).on("keypress", (_text, key) => {
-			if (key?.ctrl !== true || key.name !== "t" || closing) return;
+			if (key?.ctrl !== true || closing) return;
+			if (key.name === "x") return void enqueue(async () => command("/stop"));
+			if (key.name === "v") return void enqueue(async () => command("/pause"));
+			if (key.name !== "t") return;
 			enqueue(async () => {
 				// The prompt and what is typed on it are taken off the line, and put back after.
 				if (!busy) out.write("\r\x1b[K");
@@ -1606,7 +1918,7 @@ export async function runTerminal(session, options) {
 				if (!busy) reader.prompt(true);
 			});
 		});
-		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C stops the agent; again leaves." : "Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl-T hides and shows its thinking."));
+		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it; Ctrl-T hides and shows its thinking."));
 		// A context left large by the last session is collapsed before the first message has to carry it.
 		enqueue(async () => {
 			await rest();

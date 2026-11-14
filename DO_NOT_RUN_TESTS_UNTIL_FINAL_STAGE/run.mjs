@@ -1,17 +1,18 @@
+// DO NOT RUN THIS SUITE UNTIL FINAL VERIFICATION (Stage 8), per user instruction.
 // Tests: install layout, launch, the brain folder, chat, tasks, the ledger, the plan, checkpoints, shell windows, the atlas, the assessment, time,
 // wakes, approval switched off, standing items and the context engine.
 // They run the real `carto` command in throwaway project folders against the stand-in
-// server (test/stand-in.mjs), so no model is needed.
+// server (DO_NOT_RUN_TESTS_UNTIL_FINAL_STAGE/stand-in.mjs), so no model is needed.
 //
 //   npm test            (about three and a half minutes)
 //   npm test -- kill    only tests whose name contains "kill"
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { droppable, dressTask, KEPT_AS, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
+import { addRecord, archiveReports, deleteReports, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unarchiveReports, unshelveForUser, updateContext, writeFront, withoutTags, applyCuratedRowOp, applyContextRowAction, contextLines, shelfItem, shelfText } from "../src/context.mjs";
 import { TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
@@ -20,12 +21,17 @@ import { applyOp, LedgerError, loadLedger, OPEN_MAX, renderLedger, saveLedger, T
 import { applyPlanOp, authorize, ITEM_MAX, loadPlan, openOnce, PlanError, planSummary, renderPlan, savePlan, YOLO_LINE } from "../src/plan.mjs";
 import { withoutAdditions, withTimes } from "../src/request.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "../src/state.mjs";
+import { DEFAULTS, POLICY } from "../src/config.mjs";
 import { ago, STAMP, stamp, took } from "../src/time.mjs";
 import { loadTop, noteAssessed, pin, sinceTop, topPath, withoutTop, withTop } from "../src/top.mjs";
 import { drawTree, treeSection } from "../src/tree.mjs";
 import { atlasTool } from "../src/tools/atlas.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
-import { ledgerTool } from "../src/tools/ledger.mjs";
+import { bookTool } from "../src/tools/book.mjs";
+import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { compile } from "@earendil-works/pi-schema";
+import { shellTool } from "../src/tools/shell.mjs";
+import { wakeTool } from "../src/tools/wake.mjs";
 import { confine, listProject, LookError, projectFiles, readOne, searchProject } from "../src/tools/look.mjs";
 import { findProject, setUpBrain } from "../src/project.mjs";
 import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
@@ -37,15 +43,70 @@ import { startStandIn } from "./stand-in.mjs";
 
 const CORE = dirname(dirname(fileURLToPath(import.meta.url)));
 const CARTO = join(CORE, "bin", "carto");
+// The stand-in's briefs were written before the mechanical `write` limit (src/config.mjs): they replace
+// whole files again and again. Relax that strict default for every child carto this test file spawns,
+// including the direct spawns in the kill tests. Tests of the limit itself pass CARTO_WRITE_* in `env`
+// to turn it back on for one run.
+process.env.CARTO_WRITE_LINES ??= "1000000";
+process.env.CARTO_WRITE_CREATES_ONLY ??= "0";
 const scratch = realpathSync(mkdtempSync(join(tmpdir(), "carto-test-")));
-const only = process.argv[2];
+// The tests must not read the install's own settings: this checkout may hold a config.json of the user's own
+// (yolo, bwrap, the context window), which turned half the suite red on such an install. Every carto these
+// tests spawn reads an empty one instead, so the defaults are what is under test.
+const EMPTY_CONFIG = join(scratch, "empty-config.json");
+writeFileSync(EMPTY_CONFIG, "{}\n");
+process.env.CARTO_CONFIG = EMPTY_CONFIG;
+let only; // a substring filter: `node DO_NOT_RUN_TESTS_UNTIL_FINAL_STAGE/run.mjs ledger` runs the tests whose names hold it
+// How many tests run beside each other: --jobs N (or -j N, or CARTO_TEST_JOBS), else one per core to a cap of 8.
+// Tests wait on the machine most of the time, so several at once are safe; the waits that measure it get SLOW,
+// the same factor, so that a loaded run is not failed by a clock.
+let jobsArg;
+{
+	const argv = process.argv.slice(2);
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] === "--jobs" || argv[i] === "-j") jobsArg = Number(argv[++i]);
+		else if (argv[i].startsWith("--jobs=")) jobsArg = Number(argv[i].slice("--jobs=".length));
+		else if (only === undefined) only = argv[i];
+	}
+}
+const JOBS = Number.isInteger(jobsArg) && jobsArg >= 1 ? jobsArg : Math.min(8, Math.max(1, availableParallelism() - 1));
+const SLOW = 1 + (JOBS - 1) * 0.5;
+process.env.CARTO_TEST_SLOW = String(SLOW);
 
 const tests = [];
-const test = (name, run) => tests.push({ name, run });
+/** A test that must run with no other test beside it takes `{ alone: true }`: it changes something that
+ * every other test reads while it runs — one swaps this process's environment for its shell windows. */
+const test = (name, run, { alone = false } = {}) => tests.push({ name, run, alone });
 
-/** A throwaway project with a few files. `git: true` makes it a repository. */
+test("configuration policy is deeply immutable", () => {
+	assert.ok(Object.isFrozen(DEFAULTS));
+	assert.ok(Object.isFrozen(DEFAULTS.shellRead));
+	assert.ok(Object.isFrozen(POLICY.limits.windows));
+	assert.ok(Object.isFrozen(POLICY.enums.shellActions));
+	assert.ok(Object.isFrozen(POLICY.enums.actions));
+	assert.ok(Object.isFrozen(POLICY.enums.entryStatus));
+	assert.ok(Object.isFrozen(POLICY.enums.ledgerKind));
+	assert.ok(Object.isFrozen(POLICY.enums.planMode));
+	assert.ok(Object.isFrozen(POLICY.enums.wakeKinds));
+	assert.ok(Object.isFrozen(POLICY.enums.windowWaitReasons));
+	assert.ok(Object.isFrozen(POLICY.enums.bookName));
+	assert.ok(Object.isFrozen(POLICY.enums.shellAction));
+	assert.ok(Object.isFrozen(POLICY.enums.atlasActions));
+	assert.ok(Object.isFrozen(POLICY.limits.tree.branchCaps));
+	assert.ok(Object.isFrozen(POLICY.idPrefixes.ledger));
+	assert.ok(Object.isFrozen(POLICY.markup.note));
+	assert.throws(() => POLICY.limits.windows.open++, TypeError);
+	assert.throws(() => POLICY.enums.shellActions.push("restart"), TypeError);
+});
+
+/** A throwaway project with a few files. `git: true` makes it a repository.
+ * Tests that run beside each other must not share a folder (a project holds a lock, and its brain one
+ * session), so a name a second test asks for gets a number: three tests say "kill", each has its own. */
+const projectCounts = new Map();
 function makeProject(name, { git = true } = {}) {
-	const root = join(scratch, name);
+	const seen = projectCounts.get(name) ?? 0;
+	projectCounts.set(name, seen + 1);
+	const root = join(scratch, seen === 0 ? name : `${name}-${seen + 1}`);
 	mkdirSync(join(root, "src", "deep", "er"), { recursive: true });
 	writeFileSync(join(root, "README.md"), "# Demo project\nA small thing for tests.\n");
 	writeFileSync(join(root, "src", "math.js"), "export function add(a, b) {\n  // MARKER-ONLY-IN-FILE\n  return a + b;\n}\n");
@@ -71,7 +132,7 @@ function run(command, args, { cwd, env = {}, input, timeoutMs = 30_000, throughN
 		let stderr = "";
 		child.stdout.on("data", (chunk) => (stdout += chunk));
 		child.stderr.on("data", (chunk) => (stderr += chunk));
-		const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+		const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs * SLOW);
 		// A command that cannot be started at all is a result like any other, not a crash of the test run.
 		child.on("error", (error) => {
 			clearTimeout(timer);
@@ -134,7 +195,7 @@ async function cartoOnTerminal(cwd, server, args, steps) {
 }
 
 /**
- * Run carto in its full screen on a terminal of the given size, and read the screen as a person would: test/vt.py
+ * Run carto in its full screen on a terminal of the given size, and read the screen as a person would: DO_NOT_RUN_TESTS_UNTIL_FINAL_STAGE/vt.py
  * keeps the grid of characters that the escape sequences paint. A step is [wait, keys] or [wait, keys, false]:
  * `wait` is text that must stand on the screen (or a number of seconds), then the keys are typed, with Enter after
  * them unless the third entry is false. <UP> <DOWN> <ENTER> <TAB> <ESC> <PGUP> <CTRLT> <CTRLC> <CTRLD> <CTRLJ> are keys,
@@ -221,11 +282,12 @@ test("launch: the command works through a symlink, as install.sh sets it up", as
 
 test("launch: without settings it says how to configure, and leaves nothing in the project", async () => {
 	const root = makeProject("no-config");
-	const result = await carto(root, undefined, [], { env: { CARTO_SERVER: "", CARTO_MODEL: "" } });
-	if (existsSync(join(CORE, "config.json"))) return "this install has a config.json";
+	// This test's own config: a file that is not there, whatever the install has.
+	const noConfig = join(scratch, "no-such-config.json");
+	const result = await carto(root, undefined, [], { env: { CARTO_SERVER: "", CARTO_MODEL: "", CARTO_CONFIG: noConfig } });
 	assert.equal(result.code, 1, `expected exit 1:\n${result.all}`);
 	has(result.stderr, "No model server is configured.", "message");
-	has(result.stderr, join(CORE, "config.json"), "names the file to write");
+	has(result.stderr, noConfig, "names the file to write");
 	assert.ok(!existsSync(join(root, ".atlas")), "a run that cannot start must not create the brain");
 });
 
@@ -425,12 +487,12 @@ test("launch: going up, the first brain or git repository is the project", () =>
 	assert.deepEqual(findProject(join(top, "vendor", "lib", "src")), { root: join(top, "vendor", "lib"), why: "git" }, "a repository nearer than the brain wins");
 
 	// What setUpBrain does to a .gitignore that is already there.
-	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "session.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\ncarto-wakes.json\nexport/\n", "a new one");
+	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "session.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "a new one");
 	writeFileSync(join(top, ".atlas", ".gitignore"), "notes.txt");
 	setUpBrain(top);
-	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\ncarto-wakes.json\nexport/\n", "missing lines are added to an existing one");
+	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "missing lines are added to an existing one");
 	setUpBrain(top);
-	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\ncarto-wakes.json\nexport/\n", "and not twice");
+	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "and not twice");
 });
 
 test("brain: the first run creates .atlas with the session and a plugins folder; a subfolder uses the same brain", async () => {
@@ -611,13 +673,47 @@ test("task: `return` needs a report, and a task that writes nothing at all is en
 	try {
 		const empty = await carto(root, server, ["-p", `task: ${['return: {"report":"  ","done":true}', "read: a.txt"].join("\\n")}`]);
 		ok(empty, "a return without a report");
-		has(resultsOf(server, "return")[0], "`report` is empty, so the task has not ended. Call `return` again with the report: what you found or changed, and what is left.", "it is refused");
+		has(resultsOf(server, "return")[0], "report: expected to match \\S", "the return schema refuses an empty report");
 		has(empty.stdout, "│ read a.txt", "and the task goes on");
 		assert.match(empty.stdout, /\n◂ report t1 {2}\d+ characters/, "until it returns with one");
 
 		const result = await carto(root, server, ["-p", "task: silent"]);
 		ok(result, "silent task");
 		has(result.stdout, "Cartographer ended the task: it wrote nothing and called nothing, 3 times in a row, so there is no report.\nIt had written nothing.", "message");
+	} finally {
+		await server.close();
+	}
+});
+
+test("kill: after a kill mid-inference, the restart does not wait for the stuck agent to talk to the user", async () => {
+	const root = makeProject("kill", { git: false });
+	// Hold any request the tool result of a call waits behind, for good: the agent is stuck mid-inference,
+	// before and after the restart, and nothing the user does should wait on it.
+	const server = await startStandIn({ holdWhen: (body) => body.messages.at(-1)?.role === "tool" });
+	try {
+		const child = spawn(process.execPath, [CARTO, "--url", server.url, "--model", "stand-in", "-p", "look: list: ."], { cwd: root, stdio: "ignore" });
+		const gone = new Promise((resolve) => child.on("close", resolve));
+		await until(() => server.heldCount() === 1, "the agent reaches its second step");
+		child.kill("SIGKILL");
+		await gone;
+		server.release();
+		// The released request never finishes: after the restart the same step is held again, still mid-inference.
+		const before = server.requests.length;
+
+		const resumed = await cartoOnTerminal(root, server, [], [
+			["Continuing unfinished work", "/books"],
+			["carto-books.json", "say: you answer at once though the task hangs"],
+			["sent; the agent reads it after its current step", "\u0018", false],
+			[3, "", false],
+			[1.5, "/quit"],
+		]);
+		ok(resumed, "restart after the kill (the stale lock is taken over)");
+		has(resumed.screen, "Continuing unfinished work from the last session", "says it is continuing");
+		has(resumed.screen, "you answer at once though the task hangs", "the user's own line was accepted while the agent hung");
+		// The echo of the line holds it once; the agent's answer holds it again.
+		const said = resumed.screen.split("you answer at once though the task hangs").length - 1;
+		assert.ok(said >= 2, `the agent answered what it had held: the words stand ${said} times on the screen`);
+		assert.ok(server.requests.slice(before).length <= 3, `only the unfinished step was redone: ${server.requests.slice(before).length} requests after the restart`);
 	} finally {
 		await server.close();
 	}
@@ -883,14 +979,14 @@ test("ledger: operations, limits and what a file must hold", () => {
 test("ledger: a call that is run again after a crash is not applied twice", async () => {
 	const dir = join(scratch, "ledger-rerun");
 	mkdirSync(dir, { recursive: true });
-	const tool = ledgerTool({ brainDir: dir });
-	const api = { taskId: "task-1", now: () => 0 };
-	const first = await tool.execute({ ops: [{ action: "add", kind: "note", text: "once" }] }, api);
+	const tool = bookTool({ brainDir: dir });
+	const api = { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID };
+	const first = await tool.execute({ book: "ledger", ops: [{ action: "add", kind: "note", text: "once" }] }, api);
 	assert.equal(first.output[0].text, "n1 added.\nOpen: no goals, no questions, 1 note.");
-	const again = await tool.execute({ ops: [{ action: "add", kind: "note", text: "once" }] }, api);
+	const again = await tool.execute({ book: "ledger", ops: [{ action: "add", kind: "note", text: "once" }] }, api);
 	has(again.output[0].text, "These operations were already applied, before a restart.", "the rerun says so");
 	assert.equal(loadLedger(dir).ledger.items.length, 1, "and adds nothing");
-	await tool.execute({ ops: [{ action: "add", kind: "note", text: "twice" }] }, { ...api, taskId: "task-2" });
+	await tool.execute({ book: "ledger", ops: [{ action: "add", kind: "note", text: "twice" }] }, { ...api, taskId: "task-2" });
 	assert.equal(loadLedger(dir).ledger.items.length, 2, "another call is applied");
 });
 
@@ -935,7 +1031,7 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	assert.equal(apply({ action: "add", mode: "look", text: "First of all", before: "p1" }).line, "p3 added.");
 	assert.deepEqual(plan.items.map((item) => item.id), ["p3", "p1", "p2"], "`before` places an item");
 	assert.equal(planSummary(plan), "3 items · 1 change item not authorized");
-	assert.equal(renderPlan(plan), "Not authorized: change items wait until the user types /approve. Look items may run.\n  p3 [look] First of all\n  p1 [look] See what is in the project\n  p2 [change] Write the roller");
+	assert.equal(renderPlan(plan), "Not approved: change items wait for the user. Look items may run.\n  p3 [look] First of all\n  p1 [look] See what is in the project\n  p2 [change] Write the roller");
 
 	assert.equal(authorize(plan, now), 1, "authorizing says how many change items it covers");
 	assert.equal(planSummary(plan), "3 items · authorized");
@@ -970,6 +1066,9 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	refuse({ action: "add", mode: "write", text: "x" }, "it is look (the task only reads) or change (the task writes files)");
 	refuse({ action: "add", mode: "look" }, "`text` is required");
 	refuse({ action: "add", mode: "look", text: "x".repeat(ITEM_MAX + 1) }, `the limit is ${ITEM_MAX}`);
+	const nextBeforeUnknownPosition = plan.next;
+	refuse({ action: "add", mode: "look", text: "Placed nowhere", before: "p404" }, "`before` names no item");
+	assert.equal(plan.next, nextBeforeUnknownPosition, "a rejected placement does not consume an id");
 	refuse({ action: "done", id: "p99" }, 'There is no item "p99". The plan has p7.');
 	refuse({ action: "edit", id: "p7" }, "An edit needs `text`, `mode`, `network` or `standing`.");
 	refuse({ action: "approve" }, "the actions are add, edit, done, remove, clear");
@@ -987,6 +1086,104 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	has(loadPlan(brain).error, "is not valid JSON", "a broken file");
 });
 
+test("tool schemas: every action accepts only its own valid shape", () => {
+	const bookDefinition = bookTool({});
+	const bookSchema = JSON.stringify(bookDefinition.parameters);
+	assert.ok(bookSchema.length > 1000, `the provider receives the full conditional schema (got ${bookSchema.length} characters)`);
+	assert.equal(bookDefinition.parameters.allOf.length, 4, "the provider sees each book's operation branch");
+	const advertisedBook = compile(bookDefinition.parameters);
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add", mode: "change", text: "build it" }] }), true, "the provider schema accepts the complete plan add shape");
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add", mode: "change" }] }), false, "the provider schema marks plan text required");
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add" }], text: "wrong place" }), false, "the provider schema disallows root text for a plan");
+	assert.equal(advertisedBook.check({ book: "books", text: "legacy assessment" }), true, "the legacy root-text form remains available for books");
+	for (const name of ["ledger", "plan", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a ${name} example`);
+	const acceptsBook = (args) => {
+		try {
+			bookDefinition.prepareArguments(args);
+			return true;
+		} catch {
+			return false;
+		}
+	};
+	for (const [args, valid, note] of [
+		[{ book: "plan", ops: [{ action: "add", mode: "change", text: "build it" }] }, true, "plan add"],
+		[{ book: "plan", ops: [{ action: "add", mode: "change" }] }, false, "plan add without text"],
+		[{ book: "plan", ops: [{ action: "remove", text: "wrong field" }] }, false, "plan remove with unrelated text"],
+		[{ book: "ledger", ops: [{ action: "add", kind: "goal", text: "finish" }] }, false, "ledger goal without done_when"],
+		[{ book: "ledger", ops: [{ action: "add", kind: "note", text: "remember" }] }, true, "ledger note"],
+		[{ book: "plan", ops: [{ action: "add", mode: "look", text: "read only", network: true }] }, false, "look plan item with a change-only flag"],
+		[{ book: "context", ops: [{ action: "shelve", path: "src/a.mjs", text: "wrong" }] }, false, "context operation with unrelated field"],
+		[{ book: "books", ops: [{ action: "add", kind: "assessment", text: "the project" }] }, true, "books add"],
+		[{ book: "books", text: "legacy assessment", ops: [{ action: "add", kind: "assessment", text: "also this" }] }, false, "ambiguous legacy and operation forms"],
+	]) assert.equal(acceptsBook(args), valid, note);
+
+	const shell = compile(shellTool({ config: { shellWait: 5 }, runner: { mode: "none" }, windows: {}, runOf: () => undefined }).parameters);
+	for (const [args, valid, note] of [
+		[{ command: "npm test" }, true, "default shell run"],
+		[{ action: "run", command: "npm test" }, true, "explicit shell run"],
+		[{ action: "run" }, false, "run without command"],
+		[{ action: "read", window: "tests" }, true, "read window"],
+		[{ action: "read", window: "tests", command: "npm test" }, false, "read with run-only field"],
+		[{ action: "send", window: "tests", text: "yes" }, true, "send line"],
+		[{ action: "send", window: "tests" }, false, "send without text"],
+	]) assert.equal(shell.check(args), valid, note);
+
+	const wake = compile(wakeTool({ wakes: {}, config: { wakeMin: 60, wakesMax: 8 } }).parameters);
+	for (const [args, valid, note] of [
+		[{ action: "set", note: "check the build", every: 60 }, true, "timed wake"],
+		[{ action: "set", note: "check the build", path: "src" , every: 120 }, true, "file wake with interval"],
+		[{ action: "set", note: "check the build", path: "src", window: "tests" }, false, "two wake triggers"],
+		[{ action: "set", note: "check the build", match: "ERROR", every: 60 }, false, "match without window"],
+		[{ action: "remove", id: "all" }, true, "remove wake"],
+		[{ action: "remove", id: "all", note: "also set" }, false, "remove with set-only field"],
+	]) assert.equal(wake.check(args), valid, note);
+
+	const atlas = compile(atlasTool({}).parameters);
+	assert.equal(atlas.check({ ops: [{ action: "add", name: "entry", gist: "one line" }] }), true, "atlas add shape");
+	assert.equal(atlas.check({ ops: [{ action: "add", name: "entry" }] }), false, "atlas add requires gist");
+	assert.equal(atlas.check({ ops: [{ action: "look", name: "entry", gist: "unrelated" }] }), false, "atlas look excludes add fields");
+});
+
+test("plan: a missing item text shows the exact call and a corrected example", async () => {
+	const dir = join(scratch, "plan-missing-text");
+	mkdirSync(dir, { recursive: true });
+	const tool = bookTool({ brainDir: dir });
+	has(tool.description, "Plan add needs `mode` and `text` inside its op", "the book description states the required fields and location");
+	assert.equal(tool.parameters.type, "object", "the provider receives a full schema with an object root");
+	assert.equal(tool.parameters.allOf.length, 4, "the provider schema includes the plan operation branch");
+	assert.throws(
+		() => tool.prepareArguments({ book: "plan", ops: [{ action: "add", mode: "change" }] }),
+		/ops\.0\.text: missing/,
+		"the full conditional schema rejects an incomplete plan add before execution",
+	);
+	const oversized = "x".repeat(5000);
+	assert.throws(
+		() => tool.prepareArguments({ book: "plan", ops: [{ action: "remove", text: oversized }] }),
+		(error) => error.message.includes("ops.0.id: missing") && error.message.includes("ops.0.text: unknown field") && !error.message.includes(oversized),
+		"local schema errors reject extra fields without echoing a large argument into context",
+	);
+	let repeatedPlanError;
+	try {
+		tool.prepareArguments({ book: "plan", ops: Array.from({ length: 3 }, () => ({ action: "add" })), text: "Polish: contact shadows, spin trails and die colors" });
+	} catch (error) {
+		repeatedPlanError = error.message;
+	}
+	assert.ok(repeatedPlanError, "the reported incomplete plan call is rejected");
+	has(repeatedPlanError, "root text is only for the legacy whole-assessment form", "the misplaced root field gets an actionable explanation");
+	has(repeatedPlanError, 'Plan add shape: {"action":"add","mode":"look or change","text":"one-line plan item"}', "the retry gets the exact operation shape");
+	hasNot(repeatedPlanError, "must not match the schema in not", "opaque conditional errors are hidden");
+	hasNot(repeatedPlanError, "Polish: contact shadows", "the original argument is not echoed");
+	const args = { book: "plan", ops: [{ action: "add", mode: "change", lines: "Build the die", name: "Build", target: "plan" }] };
+	const result = await tool.execute(args, { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID });
+	const text = result.output[0].text;
+	assert.equal(result.isError, true, "nothing was applied");
+	has(text, "`text` is required and was left out or empty", "the validation error remains clear");
+	has(text, `Call received (exact arguments):\n${JSON.stringify(args, null, 2)}`, "the whole call as received is echoed, including the misplaced fields");
+	has(text, `Expected shape for a plan add:\n${JSON.stringify({ action: "add", mode: "change", text: "one-line description of what this item covers" }, null, 2)}`, "a directly comparable example");
+	has(text, "The item's wording belongs in `text`, not `lines`. Correct the call; do not repeat it unchanged.", "explicit retry instruction");
+	assert.equal(loadPlan(dir).plan.items.length, 0, "the refused operation did not change the plan");
+});
+
 test("plan: the agent's plan is saved and shown, and the state block says what it waits for", async () => {
 	const root = makeProject("plan", { git: false });
 	const server = await startStandIn();
@@ -998,7 +1195,7 @@ test("plan: the agent's plan is saved and shown, and the state block says what i
 		has(result.stdout, "● plan  + p1 [look] See what is in the project\n● plan  + p2 [change] Write the roller\n", "the items are shown as written");
 		has(result.stdout, "\nplan  1 change item waits for you: /plan shows the plan, /approve authorizes it\n", "the user is told that the plan waits for them");
 		assert.equal(result.stdout.split("waits for you").length - 1, 1, `and told once for the same plan:\n${result.stdout}`);
-		has(result.stdout, "Not authorized: change items wait until the user types /approve. Look items may run.\n  ✓ p1 [look] See what is in the project\n  p2 [change] Write the roller\n", "/plan");
+		has(result.stdout, "Not approved: change items wait for the user. Look items may run.\n  ✓ p1 [look] See what is in the project\n  p2 [change] Write the roller\n", "/plan");
 		has(result.stdout, "● plan  authorized by you: 1 change item may run\n  p2 Write the roller\n", "/approve");
 		has(result.stdout, "refused: The plan belongs to the main agent. If the plan should change, say so in your report.", "a task cannot write the plan");
 		has(result.stdout, "◂ p1 is marked done. For further work, add a new item to the plan.", "a finished item is not run again");
@@ -1009,7 +1206,7 @@ test("plan: the agent's plan is saved and shown, and the state block says what i
 		has(after("say: before the plan"), "If reaching one needs changes to the project, find out what you need with look tasks, then write the plan.", "a goal and no plan");
 		hasNot(after("say: before the plan"), "\nPlan\n", "no plan section without a plan");
 		const waiting = after("p2 added.");
-		has(waiting, "\n\nPlan\nNot authorized: change items wait until the user types /approve. Look items may run.\n  p1 [look] See what is in the project\n  p2 [change] Write the roller\n\n", "the plan is in the block");
+		has(waiting, "\n\nPlan\nNot approved: change items wait for the user. Look items may run.\n  p1 [look] See what is in the project\n  p2 [change] Write the roller\n\n", "the plan is in the block");
 		has(waiting, "carry out p1 with `task`: look items need no authorization. Change items wait for the user: show them the plan in a few lines and ask them to type /approve.", "a look item is next");
 		has(after("p1 done."), "Change items wait for the user: show them the plan in a few lines and ask them to type /approve. Do not start p2 before that.", "a change item is next and not authorized");
 		const authorized = after("I authorize the plan as it stands.");
@@ -1256,7 +1453,7 @@ test("undo: /undo takes the last change task back, reopens its item and withdraw
 		has(first.stdout, "● undone  p2 · Mention it in the README\n  changed  README.md (−1)\n  p2 is open again. The plan needs /approve again before a change item runs.", "/undo says what it did");
 		assert.equal(readFileSync(join(root, "README.md"), "utf8"), "# Demo project\nA small thing for tests.\n", "the edit is taken back");
 		assert.equal(readFileSync(join(root, "roll.py"), "utf8"), "roll\n", "the task before it is still in effect");
-		has(first.stdout, "Not authorized: change items wait until the user types /approve. Look items may run.\n  ✓ p1 [change] Write the roller\n  p2 [change] Mention it in the README (undone by the user: the files are as they were before this item ran)\n", "/plan after the undo");
+		has(first.stdout, "Not approved: change items wait for the user. Look items may run.\n  ✓ p1 [change] Write the roller\n  p2 [change] Mention it in the README (undone by the user: the files are as they were before this item ran)\n", "/plan after the undo");
 		const told = server.requests.map(stateOf).filter((block) => block?.includes("undone by the user")).at(0);
 		has(told, "p2 [change] Mention it in the README (undone by the user: the files are as they were before this item ran)", "the agent learns of the undo from the state block");
 		has(told, "Do not start p2 before that. No goal is recorded for this plan: agree one with the user", "and that it has to wait; a plan without a goal is pointed out");
@@ -1296,7 +1493,7 @@ test("undo: an item the agent already cleared from the plan is put back, so the 
 		has(result.stdout, "● undone  p2 · Write the roller\n  deleted  roll.py (−1)\n  p2 is back in the plan, open. The plan needs /approve again before a change item runs.", "/undo says the item is back");
 		assert.ok(!existsSync(join(root, "roll.py")), "the file is gone");
 		const told = server.requests.map(stateOf).filter((block) => block?.includes("undone by the user")).at(0);
-		has(told, "Not authorized: change items wait until the user types /approve. Look items may run.\n  p2 [change] Write the roller (undone by the user: the files are as they were before this item ran)", "the agent sees the item again, marked");
+		has(told, "Not approved: change items wait for the user. Look items may run.\n  p2 [change] Write the roller (undone by the user: the files are as they were before this item ran)", "the agent sees the item again, marked");
 		const plan = readPlan(root);
 		assert.deepEqual(plan.items.map((item) => `${item.id} ${item.mode} ${item.status}`), ["p2 change open", "p3 look open"], "the plan file: the item is back and later ids go on from where they were");
 		assert.equal(plan.authorized, undefined, "nothing is authorized");
@@ -1344,13 +1541,23 @@ const NO_SANDBOX = () => (findSandbox().ok ? undefined : `no sandbox on this mac
 const RUN_ITEM = { action: "add", mode: "change", text: "Run things" };
 const NET_ITEM = { action: "add", mode: "change", network: true, text: "Fetch things" };
 /** The text of every result the server was sent for a call of tool `name`, in order, each once. */
-function resultsOf(server, name) {
+function resultsOf(server, name, book, action) {
 	const seen = new Map();
 	for (const request of server.requests) {
 		const calls = new Map();
 		for (const message of request.messages) {
-			for (const call of message.tool_calls ?? []) calls.set(call.id, call.function?.name);
-			if (message.role === "tool" && calls.get(message.tool_call_id) === name) seen.set(message.tool_call_id, messageText(message));
+			for (const call of message.tool_calls ?? []) calls.set(call.id, call.function);
+			if (message.role === "tool") {
+				const fn = calls.get(message.tool_call_id);
+				if (fn?.name !== name) continue;
+				let args = {};
+				try { args = JSON.parse(fn.arguments ?? "{}"); } catch {}
+				if (book !== undefined && args.book !== book) continue;
+				// A window action of the one shell tool: everything but run, the default.
+				if (action === "window" && (args.action === undefined || args.action === "run")) continue;
+				if (action !== undefined && action !== "window" && (args.action ?? "run") !== action) continue;
+				seen.set(message.tool_call_id, messageText(message));
+			}
 		}
 	}
 	return [...seen.values()];
@@ -1411,7 +1618,7 @@ const LOOP = (file) => `while :; do echo $(date +%s%N) > ${file}; sleep 0.05; do
 /** Whether such a file is still being rewritten. */
 async function beating(file) {
 	const before = readFileSync(file, "utf8");
-	await new Promise((resolve) => setTimeout(resolve, 400));
+	await new Promise((resolve) => setTimeout(resolve, 400 * SLOW));
 	return readFileSync(file, "utf8") !== before;
 }
 /** How the tests start `carto` so that commands run on this machine: in the sandbox where there is one. */
@@ -1519,7 +1726,7 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		delete process.env.CARTO_TEST_SECRET;
 		await server.close();
 	}
-});
+}, { alone: true });
 
 test("windows: a command outlives the call that started it; wait, read, send, stop and close reach it", async () => {
 	const skip = NO_WINDOWS();
@@ -1545,7 +1752,7 @@ test("windows: a command outlives the call that started it; wait, read, send, st
 		// A command that has not ended when the call returns keeps running.
 		const first = await run("server", "for i in 1 2 3 4 5 6; do echo tick $i; sleep 0.3; done; echo ready", 400);
 		assert.deepEqual([first.reason, first.state, first.exit], ["time", "busy", undefined], "the call returns, the command goes on");
-		await assert.rejects(run("server", "echo no", 100), (error) => error instanceof WindowError && /^Window server is busy with `for i in 1 2 3 4 5 6; do echo tick \$i; sleep 0\.3; done; echo ready` \(running \d s\)\. To run this beside it, give `shell` another `window` name\. To deal with what is running, use `window`: wait for it, stop it, or send it a line of input\.$/.test(error.message), "a busy window takes no second command, and says what to do");
+		await assert.rejects(run("server", "echo no", 100), (error) => error instanceof WindowError && /^Window server is busy with `for i in 1 2 3 4 5 6; do echo tick \$i; sleep 0\.3; done; echo ready` \(running \d s\)\. To run this beside it, give `shell` another `window` name\. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input\.$/.test(error.message), "a busy window takes no second command, and says what to do");
 		assert.equal((await run("main", "echo beside")).text, "beside", "another window works meanwhile");
 		result = await windows.wait("server", { waitMs: 10_000, until: "tick 4" });
 		assert.equal(result.reason, "until", "a wait can end at a line");
@@ -1756,15 +1963,15 @@ test("shell: only a change task of the authorized plan types into a window; the 
 		has(result.stdout, "plan  2 change items wait for you (1 with network access): /plan shows the plan, /approve authorizes it", "and so does the line that asks for /approve");
 		has(result.stdout, "  p2 Fetch things  · its commands reach the network\n", "and the authorization");
 
-		const outputs = resultsOf(server, "shell").filter((text) => !text.includes("Tool call blocked"));
+		const outputs = resultsOf(server, "shell", undefined, "run").filter((text) => !text.includes("Tool call blocked"));
 		assert.equal(outputs.length, 13, `thirteen commands were answered:\n${outputs.join("\n---\n")}`);
 		assert.match(outputs[0], /^print\("hello from app"\)\n\[exit 0 · \d+\.\d s · window main\]$/, "the output, then the exit status, the time and the window");
 		assert.equal(readFileSync(join(root, "made.txt"), "utf8"), "made\n", "the command wrote into the project");
 		assert.match(outputs[1], new RegExp(`^${root}/src\\ndeep\\s+main\\.js\\s+math\\.js\\n\\[exit 0 · \\d+\\.\\d s · window main, in src/\\]$`), "a command that changes the folder: the status line says where the window is now (ls prints in columns: it is on a terminal)");
 		assert.match(outputs[2], new RegExp(`^${root}/src\\n\\[exit 0`), "and the next command starts there");
-		assert.match(outputs[3], /^before\n\[still running after 1\.0 s in window main: the command keeps going there, and you can go on with other work\. The windows block at the end of each request shows how it is doing\. `window` waits for it, sends it input, stops it or closes it\. `shell` with another window name runs something beside it\.\]$/, "a command that takes longer than the call waits: it keeps running");
+		assert.match(outputs[3], /^before\n\[still running after 1\.0 s in window main: the command keeps going there, and you can go on with other work\. The windows block at the end of each request shows how it is doing\. The same tool's actions wait for it, send it input, stop it or close it\. A run with another window name runs something beside it\.\]$/, "a command that takes longer than the call waits: it keeps running");
 		assert.match(outputs[4], /^Refused: Window main is busy with `echo before; sleep 30; echo after` \(running \d s\)\. To run this beside it, give `shell` another `window` name\./, "the window is busy meanwhile");
-		assert.match(resultsOf(server, "window")[0], /^\^C\n\[stopped with Ctrl-C: exit 130 · window main is free\]$/, "`window` stops it");
+		assert.match(resultsOf(server, "shell", undefined, "window")[0], /^\^C\n\[stopped with Ctrl-C: exit 130 · window main is free\]$/, "`window` stops it");
 		assert.match(outputs[5], /^to-stderr\n\[exit 3 · \d+\.\d s · window main, in src\/ · this window has no network\]$/, "errors are part of the output; a failure names the missing network");
 		assert.match(outputs[6], /^1\n2\n[\s\S]*\n\[\d+ lines left out here: the output was 6000 lines\.[^\n]*\]\n[\s\S]*\n5999\n6000\n\[exit 0/, `long output is cut in the middle:\n${outputs[6].slice(0, 300)} … ${outputs[6].slice(-300)}`);
 		assert.equal(outputs[6].split("\n").length, HEAD_LINES + TAIL_LINES + 2, "and bounded, with the line on how it ended still there");
@@ -1790,7 +1997,7 @@ test("shell: only a change task of the authorized plan types into a window; the 
 		has(briefs.find((text) => text.includes("plan item p1")), "`write`, `edit` and `shell` work for you, inside the project directory. Change only what the brief asks for. Cartographer records every file you change, and the user can undo it. When what you wrote can be run, run it, and put the command and what it printed into your report. Commands in this task have no network;", "the brief of a change task");
 		has(briefs.find((text) => text.includes("plan item p2")), "Commands in this task can reach the network.", "the brief of a task with network");
 		has(server.requests[0].messages[0].content, "Running. A change task runs commands with `shell`, which types them into a shell window: a bash that stays open under a name.", "the prompt says how commands are run");
-		assert.deepEqual(server.requests[0].tools.map((tool) => tool.function.name).filter((name) => name === "shell" || name === "window"), ["shell", "window"], "the two tools");
+		assert.deepEqual(server.requests[0].tools.map((tool) => tool.function.name).filter((name) => name === "shell" || name === "window"), ["shell"], "the one tool for the windows");
 
 		// The undo takes back what the commands did.
 		const undone = await carto(root, server, [], { input: lines("/undo", "/undo") });
@@ -1818,7 +2025,7 @@ test("windows: the main agent and every task see the windows at the end of each 
 				"window: main read",
 				"task(p1): shell: cd src; echo one\\nshell[window=server,wait=0]: echo listening; sleep 30\\nlist",
 				"say: hello",
-				"window[seconds=5]: server wait listening",
+				"window[seconds=20]: server wait listening",
 				"window[lines=1]: server read",
 				"look: window: server send hi",
 				"task: window: server read\\nwindow: server send hi",
@@ -1830,7 +2037,7 @@ test("windows: the main agent and every task see the windows at the end of each 
 			),
 		});
 		ok(result, "a session with windows");
-		const answers = resultsOf(server, "window").filter((text) => !text.includes("Tool call blocked"));
+		const answers = resultsOf(server, "shell", undefined, "window").filter((text) => !text.includes("Tool call blocked"));
 		assert.equal(answers[0], 'Refused: There is no window "main". No window is open: `shell` opens one when it runs a command.', "before any window is open");
 
 		// The task's result says what it left running.
@@ -1851,7 +2058,7 @@ test("windows: the main agent and every task see the windows at the end of each 
 		assert.equal(windowsIn(server.requests[0]), undefined, "with no window open there is no block");
 		for (const request of server.requests) assert.ok(windowsCount(request) <= 1, "a request never holds more than one: the block is not stored");
 
-		assert.match(answers[1], /^listening\n\[the line appeared after \d\.\d s; the command is still running in window server\]$/, "the main agent waits for a line; one printed before the call counts");
+		assert.match(answers[1], /^listening\n\[the line appeared after (?:\d\.\d|\d+) s; the command is still running in window server\]$/, "the main agent waits for a line; one printed before the call counts");
 		assert.match(answers[2], /^listening\n\[window server: busy with `echo listening; sleep 30` for \d s · 2 lines in all\]$/, "and reads");
 		has(result.stdout, '▸ window server  send  "hi"  → refused: The main agent does not run commands itself.', "typing into a window is refused to the main agent");
 		// A task sees the same block, at the end of each of its requests and nowhere in what is stored.
@@ -2106,7 +2313,7 @@ test("windows: a message from the user ends a wait, so that the agent reads it",
 			[3, "/quit"],
 		]);
 		if (result === undefined) return "python3 is needed for a terminal";
-		const waited = resultsOf(server, "window").at(-1);
+		const waited = resultsOf(server, "shell", undefined, "window").at(-1);
 		assert.match(waited, /^\(no new output\)\n\[the wait ended after \d\.\d s because the user wrote a message; the command is still running in window bg\]$/, `the wait ends early and says why:\n${waited}`);
 		assert.match(result.screen, /▸ window bg {2}wait\n[\s\S]*\n {2}→ still running after \d\.\d s(?: · no sandbox)?\n/, "the screen shows the wait, then how it ended");
 		has(result.screen, "\nare you there\n", "and the agent answers the message");
@@ -2243,7 +2450,7 @@ test("bwrap: with the sandbox off a command reaches beyond the project; the agen
 		has(result.stdout, "sandbox: OFF · tasks run commands directly on this machine", "the header says that the sandbox is off");
 		has(result.stdout, "● plan  authorized by you: 1 change item may run · the sandbox is OFF: their commands run directly on this machine\n", "so does the authorization");
 		assert.equal(readFileSync(outside, "utf8"), "beyond\n", "a command wrote outside the project");
-		const outputs = resultsOf(server, "shell");
+		const outputs = resultsOf(server, "shell", undefined, "run");
 		assert.match(outputs[0], /^secret=TOKEN-456\n\[exit 0 · /, "it runs with the user's own environment");
 		assert.match(outputs[1], /^before\n\[still running after 1\.0 s in window main: /, "a command that takes longer keeps running here too");
 		assert.match(outputs[2], /^\(no output\)\n\[exit 3 · \d+\.\d s · window main\]$/, "a failure, and no missing network is named");
@@ -2478,12 +2685,12 @@ test("terminal: one line per tool call", () => {
 	assert.equal(describeCall({ name: "task", arguments: { brief: "Write it", item: "p2" } }), "task p2  Write it");
 	assert.equal(describeCall({ name: "write", arguments: { path: "src/a.py", content: "x\n" } }), "write src/a.py");
 	assert.equal(describeCall({ name: "edit", arguments: { path: "src/a.py", old_text: "a", new_text: "b" } }), "edit src/a.py");
-	assert.equal(describeCall({ name: "plan", arguments: { ops: [{ action: "add", mode: "change" }, { action: "done", id: "p2" }, { action: "clear" }] } }), "plan add change · done p2 · clear");
+	assert.equal(describeCall({ name: "book", arguments: { book: "plan", ops: [{ action: "add", mode: "change" }, { action: "done", id: "p2" }, { action: "clear" }] } }), "plan add change · done p2 · clear");
 	assert.equal(describeCall({ name: "shell", arguments: { command: "python -m pytest\n  -q", window: "tests" } }), "$ python -m pytest -q  (window tests)");
 	assert.equal(describeCall({ name: "shell", arguments: { command: "ls", window: "main" } }), "$ ls");
-	assert.equal(describeCall({ name: "window", arguments: { window: "server", action: "wait", until: "ready" } }), 'window server  wait  until "ready"');
-	assert.equal(describeCall({ name: "window", arguments: { window: "repl", action: "send", text: "yes" } }), 'window repl  send  "yes"');
-	assert.equal(describeCall({ name: "window", arguments: { window: "server", action: "close" } }), "window server  close");
+	assert.equal(describeCall({ name: "shell", arguments: { window: "server", action: "wait", until: "ready" } }), 'window server  wait  until "ready"');
+	assert.equal(describeCall({ name: "shell", arguments: { window: "repl", action: "send", text: "yes" } }), 'window repl  send  "yes"');
+	assert.equal(describeCall({ name: "shell", arguments: { window: "server", action: "close" } }), "window server  close");
 	const shellResult = (details, text = "x", isError = false) => describeResult({ role: "toolResult", toolName: "shell", isError, details, content: [{ type: "text", text }] });
 	assert.equal(shellResult({ exit: 0, seconds: 0.4, last: "3 passed" }), "exit 0 · 0.4 s · 3 passed");
 	assert.equal(shellResult({ exit: 1, seconds: 12.3, last: "" }, "x", true), "exit 1 · 12 s");
@@ -2491,12 +2698,12 @@ test("terminal: one line per tool call", () => {
 	assert.equal(shellResult({ running: true, asks: true, seconds: 1.6, last: "name?" }), "may be waiting for input after 1.6 s · name?");
 	assert.equal(shellResult({ closed: true, exit: 3, seconds: 0.1, last: "" }, "x", true), "exit 3 · the window closed");
 	assert.equal(shellResult({ exit: 0, seconds: 0.2, sandbox: false, last: "ok" }), "exit 0 · 0.2 s · no sandbox · ok");
-	assert.equal(describeResult({ role: "toolResult", toolName: "window", details: { window: "server", action: "read", running: true, seconds: 0, lines: 12, last: "tick" }, content: [{ type: "text", text: "x" }] }), "12 lines · still running · tick");
-	assert.equal(describeResult({ role: "toolResult", toolName: "window", details: { window: "server", action: "close", closed: true }, content: [{ type: "text", text: "Window server is closed." }] }), "closed");
+	assert.equal(describeResult({ role: "toolResult", toolName: "shell", details: { window: "server", action: "read", running: true, seconds: 0, lines: 12, last: "tick" }, content: [{ type: "text", text: "x" }] }), "12 lines · still running · tick");
+	assert.equal(describeResult({ role: "toolResult", toolName: "shell", details: { window: "server", action: "close", closed: true }, content: [{ type: "text", text: "Window server is closed." }] }), "closed");
 	assert.equal(shellResult(undefined, "<harness>\n[error] Tool shell was aborted\n</harness>", true), "stopped");
 	assert.equal(shellResult(undefined, "<harness>\n[error] Tool shell was interrupted by a restart and may have partially run\n</harness>", true), "cut off by a restart, and not run again");
 	assert.equal(shellResult(undefined, "Refused: `command` is empty: give the command line to run.", true), "refused: `command` is empty: give the command line to run.");
-	assert.equal(describeCall({ name: "ledger", arguments: { ops: [{ action: "add", kind: "goal" }, { action: "done", id: "q2" }] } }), "ledger add goal · done q2");
+	assert.equal(describeCall({ name: "book", arguments: { book: "ledger", ops: [{ action: "add", kind: "goal" }, { action: "done", id: "q2" }] } }), "ledger add goal · done q2");
 });
 
 // ─── The atlas, the assessment, and time ───────────────────────────────────
@@ -2552,24 +2759,24 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 	const refused = (op, pattern, what, as = who) => assert.throws(() => apply(op, as), (error) => error instanceof AtlasError && pattern.test(error.message), what);
 
 	// Writing and rewriting.
-	const made = apply({ action: "note", name: "Math Helpers", gist: "adds", kind: "component", files: ["src/math.js"], links: ["Entry Point", "math helpers"] });
+	const made = apply({ action: "add", name: "Math Helpers", gist: "adds", kind: "component", files: ["src/math.js"], links: ["Entry Point", "math helpers"] });
 	assert.equal(made.line, "math_helpers written. It links to entry_point, which is not a node yet.");
 	assert.equal(made.shown, "+ component math_helpers  adds  [src/math.js]  → entry_point");
 	assert.deepEqual(atlas.nodes[0].links, ["entry_point"], "a link to itself is dropped");
 	assert.match(atlas.nodes[0].seen["src/math.js"], /^f:[0-9a-f]{12}$/, "the file's fingerprint is kept");
-	assert.equal(apply({ action: "note", name: "MATH-helpers", gist: "adds two numbers", detail: "Pure.", files: ["./src/main.js"] }).line.split(".")[0], "math_helpers rewritten", "any spelling of the name finds the node");
+	assert.equal(apply({ action: "edit", name: "MATH-helpers", gist: "adds two numbers", detail: "Pure.", files: ["./src/main.js"] }).line.split(".")[0], "math_helpers rewritten", "any spelling of the name finds the node");
 	assert.deepEqual([atlas.nodes.length, atlas.nodes[0].gist, atlas.nodes[0].kind, atlas.nodes[0].files], [1, "adds two numbers", "component", ["src/math.js", "src/main.js"]], "the gist is replaced, files are added, the kind stays");
-	apply({ action: "note", name: "plain", gist: "a node with no file and no link" });
+	apply({ action: "add", name: "plain", gist: "a node with no file and no link" });
 	assert.deepEqual([atlas.nodes[1].files, atlas.nodes[1].links, atlas.nodes[1].kind], [[], [], undefined], "a node needs no file, no link and no kind");
 
-	refused({ action: "note", name: "x" }, /`gist` .* is required/, "no gist");
-	refused({ action: "note", name: "x", gist: "g".repeat(GIST_MAX + 1) }, /the limit is 200/, "a gist that is too long");
-	refused({ action: "note", name: "x", gist: "g", detail: "d".repeat(DETAIL_MAX + 1) }, /the limit is 2000/, "detail that is too long");
-	refused({ action: "note", name: "x", gist: "g", kind: "hypothesis" }, /it is one of component, finding, dead_end, or left out/, "an unknown kind");
-	refused({ action: "note", name: "x", gist: "g", files: ["src/nope.js"] }, /there is no file or folder src\/nope.js in the project/, "a file that is not there");
-	refused({ action: "note", name: "x", gist: "g", files: ["../elsewhere.txt"] }, /outside the project/, "a file outside the project");
-	refused({ action: "note", name: "!!!", gist: "g" }, /`name` is required/, "no usable name");
-	refused({ action: "fuse", name: "x" }, /the actions are note, link, unlink, confirm, remove, look, tree/, "an unknown action");
+	refused({ action: "add", name: "x" }, /`gist` .* is required/, "no gist");
+	refused({ action: "add", name: "x", gist: "g".repeat(GIST_MAX + 1) }, /the limit is 200/, "a gist that is too long");
+	refused({ action: "add", name: "x", gist: "g", detail: "d".repeat(DETAIL_MAX + 1) }, /the limit is 2000/, "detail that is too long");
+	refused({ action: "add", name: "x", gist: "g", kind: "hypothesis" }, /it is one of component, finding, dead_end, or left out/, "an unknown kind");
+	refused({ action: "add", name: "x", gist: "g", files: ["src/nope.js"] }, /there is no file or folder src\/nope.js in the project/, "a file that is not there");
+	refused({ action: "add", name: "x", gist: "g", files: ["../elsewhere.txt"] }, /outside the project/, "a file outside the project");
+	refused({ action: "add", name: "!!!", gist: "g" }, /`name` is required/, "no usable name");
+	refused({ action: "fuse", name: "x" }, /the actions are add, edit, link, unlink, confirm, remove, look, tree/, "an unknown action");
 	assert.equal(atlas.nodes.length, 2, "a refused operation leaves nothing behind");
 
 	// What a file link checks.
@@ -2587,9 +2794,9 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 	assert.equal(apply({ action: "unlink", name: "math_helpers", files: ["src/main.js"] }).line, "math_helpers no longer links to src/main.js.");
 	assert.deepEqual([staleNodes(root, atlas), Object.keys(atlas.nodes[0].seen)], [[], ["src/math.js"]], "unlinking it clears the mark, and its fingerprint goes");
 	writeFileSync(join(root, "src", "math.js"), "export const add = (a, b) => a + b; // changed once more\n");
-	apply({ action: "note", name: "math_helpers", gist: "adds, the other way round" });
+	apply({ action: "edit", name: "math_helpers", gist: "adds, the other way round" });
 	assert.deepEqual(staleNodes(root, atlas), [], "rewriting a node says it is true of the files as they are now");
-	apply({ action: "note", name: "sources", gist: "all the code", files: ["src"] });
+	apply({ action: "add", name: "sources", gist: "all the code", files: ["src"] });
 	writeFileSync(join(root, "src", "added.js"), "export {};\n");
 	assert.deepEqual(staleNodes(root, atlas).map((node) => node.name), ["sources"], "a folder link notices a file that is added to the folder");
 	apply({ action: "confirm", names: ["sources"] });
@@ -2619,8 +2826,8 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 
 	// The outline, and what changed between two moments.
 	assert.equal(renderOutline(atlas), "Other nodes:\n  plain  a node with no file and no link  [README.md]  → later\n  sources  all the code  [src]", "nodes without a kind");
-	apply({ action: "note", name: "tried_cache", gist: "A cache was tried and made it slower", kind: "dead_end" });
-	apply({ action: "note", name: "roller", gist: "rolls", kind: "component" });
+	apply({ action: "add", name: "tried_cache", gist: "A cache was tried and made it slower", kind: "dead_end" });
+	apply({ action: "add", name: "roller", gist: "rolls", kind: "component" });
 	const outline = renderOutline(atlas);
 	has(outline, "Components:\n  roller  rolls\n", "grouped by kind");
 	has(outline, "Dead ends (tried and ruled out):\n  tried_cache", "dead ends have their own heading");
@@ -2628,13 +2835,13 @@ test("atlas: operations on nodes, what a file link checks, limits and what a fil
 	apply({ action: "remove", name: "roller" });
 	has(renderOutline(atlas, 120), "By name only, to keep this short (`atlas` look shows one): ", "an outline that is too long lists the oldest nodes by name");
 	const before = nodeHashes(atlas);
-	apply({ action: "note", name: "plain", gist: "reworded" });
+	apply({ action: "edit", name: "plain", gist: "reworded" });
 	apply({ action: "remove", name: "sources" });
-	apply({ action: "note", name: "fresh", gist: "new" });
+	apply({ action: "add", name: "fresh", gist: "new" });
 	assert.deepEqual(nodeChanges(before, nodeHashes(atlas)), { written: ["plain", "fresh"], removed: ["sources"] });
 	const full = { version: 1, view: { anchor: "." }, nodes: [] };
-	for (let index = 0; index < NODES_MAX; index++) applyAtlasOp(full, { action: "note", name: `n${index}`, gist: "g" }, who);
-	assert.throws(() => applyAtlasOp(full, { action: "note", name: "one_more", gist: "g" }, who), /200 nodes, which is its limit/, "the graph has a size limit");
+	for (let index = 0; index < NODES_MAX; index++) applyAtlasOp(full, { action: "add", name: `n${index}`, gist: "g" }, who);
+	assert.throws(() => applyAtlasOp(full, { action: "add", name: "one_more", gist: "g" }, who), /200 nodes, which is its limit/, "the graph has a size limit");
 
 	// The file.
 	const dir = join(scratch, "atlas-file");
@@ -2663,7 +2870,7 @@ test("atlas: a node linked to a file that is not there creates it once the plan 
 	const root = makeProject("atlas-create", { git: false });
 	const server = await startStandIn();
 	try {
-		const node = (name, files) => `atlas: ${JSON.stringify([{ action: "note", name, gist: "planned", files }])}`;
+		const node = (name, files) => `atlas: ${JSON.stringify([{ action: "add", name, gist: "planned", files }])}`;
 		const result = await carto(root, server, [], { input: lines(node("early", ["src/planned.js"]), planMessage(WRITE_ITEM), "/approve", node("roller", ["src/roll/dice.js", "docs/"]), node("escape", ["../out.js"]), node("brain", [".atlas/x.json"])) });
 		ok(result, "a session that maps planned files");
 		const results = resultsOf(server, "atlas");
@@ -2687,13 +2894,13 @@ test("atlas: a call that is run again after a crash is not applied twice", async
 	mkdirSync(dir, { recursive: true });
 	const tool = atlasTool({ root, brainDir: dir });
 	const api = { taskId: "task-1", now: () => Date.now(), conversationId: "a-task" };
-	const ops = [{ action: "note", name: "once", gist: "written once" }, { action: "look", name: "once" }];
+	const ops = [{ action: "add", name: "once", gist: "written once" }, { action: "look", name: "once" }];
 	const first = await tool.execute({ ops }, api);
 	has(first.output[0].text, "once written.\nonce (node) · written just now by a task\nwritten once", "the first run");
 	const again = await tool.execute({ ops }, api);
-	has(again.output[0].text, "Op 1 (note once) was already applied, before a restart.\nonce (node)", "the rerun says so, and still answers what only reads");
+	has(again.output[0].text, "Op 1 (add once) was already applied, before a restart.\nonce (node)", "the rerun says so, and still answers what only reads");
 	assert.equal(loadAtlas(dir).atlas.nodes.length, 1, "and writes nothing twice");
-	const batch = await tool.execute({ ops: [{ action: "note", name: "first", gist: "x", links: ["second", "third"] }, { action: "note", name: "second", gist: "y" }] }, { ...api, taskId: "task-1b" });
+	const batch = await tool.execute({ ops: [{ action: "add", name: "first", gist: "x", links: ["second", "third"] }, { action: "add", name: "second", gist: "y" }] }, { ...api, taskId: "task-1b" });
 	assert.equal(batch.output[0].text, "first written. It links to third, which is not a node yet.\nsecond written.", "a node written later in the same call is not reported as missing");
 	const none = await tool.execute({ ops: [] }, api);
 	assert.ok(none.isError && none.output[0].text.includes("`ops` is empty"), "no operations is an error");
@@ -2717,7 +2924,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 
 	saveAssessment(dir, "A demo.\n");
 	const atlas = { version: 1, view: { anchor: "." }, nodes: [] };
-	applyAtlasOp(atlas, { action: "note", name: "one", gist: "the first node" }, { root: dir, now: new Date(at).toISOString(), by: "main", main: true });
+	applyAtlasOp(atlas, { action: "add", name: "one", gist: "the first node" }, { root: dir, now: new Date(at).toISOString(), by: "main", main: true });
 	saveAtlas(dir, atlas);
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: ["one"], removed: [], assessment: true, at: new Date(at).toISOString() }, "what was written since the copy");
 	assert.deepEqual(pin(dir, { now: at + 120_000, reason: "goal g1 was closed" }), { changed: true });
@@ -2776,9 +2983,9 @@ test("state: the time, the age of what is old, the tree, and what the atlas hold
 	// The tree and the atlas.
 	pin(dir, { now, reason: "the first start" });
 	has(block(), "\n\nTree\nFrom the project root, 3 levels deep: 5 files in all.\nsrc/\n", "the tree");
-	has(block(), "\n\nAtlas\nGraph: no nodes yet. Assessment: none yet. Write one with `assess` once you know what the project is and how it is built.\n\nLedger\n", "an empty atlas");
+	has(block(), "\n\nAtlas\nGraph: no nodes yet. Assessment: none yet. Write one with `book`'s books once you know what the project is and how it is built.\n\nLedger\n", "an empty atlas");
 	const atlas = loadAtlas(dir).atlas;
-	applyAtlasOp(atlas, { action: "note", name: "adder", gist: "adds", files: ["src/math.js"] }, { root, now: new Date(now).toISOString(), by: "task", main: false });
+	applyAtlasOp(atlas, { action: "add", name: "adder", gist: "adds", files: ["src/math.js"] }, { root, now: new Date(now).toISOString(), by: "task", main: false });
 	saveAtlas(dir, atlas);
 	has(block(), "  math.js  [adder]\n", "a node is named on the file it links to");
 	has(block(), "Graph: 1 node. Files a node links to: 1 of 5.", "how much of the project the graph touches");
@@ -2791,7 +2998,7 @@ test("state: the time, the age of what is old, the tree, and what the atlas hold
 	saveAssessment(dir, "By hand.");
 	has(block(), "The assessment was edited outside this conversation since that copy, probably by the user. It now reads:\nBy hand.\n", "an edit by hand is shown in full");
 	noteAssessed(dir, "By hand.");
-	has(block(), "You rewrote the assessment since that copy: your `assess` call holds the text that counts.", "the agent's own rewrite is only mentioned");
+	has(block(), "You rewrote the assessment since that copy: your `book` call holds the text that counts.", "the agent's own rewrite is only mentioned");
 	hasNot(block(), "It now reads", "and not repeated");
 	pin(dir, { now, reason: "goal g1 was closed" });
 	hasNot(block(), "since that copy", "after a new copy nothing is newer");
@@ -2811,10 +3018,10 @@ test("atlas: a task records what it learned; the main agent gets the record, and
 	const root = makeProject("atlas-task", { git: false });
 	const server = await startStandIn();
 	try {
-		const note = { action: "note", name: "Math Helpers", gist: "add(a, b), used by main.js", kind: "component", files: ["src/math.js"], links: ["entry"] };
-		const first = await carto(root, server, ["-p", `task: read: src/math.js\\n${atlasMessage(note, { action: "note", name: "ghost", gist: "no such file", files: ["src/nope.js"] })}`]);
+		const note = { action: "add", name: "Math Helpers", gist: "add(a, b), used by main.js", kind: "component", files: ["src/math.js"], links: ["entry"] };
+		const first = await carto(root, server, ["-p", `task: read: src/math.js\\n${atlasMessage(note, { action: "add", name: "ghost", gist: "no such file", files: ["src/nope.js"] })}`]);
 		ok(first, "a task that writes a node");
-		has(first.stdout, "│ atlas note Math Helpers · note ghost", "the call on the screen");
+		has(first.stdout, "│ atlas add Math Helpers · add ghost", "the call on the screen");
 		has(first.stdout, "→ + component math_helpers add(a, b), used by main.js [src/math.js] → entry\n", "with what was written");
 		has(first.stdout, "◂ atlas  wrote math_helpers  (/atlas shows the graph)", "the record on the screen");
 
@@ -2823,7 +3030,7 @@ test("atlas: a task records what it learned; the main agent gets the record, and
 		has(brief, "The project's files as they are now:\nFrom the project root, 3 levels deep: 5 files in all.\nsrc/\n  deep/\n    er/  (1 file)\n  main.js\n  math.js\nREADME.md\nlong.txt\n\nBrief:\nread: src/math.js", "the tree in the brief");
 		has(brief, "`atlas` works for you too: before you return, record what you learned that will still matter later as nodes", "a look task is asked to record what it learns");
 		const told = server.requests.filter(isTask).map((request) => messageText(request.messages.at(-1)));
-		assert.ok(told.some((text) => text.includes("math_helpers written. It links to entry, which is not a node yet.\nOp 2 (note ghost) not applied: `files`: there is no file or folder src/nope.js in the project.")), `the task is told what was applied and what was not: ${JSON.stringify(told.at(-1))}`);
+		assert.ok(told.some((text) => text.includes("math_helpers written. It links to entry, which is not a node yet.\nOp 2 (add ghost) not applied: `files`: there is no file or folder src/nope.js in the project.")), `the task is told what was applied and what was not: ${JSON.stringify(told.at(-1))}`);
 
 		// The main agent learns of it from the record, and sees it in the tree.
 		const last = server.requests.at(-1);
@@ -2897,7 +3104,7 @@ test("atlas: a node whose file a change task changed is reported as possibly out
 	try {
 		const result = await carto(root, server, [], {
 			input: lines(
-				atlasMessage({ action: "note", name: "adder", gist: "add(a, b) returns a + b", files: ["src/math.js"] }),
+				atlasMessage({ action: "add", name: "adder", gist: "add(a, b) returns a + b", files: ["src/math.js"] }),
 				planMessage(WRITE_ITEM),
 				"/approve",
 				"task(p1): edit: src/math.js <<< return a + b; >>> return b + a;",
@@ -2933,7 +3140,7 @@ test("assessment: the main agent writes it and a task cannot; it reaches the top
 		has(first.stdout, "● assessment written, 41 characters  (/assessment shows it)", "on the screen");
 		const before = server.requests.at(-1);
 		has(firstMessage(before), "Your assessment\nNone written yet.\n", "the copy at the top is not replaced by the write");
-		has(stateOf(before), "You rewrote the assessment since that copy: your `assess` call holds the text that counts.", "the state block says the copy is behind");
+		has(stateOf(before), "You rewrote the assessment since that copy: your `book` call holds the text that counts.", "the state block says the copy is behind");
 		hasNot(stateOf(before), "Two files, no build step.", "without repeating the text");
 		// What makes the write cheap: the start of the conversation is the same in every request.
 		assert.equal(new Set(server.requests.map((request) => withoutState(firstMessage(request)))).size, 1, "the first message is the same in every request");
@@ -2953,7 +3160,7 @@ test("assessment: the main agent writes it and a task cannot; it reaches the top
 		const told = server.requests.filter(isTask).map((request) => messageText(request.messages.at(-1)));
 		assert.ok(told.some((text) => text.includes("The assessment belongs to the main agent. If it should change, say so in your report.")), `the task is told: ${JSON.stringify(told.slice(-2))}`);
 		ok(await carto(root, server, ["-p", `assess: ${"x".repeat(ASSESSMENT_MAX + 1)}`]), "an assessment that is too long");
-		has(messageText(server.requests.at(-1).messages.at(-1)), "The assessment is 3001 characters; the limit is 3000.", "is refused with the limit");
+		has(messageText(server.requests.at(-1).messages.at(-1)), "The assessment is 3001 characters; the limit is 3000.", "the assessment handler refuses text over its limit");
 		assert.equal(readFileSync(file, "utf8"), "A demo project.\nTwo files, no build step.\n", "and the file is as it was");
 
 		const shown = await carto(root, server, [], { input: lines("/assessment") });
@@ -2970,7 +3177,7 @@ test("top: /pin and /new rewrite the copy; a task's prompt begins with the same 
 	const server = await startStandIn();
 	try {
 		const first = await carto(root, server, [], {
-			input: lines("say: one", atlasMessage({ action: "note", name: "readme", gist: "what the project is", files: ["README.md"] }), "/assessment", "/pin", "/pin", "say: two"),
+			input: lines("say: one", atlasMessage({ action: "add", name: "readme", gist: "what the project is", files: ["README.md"] }), "/assessment", "/pin", "/pin", "say: two"),
 		});
 		ok(first, "/pin");
 		has(first.stdout, "  No assessment yet. The agent writes one when it knows the project.", "/assessment without one");
@@ -3037,7 +3244,7 @@ test("atlas: an edit made by hand shows at the next request; a broken file is re
 		assert.deepEqual([readAtlas(root).nodes[0].links, readAtlas(root).nodes[0].mine], [["other"], true], "what the user wrote is kept");
 
 		writeFileSync(file, "{ not json");
-		const broken = await carto(root, server, [], { input: lines(atlasMessage({ action: "note", name: "x", gist: "y" }), "/atlas") });
+		const broken = await carto(root, server, [], { input: lines(atlasMessage({ action: "add", name: "x", gist: "y" }), "/atlas") });
 		ok(broken, "a broken file");
 		has(broken.stdout, "! The atlas cannot be read: ", "the start says so");
 		has(broken.stdout, "! The graph cannot be read: ", "and so does /atlas");
@@ -3053,10 +3260,10 @@ test("atlas: an edit made by hand shows at the next request; a broken file is re
 
 test("terminal: one line per call to the atlas and the assessment", () => {
 	assert.equal(
-		describeCall({ name: "atlas", arguments: { ops: [{ action: "note", name: "dice" }, { action: "confirm", names: ["a", "b"] }, { action: "tree", anchor: "src" }, { action: "tree", depth: 2 }] } }),
-		"atlas note dice · confirm a, b · tree src · tree depth 2",
+		describeCall({ name: "atlas", arguments: { ops: [{ action: "add", name: "dice" }, { action: "confirm", names: ["a", "b"] }, { action: "tree", anchor: "src" }, { action: "tree", depth: 2 }] } }),
+		"atlas add dice · confirm a, b · tree src · tree depth 2",
 	);
-	assert.equal(describeCall({ name: "assess", arguments: { text: "x".repeat(1200) } }), "assess  1.2k characters");
+	assert.equal(describeCall({ name: "book", arguments: { book: "books", text: "x".repeat(1200) } }), "assess  1.2k characters");
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "atlas", isError: false, details, content: [{ type: "text", text }] });
 	assert.equal(result({ shown: ["+ node a  what a is", "✓ confirmed b"] }, "a written.\nb confirmed."), "+ node a what a is · ✓ confirmed b");
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");
@@ -3380,16 +3587,18 @@ test("wake: `sleep` ends the turn at once; a wake that repeats until removed; /w
 	try {
 		const result = await carto(root, server, [], {
 			timeoutMs: 60_000,
-			input: lines("say: watching. ON EVERY WAKE: sleep", 'wake: {"action":"set","note":"is it up","every":1,"times":0}', "/wait 4", "/wakes", "/wakes remove w1", "/wakes", "/wakes remove w1", "/wakes clear", "say: still here"),
+			// The wait scales like every other measured wait (SLOW): under load a wake cycle takes longer than its second.
+			input: lines("say: watching. ON EVERY WAKE: sleep", 'wake: {"action":"set","note":"is it up","every":1,"times":0}', `/wait ${4 * SLOW}`, "/wakes", "/wakes remove w1", "/wakes", "/wakes remove w1", "/wakes clear", "say: still here"),
 		});
 		ok(result, "a session that sleeps");
 		has(result.stdout, "● wake  + w1 every 1 s, until removed · is it up\n", "set until removed");
 		const notes = server.requests.filter((request) => rawText(request.messages.at(-1)).startsWith("<cartographer>"));
-		assert.ok(notes.length >= 3, `it goes on firing: ${notes.length} times in four seconds`);
+		assert.ok(notes.length >= 3, `it goes on firing: ${notes.length} times in ${Math.round(4 * SLOW)} seconds`);
 		assert.equal(server.requests.length, 1 + 2 + notes.length + 1, "after `sleep` no further request is made: one per wake");
 		assert.equal(result.stdout.split("\n").filter((line) => /^● resting · next wake in \d+ s$/.test(line)).length, notes.length, `the screen says that it rests, and until when:\n${result.stdout}`);
 		for (const request of notes) assert.equal(request.messages.filter((message) => rawText(message).startsWith("<cartographer>")).length, 1, "a turn with `sleep` alone is quiet");
-		assert.match(result.stdout, /\n {2}w1 · every 1 s, until removed · is it up · fired \d times, last (?:just now|\d s ago) · (?:next in \d+ s|due now)\n {2}\S+carto-wakes\.json · \/wakes remove ID takes one away\n/, "/wakes shows it, and the file");
+		const wakesView = result.stdout.split("\n").filter((line) => line.includes("w1 ·") || line.includes("carto-wakes.json") || line.includes("woken 12 times")).join("\n");
+		assert.match(wakesView, /w1 · every 1 s, until removed · is it up · fired \d+ times, last (?:just now|\d s ago) · (?:next in \d+ s|due now)\n {2}\S+carto-wakes\.json · \/wakes remove ID takes one away/, `/wakes shows it, and the file:\n${wakesView}`);
 		hasNot(result.stdout, "you last acted on it", "it never did anything about it");
 		has(result.stdout, "● wake  - w1 every 1 s · removed by you\n  The agent has set no wake.\n", "the user can take it away");
 		has(result.stdout, "\n  No wake is set.\n", "what is not there cannot be removed");
@@ -3477,7 +3686,7 @@ test("wake: a window wake ends the main agent's wait on a window, and says why",
 		ok(result, "a session with a window wake");
 		assert.ok(Date.now() - started < 20_000, "the wait ended long before its 25 seconds");
 		has(result.stdout, '● wake  + w1 when window srv prints a line with "ERROR", once · the server failed\n', "what was set");
-		const waited = resultsOf(server, "window")[0];
+		const waited = resultsOf(server, "shell", undefined, "window")[0];
 		assert.match(waited, /\[the wait ended after \d(?:\.\d)? s because your wake w1 fired \(when window srv prints a line with "ERROR"\): ERROR disk full; the command is still running in window srv/, `the wait says what ended it:\n${waited}`);
 		has(waited, "all fine\n", "a line without the text did not end it");
 		const next = server.requests.find((request) => (stateOf(request) ?? "").includes("Fired during this turn"));
@@ -3502,7 +3711,7 @@ test("wake: a wake that fires while a task runs is held until the task has repor
 			input: lines(planMessage(RUN_ITEM), "/approve", 'wake: {"action":"set","note":"look at the queue","every":1} || task(p1): shell[window=bg,wait=0]: sleep 4; echo through\\nwindow[seconds=20]: bg wait'),
 		});
 		ok(result, "a session with a wake during a task");
-		const waited = resultsOf(server, "window")[0];
+		const waited = resultsOf(server, "shell", undefined, "window")[0];
 		assert.match(waited, /^through\n\[exit 0 · \d\.\d s · window bg/, `the task waited until its command ended:\n${waited}`);
 		const fired = "Wake w1 (every 1 s): its time came. That was its last time, so it is removed. Your note: look at the queue";
 		has(result.stdout, `◆ ${fired}  (the agent is working: it reads this at its next step)\n`, "the screen shows the firing when it happens");
@@ -3549,12 +3758,12 @@ test("wake: a task can neither set a wake nor sleep; what the tool refuses", asy
 			input: lines('task: wake: {"action":"set","note":"n","every":60} +++ sleep', 'wake: {"action":"set","note":"too soon","every":5}', 'wake: {"action":"remove","id":"w3"}', 'wake: {"action":"set","every":60}', 'wake: {"action":"remove"}', 'wake: {"action":"set","note":"in a minute","every":60} || wake: {"action":"set","note":"the sources","path":"src","times":0}', 'wake: {"action":"remove","id":"all"}'),
 		});
 		ok(result, "a session with refused wakes");
-		has(resultsOf(server, "wake")[0], "Tool call blocked: Wakes belong to the main agent. If something should be watched after this task, say what in your report. To wait for a command inside this task, use `window` with wait.");
+		has(resultsOf(server, "wake")[0], "Tool call blocked: Wakes belong to the main agent. If something should be watched after this task, say what in your report. To wait for a command inside this task, use `shell` with action wait.");
 		has(resultsOf(server, "sleep")[0], "Tool call blocked: A task does not sleep. You are still the task. When its work is finished, call `return` with your report; until then, go on with the brief.");
-		has(result.stdout, "● wake  not changed: `every` is 5; it is a whole number of seconds from 60 to 604800. A wake costs a whole turn, so 1 m is the least.\n", "the default least interval is a minute, and the screen shows a refusal");
+		has(result.stdout, "● wake  not changed: Validation failed for tool \"wake\": - every: expected >= 60", "the schema refuses a wake shorter than the configured minimum");
 		has(result.stdout, "● wake  not changed: No wake is set.\n", "removing what is not there");
-		has(result.stdout, "● wake  not changed: A wake needs a `note`: what you want to look at or do when it fires, written for yourself.\n", "a wake without a note");
-		has(result.stdout, "● wake  not changed: remove needs `id`: the wake to take back, or all. No wake is set.\n", "removing without saying which");
+		has(result.stdout, "Validation failed for tool \"wake\": - note: missing", "the wake schema requires a note");
+		has(result.stdout, "Validation failed for tool \"wake\": - id: missing", "the wake schema requires an id to remove");
 		// What a tool takes is an object with named properties at the top, for every tool: a choice between shapes
 		// there is something chat templates and models handle badly.
 		for (const tool of server.requests[0].tools) {
@@ -3596,7 +3805,7 @@ test("plan: a standing item stays open and can be carried out again and again", 
 	assert.equal(applyPlanOp(other, { action: "add", mode: "change", text: "Two" }, now, { yolo: true }).withdrawn, false);
 	assert.equal(other.authorized, undefined, "but the authorization is gone all the same: it covered the plan as it stood");
 	assert.equal(renderPlan(other, { yolo: true }).split("\n")[0], "The user has switched approval off: change items may run without /approve.");
-	assert.equal(renderPlan(other).split("\n")[0], "Not authorized: change items wait until the user types /approve. Look items may run.");
+	assert.equal(renderPlan(other).split("\n")[0], "Not approved: change items wait for the user. Look items may run.");
 
 	const root = makeProject("standing", { git: false });
 	const server = await startStandIn();
@@ -3625,7 +3834,7 @@ test("plan: a standing item stays open and can be carried out again and again", 
 		has(result.stdout, "◂ p1 is marked done. For further work, add a new item to the plan.", "once it is marked done, no task is started for it");
 		const after = server.requests.find((request) => request.messages.at(-1).role === "user" && messageText(request.messages.at(-1)).startsWith("task(p1): write: notes.txt <<< two"));
 		has(stateOf(after), "Beyond that, nothing of the plan is left to do once. p1 is a standing duty: start a task for it whenever its text calls for it, as often as that is, and do not mark it done while the duty lasts. A wake set with `wake` brings you back to check on it.", "the state block says what a standing item is for");
-		has(resultsOf(server, "plan").at(-1), "The standing duty has ended: no further task can be started for it.", "and what marking it done means");
+		has(resultsOf(server, "book", "plan").at(-1), "The standing duty has ended: no further task can be started for it.", "and what marking it done means");
 	} finally {
 		await server.close();
 	}
@@ -3721,7 +3930,7 @@ test("chat: what the agent says to the user goes through `chat`; plain text is a
 		ok(result, "a session with chat");
 		const chat = server.requests[0].tools.find((tool) => tool.function.name === "chat");
 		assert.deepEqual(chat?.function.parameters.required, ["text"], "the model is offered `chat`, which takes a text");
-		has(server.requests[0].messages[0].content, "The user reads only what you send with `chat`: an answer, the plan in a few lines, what was done.", "and the prompt says what it is for");
+		has(server.requests[0].messages[0].content, "Anything you say to the user must be sent with chat or ask: an answer, the plan in a few lines, what was done.", "and the prompt says what it is for");
 
 		// Said with `chat`: on the screen as it is, and the turn ends with that reply.
 		has(result.stdout, "› say: Hello there.\nHello there.\n  context ", "what `chat` says is the answer on the screen");
@@ -3749,7 +3958,7 @@ test("chat: what the agent says to the user goes through `chat`; plain text is a
 		assert.ok(after.includes("Note to self: I keep this to myself.") && after.includes("Note to self: Noted for myself."), `notes are marked as notes in every request:\n${after.join("\n")}`);
 		hasNot(JSON.stringify(after), "Note to self: Note to self", "once");
 
-		has(result.stdout, "● chat  not shown: `text` is empty, so nothing was shown to the user.\n", "an empty `chat` is refused and the turn goes on");
+		has(result.stdout, "Validation failed for tool \"chat\": - text: expected at least 1 characters", "the chat schema refuses an empty message and the turn goes on");
 
 		// The times: a message that follows a `chat` came after the turn had ended, not during work.
 		has(stateOf(server.requests.at(-1)), "The user's newest message came just now.\n", "the state block does not take the user's next message for one sent during work");
@@ -3802,7 +4011,7 @@ test("ask: a question waits for the user's answer, which comes back as the resul
 		assert.deepEqual(resultsOf(server, "ask").slice(0, 3), ["The user answered: blue", "The user answered: the usual one", "The user answered: spaces, please"], "a number picks a choice, and anything else is the answer as typed");
 		has(result.stdout, "? What port?\n  Type your answer. The agent waits for it.\n› the usual one\n", "without choices the user just replies");
 		has(result.stdout, "? Tabs or spaces?\n    1  tabs\n    2  spaces\n  Type a number, or an answer of your own. The task waits for it.\n› spaces, please\n│ read a.txt", "a task can ask too, and goes on with the answer");
-		has(result.stdout, "refused: `text` is empty, so nothing was asked.", "a question needs words");
+		has(result.stdout, "Validation failed for tool \"ask\": - text: expected at least 1 characters", "the ask schema refuses an empty question");
 		// Nobody left to answer: the agent is told and goes on.
 		has(result.stdout, "? Anyone there?\n  Type your answer. The agent waits for it.\n  nobody is at the terminal to answer: the agent is told and goes on\n", "when the input has ended, the question does not wait forever");
 		has(resultsOf(server, "ask").at(-1), "No answer: nobody is at the terminal: its input has ended. The question stays on their screen. Go on with what you can decide yourself and say what you assumed, or leave the matter open.", "and the agent is told what to do then");
@@ -3897,7 +4106,7 @@ test("task: `return` carries the report, marks a plan item done or leaves it ope
 		has(resultsOf(server, "return").find((text) => text.startsWith("Not on your shelf")), "Not on your shelf: nope.txt. Your shelf is empty. The task has not ended: call `return` again without `shelf`, or name files from your shelf.", "a file that is not on the task's shelf cannot be handed on");
 		has(reports[3], "Second try.", "and the task ends with the next `return`");
 		// What is remembered of each task: its summary, or the start of its report.
-		const records = contextStore(root).records;
+		const records = contextStore(root).rows.filter((row) => row.species === "composed");
 		assert.deepEqual(records.map((record) => [record.id, record.outcome, record.undone === true]), [["t1", "a.txt: one line", false], ["t2", "== a.txt", true], ["t3", "Half of it.", true], ["t4", "Second try.", false]], "the record line is the summary when one was given");
 		has(readFileSync(join(root, ".atlas", "reports", "t1.md"), "utf8"), "Report:\nThe file a.txt holds one line. Nothing else was read.", "the report is stored in full");
 	} finally {
@@ -4151,7 +4360,7 @@ test("context: every report is kept under an id; /report shows it, and the agent
 		assert.match(rawText(after.messages.at(-1)), /^REPORT\n== src\/math\.js \(lines 1-4 of 4\)\n\nThis report is kept as t1\.\n\n\[task ended /, "the report names its id");
 		// One line per task in the store.
 		const store = contextStore(root);
-		assert.deepEqual(store.records.map((record) => [record.id, record.mode, record.brief]), [["t1", "look", "read: src/math.js"], ["t2", "look", "list:"]]);
+		assert.deepEqual(store.rows.filter((record) => record.species === "composed").map((record) => [record.id, record.mode, record.brief]), [["t1", "look", "read: src/math.js"], ["t2", "look", "list:"]]);
 		assert.equal(store.next, 3);
 		// /report with an id shows that report; an unknown id is said.
 		assert.match(result.stdout, /\nReport t1 · [^\n]* · look task\n\nBrief:\nread: src\/math\.js\n\nReport:\nREPORT\n== src\/math\.js \(lines 1-4 of 4\)\n  There is no report t9\. \/context lists the kept ones\.\nREPORT\nproject: 5 files\n› /, "/report t1 shows the kept one, an unknown id is said, /report alone shows the last");
@@ -4199,7 +4408,7 @@ test("context: /collapse puts one block in place of the work so far; the agent i
 		assert.deepEqual(next.messages[0], last.messages[0], "the prompt is the same");
 		assert.deepEqual(next.tools, last.tools, "and so are the tools");
 		const front = frontOf(next);
-		assert.match(front, /^<context>\nWritten by Cartographer, not by the user\. Your context was collapsed on [^\n]* \(the user asked for it\)\. What you had in view before is gone except for what stands here: one line for each finished task, your shelf, and the last of your talk with the user\. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them\.\n\nFinished tasks \(`context` with action recall and the id brings a report back in full\)\nt1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\n\nYour shelf is empty\.\n\nYour talk with the user, word for word; what was said before it is gone\n/);
+		assert.match(front, /^<context>\nWritten by Cartographer, not by the user\. Your context was collapsed on [^\n]* \(the user asked for it\)\. What you had in view before is gone except for what stands here: one line for each finished task, your shelf, and the last of your talk with the user\. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them\.\n\nFinished tasks \(`book` with book context, action recall and the id brings a report back in full\)\nt1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\n\nYour shelf is empty\.\n\nYour talk with the user, word for word; what was said before it is gone\n/);
 		assert.match(front, /\n\[user · [^\]]*\] task: read: src\/math\.js\n\[you · [^\]]*\] Report received: REPORT\n== src\/math\.js \(lines 1-4 of 4\)\n\[user · [^\]]*\] say: hello there\n\[you · [^\]]*\] hello there\n<\/context>$/, "the talk, word for word, and nothing after it");
 		hasNot(rawText(next.messages[1]), "MARKER-ONLY-IN-FILE", "no file text");
 		assert.ok(rawText(next.messages[1]).startsWith("<project>\nWritten by Cartographer"), "the copy of the assessment and graph stands before it");
@@ -4325,7 +4534,7 @@ test("context: a goal closing collapses the context in the middle of the turn, a
 		const front = frontOf(first);
 		has(front, "\n\nThis collapse came in the middle of your turn, so the turn goes on.\nThe calls of your last reply, all carried out, and what each returned:\n▸ ledger ", "the block says where the turn stands");
 		has(front, "\ng1 closed. ", "with what the ledger returned");
-		has(front, "\n▸ assess {\"text\":\"Small and tidy.\"}\nAssessment saved (15 characters)", "and the other call of that reply");
+		has(front, "\n▸ assess  15 characters\nAssessment saved (15 characters)", "and the other call of that reply");
 		has(front, "\nGo on from here: do what is left of the turn, or end it.\n</context>", "and what to do");
 		has(front, `[user · `, "the talk is there");
 		has(front, "] ledger: [{\"action\":\"done\",\"id\":\"g1\"}] || assess: Small and tidy.", "with the message that began the turn");
@@ -4378,7 +4587,7 @@ test("context: in the middle of a turn the agent that says yes gets one more rep
 		assert.ok(order[0] !== -1 && order[0] < order[1] && order[1] < order[2], `closed, written, collapsed: ${order}`);
 		assert.equal(server.asides.length, 1, "asked once");
 		const first = server.requests.find((request) => (frontOf(request) ?? "").includes("goal g1 was closed"));
-		has(frontOf(first), "▸ ledger {\"ops\":[{\"action\":\"add\",\"kind\":\"note\",\"text\":\"the port is 8080\"}]}\nn2 added.", "the block ends with the reply it used");
+		has(frontOf(first), "▸ ledger add note\nn2 added.", "the block ends with the reply it used");
 		hasNot(frontOf(first), "your context will be collapsed after your next reply", "and without the notice");
 	} finally {
 		await server.close();
@@ -4397,7 +4606,7 @@ test("context: while the agent works, its context is collapsed when it is nearly
 		const first = server.requests.find((request) => /it held about \d\d% of what fits/.test(frontOf(request) ?? ""));
 		assert.deepEqual(first.messages.map((message) => message.role), ["system", "user"]);
 		has(frontOf(first), "This collapse came in the middle of your turn, so the turn goes on.", "the turn goes on");
-		has(frontOf(first), "\n▸ assess {\"text\":\"The project is a small one. ", "with the call it had just made");
+		has(frontOf(first), "\n▸ assess  8.4k characters", "with the call it had just made");
 		has(result.stdout, "\nCollapsed, going on.\n", "and it does");
 		// What is left is still more than the limit here, but nearly all of it is what a collapse keeps: no second one.
 		assert.equal(result.stdout.split("◆ context collapsed").length - 1, 1, "a collapse that would free next to nothing is not made, however full the context");
@@ -4446,9 +4655,10 @@ test("context: at rest the context is collapsed once enough would go, and not be
 	}
 });
 
-test("context: the shelf: a marked file changes nothing now, stands in the block from the next collapse, and every task begins with it read", async () => {
+test("context: shelving snapshots a file into active view now, carries it through collapse, and starts every task with it read", async () => {
 	const root = makeProject("context-shelf", { git: false });
 	configure(root, { shelfTokens: 1000, chatWindow: 1000 });
+	writeFileSync(join(root, "binary.bin"), Buffer.from([0, 1, 2]));
 	const server = await startStandIn();
 	try {
 		const shelve = (path, lines) => `context: ${JSON.stringify({ action: "shelve", path, ...(lines ? { lines } : {}) })}`;
@@ -4459,6 +4669,7 @@ test("context: the shelf: a marked file changes nothing now, stands in the block
 				shelve("long.txt"),
 				shelve("nothing.js"),
 				shelve("../outside.txt"),
+				shelve("binary.bin"),
 				shelve("src"),
 				shelve("long.txt", "ten"),
 				"say: marked",
@@ -4472,65 +4683,94 @@ test("context: the shelf: a marked file changes nothing now, stands in the block
 			].join("\n"),
 		});
 		ok(result, "run");
-		has(result.stdout, "● context  shelved src/math.js · about ", "marked");
-		has(result.stdout, "● context  shelved long.txt (lines 10-12) · about ", "a range of lines");
+		has(result.stdout, "● context  shelved src/math.js as sh-", "marked with a stable shelf ID");
+		has(result.stdout, "● context  shelved long.txt (lines 10-12) as sh-", "a range of lines has a stable shelf ID");
 		// What is refused, and why.
 		const tooLarge = server.requests.map((request) => messageText(request.messages.at(-1))).find((text) => text.startsWith("long.txt is about "));
-		assert.match(tooLarge, /^long\.txt is about [\d,]+ tokens, and the shelf would then hold [\d,]+ of at most 1,000\. Shelve a range of lines instead, or take something off first: src\/math\.js\.$/, "too large for the shelf; a file has one place on it, so the range of the same file does not count");
+		assert.match(tooLarge, /^long\.txt is about [\d,]+ rendered tokens, and the shelf would then put [\d,]+ of at most 1,000 into context\. Shelve a smaller range or take something off first: src\/math\.js\.$/, "the rendered selection exceeds the active context cap; the full backing snapshot is not counted");
+		const ranged = contextStore(root).shelf.find((item) => item.path === "long.txt");
+		const fullBacking = readFileSync(join(root, ".atlas", "shelf", `${ranged.id}.txt`), "utf8");
+		assert.equal(fullBacking.split("\\n").length, 700, "the backing file retains all lines, including lines outside the selected range");
+		assert.match(ranged.snapshot, /10  line 10[\\s\\S]*12  line 12/);
+		assert.doesNotMatch(ranged.snapshot, /line 13/, "only the selected range enters active context");
 		has(result.stdout, "● context  nothing done: long.txt is about ", "and shown as refused");
 		has(result.stdout, "● context  nothing done: nothing.js does not exist. The tree in the state block shows the files.", "no such file");
 		has(result.stdout, "● context  nothing done: ../outside.txt is outside the project", "outside the project");
+		has(result.stdout, "● context  nothing done: binary.bin is binary and cannot be snapshotted as text.", "an unreadable binary file is rejected before changing the shelf");
 		has(result.stdout, "● context  nothing done: src is a directory: the shelf holds files, or line ranges of files.", "a directory");
 		has(result.stdout, '● context  nothing done: `lines` is a range like "10-80"; leave it out for the whole file.', "a bad range");
 
-		// Marking changed nothing in view: the request after it holds the answer and no file text.
+		// The successful shelf result puts the snapshot in active conversation immediately, before the collapse block.
 		const marked = server.requests.find((request) => messageText(request.messages.at(-1)).startsWith("say: marked"));
 		assert.equal(frontOf(marked), undefined, "no block yet");
-		hasNot(marked.messages.slice(0, -1).map(rawText).join("\n"), "MARKER-ONLY-IN-FILE", "the file is not in view yet");
+		has(marked.messages.slice(0, -1).map(rawText).join("\n"), "MARKER-ONLY-IN-FILE", "the tool result adds the file snapshot immediately");
 		has(stateOf(marked), "\nContext\n", "the state block has a part on the context");
-		has(stateOf(marked), "\nMarked for your shelf, in view from the next collapse on: src/math.js, long.txt (lines 10-12).\n", "which says what waits");
+		has(stateOf(marked), "\nNew or updated shelf snapshots, in view now and carried into the next collapse:\n", "the state includes the new snapshots immediately");
+		assert.match(stateOf(marked), /== src\/math\.js \(lines 1-4 of 4\) \[shelf id sh-[a-f0-9-]+\]\n1  export function add\(a, b\) \{\n2    \/\/ MARKER-ONLY-IN-FILE/, "the selected snapshot and stable ID are readable before collapse");
 		assert.match(stateOf(marked), /\nYour context holds about [\d,]+ of 100,000 tokens\.\n/, "and how full it is");
 
 		// From the collapse on the files stand in the block, with their line numbers.
 		const task = taskRequests(server)[0];
 		const front = frontOf(task);
-		has(front, "\n\nYour shelf: 2 items, as the files were at the collapse\n== src/math.js (lines 1-4 of 4)\n1  export function add(a, b) {\n2    // MARKER-ONLY-IN-FILE\n3    return a + b;\n4  }\n== long.txt (lines 10-12 of 700)\n10  line 10\n11  line 11\n12  line 12\n", "the shelf, in the order it was filled");
+		assert.match(front, /\n\nYour shelf: 2 items, as the files were at the collapse\n== src\/math\.js \(lines 1-4 of 4\) \[shelf id sh-[a-f0-9-]+\]\n1  export function add\(a, b\) \{\n2    \/\/ MARKER-ONLY-IN-FILE\n3    return a \+ b;\n4  \}\n== long\.txt \(lines 10-12 of 700\) \[shelf id sh-[a-f0-9-]+\]\n10  line 10\n11  line 11\n12  line 12\n/, "the selected snapshots and stable IDs, in shelf order");
 		// The task began with it: its context is the main agent's, block included.
 		assert.equal(task.messages[1].role, "user");
 		assert.ok(rawText(task.messages[1]).includes(front), "the task's context begins with the same block");
 		hasNot(stateOf(server.requests.at(-1)) ?? "", "Marked for your shelf", "nothing waits any more");
 
 		// Taking something off: gone at the next collapse, and said until then.
-		has(result.stdout, "● context  unshelved long.txt (lines 10-12)\n", "taken off");
-		has(result.stdout, "● context  nothing done: README.md is not on your shelf. On it: src/math.js.", "what is not on it");
-		has(stateOf(server.requests.at(-1)), "\nTaken off your shelf, gone from view at the next collapse: long.txt (lines 10-12).\n", "the state block says it");
-		assert.deepEqual(contextStore(root).shelf, [{ path: "src/math.js" }]);
+		assert.match(result.stdout, /● context  unshelved long\.txt \(lines 10-12\) as sh-[a-f0-9-]+\n/, "taken off by path while returning its stable ID");
+		assert.match(result.stdout, /● context  nothing done: README\.md is not on your shelf\. On it: src\/math\.js \[sh-[a-f0-9-]+\]\./, "what is not on it");
+		assert.match(stateOf(server.requests.at(-1)), /\nTaken off your shelf, gone from view at the next collapse: long\.txt \(lines 10-12\) \[sh-[a-f0-9-]+\]\.\n/, "the state block says it");
+		assert.equal(contextStore(root).shelf[0].path, "src/math.js");
+		assert.equal(contextStore(root).shelf[0].type, "file");
 		// /context shows the shelf.
-		assert.match(result.stdout, /\n    shelf +\d+   src\/math\.js, long\.txt \(lines 10-12\)\n/, "/context names what stands on it now");
-		has(result.stdout, "\n  taken off the shelf, gone at the next collapse: long.txt (lines 10-12)\n", "and what leaves");
+		assert.match(result.stdout, /\n    shelf +\d+   src\/math\.js \[sh-[a-f0-9-]+\]\n/, "/context names the shelved file and stable ID");
+		assert.match(result.stdout, /\n  taken off the shelf, gone at the next collapse: long\.txt \(lines 10-12\) \[sh-[a-f0-9-]+\]\n/, "and what leaves");
 	} finally {
 		await server.close();
 	}
 });
 
-test("context: a shelved file that changed is said in the state block, and one that is gone leaves the shelf", async () => {
+test("context: full shelf snapshots survive source deletion with the same ID and allow a new range", async () => {
 	const root = makeProject("context-shelf-changed", { git: false });
+	const originalMain = readFileSync(join(root, "src", "main.js"), "utf8");
 	const server = await startStandIn();
 	try {
 		ok(await carto(root, server, [], { input: 'context: {"action":"shelve","path":"src/math.js"}\ncontext: {"action":"shelve","path":"src/main.js"}\n/collapse\n' }), "first run");
+		let shelf = contextStore(root).shelf;
+		const mainId = shelf.find((item) => item.path === "src/main.js").id;
+		const backing = join(root, ".atlas", "shelf", `${mainId}.txt`);
+		assert.equal(readFileSync(backing, "utf8"), originalMain, "the backing snapshot is a real full-file copy under .atlas");
 		writeFileSync(join(root, "src", "math.js"), "export const add = (a, b) => a + b;\n");
 		const changed = await carto(root, server, [], { input: "say: one\n" });
 		ok(changed, "second run");
-		has(stateOf(server.requests.at(-1)), "\nChanged since your shelf was written, so the copy on the shelf is old: src/math.js.\n", "the change is said");
-		has(frontOf(server.requests.at(-1)), "2    // MARKER-ONLY-IN-FILE", "the block itself is not rewritten: that would be read again in full");
+		has(stateOf(server.requests.at(-1)), "Changes since the saved shelf snapshots", "pending selected-content changes are reported");
+		has(stateOf(server.requests.at(-1)), "- 2    // MARKER-ONLY-IN-FILE", "the diff shows removed snapshot lines");
+		has(stateOf(server.requests.at(-1)), "+ 1  export const add = (a, b) => a + b;", "and added current lines");
 		rmSync(join(root, "src", "main.js"));
-		const gone = await carto(root, server, [], { input: "/collapse\nsay: two\n" });
-		ok(gone, "third run");
-		has(gone.stdout, "  taken off the shelf: src/main.js (the file is gone)\n", "the user is told");
+		const collapsed = await carto(root, server, [], { input: "/collapse\nsay: two\n" });
+		ok(collapsed, "third run");
 		const front = frontOf(server.requests.at(-1));
-		has(front, "\nYour shelf: 1 item, as the files were at the collapse\n== src/math.js (lines 1-1 of 1)\n1  export const add = (a, b) => a + b;\n(src/main.js was taken off the shelf: the file is gone.)\n", "the new block has the file as it is now, and says what left");
-		hasNot(stateOf(server.requests.at(-1)) ?? "", "Changed since your shelf was written", "nothing is old now");
-		assert.deepEqual(contextStore(root).shelf, [{ path: "src/math.js" }]);
+		assert.match(front, /Your shelf: 2 items, as the files were at the collapse/);
+		assert.match(front, new RegExp(`src/main\\.js \\[shelf id ${mainId}\\]`), "the same item ID remains in the collapsed view");
+		has(front, "import { add } from \"./math.js\";", "the missing live file resolves to its complete backing snapshot");
+		assert.match(stateOf(server.requests.at(-1)), new RegExp(`Source files missing or unreadable[\\s\\S]*src/main\\.js \\[${mainId}\\]`), "the state block calls out the missing source and surviving ID");
+		shelf = contextStore(root).shelf;
+		assert.equal(shelf.length, 2, "collapse does not drop the missing source");
+		assert.equal(shelf.find((item) => item.path === "src/main.js").id, mainId, "the shelf item ID remains stable");
+		assert.equal(readFileSync(backing, "utf8"), originalMain, "the backing snapshot remains full after collapse");
+
+		const reselection = await carto(root, server, [], { input: `context: ${JSON.stringify({ action: "shelve", path: "src/main.js", lines: "2-2" })}\n` });
+		ok(reselection, "reselect from the backing snapshot without a live source");
+		has(reselection.stdout, "console.log(add(1, 2));", "the new line range is resolved from the saved full file");
+		assert.equal(contextStore(root).shelf.find((item) => item.path === "src/main.js").id, mainId, "range changes preserve the shelf item ID");
+		assert.equal(readFileSync(backing, "utf8"), originalMain, "range selection does not truncate the backing snapshot");
+
+		const removed = await carto(root, server, [], { input: `context: ${JSON.stringify({ action: "unshelve", path: mainId })}\n` });
+		ok(removed, "unshelve by stable ID");
+		assert.equal(contextStore(root).shelf.some((item) => item.id === mainId), false, "unshelve removes the item");
+		assert.equal(existsSync(backing), false, "unshelve discards its backing snapshot");
 	} finally {
 		await server.close();
 	}
@@ -4541,14 +4781,14 @@ test("context: the main agent can drop a report from view and get it back; notes
 	const server = await startStandIn();
 	try {
 		const result = await carto(root, server, [], {
-			input: ['task: read: src/math.js', 'context: {"action":"drop","id":"t1"}', "say: dropped", 'context: {"action":"drop","id":"t1"}', 'context: {"action":"recall","id":"t1"}', "say: back", 'context: {"action":"note","text":"remember"}', 'context: {"action":"drop"}', 'context: {"action":"fly"}', ""].join("\n"),
+			input: ['task: read: src/math.js', 'context: {"action":"fold","id":"t1"}', "say: dropped", 'context: {"action":"fold","id":"t1"}', 'context: {"action":"recall","id":"t1"}', "say: back", 'context: {"action":"note","text":"remember"}', 'context: {"action":"fold"}', 'context: {"action":"fly"}', ""].join("\n"),
 		});
 		ok(result, "run");
 		assert.match(result.stdout, /● context  dropped t1 · about \d+ tokens freed\n/);
 		// In the request after the drop the report is one line; before it, it was there in full.
 		const report = (request) => rawText(request.messages.find((message) => message.role === "tool" && /REPORT|dropped report/.test(rawText(message))));
 		const dropped = server.requests.find((request) => messageText(request.messages.at(-1)).startsWith("say: dropped"));
-		assert.match(report(dropped), /^\[You dropped report t1 from view\. Its record: t1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\. `context` with action recall and t1 brings it back\.\]\n\n\[task ended /, "one line in its place");
+		assert.match(report(dropped), /^\[You dropped report t1 from view\. Its record: t1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\. `book` with context recall and t1 brings it back\.\]\n\n\[task ended /, "one line in its place");
 		const answer = server.requests.find((request) => rawText(request.messages.at(-1)).startsWith("Dropped from view: t1, about "));
 		assert.match(messageText(answer.messages.at(-1)), /^Dropped from view: t1, about \d+ tokens\. In its place stands the record line\. The server reads what follows again, about \d+ tokens\. Its record: t1 · /, "the answer says what it cost");
 		has(result.stdout, "● context  nothing done: t1 is not in your context in full, so there is nothing to drop. No report is.", "twice is refused");
@@ -4559,8 +4799,8 @@ test("context: the main agent can drop a report from view and get it back; notes
 		assert.deepEqual(contextStore(root).dropped, []);
 		// What the tool refuses.
 		has(result.stdout, "● context  nothing done: A note of this kind is for a task's own steps. What you need after a collapse belongs in the ledger", "the main agent's notes go to the brain");
-		has(result.stdout, "● context  nothing done: drop needs `id`: the report to drop from view, like t12.", "no id");
-		has(result.stdout, '● context  nothing done: Validation failed for tool "context": - action: expected one of ["recall","shelve","unshelve","drop","note","collapse"]', "an unknown action is refused by the tool's schema");
+		has(result.stdout, "Validation failed for tool \"book\": - ops.0.id: missing", "the context action schema requires an id for fold");
+		has(result.stdout, 'ops.0.action: expected one of ["add","edit","done","remove","before","archive","unarchive","delete","recall","shelve","unshelve","fold","note","collapse"]', "an unknown context action is refused by the tool's schema");
 	} finally {
 		await server.close();
 	}
@@ -4578,7 +4818,7 @@ test("context: the agent can collapse its own context; it is not asked first, si
 		const first = server.requests.find((request) => frontOf(request) !== undefined);
 		has(frontOf(first), "Your context was collapsed on ", "collapsed");
 		has(frontOf(first), " (you asked for it: starting on the parser). What you had in view", "the block says it in the agent's words");
-		has(frontOf(first), '▸ context {"action":"collapse","text":"starting on the parser"}\nYour context is collapsed when the calls of this reply are done. Your next request begins with what was kept.\nGo on from here', "with the call that asked");
+		has(frontOf(first), '▸ context collapse starting on the parser\nYour context is collapsed when the calls of this reply are done. Your next request begins with what was kept.\nGo on from here', "with the call that asked");
 		has(result.stdout, "\nFresh.\n", "the turn goes on");
 	} finally {
 		await server.close();
@@ -4589,7 +4829,7 @@ test("context: a task tidies its own steps: marks on large results, a re-read re
 	const root = makeProject("context-task", { git: false });
 	const server = await startStandIn();
 	try {
-		const brief = ["read: long.txt @1+250", "read: src/math.js", "read: long.txt @1+250", 'context: {"action":"drop","id":"s1"}', 'context: {"action":"drop","id":"s3"}', 'context: {"action":"note","text":"line 7 is the one"}', 'context: {"action":"recall","id":"t1"}', 'context: {"action":"drop","id":"t1"}', "list:"].join("\\n");
+		const brief = ["read: long.txt @1+250", "read: src/math.js", "read: long.txt @1+250", 'context: {"action":"fold","id":"s1"}', 'context: {"action":"fold","id":"s3"}', 'context: {"action":"note","text":"line 7 is the one"}', 'context: {"action":"recall","id":"t1"}', 'context: {"action":"fold","id":"t1"}', "list:"].join("\\n");
 		const result = await carto(root, server, [], { input: `say: before\ntask: ${brief}\n` });
 		ok(result, "run");
 		const requests = taskRequests(server);
@@ -4602,16 +4842,16 @@ test("context: a task tidies its own steps: marks on large results, a re-read re
 		const again = resultsIn(requests[3]);
 		assert.match(again[0], /^\[s1: An earlier read of the same lines stood here; the newer one is further down\. It was: read long\.txt from line 1, about [\d,]+ tokens\. Call again if you need it\.\]$/, "the older copy is replaced");
 		assert.match(again[2], /^== long\.txt \(lines 1-250 of 700\)\n[\s\S]*\n\n\[s3 · about [\d,]+ tokens\]/, "the newer one is in full, under its own id");
-		assert.match(result.stdout, /│ context drop s1 +→ refused: s1 is not a result in your view\. Your larger results: s3 \(read long\.txt from line 1, about [\d,]+ tokens\)\./, "what is gone already cannot be dropped");
+		assert.match(result.stdout, /│ context fold s1 +→ refused: s1 is not a result in your view\. Your larger results: s3 \(read long\.txt from line 1, about [\d,]+ tokens\)\./, "what is gone already cannot be dropped");
 		// Dropped by the task itself.
-		assert.match(result.stdout, /│ context drop s3 +→ dropped s3 · about [\d,]+ tokens freed\n/);
+		assert.match(result.stdout, /│ context fold s3 +→ dropped s3 · about [\d,]+ tokens freed\n/);
 		const after = resultsIn(requests.at(-1));
 		assert.match(after[2], /^\[s3: You dropped this result\. It was: read long\.txt from line 1, about [\d,]+ tokens\. Call again if you need it\.\]$/, "one line in its place");
 		assert.match(after[4], /^Dropped: s3, about [\d,]+ tokens\. The server reads what follows again, about [\d,]+ tokens\.$/, "and the answer says what it cost");
 		assert.match(result.stdout, /│ context note line 7 is the one +→ noted · 17 characters\n/);
 		// A task has no reports to recall or drop.
 		assert.match(result.stdout, /│ context recall t1 +→ refused: There is no report t1\. No report is kept yet\./);
-		assert.match(result.stdout, /│ context drop t1 +→ refused: t1 is not a result in your view\./);
+		assert.match(result.stdout, /│ context fold t1 +→ refused: t1 is not a result in your view\./);
 		// Nothing before the brief was touched: the task's requests begin with the main agent's, to the letter.
 		const before = stored(main[1]).slice(0, -1);
 		for (const request of requests) assert.deepEqual(request.messages.slice(0, before.length), before, "what precedes the brief is the main agent's context, unchanged");
@@ -4624,7 +4864,7 @@ test("context: a task tidies its own steps: marks on large results, a re-read re
 
 test("context: a task's steps are collapsed when its context is nearly full, after it was asked; its notes, shelf and calls stay", async () => {
 	const root = makeProject("context-task-full", { git: false });
-	configure(root, { contextWindow: 24000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
+	configure(root, { contextWindow: 12000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
 	const server = await startStandIn();
 	try {
 		const reads = [1, 201, 401, 101, 301, 151, 351].map((from) => `read: long.txt @${from}+200`);
@@ -4640,9 +4880,9 @@ test("context: a task's steps are collapsed when its context is nearly full, aft
 		assert.deepEqual(collapsed.messages.slice(0, briefAt + 1), stored(requests[at - 1]).slice(0, briefAt + 1), "everything up to the brief is unchanged");
 		assert.deepEqual(collapsed.messages.slice(briefAt + 1).map((message) => message.role), ["user"], "after the brief: the block, and nothing else");
 		const block = rawText(collapsed.messages.at(-1));
-		assert.match(block, /^<cartographer>\nWritten by Cartographer, not by the user\. Your context held about \d\d% of what fits, so your steps up to here \(\d+ replies, \d+ calls\) were collapsed: their results are no longer in view\. You are still the task, and the brief above still holds\. What you kept:\n\nYour notes\n- the answer is in long\.txt\n\nYour calls so far \(call again for a result you need\)\ns1 context \{"action":"shelve","path":"src\/math\.js"\} → /, "the block: why, the notes, the calls");
+		assert.match(block, /^<cartographer>\nWritten by Cartographer, not by the user\. Your context held about \d\d% of what fits, so your steps up to here \(\d+ replies, \d+ calls\) were collapsed: their results are no longer in view\. You are still the task, and the brief above still holds\. What you kept:\n\nYour notes\n- the answer is in long\.txt\n\nYour calls so far \(call again for a result you need\)\ns1 context shelve src\/math\.js → /, "the block: why, the notes, the calls");
 		has(block, "\ns3 read long.txt from line 1 → == long.txt (lines 1-200 of 700)\n", "one line per call");
-		has(block, "\n\nYour shelf: 1 item, as the files are now\n== src/math.js (lines 1-4 of 4)\n1  export function add(a, b) {\n", "the shelf, in full");
+		assert.match(block, /\n\nYour shelf: 1 item, as the files are now\n== src\/math\.js \(lines 1-4 of 4\) \[shelf id sh-[a-f0-9-]+\]\n1  export function add\(a, b\) \{\n/, "the shelf, in full with its stable ID");
 		has(block, "\n\nGo on with the brief from here. Your final message is still the report.\n</cartographer>", "and what to do");
 		hasNot(block, "line 150\n", "no result text");
 		// The task goes on with the brief, and reports.
@@ -4662,7 +4902,9 @@ test("context: a task's steps are collapsed when its context is nearly full, aft
 
 test("context: a task that says yes before its steps collapse gets one reply to note what it needs", async () => {
 	const root = makeProject("context-task-yes", { git: false });
-	configure(root, { contextWindow: 24000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
+	// Tool schemas count toward the fixed prompt. At 60%, this fixture crosses the threshold twice; 70% keeps
+	// the exercise focused on one ask, one note, and one collapse after the reads.
+	configure(root, { contextWindow: 19000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 70 });
 	const server = await startStandIn();
 	try {
 		const reads = [1, 201, 401, 101, 301, 151, 351].map((from) => `read: long.txt @${from}+200`);
@@ -4692,21 +4934,24 @@ test("context: a task can collapse its own steps, and can hand a shelved file on
 		const brief = ["read: long.txt @1+250", 'context: {"action":"shelve","path":"src/math.js","hand_on":true}', 'context: {"action":"shelve","path":"src/main.js"}', 'context: {"action":"collapse","text":"done reading"}', "list:"].join("\\n");
 		const result = await carto(root, server, [], { input: `task: ${brief}\nsay: next\n/collapse\nsay: after\n` });
 		ok(result, "run");
-		assert.match(result.stdout, /│ context shelve src\/math\.js +→ shelved src\/math\.js · about \d+ tokens · handed on to the main agent at the end\n/);
+		assert.match(result.stdout, /│ context shelve src\/math\.js +→ shelved src\/math\.js as sh-[a-f0-9-]+ · about \d+ rendered tokens · handed on to the main agent at the end\n/);
 		has(result.stdout, "│ ◆ the task's steps collapsed (it asked for it (done reading)): 4 replies with 4 calls, now one block of notes\n", "collapsed at its own word");
 		assert.equal(server.asides.filter((aside) => aside.response_format !== undefined && /steps since the brief/.test(aside.messages.at(-1).content)).length, 0, "it is not asked: it chose the moment");
 		const block = rawText(taskRequests(server).at(-1).messages.find((message) => message.role === "user" && rawText(message).includes("steps up to here")));
 		has(block, "You asked for it (done reading), so your steps up to here (4 replies, 4 calls) were collapsed", "the block says why");
-		has(block, "Your shelf: 2 items, as the files are now\n== src/math.js (lines 1-4 of 4)", "both shelved files stay in the task's view");
-		has(block, "== src/main.js (lines 1-2 of 2)", "also the one it keeps to itself");
+		assert.match(block, /Your shelf: 2 items, as the files are now\n== src\/math\.js \(lines 1-4 of 4\) \[shelf id sh-[a-f0-9-]+\]/, "both shelved files stay in the task's view with IDs");
+		assert.match(block, /== src\/main\.js \(lines 1-2 of 2\) \[shelf id sh-[a-f0-9-]+\]/, "also the one it keeps to itself, with its ID");
 		// At the end: only what it handed on goes to the main agent's shelf, and the report says so.
-		has(result.stdout, "◂ shelf  the task added src/math.js  (/context shows the shelf)\n", "the user is told");
+		assert.match(result.stdout, /◂ shelf  the task added src\/math\.js as sh-[a-f0-9-]+  \(\/context shows the shelf\)\n/, "the user is told the handed-on stable ID");
 		const main = mainRequests(server);
 		const report = main.find((request) => rawText(request.messages.at(-1)).startsWith("REPORT"));
-		has(messageText(report.messages.at(-1)), "\n\nThe task put on your shelf: src/math.js. In view from the next collapse on.\n\nThis report is kept as t1.", "the agent is told under the report");
-		assert.deepEqual(contextStore(root).shelf, [{ path: "src/math.js" }], "handed on: one of the two");
+		assert.match(messageText(report.messages.at(-1)), /The task put on your shelf; these snapshots are in view now and will stand at the next collapse: src\/math\.js as sh-[a-f0-9-]+\.\n\n== src\/math\.js \(lines 1-4 of 4\) \[shelf id sh-[a-f0-9-]+\]/, "the agent immediately receives the handed-off full-backed snapshot and ID");
+		has(messageText(report.messages.at(-1)), "This report is kept as t1.", "the report marker remains");
+		assert.equal(contextStore(root).shelf[0].path, "src/math.js", "handed on: one of the two");
+		assert.equal(contextStore(root).shelf[0].type, "file", "the shelf stores a typed file item");
+		assert.match(contextStore(root).shelf[0].snapshot, /MARKER-ONLY-IN-FILE/, "and its exact snapshot");
 		// And from the next collapse on it is in view.
-		has(frontOf(server.requests.at(-1)), "Your shelf: 1 item, as the files were at the collapse\n== src/math.js (lines 1-4 of 4)\n", "in the block");
+		assert.match(frontOf(server.requests.at(-1)), /Your shelf: 1 item, as the files were at the collapse\n== src\/math\.js \(lines 1-4 of 4\) \[shelf id sh-[a-f0-9-]+\]\n/, "in the block with its stable ID");
 		hasNot(frontOf(server.requests.at(-1)), "== src/main.js", "the other is not");
 	} finally {
 		await server.close();
@@ -4747,7 +4992,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 		assert.ok(server.asides.length >= 3, `the question was sent: ${server.asides.length} requests on the side`);
 		const questions = server.asides.filter((aside) => aside.max_tokens === 16);
 		for (const aside of questions) assert.equal(aside.tool_choice, "none", "every question says that no tool can be the answer");
-		for (const aside of questions) assert.ok(aside.tools.length === 18 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
+		for (const aside of questions) assert.ok(aside.tools.length === 14 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
 		assert.deepEqual(questions.map((aside) => aside.response_format !== undefined), [true, false, false], `the form of the answer is tried once, then left out:\n${JSON.stringify(questions.map((aside) => Object.keys(aside)))}`);
 		assert.equal(result.stdout.split("the model server refused the form the answer must have").length - 1, 1, `the user is told once:\n${result.stdout}`);
 		has(result.stdout, "does it need to write something down first? no · ", "and the question is answered all the same");
@@ -4756,7 +5001,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 	}
 });
 
-test("context: /context shows the parts and their sizes, /new starts with nothing in view, and the tools are eighteen flat objects", async () => {
+test("context: /context shows the parts and their sizes, /new starts with nothing in view, and the tools are fifteen flat objects", async () => {
 	const root = makeProject("context-view", { git: false });
 	const server = await startStandIn();
 	try {
@@ -4774,18 +5019,21 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual(fresh.messages.map((message) => message.role), ["system", "user"], "a fresh context");
 		assert.equal(frontOf(fresh), undefined, "without a block");
 		const store = contextStore(root);
-		assert.deepEqual([store.records.length, store.chat.length, store.shelf.length, store.front], [0, 2, 0, undefined], "the record and the shelf are empty; the talk begins again");
+		assert.deepEqual([store.rows.filter((row) => row.species === "composed").length, store.chat.length, store.shelf.length, store.front], [0, 2, 0, undefined], "the record and the shelf are empty; the talk begins again");
 		assert.ok(existsSync(join(root, ".atlas", "reports", "t1.md")), "the report is still on disk");
 		assert.equal(store.next, 2, "and ids are not reused");
-		// The tools: one more, and each a flat object (a schema with a choice at its root breaks tool calls on llama.cpp with Qwen).
-		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "assess", "atlas", "chat", "context", "edit", "ledger", "list", "plan", "read", "return", "search", "shell", "sleep", "task", "wake", "window", "write"]);
+		// The tools: one more, each with an object at the root; `book` carries its full conditional branches.
+		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "atlas", "book", "chat", "edit", "list", "read", "return", "search", "shell", "sleep", "task", "wake", "write"]);
 		for (const tool of fresh.tools) assert.equal(tool.function.parameters.anyOf ?? tool.function.parameters.oneOf, undefined, `${tool.function.name} is a flat object`);
-		const context = fresh.tools.find((tool) => tool.function.name === "context").function.parameters;
-		assert.equal(context.type, "object");
-		assert.equal(context.anyOf ?? context.oneOf, undefined);
-		assert.deepEqual(context.required, ["action"]);
-		assert.deepEqual(Object.keys(context.properties).sort(), ["action", "hand_on", "id", "lines", "path", "text"]);
-		assert.deepEqual(context.properties.action.enum, ["recall", "shelve", "unshelve", "drop", "note", "collapse"]);
+		const book = fresh.tools.find((tool) => tool.function.name === "book").function.parameters;
+		assert.equal(book.type, "object");
+		assert.equal(book.anyOf ?? book.oneOf, undefined);
+		assert.deepEqual(book.required, ["book"]);
+		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
+		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "books", "context"]);
+		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays an object, like the other tools");
+		assert.ok(JSON.stringify(book).length > 1000, "the provider receives the full book schema");
+		assert.equal(book.allOf.length, 4, "the transmitted schema includes every book-specific operation branch");
 	} finally {
 		await server.close();
 	}
@@ -5127,12 +5375,12 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 });
 
 test("screen: the views read the brain: nodes, entries and items with the line they stand on, the tree, a patch by file, the editor's command", async () => {
-	const { assessmentView, atlasView, diffView, editorCommand, ledgerView, planView, treeView } = await import("../src/screen/views.mjs");
+	const { atlasView, booksView, diffView, editorCommand, ledgerView, planView, treeView } = await import("../src/screen/views.mjs");
 	const root = makeProject("views", { git: false });
 	const brainDir = setUpBrain(root).brainDir;
 	const server = await startStandIn();
 	try {
-		const node = { action: "note", name: "Math Helpers", gist: "add(a, b)", kind: "component", files: ["src/math.js"], links: ["entry"], detail: "Used by main.js." };
+		const node = { action: "add", name: "Math Helpers", gist: "add(a, b)", kind: "component", files: ["src/math.js"], links: ["entry"], detail: "Used by main.js." };
 		const result = await carto(root, server, ["--yolo", "--no-bwrap"], {
 			input: lines(ledgerMessage(GOAL, { action: "add", kind: "note", text: "Prefer tabs" }), planMessage(WRITE_ITEM, LOOK_ITEM), `atlas: ${JSON.stringify([node])}`, "assess: A small demo.\\n\\nTwo source files.", "task(p1): write: roll.py <<< print(4)\\\\n\\nedit: src/math.js <<< return a + b; >>> return b + a;"),
 		});
@@ -5163,7 +5411,10 @@ test("screen: the views read the brain: nodes, entries and items with the line t
 		has(text(open), "math.js  71 B  ← math_helpers", "a file names the graph's nodes about it");
 		assert.deepEqual(open.items.find((item) => item.key === "file:src/math.js").target, { file: join(root, "src/math.js") }, "and e opens the file itself");
 
-		assert.deepEqual(assessmentView({ brainDir }).items.map((item) => item.head[0][0]), ["A small demo.", "Two source files."], "the assessment, a paragraph to an item");
+		const books = booksView({ brainDir });
+		has(text(books), "a1  A small demo.", "the assessment, one entry to an item (migrated from assessment.md)");
+		has(text(books), "a2  Two source files.", "and the second");
+		has(books.items[1].target.file, join(root, ".atlas", "assessment.md"), "until the agent edits the books, e opens the assessment they were split from");
 
 		const diff = diffView({ root, brainDir, started: 0 }, "last");
 		has(text(diff), "p1 · Write the roller", "the last step");
@@ -5200,20 +5451,43 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	const sent = { task: false, payload, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, used: 6100, collapsedSince: false };
 	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
-	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "You", "Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them");
+	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them, the chat told from the rest");
 	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    37  Tools · 1: read  "], "each is one line: its colour, its size, what it is, how it begins");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
 	has(byKey("Tools · 1").body, '── read ──\nRead files.\nparameters: {\n  "type": "object"', "the tools as they are sent");
+	assert.deepEqual(view.items.filter((item) => item.key?.startsWith("tool:")).map((item) => item.key), [], "folded, the tools are one part; a view that opens them is asked with isOpen");
 	assert.match(byKey("Assessment and graph").body, /^<project>\n[\s\S]*\n<\/project>$/, "the block Cartographer puts in front is a part of its own");
 	assert.match(byKey("What the last collapse kept").body, /^<context>\n[\s\S]*\n<\/context>$/, "so is what a collapse kept");
-	assert.equal(byKey("You").body, "Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "and the user's message is what is left");
-	assert.equal(byKey("Agent · note and call: task").body, "I should look.\n\ncall task\n  brief:\n    Find the config\n    and say where", "a call reads as a call: its arguments one by one, long text as text");
+	const you = byKey("Chat · You");
+	assert.equal(you.body, "Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "and the user's message is what is left");
+	assert.equal(you.editKind, "chat-you", "a message of the user says what e does on it");
+	const agent = byKey("Chat · Agent · note and call: task");
+	assert.equal(agent.body, "I should look.\n\ncall task\n  brief:\n    Find the config\n    and say where", "a call reads as a call: its arguments one by one, long text as text");
+	assert.equal(agent.editKind, "chat-agent", "a message of the agent is editable as well");
 	assert.match(byKey("State block").body, /^<state>\n[\s\S]*\n<\/state>$/, "the state block is cut off the result it was added to");
 	assert.match(byKey("Windows block").body, /^<windows>\n[\s\S]*\n<\/windows>$/, "and the windows block");
 	hasNot(byKey("Result of task").body, "<state>", "which is then only the result");
 	assert.equal(byKey("The reply").body, "(thinking, not kept in the context)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the request: the reply");
 	assert.equal(byKey("Result of chat").body, "Shown to the user.", "and what its call returned");
+
+	// e on the tab: each part says what it opens, and what the user has said anew stands where the original stood.
+	assert.deepEqual(view.items.map((item) => item.editKind).filter(Boolean), ["prompt", "tools", "assessment", "store", "chat-you", "chat-agent", "result", "state", "windows", "chat-agent", "result"], "every part says what e does on it");
+	const touched = contextView(sent, { windowSize: 20_000, cols: 40, edits: new Map([["Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "Where is the config, exactly?\n\n[sent Thu 12 Nov 2026, 14:02]"]]) });
+	assert.equal(touched.items.find((item) => item.editKind === "chat-you").body, "Where is the config, exactly?\n\n[sent Thu 12 Nov 2026, 14:02]", "what was said anew stands where the original stood, its stamp with it");
+	assert.equal(touched.items.find((item) => item.editKind === "chat-you").head[2][0], "  Chat · You", "and the title is the chat's, not the part's kind");
+	const said = contextView({ ...sent, reply: { role: "assistant", content: [{ type: "toolCall", id: "c3", name: "chat", arguments: { text: "Here you are, said anew." } }] }, results: new Map([["c3", "Shown."]]) }, { windowSize: 20_000, cols: 40 });
+	const saidPart = said.items.find((item) => item.editKind === "chat-agent" && item.chat !== undefined);
+	assert.ok(saidPart, "a message whose only work is to speak carries its words for e");
+	assert.equal(saidPart.chat, "Here you are, said anew.", "so that the saying is edited, and not the rendering of the call");
+
+	// Opened, the tools part gives a line to each tool, so that one description can be read and edited.
+	const opened = contextView(sent, { windowSize: 20_000, cols: 40, isOpen: (key) => key === "tools" });
+	const tool = opened.items.find((item) => item.key === "tool:read");
+	assert.ok(tool, "the tools part unfolds to a line per tool");
+	assert.equal(tool.depth, 1, "a tool of the block stands one step in");
+	assert.equal(tool.body, "Read files.\n\nparameters: {\n  \"type\": \"object\",\n  \"properties\": {\n    \"paths\": {\n      \"type\": \"array\"\n    }\n  }\n}", "a tool's body is its description and its parameters, as the server got them");
+	assert.equal(opened.items.filter((item) => item.key?.startsWith("tool:")).length, 1, "just the tools of this request");
 
 	// The top: whose window, the bar, the legend.
 	const top = view.header.map((line) => line.map(([part]) => part).join(""));
@@ -5264,6 +5538,8 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 			["[change] Write the roller", "\x1b[<0;6;5M\x1b[<0;6;5m", false],
 			["▾ ✓ p1", "e", false],
 			[0.8, "]", false],
+			// One more ] than before: Requests stands between Plan and Tree.
+			[0.4, "]", false],
 			[" files in ", "5", false],
 			["What the main agent sees", "+", false],
 			["You are in one of two roles at any time.", "G", false],
@@ -5295,7 +5571,7 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		has(diff, "p1 · Write the roller  1 file (+1)\n▾ new      roll.py (+1)\n    --- /dev/null\n    +++ b/roll.py\n    @@ -0,0 +1 @@\n    +print(4)\n", "l opens the changed file to its patch");
 		has(at("Since carto started"), "Since carto started: 1 step  1 file (+1)\n▸ new      roll.py (+1)\n", "] goes to the next view: this session");
 		const plan = at("[change] Write the roller");
-		assert.match(plan, /\n {2}Atlas {2}Ledger {2}Plan {2}Tree {2}Assessment {4}\[ \] change view · e opens \.atlas\/carto-plan\.json\n/, `Carto has its views on a row:\n${plan}`);
+		assert.match(plan, /\n {2}Atlas {2}Ledger {2}Plan {2}Requests {2}Tree {2}Books {4}\[ \] change view · e opens \.atlas\/carto-plan\.json\n/, `Carto has its views on a row:\n${plan}`);
 		has(plan, "▸ ✓ p1 [change] Write the roller", "the plan's items are lines that can be selected");
 		assert.match(at("▾ ✓ p1"), /\n▾ ✓ p1 \[change\] Write the roller[^\n]*\n {4}Write the roller\n {4}done /, "a click on one opens it");
 		has(at(" files in "), "▸ src/  ", "the tree is a view of folders that open");
@@ -5310,7 +5586,7 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		const context = at("What the main agent sees");
 		assert.match(context, /\nWhat the main agent sees {2}· {2}about [\d.]+k of 100k tokens \(\d+%\) {2}· {2}the server counted [\d.]+k\nrequest \d+ of this run, sent \d\d:\d\d \([^)]*\), as the server got it · part sizes are estimates\n/, `the Context tab says whose window it is, how full, and which request it shows:\n${context}`);
 		assert.match(context, /\n■+□+\n■ System prompt \.+ +[\d.]+k +[\d.]+% +■ Tools \.+ +[\d.]+k +[\d.]+%/, `then the window as one row, and what each part of it is:\n${context}`);
-		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 18: /, `then every part as one line, folded:\n${context}`);
+		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 14: /, `then every part as one line, folded:\n${context}`);
 		assert.match(at("You are in one of two roles at any time."), /\n▾ ■ +[\d.]+k {2}System prompt/, "+ opens every part: the tab is then the whole window, word for word");
 		const end = at("since that request");
 		has(end, "── since that request: what the next one will hold as well ──", "the reply and what its calls returned follow what was sent");
@@ -5337,11 +5613,93 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 	}
 });
 
+test("screen: e says a message anew, Hands folds and recalls, and a shell window shows its output as a terminal does", async () => {
+	const root = makeProject("screen-hands");
+	const server = await startStandIn();
+	const editor = join(scratch, "hands-editor.sh");
+	const opened = join(scratch, "hands-editor-args.txt");
+	writeFileSync(editor, `#!/bin/sh\necho "$@" >> ${opened}\nprintf ' (said anew)' >> "$1"\n`);
+	chmodSync(editor, 0o755);
+	try {
+		ok(await carto(root, server, ["--yolo"], { input: lines(planMessage(RUN_ITEM)) }), "a plan");
+		const result = await cartoOnScreen(root, server, ["--yolo", "--no-bwrap"], [
+			["Type a message", "task(p1): shell[window=run,wait=0]: while :; do echo beat; sleep 0.2; done\\nshell: echo from run\\n"],
+			["report t1", ""],
+			// e on the user's message: g selects the first stop (what Cartographer printed at the start),
+			// and j moves to the next: what the user typed.
+			["resting", "<ESC>", false],
+			["COMMANDS", "gjj", false],
+			[0.4, "e", false],
+			[0.8, "5", false],
+			// The Hands view of the Context tab: fold the report, bring it back, shelve a file.
+			["What the main agent sees", "]]]", false],
+			["Your hands on what the agent keeps", "f", false],
+			["· folded", "", false],
+			["COMMANDS", "f", false],
+			[0.4, "a", false],
+			["/shelve", " README.md"],
+			[0.8, "<ESC>", false],
+			// e from the Context tab itself: the first Chat · You part of the request, edited where it shows.
+			["COMMANDS", "5[[[", false],
+			["What the main agent sees", "j", false],
+			[0.3, "j", false],
+			[0.3, "j", false],
+			[0.3, "e", false],
+			[0.8, "", false],
+			// Hands again: v archives the report out of the record, and d, twice, deletes it for good.
+			["What the main agent sees", "]]]", false],
+			["Your hands on what the agent keeps", "j", false],
+			[0.4, "v", false],
+			["· archived", "", false],
+			[0.4, "d", false],
+			["d again", "d", false],
+			[4.5, "", false],
+			// The Shells tab: the window's output as a terminal emulator sees it, the newest at the bottom.
+			["COMMANDS", "4", false],
+			["shell window", "<ENTER>", false],
+			["Output of run", "i", false],
+			["type a message", "/quit"],
+			[1.5, "", false],
+		], { rows: 34, env: { EDITOR: editor } });
+		if (result === undefined) return "python3 is needed for a terminal";
+		const at = (text) => result.shots.find((shot) => shot.includes(text)) ?? assert.fail(`no screen shows ${JSON.stringify(text)}:\n${result.shots.join("\n────\n")}`);
+		const edited = at("your message is edited");
+		has(edited, "said anew", "e opened the user's message in the editor, and the tab says it anew");
+		const calls = readFileSync(opened, "utf8").trim().split("\n");
+		assert.match(calls.at(-1), /\.atlas\/scratch\/message\.md$/, "the editor was handed the message's scratch file");
+		const store = JSON.parse(readFileSync(join(root, ".atlas", "carto-context.json"), "utf8"));
+		const said = store.chat.filter((entry) => entry.who === "user").at(-1);
+		has(said.text, "(said anew)", "the talk the context keeps was rewritten to match");
+		const hands = at("Your hands on what the agent keeps");
+		has(hands, "t1  · in view", "Hands lists the report");
+		has(at("· folded"), "t1  · folded", "f folds it, and says so on its line");
+		has(at("README.md"), "README.md", "a put /shelve in the prompt, and the file stands on the shelf");
+		// The edit from the Context tab: the Chat · You part says the new words where the original stood.
+		const again = result.shots.find((shot) => shot.includes("Chat · You") && shot.includes("(said anew)"));
+		assert.ok(again, "e works on the messages of the context as well:\n" + result.shots.join("\n────\n"));
+		const saidStore = JSON.parse(readFileSync(join(root, ".atlas", "carto-context.json"), "utf8"));
+		has(saidStore.chat.filter((entry) => entry.who === "user").at(-1).text, "said anew", "the talk says the new words");
+		has(at("· archived"), "t1  · archived", "v archives the report out of the record");
+		assert.ok(result.shots.some((shot) => shot.includes("d again")), "the first d asks before it deletes");
+		const empty = result.shots.find((shot) => shot.includes("No work has been finished yet"));
+		assert.ok(empty, "the second d deletes it:\n" + result.shots.join("\n────\n"));
+		assert.ok(!empty.includes("t1  ·"), "and the list no longer holds the report:\n" + empty);
+		assert.ok(!existsSync(join(root, ".atlas", "reports", "t1.md")), "the report's file is gone with it");
+		const out = at("Output of run");
+		has(out, "beat", "the window's output, as it was printed");
+		assert.match(out, /Enter goes back to the list; \/send run line types into it/, "and the view says how to type into the window");
+	} finally {
+		await server.close();
+	}
+});
+
 test("screen: blocks have backgrounds of their own inside an empty margin, and hiding the notes leaves no line behind", async () => {
 	const root = makeProject("screen-look", { git: false });
 	const server = await startStandIn();
 	try {
 		ok(await carto(root, server, [], { input: "" }), "set up");
+		// The greys are pinned below in the 256 palette, so the colour mode is pinned too: a COLORTERM of the
+		// shell this suite runs in would otherwise make the theme truecolor.
 		const result = await cartoOnScreen(root, server, [], [
 			["Type a message", "think: Thinking it over."],
 			["┊ Thinking it over.", "task: read: a.txt"],
@@ -5354,7 +5712,7 @@ test("screen: blocks have backgrounds of their own inside an empty margin, and h
 			[0.6, "<ESC>", false],
 			["COMMANDS", "kkk", false],
 			[0.5, "", false],
-		], { rows: 34 });
+		], { rows: 34, env: { COLORTERM: "" } });
 		if (result === undefined) return "python3 is needed for a terminal";
 		const rows = result.painted;
 		const row = (text) => rows.find((entry) => entry.text.includes(text)) ?? assert.fail(`no row shows ${JSON.stringify(text)}:\n${rows.map((entry) => entry.text).join("\n")}`);
@@ -5384,7 +5742,7 @@ test("screen: blocks have backgrounds of their own inside an empty margin, and h
 		assert.ok(result.osc.includes("11;?") && result.osc.includes("10;?"), "the terminal is asked for its background and text colours");
 
 		// A terminal that answers with a light background gets light blocks.
-		const light = await cartoOnScreen(root, server, [], [["Type a message", "say: hi"], ["\n  hi\n", "", false], [0.5, "", false]], { rows: 20, env: { VT_BACKGROUND: "faf9f6" } });
+		const light = await cartoOnScreen(root, server, [], [["Type a message", "say: hi"], ["\n  hi\n", "", false], [0.5, "", false]], { rows: 20, env: { VT_BACKGROUND: "faf9f6", COLORTERM: "" } });
 		const grey = (code) => Number(/^5;(\d+)$/.exec(code ?? "")?.[1]);
 		const [darkBar, lightBar] = [grey(tabs.edge), grey(light.painted[0].edge)];
 		assert.ok(darkBar >= 232 && darkBar < 242, `on a dark background the row of tabs is a dark grey: ${tabs.edge}`);
@@ -5540,7 +5898,7 @@ test("screen: the editor completes commands, a sheet shows the keys, a slash sea
 		has(at("→ session"), "› /copy session\n", "a command's own words are completed too");
 		assert.equal(readdirSync(join(root, ".atlas", "export")).filter((name) => name.startsWith("session-")).length, 1, "one Enter takes the completion and sends the command");
 		assert.ok(result.shots.some((shot) => /\n› say: canary bird\n/.test(shot)), `Up brings back what was sent, into the place to type:\n${result.shots.slice(4, 6).join("\n────\n")}`);
-		has(at("Graph:"), "Atlas  Ledger  Plan", "with nothing typed, Tab goes to the next tab");
+		has(at("Graph:"), "Atlas  Ledger  Plan  Requests", "with nothing typed, Tab goes to the next tab");
 		has(at("› /plan"), " 1 Chat ", "with something typed, Tab completes it");
 		const sheet = at("Two modes");
 		assert.match(sheet, /\n {3}Keys {3}1–\d+ of \d+ · j k scroll {3}Esc closes\n\n {3}Two modes\n/, `F1 lays a sheet with the keys over the screen:\n${sheet}`);
@@ -5619,33 +5977,440 @@ test("repeat: a reply that writes the same thing over and over is cut off; the a
 	}
 });
 
+test("model: /model lists what the server serves, switches by name or by number, and a stored model never bricks the session", async () => {
+	const root = makeProject("model");
+	const server = await startStandIn({ models: ["model-a", "model-b"] });
+	try {
+		const first = await carto(root, server, ["--model", "model-a"], { input: lines("say: hi", "/model", "/model 2", "/status") });
+		ok(first, "the first run");
+		has(first.stdout, "  Models  on model-a  ·  the server serves:\n    1  model-a  ← on\n    2  model-b\n", "/model lists the models the server serves, and which is on");
+		has(first.stdout, "● model  model-a → model-b\n", "/model 2 switches by number");
+		has(first.stdout, "· model model-b · idle\n", "/status says which model the session is on");
+		const under = await carto(root, server, ["--model", "model-b"], { input: lines("/status") });
+		ok(under, "resumed under the model the settings now name");
+		has(under.stdout, "· model model-b · idle\n", "the model stored in the session does not brick it");
+		const back = await carto(root, server, ["--model", "model-a"], { input: lines("/status") });
+		ok(back, "resumed under the first model again");
+		has(back.stdout, "· model model-a · idle\n", "the settings decide which model the session is on at each start");
+		const wrong = await carto(root, server, ["--model", "model-c"], { input: lines("/status") });
+		assert.notEqual(wrong.code, 0, "a model the server does not serve is refused at the start");
+		has(wrong.stderr, 'The model server has no model named "model-c"', "and says what is served");
+		const bad = await carto(root, server, ["--model", "model-a"], { input: lines("/model 9") });
+		ok(bad, "a number off the list");
+		has(bad.stdout, 'The server has no model "9". It serves: model-a, model-b. /model lists them.', "and says what is served");
+	} finally {
+		await server.close();
+	}
+});
+
+test("the user's hands: /shelve, /unshelve, /fold, /recall and /send do for the user what the agent's calls do", async () => {
+	const root = makeProject("hands");
+	writeFileSync(join(root, "notes.txt"), "alpha\nbeta\ngamma\n");
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, ["--no-bwrap"], { input: lines(
+			planMessage(RUN_ITEM),
+			"/approve",
+			`task(p1): shell[window=run,wait=0]: while :; do echo beat; sleep 0.2; done\nshell: echo from run`,
+			"/shelve notes.txt",
+			"/unshelve notes.txt",
+			"/unshelve notes.txt",
+			"/fold t1",
+			"/fold t1",
+			"/recall t1",
+			"/recall nope",
+			"/send run echo typed by the user",
+			"/send gone hi",
+			"/archive t1",
+			"/unarchive t1",
+			"/delete t1",
+			"/delete t1",
+		) });
+		ok(result, "the run");
+		assert.match(result.stdout, /notes\.txt is on the shelf as sh-[a-f0-9-]+ \(about [\d,]+ rendered tokens/, "/shelve adds a typed full-backed snapshot immediately");
+		assert.match(result.stdout, /Taken off the shelf: notes\.txt \[sh-[a-f0-9-]+\]\./, "/unshelve takes it off and reports its ID");
+		has(result.stdout, "notes.txt is not on the shelf. The shelf is empty.", "and says so when there is nothing to take");
+		has(result.stdout, "out of view, the record line stands in its place", "/fold takes a report out of view");
+		has(result.stdout, "t1 stands in its place again, in view.", "/recall brings it back");
+		has(result.stdout, "There is no report nope. /context lists the kept ones.", "/recall of an unknown id says so");
+		has(result.stdout, "typed into run: echo typed by the user", "/send types a line into a window that runs");
+		has(result.stdout, 'There is no window "gone"', "/send to a window there is not says so");
+		has(result.stdout, "t1 archived: the record line leaves the kept block, the report stays on disk, recall by id still finds it.", "/archive hides the line and keeps the report");
+		has(result.stdout, "t1 back in the record", "/unarchive brings it back");
+		has(result.stdout, "t1 deleted: the record line is gone and its file is gone from", "/delete removes record and file");
+		has(result.stdout, "There is no t1. a report is t1 or a curated context row c1", "deleting what is gone says so without dispatching by its id prefix");
+	} finally {
+		await server.close();
+	}
+});
+
+test("settings: yolo and bwrap start from the settings, and a switch while running is not remembered", async () => {
+	const root = makeProject("switches");
+	const server = await startStandIn();
+	try {
+		const plain = await carto(root, server, [], { input: lines("/status") });
+		ok(plain, "a run with no settings of its own");
+		hasNot(plain.stdout, YOLO_LINE, "yolo is off by default");
+		hasNot(plain.stdout, "sandbox: OFF", "and the sandbox is whatever this machine can do");
+		writeFileSync(join(root, ".atlas", "config.json"), JSON.stringify({ yolo: true, bwrap: false }));
+		const set = await carto(root, server, [], { input: lines("/status") });
+		ok(set, "the settings say yolo on and bwrap off");
+		has(set.stdout, YOLO_LINE, "yolo comes from the settings");
+		has(set.stdout, "sandbox: OFF · tasks run commands directly on this machine", "bwrap false starts with the sandbox off");
+		const off = await carto(root, server, [], { input: lines("/yolo off", "/status") });
+		ok(off, "/yolo off during the run");
+		has(off.stdout, "approval: on · change items wait for /approve again", "and ends it for the run");
+		const again = await carto(root, server, [], { input: lines("/status") });
+		ok(again, "the next run");
+		has(again.stdout, YOLO_LINE, "reads the settings again: the switch was never remembered");
+	} finally {
+		await server.close();
+	}
+});
+
+test("context: curated rows share the tagged row projection, defer visibility independently, and shelf full report references", () => {
+	const root = makeProject("context-curated-rows", { git: false });
+	const brainDir = join(root, ".atlas");
+	addRecord(brainDir, { id: "t1", at: Date.now(), mode: "look", brief: "Inspect the project", report: "The full report body.", changed: 0 });
+	writeFront(brainDir, root, { shelfTokens: 12_000, chatWindow: 8_000 }, { now: Date.now(), reason: "a test" });
+
+	const pending = applyCuratedRowOp(brainDir, { action: "add", text: "Deferred row", when: "next-boundary" });
+	assert.match(pending.line, /c1 added/);
+	assert.deepEqual(loadContext(brainDir).front.rows.map((row) => row.id), ["t1"], "the active projection is unchanged");
+	assert.match(contextLines(brainDir, root, { window: 100_000 }), /Rows entering context at the next boundary: c1/);
+	applyCuratedRowOp(brainDir, { action: "add", text: "Immediate row", when: "now" });
+	assert.deepEqual(loadContext(brainDir).front.rows.map((row) => row.id), ["t1", "c2"], "a now operation does not flush the deferred c1 row");
+	applyCuratedRowOp(brainDir, { action: "edit", id: "c1", text: "Edited now", when: "now" });
+	assert.deepEqual(loadContext(brainDir).front.rows.map((row) => row.id), ["t1", "c1", "c2"], "only the edited row is reconciled into the active projection");
+	applyContextRowAction(brainDir, "t1", "archive", "next-boundary");
+	assert.ok(loadContext(brainDir).front.rows.some((row) => row.id === "t1"), "deferred archive leaves the active report visible");
+	assert.match(contextLines(brainDir, root, { window: 100_000 }), /Rows leaving context at the next boundary: t1 \(archived\)/);
+	applyCuratedRowOp(brainDir, { action: "remove", id: "c2", when: "next-boundary" });
+	assert.ok(loadContext(brainDir).front.rows.some((row) => row.id === "c2"), "deferred removal leaves the current projection intact");
+	assert.match(contextLines(brainDir, root, { window: 100_000 }), /c2 \(deleted\)/, "the state block explains a pending removal");
+	const { item } = shelfItem(root, "report:t1", undefined, brainDir);
+	assert.equal(item.type, "reference");
+	assert.equal(item.ref.type, "report");
+	assert.match(item.snapshot, /The full report body\./, "the typed reference persists the exact snapshot");
+	assert.match(shelfText(root, item, brainDir), /The full report body\./, "a report reference resolves to its full stored content");
+});
+
+test("screen: Hands lists the shelf and the reports with the agent's operations, and Shells has an Output view", async () => {
+	const { handsView, shellsOutView } = await import("../src/screen/views.mjs");
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const root = makeProject("hands-view");
+	writeFileSync(join(root, "keep.txt"), "kept line\n");
+	const brainDir = join(root, ".atlas");
+	addRecord(brainDir, { id: "t1", at: Date.now(), mode: "look", brief: "Read the tree", report: "The tree has 5 files.", changed: 0 });
+	updateContext(brainDir, (store) => {
+		store.shelf.push({ path: "keep.txt" });
+		store.dropped.push("t1");
+	});
+	const view = handsView({ root, brainDir });
+	const titles = view.items.filter((item) => !item.plain).map((item) => item.key);
+	assert.deepEqual(titles, ["shelf:keep.txt", "report:t1"], "the shelf, then the reports, each selectable");
+	const report = view.items.find((item) => item.key === "report:t1");
+	assert.equal(report.folded, true, "a report that is folded says so");
+	has(report.head.map(([part]) => part).join(""), "t1", "with its record line");
+	const shelf = view.items.find((item) => item.key === "shelf:keep.txt");
+	assert.match(shelf.body(), /^== keep\.txt .{0,20}\n1  kept line$/, "opened, a shelved file is its text, numbered as the shelf keeps it");
+	assert.deepEqual(view.items.filter((item) => item.plain && item.head[0][0].includes("The reports of finished work")).length, 1, "and a heading stands over each kind");
+
+	// The operations behind the keys, as the terminal commands call them.
+	assert.match(shelveForUser(root, brainDir, { shelfTokens: 1000 }, "keep.txt"), /full backing snapshot is saved under \.atlas[\s\S]*kept line/, "shelving keeps a full backing snapshot, including one already on the shelf");
+	assert.match(foldReports(brainDir, ["t1"]), /already out of view/, "a report that is folded folds no further");
+	const said = recallReport(brainDir, "t1");
+	assert.match(said, /stands in its place again/, "recall brings a folded report back into view");
+	assert.match(unshelveForUser(brainDir, "keep.txt"), /Taken off the shelf/, "unshelve takes a file off");
+	assert.throws(() => unshelveForUser(brainDir, "keep.txt"), /not on the shelf/, "and says so when it is not there");
+
+	// Archive: the record line leaves what the collapse keeps, the report stays, recall still finds it.
+	assert.match(archiveReports(brainDir, ["t1"]), /t1 archived/, "v archives a report out of the record");
+	const front = writeFront(brainDir, root, { shelfTokens: 12_000, chatWindow: 8_000 }, { now: Date.now(), reason: "a test" });
+	assert.ok(!front.text.includes("Read the tree"), "the kept block no longer lists the archived line:\n" + front.text);
+	assert.match(unarchiveReports(brainDir, ["t1"]), /back in the record/, "v brings it back");
+	const back = writeFront(brainDir, root, { shelfTokens: 12_000, chatWindow: 8_000 }, { now: Date.now(), reason: "a test" });
+	has(back.text, "Read the tree", "and the record lists it again");
+	const archived = handsView({ root, brainDir }).items.find((item) => item.key === "report:t1");
+	assert.equal(archived.archived, false, "the view says it stands again");
+	assert.match(deleteReports(brainDir, ["t1"]), /t1 deleted/, "d deletes a report for good");
+	assert.ok(!existsSync(join(brainDir, "reports", "t1.md")), "and the file is gone with it");
+	assert.equal(loadContext(brainDir).rows.filter((row) => row.species === "composed").length, 0, "and the record holds it no more");
+	assert.match(deleteReports(brainDir, ["t1"]), /There is no report t1/, "deleting what is gone says so");
+
+	// The chat tab's messages: the user's and the agent's words can be said anew, tool work cannot.
+	const chat = createChat({});
+	chat.user("hello");
+	chat.print("  A notice.\n");
+	chat.seal();
+	chat.entry(0, { model: [{ role: "assistant", content: [{ type: "text", text: "Here you are." }], stopReason: "end-turn", usage: {}, provider: "x", model: "x", api: "x", timestamp: 1 }] });
+	const mine = chat.items[0];
+	const printed = chat.items[1];
+	const agent = chat.items.at(-1);
+	assert.deepEqual([chat.editable(mine.key), chat.editable(printed.key), chat.editable(agent.key)], [true, false, true], "the user's words and the agent's are editable, what Cartographer printed is not");
+	assert.equal(chat.revise(mine.key, "hello, said anew"), true, "a message is said anew");
+	assert.equal(mine.text, "hello, said anew", "and the tab shows the new words");
+	updateContext(brainDir, (store) => {
+		store.chat.push({ who: "user", at: 1, text: "hello" });
+	});
+	assert.equal(reviseNote(brainDir, "hello", "hello, said anew"), true, "the talk the context keeps is rewritten to match an edit");
+	assert.equal(loadContext(brainDir).chat.at(-1).text, "hello, said anew", "and the edited words are what it holds");
+	assert.equal(chat.revise(mine.key, ""), false, "an empty message is not taken");
+	assert.equal(chat.revise(printed.key, "nope"), false, "what cannot be edited is not");
+	assert.equal(chat.revise(999, "nope"), false, "nor one that is not there");
+
+	// The shells' Output view: a window's kept lines, the newest at the bottom, as a terminal emulator sees them.
+	const { createWindows } = await import("../src/windows.mjs");
+	const windows = createWindows({ root, brainDir, config: { shellRead: [], treeDepth: 1, windowTail: 10 }, runner: { off: true } });
+	await windows.run("term", "echo from the window", { waitMs: 3000 });
+	const out = shellsOutView({ session: { windows } }, "term");
+	has(out.header[0].map(([part]) => part).join(""), "Output of term", "the view says which window it shows");
+	has(out.items[0].head.map(([part]) => part).join(""), "from the window", "and shows what it printed");
+	const nothing = shellsOutView({ session: { windows } }, "nope");
+	has(nothing.header[0].map(([part]) => part).join(""), "Output of term", "a window there is not falls back to the newest");
+	windows.shutdown();
+});
+
+test("pause: /pause and Ctrl-V hold everything new back from the agent, and let it go on", async () => {
+	const root = makeProject("pause", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const first = await cartoOnTerminal(root, server, [], [
+			["› ", "/pause"],
+			["paused", "say: held while paused"],
+			[1.2, "/pause"],
+			["on again: what you wrote is sent now", ""],
+			[1.5, ""],
+		]);
+		ok(first, "a session with a pause");
+		has(first.screen, "[paused", "the prompt says the pause");
+		has(first.screen, "(held: the agent is paused, 1 line waits · /pause or Ctrl-V lets them go)", "a line written while it is paused is held, and said to be");
+		has(first.screen, "on again: what you wrote is sent now (1 line)", "and is sent when the pause is lifted");
+		has(first.screen, "held while paused", "the agent answers it");
+		assert.equal(server.requests.length, 1, "the held line reached the agent only when the pause was lifted");
+		has(rawText(server.requests[0].messages.at(-1)), "held while paused", "as itself, not as a note");
+		// Ctrl-V does the same, and lifts the pause while the agent works.
+		const second = await cartoOnTerminal(root, server, [], [
+			["› ", "\u0016"],
+			["paused", "say: held by the key"],
+			[1.2, "\u0016"],
+			["on again", ""],
+			[1.5, ""],
+		]);
+		ok(second, "a session with Ctrl-V");
+		has(second.screen, "[paused", "Ctrl-V pauses");
+		has(second.screen, "on again: what you wrote is sent now (1 line)", "and Ctrl-V again lets the held line go");
+		assert.equal(server.requests.length, 2, "one request more, for the line the second pause held");
+	} finally {
+		await server.close();
+	}
+});
+
+test("the books: /archive, /unarchive and /delete reach every book the agent keeps, and deleting says nothing to the agent", async () => {
+	const root = makeProject("books-ops", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const brainDir = join(root, ".atlas");
+		addRecord(brainDir, { id: "t1", at: Date.now(), mode: "look", brief: "Read the tree", report: "The tree has 5 files.", changed: 0 });
+		writeFileSync(join(brainDir, "carto-ledger.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "g1", kind: "goal", text: "Keep the lights on", doneWhen: "they stay on", status: "open", added: "2026-01-01T00:00:00.000Z" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-plan.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "p1", mode: "change", text: "Run things" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-atlas.json"), `${JSON.stringify({ nodes: [{ name: "alpha", gist: "First.", links: ["beta"] }, { name: "beta", gist: "Second." }] }, null, "\t")}\n`);
+		const result = await carto(root, server, [], { input: lines("/archive g1 p1", "/ledger", "/plan", "/unarchive p1", "/delete g1", "/delete beta", "/atlas", "/delete alpha zz", "/delete t1") });
+		ok(result, "the commands run");
+		has(result.stdout, "g1 archived: the goal leaves the ledger as the agent reads it", "/archive archives a ledger entry");
+		has(result.stdout, "p1 archived: the item leaves the plan as the agent reads it", "and a plan item");
+		has(result.stdout, "(1 archived entry not shown; /unarchive ID brings one back)", "/ledger hides the archived one and says how many");
+		hasNot(result.stdout, "Keep the lights on", "the archived entry is not shown");
+		has(result.stdout, "(1 archived item not shown; /unarchive ID brings one back)", "/plan hides the archived one too");
+		hasNot(result.stdout, "Run things", "the archived item is not shown");
+		has(result.stdout, "p1 is back in the plan as the agent reads it.", "/unarchive brings a row back");
+		has(result.stdout, "g1 is gone for good: the goal is out of the ledger, and nothing of it is said to the agent.", "/delete takes a ledger entry away for good");
+		has(result.stdout, "beta is gone for good: the node is out of the graph, and 1 link to it went with it", "/delete takes a node away, and its links with it");
+		has(result.stdout, "alpha is gone for good: the node is out of the graph", "and another");
+		has(result.stdout, "There is no zz. a report is t1", "an id that names nothing is refused, with the books named");
+		has(result.stdout, "t1 deleted: the record line is gone", "a report goes by the words of the context store");
+		assert.ok(!existsSync(join(brainDir, "reports", "t1.md")), "and the report's file is gone with it");
+		const atlas = JSON.parse(readFileSync(join(brainDir, "carto-atlas.json"), "utf8"));
+		assert.deepEqual([atlas.nodes.map((node) => node.name), atlas.nodes.flatMap((node) => node.links)], [[], []], "the graph holds neither node nor link");
+		assert.equal(JSON.parse(readFileSync(join(brainDir, "carto-ledger.json"), "utf8")).items.length, 0, "the ledger holds neither");
+		// Not one word to the agent: archiving and deleting are the user's hands on what the agent keeps.
+		assert.equal(server.requests.length, 0, "the agent is sent nothing through all of it");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: Ctrl-C clears what is typed; twice on the empty line leaves; Ctrl-X says nothing runs", async () => {
+	const root = makeProject("screen-keys", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const result = await cartoOnScreen(root, server, [], [
+			// Typed but not sent: the Enter that would send it is held back.
+			["Type a message", "hello there", false],
+			["hello there", "<CTRLC>", false],
+			["type a message, or /help", "", false],
+			[0.3, "<CTRLX>", false],
+			["nothing runs: the agent rests", "", false],
+			// With the line standing empty, the first Ctrl-C asks, the second, soon after, leaves.
+			[0.3, "<CTRLC>", false],
+			["Ctrl-C again to leave", "<CTRLC>", false],
+			[1, "", false],
+		], { rows: 24 });
+		if (result === undefined) return "python3 is needed for a terminal";
+		const cleared = result.shots.find((shot) => shot.includes("type a message, or /help"));
+		assert.ok(cleared, `the line is cleared:\n${result.shots.join("\n────\n")}`);
+		hasNot(cleared, "hello there", "and what was typed is gone");
+		assert.ok(result.shots.some((shot) => shot.includes("nothing runs: the agent rests")), "Ctrl-X at rest says so, and says nothing to the agent");
+		assert.ok(result.shots.some((shot) => shot.includes("Ctrl-C again to leave")), "the first Ctrl-C on the empty line asks");
+		has(result.shots.at(-1), "Ctrl-C again to leave", "the second leaves, and the conversation stands on the screen");
+		assert.equal(server.requests.length, 0, "what was cleared never reached the agent");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: in Requests, a approves a change item and n turns down a question", async () => {
+	const root = makeProject("screen-requests", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const brainDir = join(root, ".atlas");
+		writeFileSync(join(brainDir, "carto-ledger.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Blue or red?", status: "open", added: "2026-01-01T00:00:00.000Z" }] }, null, "\t")}\n`);
+		writeFileSync(join(brainDir, "carto-plan.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "p1", mode: "change", text: "Run things" }] }, null, "\t")}\n`);
+		const result = await cartoOnScreen(root, server, [], [
+			[0.5, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["Atlas", "]", false],
+			["Ledger", "]", false],
+			["Plan", "]", false],
+			// A refresh selects the first row by itself: a approves p1 where it stands.
+			["2 requests wait for you", "a", false],
+			["approved p1", "", false],
+			// The approve left the session on the Chat tab, typing; go back to the rows.
+			[2.2, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["1 request waits for you", "n", false],
+			["q1 turned down", "", false],
+			[2.2, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["Atlas", "]", false],
+			["Ledger", "]", false],
+			["Plan", "]", false],
+			["Requests", "]", false],
+			[0.4, "/quit"],
+		], { rows: 30 });
+		if (result === undefined) return "python3 is needed for a terminal";
+		const asked = result.shots.find((shot) => shot.includes("2 requests wait for you"));
+		assert.ok(asked, `the requests view shows:\n${result.shots.join("\n────\n")}`);
+		has(asked, "a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "the view says what the keys do");
+		const gone = result.shots.find((shot) => shot.includes("Nothing waits for you"));
+		assert.ok(gone, `the last request leaves the view:\n${result.shots.join("\n────\n")}`);
+		has(gone, "Nothing waits for you. The agent goes on with whatever does not depend on an answer.", "the view says what is left");
+		// The approve and the deny were sent to the agent.
+		const said = server.requests.map((request) => rawText(request.messages.at(-1)));
+		assert.equal(said.filter((text) => text.includes("I approved p1")).length, 1, "a approved the change item, and the agent is told");
+		assert.equal(said.filter((text) => text.includes("I turned down q1")).length, 1, "n turned the question down, and the agent is told");
+		assert.equal(server.requests.length, 2, "each request decision is sent to the agent");
+		const ledger = JSON.parse(readFileSync(join(brainDir, "carto-ledger.json"), "utf8"));
+		assert.equal(ledger.items[0].status, "done", "the question was closed by the deny");
+	} finally {
+		await server.close();
+	}
+});
+
+test("screen: d in the Context window takes a message of yours out of the talk the collapse keeps, and out of view", async () => {
+	const root = makeProject("screen-delete", { git: false });
+	const server = await startStandIn();
+	try {
+		ok(await carto(root, server, [], { input: "" }), "set up");
+		const result = await cartoOnScreen(root, server, [], [
+			["Type a message", "say: hello there"],
+			["hello there", "", false],
+			[0.8, "<ESC>", false],
+			["COMMANDS", "5", false],
+			["What the main agent sees", "j", false],
+			[0.2, "j", false],
+			// The front block rides inside the first message of the user: three j's from the system prompt reach your words.
+			[0.2, "j", false],
+			[0.2, "d", false],
+			["Press d again: the message goes for good", "d", false],
+			["deleted from the talk", "", false],
+			[2.2, "/quit"],
+		], { rows: 30 });
+		if (result === undefined) return "python3 is needed for a terminal";
+		assert.ok(result.shots.some((shot) => shot.includes("Press d again: the message goes for good")), `the first d asks:\n${result.shots.join("\n────\n")}`);
+		assert.ok(result.shots.some((shot) => shot.includes("deleted from the talk the collapse keeps")), `the second carries it out:\n${result.shots.join("\n────\n")}`);
+		const store = JSON.parse(readFileSync(join(root, ".atlas", "carto-context.json"), "utf8"));
+		assert.ok(!store.chat.some((entry) => entry.text.includes("say: hello there")), `the talk the collapse keeps holds neither:\n${JSON.stringify(store.chat)}`);
+		assert.ok(store.chat.some((entry) => entry.text.includes("hello there")), "what the agent said to you stays");
+		hasNot(result.shots.at(-1), "say: hello there", "the part stands out of the window, and out of the conversation");
+	} finally {
+		await server.close();
+	}
+});
+
 async function until(condition, what, timeoutMs = 15_000) {
+	const limit = timeoutMs * SLOW;
 	const start = Date.now();
 	while (!condition()) {
-		if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting until ${what}`);
+		if (Date.now() - start > limit) throw new Error(`timed out waiting until ${what}`);
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
 }
 
+// ─── The run ────────────────────────────────────────────────────────────────
+// Tests are independent: each makes its own project and its own stand-in server, so they run several at a
+// time — `--jobs N` (or CARTO_TEST_JOBS, or `-j N`) says how many, `npm test` lets the defaults decide:
+// one per core to a cap of 8. A test marked `alone` runs with none beside it, so batches keep the order.
+// One line per test, whatever the moment it ended on, so the log reads the same as ever: ok, skip, FAIL.
 let passed = 0;
 let failed = 0;
 let skipped = 0;
-for (const { name, run: body } of tests) {
-	if (only !== undefined && !name.includes(only)) continue;
-	try {
-		const note = await body();
-		if (typeof note === "string") {
-			skipped++;
-			console.log(`skip  ${name}  (${note})`);
-		} else {
-			passed++;
-			console.log(`ok    ${name}`);
+const strays = []; // rejections no test awaited: counted, so the run still ends, and red
+process.on("unhandledRejection", (error) => strays.push(error));
+
+const write = (text) => process.stdout.write(`${text}\n`);
+const secs = (ms) => (ms >= 1000 ? `  (${(ms / 1000).toFixed(1)} s)` : "");
+const chosen = tests.filter((t) => only === undefined || t.name.includes(only));
+const batches = [];
+for (const t of chosen) {
+	const last = batches.at(-1);
+	if (t.alone) batches.push({ alone: true, tests: [t] });
+	else if (last !== undefined && !last.alone) last.tests.push(t);
+	else batches.push({ alone: false, tests: [t] });
+}
+for (const batch of batches) {
+	const list = batch.tests;
+	let at = 0;
+	const runOne = async ({ name, run: body }) => {
+		const start = Date.now();
+		try {
+			const note = await body();
+			if (typeof note === "string") {
+				skipped++;
+				write(`skip  ${name}  (${note})`);
+			} else {
+				passed++;
+				write(`ok    ${name}${secs(Date.now() - start)}`);
+			}
+		} catch (error) {
+			failed++;
+			write(`FAIL  ${name}\n      ${String(error?.message ?? error).split("\n").join("\n      ")}`);
 		}
-	} catch (error) {
-		failed++;
-		console.log(`FAIL  ${name}\n      ${String(error?.message ?? error).split("\n").join("\n      ")}`);
-	}
+	};
+	// One worker pulls the next test as soon as it is free; a batch of one runs by itself, as it asked.
+	await Promise.all(Array.from({ length: Math.min(JOBS, list.length) }, async () => {
+		while (at < list.length) await runOne(list[at++]);
+	}));
+}
+for (const error of strays) {
+	failed++;
+	write(`FAIL  (a rejection no test awaited)\n      ${String(error?.message ?? error).split("\n").join("\n      ")}`);
 }
 rmSync(scratch, { recursive: true, force: true });
-console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
+write(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
+await new Promise((resolve) => setImmediate(resolve));
 process.exit(failed === 0 ? 0 : 1);
