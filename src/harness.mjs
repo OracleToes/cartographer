@@ -394,7 +394,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 
 	const storage = await openNodeSqliteStorage(join(brainDir, "session.sqlite"));
 	// The Harness would summarize a long context with a request of its own. Cartographer collapses it instead.
-	const harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false } } }, context);
+	// A burst of user messages sent while a provider request or focus is busy belongs in the very next context
+	// boundary. The Durable default takes only one steer per boundary, needlessly leaving the rest queued for a
+	// later tool round (or even the next user turn) when the current response ends without more tools.
+	const harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
 	const main = await harness.root(context, {
 		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
 	});
