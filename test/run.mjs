@@ -1057,6 +1057,23 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	has(loadPlan(brain).error, "is not valid JSON", "a broken file");
 });
 
+test("plan: a missing item text shows the exact call and a corrected example", async () => {
+	const dir = join(scratch, "plan-missing-text");
+	mkdirSync(dir, { recursive: true });
+	const tool = bookTool({ brainDir: dir });
+	has(tool.description, "For a plan add, `text` is required", "the book description states the required field");
+	has(tool.parameters.properties.ops.items.properties.text.description, "REQUIRED", "the field schema says when text is needed");
+	const args = { book: "plan", ops: [{ action: "add", mode: "change", lines: "Build the die", name: "Build", target: "plan" }] };
+	const result = await tool.execute(args, { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID });
+	const text = result.output[0].text;
+	assert.equal(result.isError, true, "nothing was applied");
+	has(text, "`text` is required and was left out or empty", "the validation error remains clear");
+	has(text, `Call received (exact arguments):\n${JSON.stringify(args, null, 2)}`, "the whole call as received is echoed, including the misplaced fields");
+	has(text, `Expected shape for a plan add:\n${JSON.stringify({ action: "add", mode: "change", text: "one-line description of what this item covers" }, null, 2)}`, "a directly comparable example");
+	has(text, "The item's wording belongs in `text`, not `lines`. Correct the call; do not repeat it unchanged.", "explicit retry instruction");
+	assert.equal(loadPlan(dir).plan.items.length, 0, "the refused operation did not change the plan");
+});
+
 test("plan: the agent's plan is saved and shown, and the state block says what it waits for", async () => {
 	const root = makeProject("plan", { git: false });
 	const server = await startStandIn();

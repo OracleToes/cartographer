@@ -102,7 +102,12 @@ function runPlan({ brainDir, gate }, args, api) {
 			applied++;
 		} catch (problem) {
 			if (!(problem instanceof PlanError)) throw problem;
-			lines.push(`Op ${index + 1} (${opLabel(op, "mode")}) not applied: ${problem.message}`);
+			let message = problem.message;
+			if (op?.action === "add" && (typeof op.text !== "string" || op.text.trim() === "")) {
+				const expected = { action: "add", mode: op.mode === "look" ? "look" : "change", text: "one-line description of what this item covers" };
+				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe item's wording belongs in \`text\`, not \`lines\`. Correct the call; do not repeat it unchanged.`;
+			}
+			lines.push(`Op ${index + 1} (${opLabel(op, "mode")}) not applied: ${message}`);
 		}
 	}
 	if (applied === 0) return fail(lines.join("\n"));
@@ -368,9 +373,9 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 					}),
 					id: opt(str({ description: "The entry, item or report the operation works on (g1, p2, a3, t12); in a task, a step (s3)." })),
 					kind: opt(str({ description: "For add: a goal, question or note in the ledger; assessment or practice in the books." })),
-					text: opt(str({ description: "The entry's wording; for done, how it ended; for note, what to keep; for collapse, why, in a few words." })),
+					text: opt(str({ description: "For a plan add, REQUIRED: one line saying what the item covers (not `lines`). Also the entry's wording; for done, how it ended; for note, what to keep; for collapse, why, in a few words." })),
 					done_when: opt(str({ description: "For add and edit of a ledger goal: how you and the user will know it is reached." })),
-					mode: opt(str({ description: "For the plan: look (the task only reads) or change (it writes, which needs the user's authorization)." })),
+					mode: opt(str({ description: "For a plan add, REQUIRED: look (the task only reads) or change (it writes, which needs the user's authorization)." })),
 					network: opt(bool({ description: "For a plan change item: true lets its commands reach the network." })),
 					standing: opt(bool({ description: "For a plan change item: true makes it a duty that stays open, carried out again and again." })),
 					before: opt(str({ description: "Put the new or moved entry in front of this one. Left out: at the end." })),
@@ -378,7 +383,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 					name: opt(str({ description: "For a prompt proposal that adds a section: its short name, in small letters." })),
 					why: opt(str({ description: "For a prompt proposal: what misled you or what you observed, in one line. The user decides from it." })),
 					path: opt(str({ description: "For shelve and unshelve: a file, as a path inside the project; for unshelve also: all." })),
-					lines: opt(str({ description: 'For shelve: a range of lines like "10-80". Leave out for the whole file.' })),
+					lines: opt(str({ description: 'For context shelve only: a range of file lines like "10-80". It is not the wording of a plan item.' })),
 					hand_on: opt(bool({ description: "For shelve, in a task: true puts the file on the main agent's shelf as well when the task ends." })),
 				}),
 					{ description: "Operations, applied in order. Each stands on its own: one that cannot be applied is reported, and the others are saved." },
