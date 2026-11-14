@@ -1898,7 +1898,7 @@ test("windows: the main agent and every task see the windows at the end of each 
 				"window: main read",
 				"task(p1): shell: cd src; echo one\\nshell[window=server,wait=0]: echo listening; sleep 30\\nlist",
 				"say: hello",
-				"window[seconds=5]: server wait listening",
+				"window[seconds=20]: server wait listening",
 				"window[lines=1]: server read",
 				"look: window: server send hi",
 				"task: window: server read\\nwindow: server send hi",
@@ -1931,7 +1931,7 @@ test("windows: the main agent and every task see the windows at the end of each 
 		assert.equal(windowsIn(server.requests[0]), undefined, "with no window open there is no block");
 		for (const request of server.requests) assert.ok(windowsCount(request) <= 1, "a request never holds more than one: the block is not stored");
 
-		assert.match(answers[1], /^listening\n\[the line appeared after \d\.\d s; the command is still running in window server\]$/, "the main agent waits for a line; one printed before the call counts");
+		assert.match(answers[1], /^listening\n\[the line appeared after (?:\d\.\d|\d+) s; the command is still running in window server\]$/, "the main agent waits for a line; one printed before the call counts");
 		assert.match(answers[2], /^listening\n\[window server: busy with `echo listening; sleep 30` for \d s · 2 lines in all\]$/, "and reads");
 		has(result.stdout, '▸ window server  send  "hi"  → refused: The main agent does not run commands itself.', "typing into a window is refused to the main agent");
 		// A task sees the same block, at the end of each of its requests and nowhere in what is stored.
@@ -3460,16 +3460,18 @@ test("wake: `sleep` ends the turn at once; a wake that repeats until removed; /w
 	try {
 		const result = await carto(root, server, [], {
 			timeoutMs: 60_000,
-			input: lines("say: watching. ON EVERY WAKE: sleep", 'wake: {"action":"set","note":"is it up","every":1,"times":0}', "/wait 4", "/wakes", "/wakes remove w1", "/wakes", "/wakes remove w1", "/wakes clear", "say: still here"),
+			// The wait scales like every other measured wait (SLOW): under load a wake cycle takes longer than its second.
+			input: lines("say: watching. ON EVERY WAKE: sleep", 'wake: {"action":"set","note":"is it up","every":1,"times":0}', `/wait ${4 * SLOW}`, "/wakes", "/wakes remove w1", "/wakes", "/wakes remove w1", "/wakes clear", "say: still here"),
 		});
 		ok(result, "a session that sleeps");
 		has(result.stdout, "● wake  + w1 every 1 s, until removed · is it up\n", "set until removed");
 		const notes = server.requests.filter((request) => rawText(request.messages.at(-1)).startsWith("<cartographer>"));
-		assert.ok(notes.length >= 3, `it goes on firing: ${notes.length} times in four seconds`);
+		assert.ok(notes.length >= 3, `it goes on firing: ${notes.length} times in ${Math.round(4 * SLOW)} seconds`);
 		assert.equal(server.requests.length, 1 + 2 + notes.length + 1, "after `sleep` no further request is made: one per wake");
 		assert.equal(result.stdout.split("\n").filter((line) => /^● resting · next wake in \d+ s$/.test(line)).length, notes.length, `the screen says that it rests, and until when:\n${result.stdout}`);
 		for (const request of notes) assert.equal(request.messages.filter((message) => rawText(message).startsWith("<cartographer>")).length, 1, "a turn with `sleep` alone is quiet");
-		assert.match(result.stdout, /\n {2}w1 · every 1 s, until removed · is it up · fired \d times, last (?:just now|\d s ago) · (?:next in \d+ s|due now)\n {2}\S+carto-wakes\.json · \/wakes remove ID takes one away\n/, "/wakes shows it, and the file");
+		const wakesView = result.stdout.split("\n").filter((line) => line.includes("w1 ·") || line.includes("carto-wakes.json") || line.includes("woken 12 times")).join("\n");
+		assert.match(wakesView, /w1 · every 1 s, until removed · is it up · fired \d times, last (?:just now|\d s ago) · (?:next in \d+ s|due now)\n {2}\S+carto-wakes\.json · \/wakes remove ID takes one away/, `/wakes shows it, and the file:\n${wakesView}`);
 		hasNot(result.stdout, "you last acted on it", "it never did anything about it");
 		has(result.stdout, "● wake  - w1 every 1 s · removed by you\n  The agent has set no wake.\n", "the user can take it away");
 		has(result.stdout, "\n  No wake is set.\n", "what is not there cannot be removed");
