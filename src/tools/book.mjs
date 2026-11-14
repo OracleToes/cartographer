@@ -8,11 +8,11 @@
 // `context` tool let it; the other books belong to the main agent, and are refused with the same words
 // the old per-tool refusals used.
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { arr, bool, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
-import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
-import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
-import { applyPlanOp, authorizationLine, loadPlan, PlanError, savePlan } from "../plan.mjs";
-import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "../books.mjs";
+import { arr, bool, lit, obj, oneOf, opt, str, union, unknown } from "@earendil-works/pi-schema";
+import { describe, REFUSALS, SECTION_MAX, STILL_TASK, TOOL_MAX } from "../prompt.mjs";
+import { applyOp, KINDS, LedgerError, loadLedger, open, openCounts, prune, saveLedger, TEXT_MAX as LEDGER_TEXT_MAX } from "../ledger.mjs";
+import { applyPlanOp, authorizationLine, ITEM_MAX, loadPlan, PlanError, savePlan } from "../plan.mjs";
+import { applyBookOp, BOOK_KINDS, BOOK_TEXT_MAX, BookError, loadBooks, renderBook, saveBooks } from "../books.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
@@ -351,40 +351,82 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-/** The actions the loose operation schema names, and the fields each book reads. */
-const ACTIONS = ["add", "edit", "done", "remove", "before", "clear", "recall", "shelve", "unshelve", "fold", "note", "collapse"];
+// The root stays flat for llama.cpp's Qwen tool-call path. The selected book narrows the operation
+// schema with JSON Schema conditionals; each tagged operation then requires exactly the fields it uses.
+const line = (description, maxLength) => str({ minLength: 1, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
+const entryId = (description = "The entry (g1, q5, n7).") => line(description);
 
-// Keep the top-level tool arguments a flat object for llama.cpp's Qwen tool-call path, but narrow the
-// `ops` branch when book=plan. The plan's nested action union worked before the books were combined; each
-// branch makes the fields it needs required and excludes fields that belong to the other books.
+const LEDGER_OP = union([
+	obj(
+		{ action: lit("add"), kind: oneOf(KINDS, { description: "goal, question or note." }), text: line("The entry itself, one line in your words.", LEDGER_TEXT_MAX), done_when: opt(line("For a goal: how you and the user will know it is reached.", LEDGER_TEXT_MAX)) },
+		{ allOf: [
+			{ if: { properties: { kind: lit("goal") }, required: ["kind"] }, then: { required: ["done_when"] } },
+			{ if: { properties: { kind: oneOf(["question", "note"]) }, required: ["kind"] }, then: { not: { required: ["done_when"] } } },
+		], description: "Add a ledger entry; goals need a done-when line." },
+	),
+	obj({ action: lit("done"), id: entryId(), text: opt(line("How it ended, one line.", LEDGER_TEXT_MAX)) }, { description: "Close a ledger entry." }),
+	obj(
+		{ action: lit("edit"), id: entryId(), text: opt(line("The new wording, one line.", LEDGER_TEXT_MAX)), done_when: opt(line("For a goal: its new done-when line.", LEDGER_TEXT_MAX)) },
+		{ anyOf: [{ required: ["text"] }, { required: ["done_when"] }], description: "Edit an entry; change its wording or a goal's done-when line." },
+	),
+	obj({ action: lit("remove"), id: entryId() }, { description: "Remove a ledger entry." }),
+]);
+
 const PLAN_OP = union([
 	obj(
-		{
-			action: lit("add"),
-			mode: oneOf(["look", "change"], { description: "look: the task only reads. change: it writes files, which needs the user's authorization." }),
-			text: str({ description: "Required: one line saying what this item covers." }),
-			network: opt(bool({ description: "true: this change item's commands can reach the network." })),
-			standing: opt(bool({ description: "true: this is a duty that stays open and may be carried out again." })),
-			before: opt(str({ description: "Put the new item in front of this one (p3). Default: at the end." })),
-		},
-		{ description: "Add a plan item." },
+		{ action: lit("add"), mode: oneOf(["look", "change"], { description: "look: the task only reads. change: it writes files, which needs the user's authorization." }), text: line("Required: one line saying what this item covers.", ITEM_MAX), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })), before: opt(entryId("Put the new item in front of this one (p3). Default: at the end.")) },
+		{ allOf: [{ if: { properties: { mode: lit("look") }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], description: "Add a plan item; look items cannot have change-only flags." },
 	),
-	obj({ action: lit("done"), id: str({ description: "The item (p1, p4)." }), text: opt(str({ description: "What came of it, one line." })) }, { description: "Mark a plan item finished." }),
+	obj({ action: lit("done"), id: entryId("The item (p1, p4)."), text: opt(line("What came of it, one line.", ITEM_MAX)) }, { description: "Mark a plan item finished." }),
 	obj(
-		{
-			action: lit("edit"),
-			id: str({ description: "The item (p1, p4)." }),
-			text: opt(str({ description: "The new wording, one line." })),
-			mode: opt(oneOf(["look", "change"])),
-			network: opt(bool()),
-			standing: opt(bool()),
-		},
-		{ description: "Edit a plan item." },
+		{ action: lit("edit"), id: entryId("The item (p1, p4)."), text: opt(line("The new wording, one line.", ITEM_MAX)), mode: opt(oneOf(["look", "change"], { description: "look or change." })), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })) },
+		{ allOf: [{ if: { properties: { mode: lit("look") }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], anyOf: [{ required: ["text"] }, { required: ["mode"] }, { required: ["network"] }, { required: ["standing"] }], description: "Edit a plan item; look items cannot have change-only flags." },
 	),
-	obj({ action: lit("remove"), id: str({ description: "The item (p1, p4)." }) }, { description: "Remove a plan item." }),
+	obj({ action: lit("remove"), id: entryId("The item (p1, p4).") }, { description: "Remove a plan item." }),
 	obj({ action: lit("clear") }, { description: "Clear the plan." }),
 ]);
-const PLAN_OPS = arr(PLAN_OP, { description: "Plan operations, each with only the fields that action takes." });
+
+const BOOKS_OP = union([
+	obj({ action: lit("add"), kind: oneOf(BOOK_KINDS, { description: "assessment or practice." }), text: line("One short entry, in your words.", BOOK_TEXT_MAX), before: opt(entryId("Put the new entry in front of this one.")) }, { description: "Add an assessment or practice entry." }),
+	obj({ action: lit("edit"), id: entryId("The entry (a3, r7)."), text: line("The new wording of this one entry.", BOOK_TEXT_MAX) }, { description: "Reword one entry." }),
+	obj({ action: lit("done"), id: entryId("The entry (a3, r7)."), text: opt(line("How it was settled, one line.", 300)) }, { description: "Settle an entry." }),
+	obj({ action: lit("remove"), id: entryId("The entry (a3, r7).") }, { description: "Remove an entry." }),
+	obj({ action: lit("before"), id: entryId("The entry (a3, r7)."), before: opt(entryId("The entry to stand in front of.")) }, { description: "Reorder an entry." }),
+]);
+
+const PROMPT_OP = union([
+	obj({ action: lit("edit"), target: line("A section name, or a tool description such as tool.edit."), text: line("The whole new wording.", Math.max(SECTION_MAX, TOOL_MAX)), why: line("What misled you or what you observed, in one line.", 300) }, { description: "Reword a section or a tool description." }),
+	obj({ action: lit("add"), name: str({ minLength: 2, maxLength: 24, pattern: "^[a-z][a-z0-9-]+$", description: "A short name for the new section, in small letters." }), text: line("The new section's wording.", SECTION_MAX), before: opt(line("The section it stands in front of.")), why: line("What misled you or what you observed, in one line.", 300) }, { description: "Add a section." }),
+	obj({ action: lit("remove"), target: line("The section to drop."), why: line("What misled you or what you observed, in one line.", 300) }, { description: "Drop a section." }),
+]);
+
+const CONTEXT_OP = union([
+	obj({ action: lit("recall"), id: entryId("The report to bring back (t12).") }, { description: "Recall a kept report." }),
+	obj({ action: lit("shelve"), path: line("A file inside the project."), lines: opt(line('A line range such as "10-80"; omit for the whole file.')), hand_on: opt(bool({ description: "In a task, put this file on the main agent's shelf when you return." })) }, { description: "Keep a file in view." }),
+	obj({ action: lit("unshelve"), path: line('The file to take off the shelf, or "all".') }, { description: "Take a file off the shelf." }),
+	obj({ action: lit("fold"), id: entryId("A report id (t12) or task step ids (s3, s5), separated by commas.") }, { description: "Fold a finished report or step." }),
+	obj({ action: lit("note"), text: line("What the task must keep, with file paths and line numbers.") }, { description: "Keep a finding in task context." }),
+	obj({ action: lit("collapse"), text: opt(line("Why to collapse, in a few words.")) }, { description: "Collapse context now." }),
+]);
+
+const branchFor = (book, operations) => ({
+	if: { properties: { book: lit(book) }, required: ["book"] },
+	then: { properties: { ops: arr(operations, { minItems: 1 }) }, required: ["ops"], not: { required: ["text"] } },
+});
+const BOOK_CONDITIONS = [
+	branchFor("ledger", LEDGER_OP),
+	branchFor("plan", PLAN_OP),
+	branchFor("prompt", PROMPT_OP),
+	branchFor("context", CONTEXT_OP),
+	{
+		if: { properties: { book: lit("books") }, required: ["book"] },
+		then: {
+			properties: { ops: arr(BOOKS_OP, { minItems: 1 }), text: line("The whole assessment, for the legacy write form.", ASSESSMENT_MAX) },
+			anyOf: [{ required: ["ops"] }, { required: ["text"] }],
+			not: { required: ["ops", "text"] },
+		},
+	},
+];
 
 /**
  * @param {{ root: string, brainDir: string, config: object, engine: object, gate?: { yolo: boolean } }} input
@@ -393,43 +435,15 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 	return defineTool({
 		name: "book",
 		description: describe("book"),
-		parameters: obj({
-			book: oneOf(["ledger", "plan", "prompt", "books", "context"], {
-				description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), prompt (a proposed change to your own prompt), books (entries about the project and your practice), context (fold, recall, shelve, note).",
-			}),
-			ops: opt(arr(
-				obj({
-					action: oneOf(ACTIONS, {
-						description:
-							"The ledger, plan and books take add, edit, done, remove (before on the books positions an entry; clear empties the plan). The context takes one action per operation.",
-					}),
-					id: opt(str({ description: "The entry, item or report the operation works on (g1, p2, a3, t12); in a task, a step (s3)." })),
-					kind: opt(str({ description: "For add: a goal, question or note in the ledger; assessment or practice in the books." })),
-					text: opt(str({ description: "For a plan add, REQUIRED: one line saying what the item covers (not `lines`). Also the entry's wording; for done, how it ended; for note, what to keep; for collapse, why, in a few words." })),
-					done_when: opt(str({ description: "For add and edit of a ledger goal: how you and the user will know it is reached." })),
-					mode: opt(str({ description: "For a plan add, REQUIRED: look (the task only reads) or change (it writes, which needs the user's authorization)." })),
-					network: opt(bool({ description: "For a plan change item: true lets its commands reach the network." })),
-					standing: opt(bool({ description: "For a plan change item: true makes it a duty that stays open, carried out again and again." })),
-					before: opt(str({ description: "Put the new or moved entry in front of this one. Left out: at the end." })),
-					target: opt(str({ description: "For a prompt proposal: a section by its name, or a tool's description as tool. and the tool's name." })),
-					name: opt(str({ description: "For a prompt proposal that adds a section: its short name, in small letters." })),
-					why: opt(str({ description: "For a prompt proposal: what misled you or what you observed, in one line. The user decides from it." })),
-					path: opt(str({ description: "For shelve and unshelve: a file, as a path inside the project; for unshelve also: all." })),
-					lines: opt(str({ description: 'For context shelve only: a range of file lines like "10-80". It is not the wording of a plan item.' })),
-					hand_on: opt(bool({ description: "For shelve, in a task: true puts the file on the main agent's shelf as well when the task ends." })),
+		parameters: obj(
+			{
+				book: oneOf(["ledger", "plan", "prompt", "books", "context"], {
+					description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), prompt (a proposed change to your own prompt), books (entries about the project and your practice), context (fold, recall, shelve, note).",
 				}),
-					{ description: "Operations, applied in order. Each stands on its own: one that cannot be applied is reported, and the others are saved." },
-				)),
-			text: opt(str({ description: "For the books, instead of ops: the whole assessment, replacing the entries' rendering once." })),
-		},
-		{
-			allOf: [
-				{
-					if: { properties: { book: lit("plan") }, required: ["book"] },
-					then: { properties: { ops: PLAN_OPS }, required: ["ops"] },
-				},
-			],
-		},
+				ops: opt(arr(unknown(), { description: "Operations for the selected book." })),
+				text: opt(line("The whole assessment, for the legacy write form.")),
+			},
+			{ allOf: BOOK_CONDITIONS },
 		),
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,

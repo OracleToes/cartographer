@@ -2,24 +2,49 @@
 import { defineTool } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { took } from "../time.mjs";
-import { NOTE_MAX, wakeAbout, WakeError, wakeRepeats } from "../wakes.mjs";
+import { EVERY_MAX, NOTE_MAX, wakeAbout, WakeError, wakeRepeats } from "../wakes.mjs";
 
 /** @param {{ wakes: ReturnType<typeof import("../wakes.mjs").createWakes>, config: { wakeMin: number, wakesMax: number } }} input */
 export function wakeTool({ wakes, config }) {
 	const least = took(config.wakeMin * 1000);
-	// One flat object, like `window`. The parameters of a tool must be an object with properties at the top: a
-	// choice between shapes there (anyOf) is something chat templates and models handle badly, and the first
-	// version of this tool had one. So `note` and `id` cannot be marked required; `execute` asks for them.
-	const Parameters = obj({
-		action: oneOf(["set", "remove"], { description: "set: set a wake, with `note` and one of `every`, `path`, `window`. remove: take one back, with `id`." }),
-		note: opt(str({ description: `For set, required: what to look at or do when it fires, written for yourself. It is handed back to you then. One line, at most ${NOTE_MAX} characters.` })),
-		every: opt(int({ description: `For set: a number of seconds, ${config.wakeMin} or more. Alone: wake after this long, and again each time it passes. With path or window: the least time between two wakes, default ${config.wakeMin}.` })),
-		times: opt(int({ description: "For set: how often it fires before it is removed. Default 1. 0: until you remove it." })),
-		path: opt(str({ description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes you when it appears." })),
-		window: opt(str({ description: "For set: wake when this shell window prints something." })),
-		match: opt(str({ description: "For set, with window: only a line that contains this text counts, such as ERROR." })),
-		id: opt(str({ description: "For remove, required: the wake (w2), or all." })),
-	});
+	// Keep one flat object at the root for chat templates, but use `if`/`then` constraints to require each
+	// action's fields and reject fields that belong to the other action. The root never branches between shapes.
+	const Parameters = obj(
+		{
+			action: oneOf(["set", "remove"], { description: "set: set a wake, with `note` and exactly one trigger. remove: take one back, with `id`." }),
+			note: opt(str({ minLength: 1, maxLength: NOTE_MAX, pattern: "\\S", description: `For set, required: what to look at or do when it fires, written for yourself. One line, at most ${NOTE_MAX} characters.` })),
+			every: opt(int({ minimum: config.wakeMin, maximum: EVERY_MAX, description: `For set: a number of seconds, ${config.wakeMin} or more. Alone: wake after this long, and again each time it passes. With path or window: the least time between two wakes, default ${config.wakeMin}.` })),
+			times: opt(int({ minimum: 0, description: "For set: how often it fires before it is removed. Default 1. 0: until you remove it." })),
+			path: opt(str({ minLength: 1, description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes you when it appears." })),
+			window: opt(str({ minLength: 1, description: "For set: wake when this shell window prints something." })),
+			match: opt(str({ minLength: 1, description: "For set, with window: only a line that contains this text counts, such as ERROR." })),
+			id: opt(str({ minLength: 1, pattern: "^(all|w[0-9]+)$", description: "For remove, required: the wake (w2), or all." })),
+		},
+		{
+			allOf: [
+				{
+					if: { properties: { action: { const: "set" } }, required: ["action"] },
+					then: {
+						required: ["note"],
+						anyOf: [
+							{ required: ["every"], not: { anyOf: [{ required: ["path"] }, { required: ["window"] }] } },
+							{ required: ["path"], not: { required: ["window"] } },
+							{ required: ["window"], not: { required: ["path"] } },
+						],
+						not: { required: ["id"] },
+					},
+				},
+				{
+					if: { properties: { action: { const: "set" }, match: {} }, required: ["action", "match"] },
+					then: { required: ["window"] },
+				},
+				{
+					if: { properties: { action: { const: "remove" } }, required: ["action"] },
+					then: { required: ["id"], not: { anyOf: [{ required: ["note"] }, { required: ["every"] }, { required: ["times"] }, { required: ["path"] }, { required: ["window"] }, { required: ["match"] }] } },
+				},
+			],
+		},
+	);
 	return defineTool({
 		name: "wake",
 		description: [

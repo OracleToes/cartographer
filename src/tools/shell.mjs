@@ -92,13 +92,31 @@ export function shellTool({ config, runner, windows, runOf }) {
 						"run (the default): type `command` into the window. read: more of its output. wait: return when its command ends, prints `until`, or after `seconds`. send: type `text` as a line into the program that runs there. stop: press Ctrl-C. close: end the window and everything in it.",
 				}),
 			),
-			command: opt(str({ description: "run: the command line, as you would type it in bash" })),
-			window: opt(str({ description: `Name of the window, a short word such as server or tests. A name that is not open yet opens a new window. Default: ${MAIN_WINDOW}.` })),
-			wait: opt(int({ description: `run: seconds to wait for the command to end before returning. Default ${config.shellWait}, at most ${WAIT_MAX}. 0 returns at once.` })),
+			command: opt(str({ minLength: 1, pattern: "\\S", description: "run: the command line, as you would type it in bash" })),
+			window: opt(str({ minLength: 1, description: `Name of the window, a short word such as server or tests. A name that is not open yet opens a new window. Default: ${MAIN_WINDOW}.` })),
+			wait: opt(int({ minimum: 0, maximum: WAIT_MAX, description: `run: seconds to wait for the command to end before returning. Default ${config.shellWait}, at most ${WAIT_MAX}. 0 returns at once.` })),
 			text: opt(str({ description: "send: the line to type. The line end is added." })),
-			seconds: opt(int({ description: `wait: the longest to wait. Default ${config.shellWait}, at most ${WAIT_MAX}. send: how long to wait for the program's answer, default 5.` })),
-			until: opt(str({ description: "wait: return as soon as a new line of output contains this text, such as the line a server prints when it is ready." })),
-			lines: opt(int({ description: "read: how many lines, counted from the end. Default 40, at most 400." })),
+			seconds: opt(int({ minimum: 0, maximum: WAIT_MAX, description: `wait: the longest to wait. Default ${config.shellWait}, at most ${WAIT_MAX}. send: how long to wait for the program's answer, default 5.` })),
+			until: opt(str({ minLength: 1, description: "wait: return as soon as a new line of output contains this text, such as the line a server prints when it is ready." })),
+			lines: opt(int({ minimum: 1, maximum: 400, description: "read: how many lines, counted from the end. Default 40, at most 400." })),
+		}, {
+			allOf: [
+				...[
+					["run", ["command"], ["text", "seconds", "until", "lines"]],
+					["read", ["window"], ["command", "wait", "text", "seconds", "until"]],
+					["wait", ["window"], ["command", "wait", "text", "lines"]],
+					["send", ["window", "text"], ["command", "wait", "until", "lines"]],
+					["stop", ["window"], ["command", "wait", "text", "seconds", "until", "lines"]],
+					["close", ["window"], ["command", "wait", "text", "seconds", "until", "lines"]],
+				].map(([action, required, forbidden]) => ({
+					if: { properties: { action: { const: action } }, required: ["action"] },
+					then: { required, not: { anyOf: forbidden.map((key) => ({ required: [key] })) } },
+				})),
+				{
+					if: { not: { required: ["action"] } },
+					then: { required: ["command"], not: { anyOf: ["text", "seconds", "until", "lines"].map((key) => ({ required: [key] })) } },
+				},
+			],
 		}),
 		// The output is bounded by src/sandbox.mjs, which keeps its end. These limits are above that bound, so the
 		// harness never cuts a result, and with it the line that says how the command ended.

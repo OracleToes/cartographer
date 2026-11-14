@@ -117,7 +117,7 @@ export function changeTools({ root, brainDir, write = {} }) {
 			name: "write",
 			description: "Create a NEW file of the project with a short piece of boilerplate. `write` refuses to replace an existing file and will not write a long one: build and grow files with `edit`, one exact passage at a time. Folders are created as needed.",
 			parameters: obj({
-				path: str({ description: "Path relative to the project directory" }),
+				path: str({ minLength: 1, pattern: "\\S", description: "Path relative to the project directory" }),
 				content: str({ description: "The whole text of the file" }),
 			}),
 			executionMode: "sequential",
@@ -129,8 +129,8 @@ export function changeTools({ root, brainDir, write = {} }) {
 			name: "edit",
 			description: "Replace one passage of a text file. `old_text` must match exactly one place in the file, so copy it from what `read` showed you, without the line numbers.",
 			parameters: obj({
-				path: str({ description: "Path relative to the project directory" }),
-				old_text: str({ description: "The passage to replace, exactly as it is in the file" }),
+				path: str({ minLength: 1, pattern: "\\S", description: "Path relative to the project directory" }),
+				old_text: str({ minLength: 1, description: "The passage to replace, exactly as it is in the file" }),
 				new_text: str({ description: "What replaces it. An empty string deletes the passage." }),
 			}),
 			executionMode: "sequential",

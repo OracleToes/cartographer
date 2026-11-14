@@ -17,7 +17,7 @@ export function chatTool({ brainDir } = {}) {
 			"Say something to the user. This is the only way they read anything from you: plain text outside this call is a note to yourself.",
 			"It does not wait for an answer; to wait for one, use `ask`. For the main agent, called alone it ends the turn and the user speaks next; together with another call in the same reply, you go on working. A task that calls it carries on.",
 		].join(" "),
-		parameters: obj({ text: str({ description: "What the user reads. Plain sentences; no program text, which belongs in files." }) }),
+		parameters: obj({ text: str({ minLength: 1, pattern: "\\S", description: "What the user reads. Plain sentences; no program text, which belongs in files." }) }),
 		executionMode: "sequential",
 		replay: "safe",
 		execute: async (args, api) => {

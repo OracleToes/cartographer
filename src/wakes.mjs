@@ -23,7 +23,7 @@ export const WAKE_MIN = 60;
 /** Triggers that can be set at a time. */
 export const WAKES_MAX = 8;
 export const NOTE_MAX = 300;
-const EVERY_MAX = 7 * 24 * 3600;
+export const EVERY_MAX = 7 * 24 * 3600;
 /** Files of a watched folder that are compared; a larger folder is watched by its first files only. */
 const FILES_MAX = 2000;
 const SKIP = new Set([".git", ".atlas", "node_modules"]);

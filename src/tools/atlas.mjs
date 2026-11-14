@@ -39,10 +39,10 @@ const Op = union([
 		},
 		{ description: "Rewrite the node of that name: the gist is replaced, links and files are added to the ones it has." },
 	),
-	obj({ action: lit("link"), name: name(), links: links("to link to"), files: files("to link to") }, { description: "Add links to a node, without rewriting it." }),
-	obj({ action: lit("unlink"), name: name(), links: links("to stop linking to"), files: files("to stop linking to") }, { description: "Take links off a node." }),
+	obj({ action: lit("link"), name: name(), links: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "Node names to link to." })), files: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "Project paths to link to." })) }, { anyOf: [{ required: ["links"] }, { required: ["files"] }], description: "Add links to a node, without rewriting it." }),
+	obj({ action: lit("unlink"), name: name(), links: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "Node names to stop linking to." })), files: opt(arr(str({ minLength: 1 }), { minItems: 1, description: "Project paths to stop linking to." })) }, { anyOf: [{ required: ["links"] }, { required: ["files"] }], description: "Take links off a node." }),
 	obj(
-		{ action: lit("confirm"), names: arr(str(), { description: "Nodes that were checked against their files and still hold." }) },
+		{ action: lit("confirm"), names: arr(str({ minLength: 1 }), { minItems: 1, description: "Nodes that were checked against their files and still hold." }) },
 		{ description: "Say that nodes marked as possibly out of date are still true, after their files were looked at." },
 	),
 	obj({ action: lit("remove"), name: name() }, { description: "Delete a node and every link to it." }),

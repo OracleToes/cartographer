@@ -19,7 +19,7 @@ export function returnTool({ brainDir }) {
 			"The main agent sees `report` and nothing else you did.",
 		].join(" "),
 		parameters: obj({
-			report: str({ description: "Everything the main agent needs: what you found or changed, with file paths and line numbers, and what you could not find or do." }),
+			report: str({ minLength: 1, pattern: "\\S", description: "Everything the main agent needs: what you found or changed, with file paths and line numbers, and what you could not find or do." }),
 			done: bool({ description: "true when the brief is carried out. false when something is left; say what in the report. For a plan item, true marks the item done." }),
 			summary: opt(str({ description: "One or two lines the main agent keeps of this task after its context is collapsed. Leave out, and the start of the report is used." })),
 			shelf: opt(str({ description: "Files on your shelf to put on the main agent's shelf as well: paths, separated by commas. Leave out for none." })),

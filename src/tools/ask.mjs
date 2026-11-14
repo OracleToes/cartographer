@@ -24,8 +24,8 @@ export function askTool({ brainDir, asks }) {
 			"With `choices`, the user can pick one by its number; they can also type an answer of their own.",
 		].join(" "),
 		parameters: obj({
-			text: str({ description: "The question, as the user reads it. One question, in plain sentences." }),
-			choices: opt(arr(str(), { description: "A few short answers to pick from. Leave out when the answer is open." })),
+			text: str({ minLength: 1, pattern: "\\S", description: "The question, as the user reads it. One question, in plain sentences." }),
+			choices: opt(arr(str({ minLength: 1 }), { minItems: 2, maxItems: 9, description: "A few short answers to pick from. Leave out when the answer is open." })),
 		}),
 		executionMode: "sequential",
 		// After a restart the question is put again, unless it was answered before.

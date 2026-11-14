@@ -102,8 +102,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 		description:
 			"Hand one self-contained piece of work to a task. The task continues from your context and ends by returning a report; only the report comes back to you. Without `item` the task only looks: read, search, list. With `item`, it carries out that item of the plan, and for a change item it can also write and edit files and run commands.",
 		parameters: obj({
-			brief: str({ description: "What the task must do, and what its report must contain" }),
-			item: opt(str({ description: "The plan item this task carries out (p2). Leave out for a task that only looks." })),
+			brief: str({ minLength: 1, pattern: "\\S", description: "What the task must do, and what its report must contain" }),
+			item: opt(str({ minLength: 2, pattern: "^p[0-9]+$", description: "The plan item this task carries out (p2). Leave out for a task that only looks." })),
 		}),
 		// One model, one context: when a turn asks for several tasks they run in order, not at once.
 		executionMode: "sequential",

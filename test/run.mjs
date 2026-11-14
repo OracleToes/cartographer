@@ -27,6 +27,9 @@ import { atlasTool } from "../src/tools/atlas.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { compile } from "@earendil-works/pi-schema";
+import { shellTool } from "../src/tools/shell.mjs";
+import { wakeTool } from "../src/tools/wake.mjs";
 import { confine, listProject, LookError, projectFiles, readOne, searchProject } from "../src/tools/look.mjs";
 import { findProject, setUpBrain } from "../src/project.mjs";
 import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
@@ -647,7 +650,7 @@ test("task: `return` needs a report, and a task that writes nothing at all is en
 	try {
 		const empty = await carto(root, server, ["-p", `task: ${['return: {"report":"  ","done":true}', "read: a.txt"].join("\\n")}`]);
 		ok(empty, "a return without a report");
-		has(resultsOf(server, "return")[0], "`report` is empty, so the task has not ended. Call `return` again with the report: what you found or changed, and what is left.", "it is refused");
+		has(resultsOf(server, "return")[0], "report: expected to match \\S", "the return schema refuses an empty report");
 		has(empty.stdout, "│ read a.txt", "and the task goes on");
 		assert.match(empty.stdout, /\n◂ report t1 {2}\d+ characters/, "until it returns with one");
 
@@ -1055,6 +1058,49 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	has(loadPlan(brain).error, 'item 1 needs a "mode" that is one of look, change', "a wrong mode");
 	writeFileSync(join(brain, "carto-plan.json"), "{ not json");
 	has(loadPlan(brain).error, "is not valid JSON", "a broken file");
+});
+
+test("tool schemas: every action accepts only its own valid shape", () => {
+	const book = compile(bookTool({}).parameters);
+	for (const [args, valid, note] of [
+		[{ book: "plan", ops: [{ action: "add", mode: "change", text: "build it" }] }, true, "plan add"],
+		[{ book: "plan", ops: [{ action: "add", mode: "change" }] }, false, "plan add without text"],
+		[{ book: "plan", ops: [{ action: "remove", text: "wrong field" }] }, false, "plan remove with unrelated text"],
+		[{ book: "ledger", ops: [{ action: "add", kind: "goal", text: "finish" }] }, false, "ledger goal without done_when"],
+		[{ book: "ledger", ops: [{ action: "add", kind: "note", text: "remember" }] }, true, "ledger note"],
+		[{ book: "plan", ops: [{ action: "add", mode: "look", text: "read only", network: true }] }, false, "look plan item with a change-only flag"],
+		[{ book: "prompt", ops: [{ action: "edit", target: "testing", text: "Do this carefully.", why: "The earlier wording confused me." }] }, true, "prompt proposal"],
+		[{ book: "prompt", ops: [{ action: "remove", target: "testing" }] }, false, "prompt proposal without its reason"],
+		[{ book: "context", ops: [{ action: "shelve", path: "src/a.mjs", text: "wrong" }] }, false, "context operation with unrelated field"],
+		[{ book: "books", ops: [{ action: "add", kind: "assessment", text: "the project" }] }, true, "books add"],
+		[{ book: "books", text: "legacy assessment", ops: [{ action: "add", kind: "assessment", text: "also this" }] }, false, "ambiguous legacy and operation forms"],
+	]) assert.equal(book.check(args), valid, note);
+
+	const shell = compile(shellTool({ config: { shellWait: 5 }, runner: { mode: "none" }, windows: {}, runOf: () => undefined }).parameters);
+	for (const [args, valid, note] of [
+		[{ command: "npm test" }, true, "default shell run"],
+		[{ action: "run", command: "npm test" }, true, "explicit shell run"],
+		[{ action: "run" }, false, "run without command"],
+		[{ action: "read", window: "tests" }, true, "read window"],
+		[{ action: "read", window: "tests", command: "npm test" }, false, "read with run-only field"],
+		[{ action: "send", window: "tests", text: "yes" }, true, "send line"],
+		[{ action: "send", window: "tests" }, false, "send without text"],
+	]) assert.equal(shell.check(args), valid, note);
+
+	const wake = compile(wakeTool({ wakes: {}, config: { wakeMin: 60, wakesMax: 8 } }).parameters);
+	for (const [args, valid, note] of [
+		[{ action: "set", note: "check the build", every: 60 }, true, "timed wake"],
+		[{ action: "set", note: "check the build", path: "src" , every: 120 }, true, "file wake with interval"],
+		[{ action: "set", note: "check the build", path: "src", window: "tests" }, false, "two wake triggers"],
+		[{ action: "set", note: "check the build", match: "ERROR", every: 60 }, false, "match without window"],
+		[{ action: "remove", id: "all" }, true, "remove wake"],
+		[{ action: "remove", id: "all", note: "also set" }, false, "remove with set-only field"],
+	]) assert.equal(wake.check(args), valid, note);
+
+	const atlas = compile(atlasTool({}).parameters);
+	assert.equal(atlas.check({ ops: [{ action: "add", name: "entry", gist: "one line" }] }), true, "atlas add shape");
+	assert.equal(atlas.check({ ops: [{ action: "add", name: "entry" }] }), false, "atlas add requires gist");
+	assert.equal(atlas.check({ ops: [{ action: "look", name: "entry", gist: "unrelated" }] }), false, "atlas look excludes add fields");
 });
 
 test("plan: a missing item text shows the exact call and a corrected example", async () => {
@@ -3055,7 +3101,7 @@ test("assessment: the main agent writes it and a task cannot; it reaches the top
 		const told = server.requests.filter(isTask).map((request) => messageText(request.messages.at(-1)));
 		assert.ok(told.some((text) => text.includes("The assessment belongs to the main agent. If it should change, say so in your report.")), `the task is told: ${JSON.stringify(told.slice(-2))}`);
 		ok(await carto(root, server, ["-p", `assess: ${"x".repeat(ASSESSMENT_MAX + 1)}`]), "an assessment that is too long");
-		has(messageText(server.requests.at(-1).messages.at(-1)), "The assessment is 3001 characters; the limit is 3000.", "is refused with the limit");
+		has(messageText(server.requests.at(-1).messages.at(-1)), "text: expected at most 3000 characters", "the schema refuses an assessment over its limit");
 		assert.equal(readFileSync(file, "utf8"), "A demo project.\nTwo files, no build step.\n", "and the file is as it was");
 
 		const shown = await carto(root, server, [], { input: lines("/assessment") });
@@ -3655,10 +3701,10 @@ test("wake: a task can neither set a wake nor sleep; what the tool refuses", asy
 		ok(result, "a session with refused wakes");
 		has(resultsOf(server, "wake")[0], "Tool call blocked: Wakes belong to the main agent. If something should be watched after this task, say what in your report. To wait for a command inside this task, use `shell` with action wait.");
 		has(resultsOf(server, "sleep")[0], "Tool call blocked: A task does not sleep. You are still the task. When its work is finished, call `return` with your report; until then, go on with the brief.");
-		has(result.stdout, "● wake  not changed: `every` is 5; it is a whole number of seconds from 60 to 604800. A wake costs a whole turn, so 1 m is the least.\n", "the default least interval is a minute, and the screen shows a refusal");
+		has(result.stdout, "● wake  not changed: Validation failed for tool \"wake\": - every: expected >= 60", "the schema refuses a wake shorter than the configured minimum");
 		has(result.stdout, "● wake  not changed: No wake is set.\n", "removing what is not there");
-		has(result.stdout, "● wake  not changed: A wake needs a `note`: what you want to look at or do when it fires, written for yourself.\n", "a wake without a note");
-		has(result.stdout, "● wake  not changed: remove needs `id`: the wake to take back, or all. No wake is set.\n", "removing without saying which");
+		has(result.stdout, "Validation failed for tool \"wake\": - note: missing", "the wake schema requires a note");
+		has(result.stdout, "Validation failed for tool \"wake\": - id: missing", "the wake schema requires an id to remove");
 		// What a tool takes is an object with named properties at the top, for every tool: a choice between shapes
 		// there is something chat templates and models handle badly.
 		for (const tool of server.requests[0].tools) {
@@ -3853,7 +3899,7 @@ test("chat: what the agent says to the user goes through `chat`; plain text is a
 		assert.ok(after.includes("Note to self: I keep this to myself.") && after.includes("Note to self: Noted for myself."), `notes are marked as notes in every request:\n${after.join("\n")}`);
 		hasNot(JSON.stringify(after), "Note to self: Note to self", "once");
 
-		has(result.stdout, "● chat  not shown: `text` is empty, so nothing was shown to the user.\n", "an empty `chat` is refused and the turn goes on");
+		has(result.stdout, "Validation failed for tool \"chat\": - text: expected at least 1 characters", "the chat schema refuses an empty message and the turn goes on");
 
 		// The times: a message that follows a `chat` came after the turn had ended, not during work.
 		has(stateOf(server.requests.at(-1)), "The user's newest message came just now.\n", "the state block does not take the user's next message for one sent during work");
@@ -3906,7 +3952,7 @@ test("ask: a question waits for the user's answer, which comes back as the resul
 		assert.deepEqual(resultsOf(server, "ask").slice(0, 3), ["The user answered: blue", "The user answered: the usual one", "The user answered: spaces, please"], "a number picks a choice, and anything else is the answer as typed");
 		has(result.stdout, "? What port?\n  Type your answer. The agent waits for it.\n› the usual one\n", "without choices the user just replies");
 		has(result.stdout, "? Tabs or spaces?\n    1  tabs\n    2  spaces\n  Type a number, or an answer of your own. The task waits for it.\n› spaces, please\n│ read a.txt", "a task can ask too, and goes on with the answer");
-		has(result.stdout, "refused: `text` is empty, so nothing was asked.", "a question needs words");
+		has(result.stdout, "Validation failed for tool \"ask\": - text: expected at least 1 characters", "the ask schema refuses an empty question");
 		// Nobody left to answer: the agent is told and goes on.
 		has(result.stdout, "? Anyone there?\n  Type your answer. The agent waits for it.\n  nobody is at the terminal to answer: the agent is told and goes on\n", "when the input has ended, the question does not wait forever");
 		has(resultsOf(server, "ask").at(-1), "No answer: nobody is at the terminal: its input has ended. The question stays on their screen. Go on with what you can decide yourself and say what you assumed, or leave the matter open.", "and the agent is told what to do then");
@@ -4663,8 +4709,8 @@ test("context: the main agent can drop a report from view and get it back; notes
 		assert.deepEqual(contextStore(root).dropped, []);
 		// What the tool refuses.
 		has(result.stdout, "● context  nothing done: A note of this kind is for a task's own steps. What you need after a collapse belongs in the ledger", "the main agent's notes go to the brain");
-		has(result.stdout, "● context  nothing done: fold needs `id`: the report to drop from view, like t12.", "no id");
-		has(result.stdout, 'refused: Validation failed for tool "book": - ops.0.action: expected one of ["add","edit","done","remove","before","cl…', "an unknown action is refused by the tool's schema");
+		has(result.stdout, "Validation failed for tool \"book\": - ops.0.id: missing", "the context action schema requires an id for fold");
+		has(result.stdout, 'ops.0.action: expected one of ["recall","shelve","unshelve","fold","note","collapse"]', "an unknown context action is refused by the tool's schema");
 	} finally {
 		await server.close();
 	}

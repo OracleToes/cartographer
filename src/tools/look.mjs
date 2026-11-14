@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import { defineTool } from "@earendil-works/pi-durable";
-import { arr, bool, num, obj, opt, str } from "@earendil-works/pi-schema";
+import { arr, bool, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { BRAIN } from "../project.mjs";
 
 const READ_DEFAULT_LINES = 300;
@@ -272,9 +272,9 @@ export function lookTools(root) {
 			name: "read",
 			description: `Read text files of the project, with line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless you set \`limit\`.`,
 			parameters: obj({
-				paths: arr(str(), { description: "Paths relative to the project directory" }),
-				offset: opt(num({ description: "First line to read, counting from 1. Default 1." })),
-				limit: opt(num({ description: `How many lines of each file. Default ${READ_DEFAULT_LINES}, at most ${READ_MAX_LINES}.` })),
+				paths: arr(str({ minLength: 1, pattern: "\\S" }), { minItems: 1, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
+				offset: opt(int({ minimum: 1, description: "First line to read, counting from 1. Default 1." })),
+				limit: opt(int({ minimum: 1, maximum: READ_MAX_LINES, description: `How many lines of each file. Default ${READ_DEFAULT_LINES}, at most ${READ_MAX_LINES}.` })),
 			}),
 			replay: "safe",
 			execute: async (args) => {
@@ -291,11 +291,11 @@ export function lookTools(root) {
 			description:
 				"Search the text of the project's files for a regular expression. Returns matching lines as path:line: text. Files that git ignores are not searched.",
 			parameters: obj({
-				pattern: str({ description: "Regular expression (JavaScript syntax). Plain words work too." }),
-				path: opt(str({ description: "Folder or file to search in, relative to the project. Default: the whole project." })),
-				glob: opt(str({ description: "Only files whose name matches, for example *.ts" })),
+				pattern: str({ minLength: 1, description: "Regular expression (JavaScript syntax). Plain words work too." }),
+				path: opt(str({ minLength: 1, pattern: "\\S", description: "Folder or file to search in, relative to the project. Default: the whole project." })),
+				glob: opt(str({ minLength: 1, description: "Only files whose name matches, for example *.ts" })),
 				ignore_case: opt(bool({ description: "Match upper and lower case alike. Default false." })),
-				max: opt(num({ description: `Most matching lines to return. Default ${SEARCH_DEFAULT}, at most ${SEARCH_MAX}.` })),
+				max: opt(int({ minimum: 1, maximum: SEARCH_MAX, description: `Most matching lines to return. Default ${SEARCH_DEFAULT}, at most ${SEARCH_MAX}.` })),
 			}),
 			replay: "safe",
 			execute: async (args) => {
@@ -312,8 +312,8 @@ export function lookTools(root) {
 			name: "list",
 			description: "List the files of the project or of one folder, as a tree with sizes. Files that git ignores are not listed.",
 			parameters: obj({
-				path: opt(str({ description: "Folder relative to the project. Default: the project directory." })),
-				depth: opt(num({ description: "How many levels to show. Default 2, at most 6." })),
+				path: opt(str({ minLength: 1, pattern: "\\S", description: "Folder relative to the project. Default: the project directory." })),
+				depth: opt(int({ minimum: 1, maximum: 6, description: "How many levels to show. Default 2, at most 6." })),
 			}),
 			replay: "safe",
 			execute: async (args) => {
