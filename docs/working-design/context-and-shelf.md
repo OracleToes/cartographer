@@ -10,7 +10,7 @@
 4. **Load other tool schemas on demand.** A full schema for a tool should be brought into the current context only when that tool is about to be used, rather than keeping every full schema in every request. Keep it available through validation; after a successful call, remove the temporary schema material but retain the successful exact call pattern and result as an example.
 5. **Collapse should organize memory, not just trim it.** As a session grows, cluster useful chat and context into structured blocks corresponding to the user's visible areas: chat, atlas, ledger, plan, requests, tree, books, shells, thinking, notes to self, and tool results. Treat the clusters as a loose stack rather than a fixed-order outline: order or regroup by recency, and only reorganize as deeply as needed. Keep the newest tail relatively raw/frayed. Preserve exact information where needed and retain links/provenance so a summary does not replace a source of truth.
 6. **Centralize configuration-like values throughout the codebase.** Avoid scattered magic numbers, fixed control words/strings, default choices, thresholds, flags, and toggles; values such as `control: { terminate: true }` in `src/tools/chat.mjs` belong in the central configuration surface. This does not mean mechanically moving ordinary local implementation variables. Preserve behavior while doing the broad configuration sweep.
-7. **Integrate the curated-row and shared entries-engine design.** Context has two row species: composed entries and curated rows, with an estimated 250–350 tokens saved (estimate unverified). Give verbs per audience and row: the agent may fold/recall; the user alone may archive/delete. Support `when: now | next-boundary`, make collapse an action, and dissolve the `REPORT` special case in `ops.mjs`. Use the entries engine for plan/proposal CRUD via specs-with-hooks, while keeping authorization logic hand-rolled and separate.
+7. **Integrate the curated-row and shared entries-engine design.** Context has two row species: composed entries, generated from task/tool history (for example, a report plus metadata), and curated rows, independently selected and editable. An estimated 250–350 token saving is unverified. Give verbs per audience and row: the agent may fold/recall; the user alone may archive/delete. `when: now | next-boundary` controls context visibility, not whether the underlying operation is persisted: persist the row operation immediately; `now` inserts its contents into active context immediately, while `next-boundary` makes it available at the next collapse/boundary. Collapse is an action; `now` means finish the current tool call/round safely and start the next model request from the collapsed context. Dissolve the `REPORT` special case in `ops.mjs`. Use the entries engine for plan/proposal CRUD via specs-with-hooks, while keeping authorization logic hand-rolled and separate.
 
 ## Confirmed direction
 
@@ -42,6 +42,7 @@
 ## Open design questions
 
 - What exact shelf commands and syntax should the agent see? Should the existing unified `book` remain the single public tool? Preserve conditional validation.
+- For plan/proposal CRUD on the shared entries engine, should the engine own only row CRUD (add/edit/done/remove/reorder), with proposal approve/reject handled as domain decisions that apply prompt-overlay side effects? Or should proposal decisions be exposed as spec hooks while plan authorization remains hand-rolled? This needs discussion before Stage 2.
 - What are the durable collapse clusters (for example: goal/acceptance criteria, decisions, findings, open questions, successful call patterns, and shelf index)? Which information must remain verbatim?
 - How should schema references resolve and remain tied to the exact schema version/content used?
 - How much context headroom does the largest full tool schema require, and does normal collapse reliably occur before that headroom is consumed?
@@ -71,9 +72,10 @@ This is a sequencing proposal, not authorization to start implementation. Review
 
 ### Stage 2 — curated rows and shared entry operations
 
-- Model the two context row species explicitly: composed entries and curated rows. The expected reduction of roughly 250–350 tokens is an estimate to measure, not a guaranteed saving.
+- Model the two context row species explicitly: composed entries generated from task/tool history (e.g. a report plus metadata), and independently selected/editable curated rows. Measure the proposed 250–350 token saving rather than treating it as guaranteed.
 - Make each row's allowed operations audience-specific: the agent may fold/recall; the user alone may archive/delete. Keep those authority boundaries enforced in the API, not only in UI affordances.
-- Represent operation timing as `when: now | next-boundary`; make collapse an explicit action with its timing semantics rather than a separate special case.
+- `when: now | next-boundary` controls context visibility; persist the underlying row operation immediately. `now` inserts the row into active context immediately; `next-boundary` makes it visible at the next collapse/boundary.
+- Make collapse an explicit action. For the main agent, `when: now` means finish the current tool call/round safely, then start the next model request from the collapsed context.
 - Dissolve the `REPORT` special case in `ops.mjs` by bringing reports into the shared row/operation model without losing report recall, fold, archive, or delete semantics.
 - Use the shared entries engine for plan/proposal CRUD through specs-with-hooks, while keeping plan authorization logic hand-rolled and separate from generic CRUD.
 - Add or update acceptance tests for both row species, audience restrictions, timing, collapse, report operations, and plan/proposal CRUD; do not run them until Stage 7.
