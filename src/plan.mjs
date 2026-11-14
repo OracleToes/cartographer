@@ -14,13 +14,15 @@
 //
 // The plan lives in <project>/.atlas/carto-plan.json as plain JSON. The user can
 // read and edit it; it is read again every time it is needed.
+import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const MODES = ["look", "change"];
+export const MODES = POLICY.enums.planModes;
+const ITEM_ID = new RegExp(POLICY.patterns.planId);
 /** One item is one line; the open items ride along with every request. */
-export const ITEM_MAX = 300;
-export const ITEMS_MAX = 30;
+export const ITEM_MAX = POLICY.limits.plan.itemChars;
+export const ITEMS_MAX = POLICY.limits.plan.items;
 
 export class PlanError extends Error {}
 
@@ -48,21 +50,21 @@ export function loadPlan(brainDir) {
 	for (const [index, item] of raw.items.entries()) {
 		const where = `${path}, item ${index + 1}`;
 		if (item === null || typeof item !== "object") return { error: `${where} is not an object` };
-		if (typeof item.id !== "string" || !/^p\d+$/.test(item.id)) return { error: `${where} needs an "id" like "p3"` };
+		if (typeof item.id !== "string" || !ITEM_ID.test(item.id)) return { error: `${where} needs an "id" like "p3"` };
 		if (seen.has(item.id)) return { error: `${where} repeats the id ${item.id}` };
 		if (!MODES.includes(item.mode)) return { error: `${where} needs a "mode" that is one of ${MODES.join(", ")}` };
 		if (typeof item.text !== "string" || item.text.trim() === "") return { error: `${where} needs a "text"` };
 		seen.add(item.id);
-		const kept = { ...item, text: flat(item.text), status: item.status === "done" ? "done" : "open" };
+		const kept = { ...item, text: flat(item.text), status: item.status === POLICY.enums.entryStatus.done ? POLICY.enums.entryStatus.done : POLICY.enums.entryStatus.open };
 		// Only a change item runs commands, so only there does the mark mean anything.
-		if (kept.network === true && kept.mode === "change") kept.network = true;
+		if (kept.network === true && kept.mode === POLICY.enums.planMode.change) kept.network = true;
 		else delete kept.network;
-		if (kept.standing === true && kept.mode === "change") kept.standing = true;
+		if (kept.standing === true && kept.mode === POLICY.enums.planMode.change) kept.standing = true;
 		else delete kept.standing;
 		items.push(kept);
 	}
 	// Ids are never reused, also when the counter in the file is missing or behind.
-	const highest = items.reduce((max, item) => Math.max(max, Number(item.id.slice(1))), 0);
+	const highest = items.reduce((max, item) => Math.max(max, Number(item.id.slice(POLICY.idPrefixes.plan.length))), 0);
 	const next = Number.isInteger(raw.next) && raw.next > highest ? raw.next : highest + 1;
 	const plan = { version: 1, next, items };
 	if (typeof raw.authorized === "string" && raw.authorized !== "") plan.authorized = raw.authorized;
@@ -76,13 +78,13 @@ export function savePlan(brainDir, plan) {
 	renameSync(`${path}.tmp`, path);
 }
 
-export const openItems = (plan, mode) => plan.items.filter((item) => item.status === "open" && item.archived !== true && (mode === undefined || item.mode === mode));
+export const openItems = (plan, mode) => plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && (mode === undefined || item.mode === mode));
 
 /** Whether a change item may run now. */
 export const isAuthorized = (plan) => plan.authorized !== undefined;
 
 /** Whether the user's /approve is what the plan waits for. */
-export const awaitsApproval = (plan) => !isAuthorized(plan) && openItems(plan, "change").length > 0;
+export const awaitsApproval = (plan) => !isAuthorized(plan) && openItems(plan, POLICY.enums.planMode.change).length > 0;
 /** Whether any request waits on the plan: an open change item that neither the whole-plan approval nor its own covers. */
 export const planWaits = (plan) => !isAuthorized(plan) && waiting(plan).length > 0;
 /** Open items that are finished by being carried out once; a standing item is a duty and stays open. */
@@ -107,7 +109,7 @@ function checked(value) {
 
 /** One line for an item, as the agent and the user see it. */
 export function itemLine(item) {
-	const outcome = item.status === "done" && item.outcome ? ` → ${item.outcome}` : "";
+	const outcome = item.status === POLICY.enums.entryStatus.done && item.outcome ? ` → ${item.outcome}` : "";
 	const undone = item.undone ? " (undone by the user: the files are as they were before this item ran)" : "";
 	return `${item.id} [${item.mode}${item.network ? ", network" : ""}${item.standing ? ", standing" : ""}] ${item.text}${outcome}${undone}`;
 }
@@ -131,24 +133,24 @@ export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 		return !yolo;
 	};
 	const marks = (target, wanted) => {
-		if (wanted.network === true && target !== "change") throw new PlanError("`network` goes with a change item: only a change task runs commands.");
-		if (wanted.standing === true && target !== "change") throw new PlanError("`standing` goes with a change item: a look item needs no authorization and can be carried out as often as you like.");
+		if (wanted.network === true && target !== POLICY.enums.planMode.change) throw new PlanError("`network` goes with a change item: only a change task runs commands.");
+		if (wanted.standing === true && target !== POLICY.enums.planMode.change) throw new PlanError("`standing` goes with a change item: a look item needs no authorization and can be carried out as often as you like.");
 	};
 	switch (op?.action) {
-		case "add": {
+		case POLICY.enums.actions.add: {
 			if (!MODES.includes(op.mode)) throw new PlanError(`\`mode\` is ${JSON.stringify(op.mode)}; it is look (the task only reads) or change (the task writes files).`);
 			const text = checked(op.text);
 			if (plan.items.length >= ITEMS_MAX) throw new PlanError(`The plan has ${ITEMS_MAX} items, which is its limit. Remove finished ones, or clear the plan.`);
 			marks(op.mode, op);
-			const item = { id: `p${plan.next}`, mode: op.mode, text, ...(op.network === true ? { network: true } : {}), ...(op.standing === true ? { standing: true } : {}), status: "open", added: now };
+			const item = { id: `${POLICY.idPrefixes.plan}${plan.next}`, mode: op.mode, text, ...(op.network === true ? { network: true } : {}), ...(op.standing === true ? { standing: true } : {}), status: POLICY.enums.entryStatus.open, added: now };
 			let at = plan.items.length;
 			if (op.before !== undefined && op.before !== "") at = plan.items.indexOf(find(plan, op.before));
 			plan.next++;
 			plan.items.splice(at, 0, item);
-			const withdrawn = op.mode === "change" && withdraw();
+			const withdrawn = op.mode === POLICY.enums.planMode.change && withdraw();
 			return { line: `${item.id} added.${withdrawn ? ` ${WITHDRAWN}` : ""}`, shown: `+ ${itemLine(item)}`, withdrawn };
 		}
-		case "edit": {
+		case POLICY.enums.actions.edit: {
 			const item = find(plan, op.id);
 			const hasText = op.text !== undefined && flat(op.text) !== "";
 			const hasMode = op.mode !== undefined && op.mode !== "";
@@ -163,24 +165,24 @@ export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 			if (hasMode) item.mode = op.mode;
 			const hadNetwork = item.network === true;
 			if (hasNetwork && op.network) item.network = true;
-			if ((hasNetwork && !op.network) || item.mode !== "change") delete item.network;
+			if ((hasNetwork && !op.network) || item.mode !== POLICY.enums.planMode.change) delete item.network;
 			const wasStanding = item.standing === true;
 			if (hasStanding && op.standing) item.standing = true;
-			if ((hasStanding && !op.standing) || item.mode !== "change") delete item.standing;
+			if ((hasStanding && !op.standing) || item.mode !== POLICY.enums.planMode.change) delete item.standing;
 			delete item.undone;
 			// Rewording a change item, or making an item one, changes what the user agreed to.
 			const after = `${item.mode} ${item.text} ${hadNetwork || item.network === true} ${wasStanding || item.standing === true}`;
-			const changed = item.mode === "change" && item.status === "open" && before !== after;
+			const changed = item.mode === POLICY.enums.planMode.change && item.status === POLICY.enums.entryStatus.open && before !== after;
 			// Per item: rewording this one asks the user to approve this one again, and leaves its neighbours alone.
 			const reasked = changed && item.approved !== undefined;
 			if (reasked) delete item.approved;
 			const withdrawn = changed && withdraw();
 			return { line: `${item.id} changed.${withdrawn || reasked ? ` ${WITHDRAWN}` : ""}`, shown: `~ ${itemLine(item)}`, withdrawn: withdrawn || reasked };
 		}
-		case "done": {
+		case POLICY.enums.actions.done: {
 			const item = find(plan, op.id);
-			if (item.status === "done") return { line: `${item.id} was already done.`, shown: `✓ ${itemLine(item)}` };
-			item.status = "done";
+			if (item.status === POLICY.enums.entryStatus.done) return { line: `${item.id} was already done.`, shown: `✓ ${itemLine(item)}` };
+			item.status = POLICY.enums.entryStatus.done;
 			item.closed = now;
 			delete item.undone;
 			if (op.text !== undefined && flat(op.text) !== "") item.outcome = checked(op.text);
@@ -192,12 +194,12 @@ export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 					: " Every item is done. Check each open goal against its done-when line and close the ones that are reached; then clear the plan.";
 			return { line: `${item.id} done.${follow}`, shown: `✓ ${itemLine(item)}` };
 		}
-		case "remove": {
+		case POLICY.enums.actions.remove: {
 			const item = find(plan, op.id);
 			plan.items.splice(plan.items.indexOf(item), 1);
 			return { line: `${item.id} removed.`, shown: `- ${itemLine(item)}` };
 		}
-		case "clear": {
+		case POLICY.enums.actions.clear: {
 			const count = plan.items.length;
 			plan.items = [];
 			delete plan.authorized;
@@ -213,7 +215,7 @@ export function planSummary(plan) {
 	if (plan.items.length === 0) return "no plan";
 	const shown = plan.items.filter((item) => item.archived !== true);
 	const done = shown.length - openItems(plan).length;
-	const change = openItems(plan, "change").length;
+	const change = openItems(plan, POLICY.enums.planMode.change).length;
 	const state = change === 0 ? "" : isAuthorized(plan) ? " · authorized" : ` · ${plural(change, "change item")} not authorized`;
 	return `${plural(shown.length, "item")}${done > 0 ? `, ${done} done` : ""}${state}`;
 }
@@ -223,9 +225,9 @@ export const YOLO_LINE = "approval: OFF (yolo) · the agent's change items run w
 
 /** The first line of the plan as text: whether change items may run. */
 export function authorizationLine(plan, { yolo = false } = {}) {
-	if (yolo && openItems(plan, "change").length > 0) return "The user has switched approval off: change items may run without /approve.";
+	if (yolo && openItems(plan, POLICY.enums.planMode.change).length > 0) return "The user has switched approval off: change items may run without /approve.";
 	if (isAuthorized(plan)) return "Authorized by the user: change items may run.";
-	if (openItems(plan, "change").length > 0) return "Not approved: change items wait for the user. Look items may run.";
+	if (openItems(plan, POLICY.enums.planMode.change).length > 0) return "Not approved: change items wait for the user. Look items may run.";
 	return "No change item is open, so nothing needs authorizing.";
 }
 
@@ -239,9 +241,9 @@ export function renderPlan(plan, options = {}) {
 	const lines = [authorizationLine(plan, options)];
 	const shown = plan.items.filter((item) => item.archived !== true);
 	const archived = plan.items.length - shown.length;
-	const done = shown.filter((item) => item.status === "done");
+	const done = shown.filter((item) => item.status === POLICY.enums.entryStatus.done);
 	for (const item of shown) {
-		if (item.status === "open") lines.push(`  ${itemLine(item)}`);
+		if (item.status === POLICY.enums.entryStatus.open) lines.push(`  ${itemLine(item)}`);
 		else if (options.done) lines.push(`  ✓ ${itemLine(item)}`);
 	}
 	if (!options.done && done.length > 0) lines.push(`  (done: ${done.map((item) => item.id).join(", ")})`);
@@ -256,7 +258,7 @@ export function renderPlan(plan, options = {}) {
 export function authorize(plan, now) {
 	plan.authorized = now;
 	for (const item of plan.items) delete item.undone;
-	return openItems(plan, "change").length;
+	return openItems(plan, POLICY.enums.planMode.change).length;
 }
 
 // ─── Approval per item (the Requests system) ───────────────────────────────
@@ -266,7 +268,7 @@ export function authorize(plan, now) {
 
 /** Change items that wait for the user's approval: not covered by whole-plan authorization, not approved one by one. */
 export function waiting(plan) {
-	return openItems(plan, "change").filter((item) => item.approved === undefined && plan.authorized === undefined);
+	return openItems(plan, POLICY.enums.planMode.change).filter((item) => item.approved === undefined && plan.authorized === undefined);
 }
 
 /** Whether this change item may run now: approval switched off, whole-plan /approve, or its own approval. */
@@ -282,7 +284,7 @@ export function mayRun(plan, item, yolo = false) {
  * @returns {{ approved: string[], unknown: string[] }} ids approved, and ids that named no open change item
  */
 export function approve(plan, now, ids) {
-	const open = openItems(plan, "change");
+	const open = openItems(plan, POLICY.enums.planMode.change);
 	const wanted = ids === undefined ? open.map((item) => item.id) : ids.filter((id) => typeof id === "string" && id !== "");
 	const approved = [];
 	const unknown = [];

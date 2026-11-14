@@ -5,6 +5,7 @@
 // is said, and a collapse keeps the last of it word for word (src/context.mjs). `chat` never waits for an answer;
 // `ask` does (src/tools/ask.mjs). For the main agent a reply whose only call is `chat` ends the turn. A task that
 // calls it carries on: a task ends with `return` alone.
+import { POLICY } from "../config.mjs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { obj, str } from "@earendil-works/pi-schema";
 import { noteChat } from "../context.mjs";
@@ -17,9 +18,9 @@ export function chatTool({ brainDir } = {}) {
 			"Say something to the user. This is the only way they read anything from you: plain text outside this call is a note to yourself.",
 			"It does not wait for an answer; to wait for one, use `ask`. For the main agent, called alone it ends the turn and the user speaks next; together with another call in the same reply, you go on working. A task that calls it carries on.",
 		].join(" "),
-		parameters: obj({ text: str({ minLength: 1, pattern: "\\S", description: "What the user reads. Plain sentences; no program text, which belongs in files." }) }),
+		parameters: obj({ text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "What the user reads. Plain sentences; no program text, which belongs in files." }) }),
 		executionMode: "sequential",
-		replay: "safe",
+		replay: POLICY.enums.toolReplay.safe,
 		execute: async (args, api) => {
 			if (String(args.text ?? "").trim() === "") return { isError: true, output: [{ type: "text", text: "`text` is empty, so nothing was shown to the user." }] };
 			if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), args.text);
@@ -29,7 +30,7 @@ export function chatTool({ brainDir } = {}) {
 				output: [{ type: "text", text: "Shown to the user." }],
 				details: { chat: true },
 				// Alone in a reply, this ends the turn: the user speaks next.
-				control: { terminate: true },
+				control: { ...POLICY.control.terminate },
 			};
 		},
 	});

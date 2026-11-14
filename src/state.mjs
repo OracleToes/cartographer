@@ -13,6 +13,7 @@
 //
 // A task does not get the block. Its prompt is the main agent's stored conversation
 // plus the brief.
+import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
 import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
 import { loadLedger, open, renderLedger } from "./ledger.mjs";
@@ -24,8 +25,8 @@ import { loadTop, sinceTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
 import { isNote } from "./wake.mjs";
 
-const OPEN = "<state>";
-const CLOSE = "</state>";
+const OPEN = POLICY.markup.state.open;
+const CLOSE = POLICY.markup.state.close;
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const HEAD = "Written by Cartographer, not by the user. This is the current state; it replaces any state you saw before.";
 
@@ -33,11 +34,11 @@ const FIRST = "Answer the user's newest message first.";
 /** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
 const MAP =
 	"You need not sit idle meanwhile: in the same reply you may start a look task that maps a part of the project the graph says nothing about, and has what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is yours to decide.";
-const names = (list, max = 12) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
+const names = (list, max = POLICY.limits.state.listedNames) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
 
 /** What the block says the agent should do next. One situation, one instruction. `yolo`: approval is switched off. */
 function direction(ledger, plan, yolo = false) {
-	const goals = open(ledger, "goal").length > 0;
+	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
 	if (plan === undefined || plan.items.length === 0) {
 		if (goals) {
 			return `${FIRST} Beyond that, work toward the open goals. If reaching one needs changes to the project, find out what you need with look tasks, then write the plan. When a goal is reached, close it and tell the user what was achieved.`;
@@ -68,7 +69,7 @@ function direction(ledger, plan, yolo = false) {
 	}
 	if (waits) {
 		const wait = "Change items wait for the user: show them the plan in a few lines and ask them to type /approve.";
-		if (next.mode === "look") return `${FIRST} Beyond that, carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
+		if (next.mode === POLICY.enums.planMode.look) return `${FIRST} Beyond that, carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
 		return `${FIRST} ${wait} Do not start ${next.id} before that.${noGoal} ${MAP}`;
 	}
 	return `${FIRST} Beyond that, carry out the plan: ${next.id} is next. Call \`task\` with its id and a brief, and mark it done when the report and the record of changed files show that it is.${standing}${noGoal}`;
@@ -139,18 +140,20 @@ function clock(messages, now) {
 	return began === at ? `${said} ${newest}` : `${said} ${newest} You have been working since their message of ${ago(now - messages[began].timestamp)}.`;
 }
 
-const short = (command, max = 80) => {
+const short = (command, max = POLICY.limits.state.commandSummaryChars) => {
 	const [line, ...more] = String(command ?? "").split("\n");
 	return line.length > max ? `${line.slice(0, max)}…` : more.length > 0 ? `${line} …` : line;
 };
 
-const WINDOWS_OPEN = "<windows>";
-const WINDOWS_CLOSE = "</windows>";
+const WINDOWS_OPEN = POLICY.markup.windows.open;
+const WINDOWS_CLOSE = POLICY.markup.windows.close;
+const WINDOWS_BLOCK = new RegExp(`\\n*${WINDOWS_OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${WINDOWS_CLOSE}`, "g");
+const STATE_BLOCK = new RegExp(`\\n*${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}`, "g");
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const WINDOWS_HEAD = "Written by Cartographer, not by the user. The shell windows as they are at this moment:";
 /** Lines of output shown for a window that is busy, unless the settings say otherwise; a free one shows FREE_TAIL. */
-export const WINDOW_TAIL = 10;
-const FREE_TAIL = 3;
+export const WINDOW_TAIL = DEFAULTS.windowTail;
+const FREE_TAIL = POLICY.limits.state.freeWindowTail;
 
 /**
  * The shell windows as they stand: what runs in each, for how long, and its newest lines. A block of its own at the
@@ -173,7 +176,7 @@ export function windowsBlock(windows, { tail = WINDOW_TAIL } = {}) {
 
 /** Text with any windows block removed. */
 export function withoutWindows(text) {
-	return text.replace(/\n*<windows>\nWritten by Cartographer[\s\S]*?\n<\/windows>/g, "");
+	return text.replace(WINDOWS_BLOCK, "");
 }
 
 /**
@@ -184,20 +187,20 @@ export function windowLines(windows, tail = {}) {
 	const lines = [];
 	for (const win of windows) {
 		const marks = `${win.sandbox === false ? " · no sandbox" : win.network ? " · network" : ""}`;
-		if (win.state === "gone") {
+		if (win.state === POLICY.enums.windowStates.gone) {
 			lines.push(`  ${win.name} · gone: ${win.why}${win.command ? `, and \`${short(win.command)}\` ended with it` : ""}. \`window\` close clears this line.`);
 			continue;
 		}
 		const place = win.cwd !== "." ? `, in ${win.cwd}/` : "";
-		if (win.state === "busy") {
+		if (win.state === POLICY.enums.windowStates.busy) {
 			const asks = win.asks ? ` · nothing printed for ${took(win.quiet)} and its last line has no line end: it may be waiting for input` : "";
 			lines.push(`  ${win.name} · busy for ${took(win.running)} with \`${short(win.command)}\`${place}${marks}${asks}`);
-			for (const line of win.tail.slice(-(tail.busy ?? WINDOW_TAIL))) lines.push(`    | ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
+			for (const line of win.tail.slice(-(tail.busy ?? WINDOW_TAIL))) lines.push(`    | ${line.length > POLICY.limits.state.outputLineChars ? `${line.slice(0, POLICY.limits.state.outputLineChars)}…` : line}`);
 		} else {
 			const last = win.last ? ` · last: \`${short(win.last.command)}\` ended with exit ${win.last.exit}, ${ago(win.last.ago)}` : " · nothing was run in it yet";
 			lines.push(`  ${win.name} · free${place}${marks}${last}`);
 			// The command line itself is already above; show what it printed last.
-			for (const line of win.tail.filter((entry) => !entry.startsWith("$ ")).slice(-(tail.free ?? FREE_TAIL))) lines.push(`    | ${line.length > 200 ? `${line.slice(0, 200)}…` : line}`);
+			for (const line of win.tail.filter((entry) => !entry.startsWith("$ ")).slice(-(tail.free ?? FREE_TAIL))) lines.push(`    | ${line.length > POLICY.limits.state.outputLineChars ? `${line.slice(0, POLICY.limits.state.outputLineChars)}…` : line}`);
 		}
 	}
 	return lines;
@@ -229,7 +232,7 @@ function atlasText(brainDir, root, config, now) {
 	}
 	const stale = staleNodes(root, atlas, now);
 	if (stale.length > 0) {
-		lines.push(`May be out of date: ${stale.slice(0, 12).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > 12 ? `; and ${stale.length - 12} more` : ""}. Have a task check each against its files, then rewrite the node, or confirm it when it still holds.`);
+		lines.push(`May be out of date: ${stale.slice(0, POLICY.limits.terminal.staleNodes).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > POLICY.limits.terminal.staleNodes ? `; and ${stale.length - POLICY.limits.terminal.staleNodes} more` : ""}. Have a task check each against its files, then rewrite the node, or confirm it when it still holds.`);
 	}
 	return `${head}${lines.join("\n")}\n\n`;
 }
@@ -270,7 +273,7 @@ export function stateBlock(brainDir, runner, more = {}) {
 
 /** Text with any state block removed (for display, and for the tests' stand-in). */
 export function withoutState(text) {
-	return text.replace(/\n*<state>\nWritten by Cartographer[\s\S]*?\n<\/state>/g, "");
+	return text.replace(STATE_BLOCK, "");
 }
 
 /**

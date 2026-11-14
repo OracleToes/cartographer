@@ -20,6 +20,7 @@ import { applyOp, LedgerError, loadLedger, OPEN_MAX, renderLedger, saveLedger, T
 import { applyPlanOp, authorize, ITEM_MAX, loadPlan, openOnce, PlanError, planSummary, renderPlan, savePlan, YOLO_LINE } from "../src/plan.mjs";
 import { withoutAdditions, withTimes } from "../src/request.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "../src/state.mjs";
+import { DEFAULTS, POLICY } from "../src/config.mjs";
 import { ago, STAMP, stamp, took } from "../src/time.mjs";
 import { loadTop, noteAssessed, pin, sinceTop, topPath, withoutTop, withTop } from "../src/top.mjs";
 import { drawTree, treeSection } from "../src/tree.mjs";
@@ -75,6 +76,27 @@ const tests = [];
 /** A test that must run with no other test beside it takes `{ alone: true }`: it changes something that
  * every other test reads while it runs — one swaps this process's environment for its shell windows. */
 const test = (name, run, { alone = false } = {}) => tests.push({ name, run, alone });
+
+test("configuration policy is deeply immutable", () => {
+	assert.ok(Object.isFrozen(DEFAULTS));
+	assert.ok(Object.isFrozen(DEFAULTS.shellRead));
+	assert.ok(Object.isFrozen(POLICY.limits.windows));
+	assert.ok(Object.isFrozen(POLICY.enums.shellActions));
+	assert.ok(Object.isFrozen(POLICY.enums.actions));
+	assert.ok(Object.isFrozen(POLICY.enums.entryStatus));
+	assert.ok(Object.isFrozen(POLICY.enums.ledgerKind));
+	assert.ok(Object.isFrozen(POLICY.enums.planMode));
+	assert.ok(Object.isFrozen(POLICY.enums.wakeKinds));
+	assert.ok(Object.isFrozen(POLICY.enums.windowWaitReasons));
+	assert.ok(Object.isFrozen(POLICY.enums.bookName));
+	assert.ok(Object.isFrozen(POLICY.enums.shellAction));
+	assert.ok(Object.isFrozen(POLICY.enums.atlasActions));
+	assert.ok(Object.isFrozen(POLICY.limits.tree.branchCaps));
+	assert.ok(Object.isFrozen(POLICY.idPrefixes.ledger));
+	assert.ok(Object.isFrozen(POLICY.markup.note));
+	assert.throws(() => POLICY.limits.windows.open++, TypeError);
+	assert.throws(() => POLICY.enums.shellActions.push("restart"), TypeError);
+});
 
 /** A throwaway project with a few files. `git: true` makes it a repository.
  * Tests that run beside each other must not share a folder (a project holds a lock, and its brain one
@@ -1070,7 +1092,7 @@ test("tool schemas: every action accepts only its own valid shape", () => {
 	const advertisedBook = compile(bookDefinition.parameters);
 	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add" }], text: "wrong place" }), false, "the model-facing condition disallows root text for a plan");
 	assert.equal(advertisedBook.check({ book: "books", text: "legacy assessment" }), true, "the legacy root-text form remains available for books");
-	for (const name of ["ledger", "plan", "prompt", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a compact ${name} example`);
+	for (const name of ["ledger", "plan", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a compact ${name} example`);
 	const acceptsBook = (args) => {
 		try {
 			bookDefinition.prepareArguments(args);
@@ -1086,8 +1108,6 @@ test("tool schemas: every action accepts only its own valid shape", () => {
 		[{ book: "ledger", ops: [{ action: "add", kind: "goal", text: "finish" }] }, false, "ledger goal without done_when"],
 		[{ book: "ledger", ops: [{ action: "add", kind: "note", text: "remember" }] }, true, "ledger note"],
 		[{ book: "plan", ops: [{ action: "add", mode: "look", text: "read only", network: true }] }, false, "look plan item with a change-only flag"],
-		[{ book: "prompt", ops: [{ action: "edit", target: "testing", text: "Do this carefully.", why: "The earlier wording confused me." }] }, true, "prompt proposal"],
-		[{ book: "prompt", ops: [{ action: "remove", target: "testing" }] }, false, "prompt proposal without its reason"],
 		[{ book: "context", ops: [{ action: "shelve", path: "src/a.mjs", text: "wrong" }] }, false, "context operation with unrelated field"],
 		[{ book: "books", ops: [{ action: "add", kind: "assessment", text: "the project" }] }, true, "books add"],
 		[{ book: "books", text: "legacy assessment", ops: [{ action: "add", kind: "assessment", text: "also this" }] }, false, "ambiguous legacy and operation forms"],
@@ -4971,7 +4991,7 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.equal(book.anyOf ?? book.oneOf, undefined);
 		assert.deepEqual(book.required, ["book"]);
 		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
-		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "prompt", "books", "context"]);
+		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "books", "context"]);
 		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays flat");
 		assert.ok(JSON.stringify(book).length < 1000, "the transmitted book schema is a compact dispatch shape");
 		assert.deepEqual(book.properties.ops.items.required, ["action"], "the compact dispatch shape keeps the action tag required");
@@ -6133,8 +6153,7 @@ test("the books: /archive, /unarchive and /delete reach every book the agent kee
 		writeFileSync(join(brainDir, "carto-ledger.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "g1", kind: "goal", text: "Keep the lights on", doneWhen: "they stay on", status: "open", added: "2026-01-01T00:00:00.000Z" }] }, null, "\t")}\n`);
 		writeFileSync(join(brainDir, "carto-plan.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "p1", mode: "change", text: "Run things" }] }, null, "\t")}\n`);
 		writeFileSync(join(brainDir, "carto-atlas.json"), `${JSON.stringify({ nodes: [{ name: "alpha", gist: "First.", links: ["beta"] }, { name: "beta", gist: "Second." }] }, null, "\t")}\n`);
-		writeFileSync(join(brainDir, "carto-proposals.json"), `${JSON.stringify({ next: 2, items: [{ id: "x1", action: "edit", target: "approach", text: "Be brief.", why: "shorter replies", at: Date.now() }] }, null, "\t")}\n`);
-		const result = await carto(root, server, [], { input: lines("/archive g1 p1", "/ledger", "/plan", "/unarchive p1", "/delete g1", "/delete beta", "/atlas", "/delete alpha x1 zz", "/delete t1") });
+		const result = await carto(root, server, [], { input: lines("/archive g1 p1", "/ledger", "/plan", "/unarchive p1", "/delete g1", "/delete beta", "/atlas", "/delete alpha zz", "/delete t1") });
 		ok(result, "the commands run");
 		has(result.stdout, "g1 archived: the goal leaves the ledger as the agent reads it", "/archive archives a ledger entry");
 		has(result.stdout, "p1 archived: the item leaves the plan as the agent reads it", "and a plan item");
@@ -6146,7 +6165,6 @@ test("the books: /archive, /unarchive and /delete reach every book the agent kee
 		has(result.stdout, "g1 is gone for good: the goal is out of the ledger, and nothing of it is said to the agent.", "/delete takes a ledger entry away for good");
 		has(result.stdout, "beta is gone for good: the node is out of the graph, and 1 link to it went with it", "/delete takes a node away, and its links with it");
 		has(result.stdout, "alpha is gone for good: the node is out of the graph", "and another");
-		has(result.stdout, "x1 is forgotten: the proposal is out of the book, and nothing of it is said to the agent.", "/delete forgets a prompt proposal");
 		has(result.stdout, "There is no zz. a report is t1", "an id that names nothing is refused, with the books named");
 		has(result.stdout, "t1 deleted: the record line is gone", "a report goes by the words of the context store");
 		assert.ok(!existsSync(join(brainDir, "reports", "t1.md")), "and the report's file is gone with it");
@@ -6190,7 +6208,7 @@ test("screen: Ctrl-C clears what is typed; twice on the empty line leaves; Ctrl-
 	}
 });
 
-test("screen: in Requests, a approves, n turns down, and d forgets a request without a word to the agent", async () => {
+test("screen: in Requests, a approves a change item and n turns down a question", async () => {
 	const root = makeProject("screen-requests", { git: false });
 	const server = await startStandIn();
 	try {
@@ -6198,7 +6216,6 @@ test("screen: in Requests, a approves, n turns down, and d forgets a request wit
 		const brainDir = join(root, ".atlas");
 		writeFileSync(join(brainDir, "carto-ledger.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Blue or red?", status: "open", added: "2026-01-01T00:00:00.000Z" }] }, null, "\t")}\n`);
 		writeFileSync(join(brainDir, "carto-plan.json"), `${JSON.stringify({ version: 1, next: 2, items: [{ id: "p1", mode: "change", text: "Run things" }] }, null, "\t")}\n`);
-		writeFileSync(join(brainDir, "carto-proposals.json"), `${JSON.stringify({ next: 2, items: [{ id: "x1", action: "edit", target: "approach", text: "Be brief.", why: "shorter replies", at: Date.now() }] }, null, "\t")}\n`);
 		const result = await cartoOnScreen(root, server, [], [
 			[0.5, "<ESC>", false],
 			["COMMANDS", "2", false],
@@ -6206,36 +6223,30 @@ test("screen: in Requests, a approves, n turns down, and d forgets a request wit
 			["Ledger", "]", false],
 			["Plan", "]", false],
 			// A refresh selects the first row by itself: a approves p1 where it stands.
-			["3 requests wait for you", "a", false],
+			["2 requests wait for you", "a", false],
 			["approved p1", "", false],
 			// The approve left the session on the Chat tab, typing; go back to the rows.
 			[2.2, "<ESC>", false],
 			["COMMANDS", "2", false],
-			["2 requests wait for you", "n", false],
+			["1 request waits for you", "n", false],
 			["q1 turned down", "", false],
 			[2.2, "<ESC>", false],
-			["COMMANDS", "2", false],
-			["1 request waits for you", "d", false],
-			["Press d again: x1 is forgotten", "d", false],
-			["Nothing waits for you", "<ESC>", false],
 			[0.4, "/quit"],
 		], { rows: 30 });
 		if (result === undefined) return "python3 is needed for a terminal";
-		const asked = result.shots.find((shot) => shot.includes("3 requests wait for you"));
+		const asked = result.shots.find((shot) => shot.includes("2 requests wait for you"));
 		assert.ok(asked, `the requests view shows:\n${result.shots.join("\n────\n")}`);
 		has(asked, "a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "the view says what the keys do");
-		assert.ok(result.shots.some((shot) => shot.includes("Press d again: x1 is forgotten")), `the first d asks, in the words of a forget:\n${result.shots.join("\n────\n")}`);
 		const gone = result.shots.find((shot) => shot.includes("Nothing waits for you"));
-		assert.ok(gone, `the forgotten request leaves the view:\n${result.shots.join("\n────\n")}`);
+		assert.ok(gone, `the last request leaves the view:\n${result.shots.join("\n────\n")}`);
 		has(gone, "Nothing waits for you. The agent goes on with whatever does not depend on an answer.", "the view says what is left");
-		// The approve and the deny were sent; the forget was not.
+		// The approve and the deny were sent to the agent.
 		const said = server.requests.map((request) => rawText(request.messages.at(-1)));
 		assert.equal(said.filter((text) => text.includes("I approved p1")).length, 1, "a approved the change item, and the agent is told");
 		assert.equal(said.filter((text) => text.includes("I turned down q1")).length, 1, "n turned the question down, and the agent is told");
-		assert.equal(server.requests.length, 2, "and the forget says nothing to the agent");
+		assert.equal(server.requests.length, 2, "each request decision is sent to the agent");
 		const ledger = JSON.parse(readFileSync(join(brainDir, "carto-ledger.json"), "utf8"));
 		assert.equal(ledger.items[0].status, "done", "the question was closed by the deny");
-		assert.equal(JSON.parse(readFileSync(join(brainDir, "carto-proposals.json"), "utf8")).items.length, 0, "the proposal is out of the book");
 	} finally {
 		await server.close();
 	}

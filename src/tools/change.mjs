@@ -7,6 +7,7 @@
 //   - not the brain folder `.atlas/` and not `.git/`;
 //   - not a file that git ignores, and not one inside a nested git repository,
 //     because checkpoints leave those out.
+import { POLICY } from "../config.mjs";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { defineTool } from "@earendil-works/pi-durable";
@@ -14,7 +15,7 @@ import { obj, str } from "@earendil-works/pi-schema";
 import { isIgnored } from "../checkpoints.mjs";
 import { BRAIN } from "../project.mjs";
 
-const CONTENT_MAX_BYTES = 1_000_000;
+const CONTENT_MAX_BYTES = POLICY.limits.change.contentBytes;
 
 export class ChangeError extends Error {}
 
@@ -85,7 +86,7 @@ export function editOne(root, brainDir, given, oldText, newText) {
 	const path = confineWrite(root, brainDir, given);
 	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Use \`write\` to create a file`);
 	const buffer = readFileSync(path.abs);
-	if (buffer.subarray(0, 8000).includes(0)) throw new ChangeError(`${path.rel} is not a text file`);
+	if (buffer.subarray(0, POLICY.limits.change.binaryProbeChars).includes(0)) throw new ChangeError(`${path.rel} is not a text file`);
 	const text = buffer.toString("utf8");
 	const first = text.indexOf(oldText);
 	if (first === -1) {
@@ -117,25 +118,25 @@ export function changeTools({ root, brainDir, write = {} }) {
 			name: "write",
 			description: "Create a NEW file of the project with a short piece of boilerplate. `write` refuses to replace an existing file and will not write a long one: build and grow files with `edit`, one exact passage at a time. Folders are created as needed.",
 			parameters: obj({
-				path: str({ minLength: 1, pattern: "\\S", description: "Path relative to the project directory" }),
+				path: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Path relative to the project directory" }),
 				content: str({ description: "The whole text of the file" }),
 			}),
 			executionMode: "sequential",
 			// Writing the same text twice leaves the same file.
-			replay: "safe",
+			replay: POLICY.enums.toolReplay.safe,
 				execute: async (args) => run(() => writeOne(root, brainDir, args.path, args.content, write)),
 		}),
 		defineTool({
 			name: "edit",
 			description: "Replace one passage of a text file. `old_text` must match exactly one place in the file, so copy it from what `read` showed you, without the line numbers.",
 			parameters: obj({
-				path: str({ minLength: 1, pattern: "\\S", description: "Path relative to the project directory" }),
-				old_text: str({ minLength: 1, description: "The passage to replace, exactly as it is in the file" }),
+				path: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Path relative to the project directory" }),
+				old_text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "The passage to replace, exactly as it is in the file" }),
 				new_text: str({ description: "What replaces it. An empty string deletes the passage." }),
 			}),
 			executionMode: "sequential",
 			// Not run a second time after a crash: the passage may already be replaced, and the task reads the file again.
-			replay: "unsafe",
+			replay: POLICY.enums.toolReplay.unsafe,
 			execute: async (args) => run(() => editOne(root, brainDir, args.path, args.old_text, args.new_text)),
 		}),
 	];

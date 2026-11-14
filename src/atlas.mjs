@@ -11,6 +11,7 @@
 //
 // It lives in <project>/.atlas/carto-atlas.json as plain JSON so the user can read
 // and edit it; the file is read again every time it is needed.
+import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -20,16 +21,16 @@ import { confine, LookError } from "./tools/look.mjs";
 import { cleanAnchor, DEPTH_MAX, isFolder } from "./tree.mjs";
 
 /** A node without a kind is a plain node. */
-export const KINDS = ["component", "finding", "dead_end"];
-export const NAME_MAX = 40;
-export const GIST_MAX = 200;
-export const DETAIL_MAX = 2000;
-export const NODES_MAX = 200;
-export const LINKS_MAX = 12;
-export const FILES_MAX = 12;
+export const KINDS = POLICY.enums.atlasKinds;
+export const NAME_MAX = POLICY.limits.atlas.nameChars;
+export const GIST_MAX = POLICY.limits.atlas.gistChars;
+export const DETAIL_MAX = POLICY.limits.atlas.detailChars;
+export const NODES_MAX = POLICY.limits.atlas.nodes;
+export const LINKS_MAX = POLICY.limits.atlas.links;
+export const FILES_MAX = POLICY.limits.atlas.files;
 /** Characters the outline at the top of the context may take; beyond that the oldest nodes are listed by name only. */
-export const OUTLINE_MAX = 6000;
-const BIG_FILE = 5_000_000;
+export const OUTLINE_MAX = POLICY.limits.atlas.outlineChars;
+const BIG_FILE = POLICY.limits.atlas.bigFileBytes;
 
 export class AtlasError extends Error {}
 
@@ -188,7 +189,7 @@ function find(atlas, given) {
 	const node = atlas.nodes.find((entry) => entry.name === name);
 	if (node === undefined) {
 		const names = atlas.nodes.map((entry) => entry.name);
-		const listed = names.length === 0 ? "The graph has no nodes yet." : `Nodes: ${names.slice(0, 40).join(", ")}${names.length > 40 ? `, and ${names.length - 40} more` : ""}.`;
+		const listed = names.length === 0 ? "The graph has no nodes yet." : `Nodes: ${names.slice(0, POLICY.limits.atlas.listedNodes).join(", ")}${names.length > POLICY.limits.atlas.listedNodes ? `, and ${names.length - POLICY.limits.atlas.listedNodes} more` : ""}.`;
 		throw new AtlasError(`There is no node ${name || "(no name given)"}. ${listed}`);
 	}
 	return node;
@@ -263,7 +264,7 @@ function missingLinks(atlas, node) {
 /** One node in full, as `look` shows it. */
 export function renderNode(root, atlas, node, now = Date.now()) {
 	const age = since(node.written, now);
-	const lines = [`${node.name} (${kindWord(node)})${age === undefined ? "" : ` · written ${ago(age)}`}${node.by ? ` by ${node.by === "task" ? "a task" : node.by === "main" ? "the main agent" : "the user"}` : ""}`, node.gist];
+	const lines = [`${node.name} (${kindWord(node)})${age === undefined ? "" : ` · written ${ago(age)}`}${node.by ? ` by ${node.by === POLICY.enums.atlasAuthors.task ? "a task" : node.by === POLICY.enums.atlasAuthors.main ? "the main agent" : "the user"}` : ""}`, node.gist];
 	if (node.detail) lines.push("Detail:", node.detail);
 	if (node.files.length > 0) {
 		lines.push("Files:");
@@ -310,8 +311,8 @@ function unmet(base, missing, say) {
 export function applyAtlasOp(atlas, op, who) {
 	const { root, now } = who;
 	switch (op?.action) {
-		case "add":
-		case "edit": {
+		case POLICY.enums.atlasActions.add:
+		case POLICY.enums.atlasActions.edit: {
 			const name = normName(op.name);
 			if (name === "") throw new AtlasError("`name` is required: a short name for the node, such as dice_roll.");
 			if (name.length > NAME_MAX) throw new AtlasError(`The name is ${name.length} characters; the limit is ${NAME_MAX}.`);
@@ -328,8 +329,8 @@ export function applyAtlasOp(atlas, op, who) {
 			const links = checkedLinks(op.links, name);
 			let node = atlas.nodes.find((entry) => entry.name === name);
 			const fresh = node === undefined;
-			if (op.action === "add" && !fresh) throw new AtlasError(`There is a node ${name} already; \`edit\` rewrites it.`);
-			if (op.action === "edit" && fresh) throw new AtlasError(`There is no node ${name} to edit; \`add\` writes a new one.`);
+			if (op.action === POLICY.enums.atlasActions.add && !fresh) throw new AtlasError(`There is a node ${name} already; \`edit\` rewrites it.`);
+			if (op.action === POLICY.enums.atlasActions.edit && fresh) throw new AtlasError(`There is no node ${name} to edit; \`add\` writes a new one.`);
 			if (fresh) {
 				if (atlas.nodes.length >= NODES_MAX) throw new AtlasError(`The graph has ${NODES_MAX} nodes, which is its limit. Remove nodes that no longer matter, or fold several into one.`);
 				node = { name, gist, links: [], files: [], seen: {} };
@@ -359,13 +360,13 @@ export function applyAtlasOp(atlas, op, who) {
 				changed: true,
 			};
 		}
-		case "link":
-		case "unlink": {
+		case POLICY.enums.atlasActions.link:
+		case POLICY.enums.atlasActions.unlink: {
 			const node = find(atlas, op.name);
-			const files = op.action === "link" ? checkedFiles(root, op.files, who.created, who.mayCreate === true) : (Array.isArray(op.files) ? op.files : []).map(cleanAnchor);
+			const files = op.action === POLICY.enums.atlasActions.link ? checkedFiles(root, op.files, who.created, who.mayCreate === true) : (Array.isArray(op.files) ? op.files : []).map(cleanAnchor);
 			const links = checkedLinks(op.links, node.name);
 			if (files.length === 0 && links.length === 0) throw new AtlasError(`\`${op.action}\` needs \`links\` (node names), \`files\` (paths), or both.`);
-			if (op.action === "link") {
+			if (op.action === POLICY.enums.atlasActions.link) {
 				const allFiles = [...new Set([...node.files, ...files])];
 				const allLinks = [...new Set([...node.links, ...links])];
 				if (allFiles.length > FILES_MAX) throw new AtlasError(`That would give ${node.name} ${allFiles.length} file links; the limit is ${FILES_MAX}. Link the folder, or split the node.`);
@@ -388,7 +389,7 @@ export function applyAtlasOp(atlas, op, who) {
 			stampFiles(root, node, []);
 			return { line: `${node.name} no longer links to ${had.join(", ")}.`, shown: `~ ${kindWord(node)} ${nodeLine(node)}`, changed: true };
 		}
-		case "confirm": {
+		case POLICY.enums.atlasActions.confirm: {
 			const given = Array.isArray(op.names) ? op.names : op.name !== undefined ? [op.name] : [];
 			if (given.length === 0) throw new AtlasError("`names` is required: the nodes you checked and found still true.");
 			const lines = [];
@@ -408,7 +409,7 @@ export function applyAtlasOp(atlas, op, who) {
 			if (done.length === 0) throw new AtlasError(lines.join(" "));
 			return { line: lines.join(" "), shown: `✓ confirmed ${done.join(", ")}`, changed: true };
 		}
-		case "remove": {
+		case POLICY.enums.atlasActions.remove: {
 			const node = find(atlas, op.name);
 			atlas.nodes.splice(atlas.nodes.indexOf(node), 1);
 			let dropped = 0;
@@ -419,7 +420,7 @@ export function applyAtlasOp(atlas, op, who) {
 			}
 			return { line: `${node.name} removed.${dropped > 0 ? ` ${plural(dropped, "link")} to it went with it.` : ""}`, shown: `- ${kindWord(node)} ${node.name}  ${node.gist}`, changed: true };
 		}
-		case "look": {
+		case POLICY.enums.atlasActions.look: {
 			const name = normName(op.name);
 			const node = atlas.nodes.find((entry) => entry.name === name);
 			if (node !== undefined) return { line: renderNode(root, atlas, node, Date.parse(now)), changed: false };
@@ -435,7 +436,7 @@ export function applyAtlasOp(atlas, op, who) {
 			if (about.length === 0) return { line: `No node links to ${rel}.`, changed: false };
 			return { line: [`Nodes that link to ${rel}, or to a folder above it:`, ...about.map((entry) => `  ${nodeLine(entry)}`)].join("\n"), changed: false };
 		}
-		case "tree": {
+		case POLICY.enums.atlasActions.tree: {
 			if (!who.main) throw new AtlasError("The tree's anchor and depth belong to the main agent's view. In a task, `list` shows any folder.");
 			const view = { ...atlas.view };
 			if (op.anchor !== undefined && op.anchor !== null) {

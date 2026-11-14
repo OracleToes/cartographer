@@ -1,3 +1,4 @@
+import { POLICY } from "../config.mjs";
 // The terminal itself: the alternate screen, keys and the mouse as events, and frames written with as little as
 // has changed.
 //
@@ -157,7 +158,7 @@ export function createTerm({ input, output }) {
 				const left = pending;
 				pending = "";
 				if (left === ESC) listener({ type: "key", name: "escape" });
-			}, 40);
+			}, POLICY.timing.escapeSequenceMs);
 		}
 	};
 	const onResize = () => {

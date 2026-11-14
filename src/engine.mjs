@@ -15,6 +15,7 @@
 // Both are plain requests to the model server, sent from here and not through the
 // conversation: they need what the conversation's requests must never have, a fixed
 // reply shape and a different end.
+import { POLICY } from "./config.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { describeCall } from "./terminal.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
@@ -27,7 +28,8 @@ const SCHEMA = {
 	json_schema: { name: "handoff", strict: true, schema: { type: "object", properties: { handoff: { type: "boolean" } }, required: ["handoff"], additionalProperties: false } },
 };
 /** Seconds the question may take. More than this means the server is reading the whole context again. */
-const ASK_SECONDS = 90;
+const ASK_SECONDS = POLICY.timing.context.handoffQuestionSeconds;
+const NOTE_TAG = new RegExp(`(?:${POLICY.markup.note.open}|${POLICY.markup.note.close})\\n?`, "g");
 
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
 
@@ -81,7 +83,7 @@ export function createEngine({ root, brainDir, config }) {
 				signal: signal === undefined ? timer : AbortSignal.any([timer, signal]),
 			});
 			const text = await response.text();
-			if (!response.ok) return { error: `the server answered ${response.status}: ${text.replace(/\s+/g, " ").slice(0, 300)}`, ms: Date.now() - began };
+			if (!response.ok) return { error: `the server answered ${response.status}: ${text.replace(/\s+/g, " ").slice(0, POLICY.limits.engine.serverErrorChars)}`, ms: Date.now() - began };
 			return { json: JSON.parse(text), ms: Date.now() - began };
 		} catch (error) {
 			const aborted = signal?.aborted === true;
@@ -106,16 +108,16 @@ export function createEngine({ root, brainDir, config }) {
 		const body = {
 			...base,
 			messages: [...state.payload.messages, ...(state.reply === undefined ? [] : replyForServer(state.reply, returned)), { role: "user", content: task ? ASK_TASK(reason) : ASK_MAIN(reason) }],
-			stream: false,
-			max_tokens: 16,
-			temperature: 0,
+			stream: POLICY.protocol.askStream,
+			max_tokens: POLICY.limits.engine.askMaxTokens,
+			temperature: POLICY.protocol.askTemperature,
 			// Thinking off for this one request: the answer is one word.
-			chat_template_kwargs: { enable_thinking: false },
+			chat_template_kwargs: { enable_thinking: POLICY.protocol.askThinking },
 			// The tools stay in the request, because the server has read them as part of the prompt. But no call can
 			// be the answer, and with some chat templates llama.cpp cannot build the grammar for "this JSON or a call
 			// of any of these tools" at all: it answers 400 "failed to parse grammar" (seen with the Qwen3.8 template
 			// on build 11913; with tool_choice none the same request is accepted and the prompt is not read again).
-			...(Array.isArray(base.tools) && base.tools.length > 0 ? { tool_choice: "none" } : {}),
+			...(Array.isArray(base.tools) && base.tools.length > 0 ? { tool_choice: POLICY.protocol.noToolChoice } : {}),
 		};
 		// A server that will not take the schema is asked the same question without it, from then on.
 		let answer = noSchema ? undefined : await post({ ...body, response_format: SCHEMA }, { seconds: config.askSeconds ?? ASK_SECONDS });
@@ -134,7 +136,7 @@ export function createEngine({ root, brainDir, config }) {
 		} catch {
 			handoff = /"handoff"\s*:\s*true/.test(said) ? true : /"handoff"\s*:\s*false/.test(said) ? false : undefined;
 		}
-		if (typeof handoff !== "boolean") return { handoff: false, error: `the answer was not the JSON asked for: ${JSON.stringify(String(said).slice(0, 120))}`, ms: answer.ms, ...also };
+		if (typeof handoff !== "boolean") return { handoff: false, error: `the answer was not the JSON asked for: ${JSON.stringify(String(said).slice(0, POLICY.limits.engine.handoffErrorChars))}`, ms: answer.ms, ...also };
 		return { handoff, ms: answer.ms, ...also };
 	}
 
@@ -274,7 +276,7 @@ export function createEngine({ root, brainDir, config }) {
 				midTurn: {
 					by: at.turn?.by ?? "user",
 					reminded: at.turn?.reminded ?? false,
-					...(at.turn?.by === "note" && turnStart !== undefined ? { note: textOf(turnStart).replace(/<\/?cartographer>\n?/g, "").trim().slice(0, 2000) } : {}),
+					...(at.turn?.by === "note" && turnStart !== undefined ? { note: textOf(turnStart).replace(NOTE_TAG, "").trim().slice(0, POLICY.limits.engine.noteChars) } : {}),
 					calls: callsOf(reply).map((call) => ({ text: describeCall(call), result: state.results.get(call.id) ?? "(no result)" })),
 				},
 			});
@@ -357,7 +359,7 @@ export function createEngine({ root, brainDir, config }) {
 			const [dressed] = withTop(withTimes([{ role: "user", content: [{ type: "text", text: front }], timestamp: at }]), loadTop(brainDir)?.text);
 			const body = { ...base, messages: [...system, { role: "user", content: textOf(dressed) }], stream: false, max_tokens: 1 };
 			const controller = new AbortController();
-			const done = post(body, { seconds: config.readAheadSeconds ?? 600, signal: controller.signal }).then((answer) => ({
+			const done = post(body, { seconds: config.readAheadSeconds ?? POLICY.timing.engine.readAheadSeconds, signal: controller.signal }).then((answer) => ({
 				ms: answer.ms,
 				...(answer.error !== undefined ? { error: answer.error, aborted: answer.aborted === true } : { tokens: answer.json?.usage?.prompt_tokens }),
 			}));

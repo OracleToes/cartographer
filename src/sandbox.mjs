@@ -23,6 +23,7 @@
 // bubblewrap does not work, tasks cannot run commands at all, until the user switches
 // the sandbox off (--no-bwrap at launch, /bwrap off while running). Commands then run
 // on the machine itself, as the user.
+import { POLICY } from "./config.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -31,10 +32,10 @@ import { delimiter, dirname, join, sep } from "node:path";
 export class SandboxError extends Error {}
 
 /** The sandbox's own home folder, inside the brain. */
-export const SANDBOX_HOME = "home";
+export const SANDBOX_HOME = POLICY.sentinels.sandboxHome;
 
 /** Places that hold other people's business: each is covered by an empty folder. */
-const HIDDEN = ["/tmp", "/var/tmp", "/run", "/mnt", "/media"];
+const HIDDEN = POLICY.enums.sandboxHiddenDirs;
 
 /**
  * Folders in the home directory where language toolchains keep their programs. Bound read-only when they exist.
@@ -64,11 +65,11 @@ const TOOLCHAINS = [
  * What one result may hold: the start of the output and, when it is longer, its end, each bounded in characters
  * and in lines. The end gets the larger share, because that is where a failure is reported.
  */
-export const HEAD_MAX = 2000;
-export const TAIL_MAX = 8000;
-export const HEAD_LINES = 40;
-export const TAIL_LINES = 160;
-export const LINE_MAX = 1000;
+export const HEAD_MAX = POLICY.limits.sandboxOutput.headChars;
+export const TAIL_MAX = POLICY.limits.sandboxOutput.tailChars;
+export const HEAD_LINES = POLICY.limits.sandboxOutput.headLines;
+export const TAIL_LINES = POLICY.limits.sandboxOutput.tailLines;
+export const LINE_MAX = POLICY.limits.sandboxOutput.lineChars;
 
 const inside = (path, dir) => path === dir || path.startsWith(dir + sep);
 /** A real folder, not a symlink to one: bubblewrap mounts over the path as given. */
@@ -94,7 +95,7 @@ let found;
  */
 export function findSandbox() {
 	if (found !== undefined) return found;
-	const options = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 };
+	const options = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: POLICY.timing.sandbox.toolchainProbeMs };
 	let version;
 	try {
 		version = execFileSync("bwrap", ["--version"], options).trim().replace(/^bubblewrap\s+/, "");
@@ -208,7 +209,7 @@ export class Output {
 		this.#pending = parts.pop();
 		for (const part of parts) this.#line(part);
 		// A line that never ends must not grow without bound.
-		if (this.#pending.length > 64_000) {
+		if (this.#pending.length > POLICY.limits.shellOutput.pendingChars) {
 			this.#line(this.#pending);
 			this.#pending = "";
 		}

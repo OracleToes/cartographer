@@ -20,6 +20,7 @@
 // may write nodes of the atlas. Which nodes it wrote or removed, and which became
 // possibly out of date through its changes, is added to the report the same way.
 import { configure, defineTool } from "@earendil-works/pi-durable";
+import { POLICY } from "../config.mjs";
 import { obj, opt, str } from "@earendil-works/pi-schema";
 import { fileMarks, loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../atlas.mjs";
 import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep } from "../checkpoints.mjs";
@@ -32,7 +33,7 @@ import { treeSection } from "../tree.mjs";
 
 const textOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 const fail = (text, details) => ({ isError: true, output: [{ type: "text", text }], ...(details ? { details } : {}) });
-const listed = (names, max = 20) => `${names.slice(0, max).join(", ")}${names.length > max ? `, and ${names.length - max} more` : ""}`;
+const listed = (names, max = POLICY.limits.taskDisplay.listedNodes) => `${names.slice(0, max).join(", ")}${names.length > max ? `, and ${names.length - max} more` : ""}`;
 
 /** The graph as it stands: what each node says, and which nodes may be out of date. Undefined when it cannot be read. */
 function atlasMark(root, brainDir) {
@@ -55,7 +56,7 @@ function atlasRecord(root, brainDir, before) {
 	const lines = [];
 	if (written.length > 0) lines.push(`Nodes this task wrote: ${listed(written)}.`);
 	if (removed.length > 0) lines.push(`Nodes this task removed: ${listed(removed)}.`);
-	if (stale.length > 0) lines.push(`Nodes that may be out of date after this task: ${stale.slice(0, 12).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > 12 ? `; and ${stale.length - 12} more` : ""}.`);
+	if (stale.length > 0) lines.push(`Nodes that may be out of date after this task: ${stale.slice(0, POLICY.limits.taskDisplay.staleNodes).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > POLICY.limits.taskDisplay.staleNodes ? `; and ${stale.length - POLICY.limits.taskDisplay.staleNodes} more` : ""}.`);
 	return { text: `\n\nCartographer's record of the atlas:\n${lines.join("\n")}`, atlas: { written, removed, stale: stale.map((node) => node.name) } };
 }
 
@@ -75,7 +76,7 @@ function treeNow(root, brainDir, config) {
  * @returns {{ run?: { mode: "look" | "change", item?: string, text?: string, network?: boolean }, refusal?: string }}
  */
 function kindOf(brainDir, item, gate) {
-	if (item === undefined || item === null || String(item).trim() === "") return { run: { mode: "look" } };
+	if (item === undefined || item === null || String(item).trim() === "") return { run: { mode: POLICY.enums.planMode.look } };
 	const { plan, error } = loadPlan(brainDir);
 	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell the user; they have to repair the file. A task without \`item\` can still look.` };
 	const found = plan.items.find((entry) => entry.id === String(item).trim());
@@ -83,13 +84,13 @@ function kindOf(brainDir, item, gate) {
 		const ids = plan.items.map((entry) => entry.id).join(", ");
 		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `plan` first, or leave `item` out for a task that only looks." : `The plan has ${ids}.`}` };
 	}
-	if (found.status === "done") return { refusal: `${found.id} is marked done. For further work, add a new item to the plan.` };
+	if (found.status === POLICY.enums.entryStatus.done) return { refusal: `${found.id} is marked done. For further work, add a new item to the plan.` };
 	// Approval is per item: a change item runs once the user has approved it (requests), once the
 	// whole plan was authorized with /approve, or while approval is switched off. Adding another
 	// item never cancels what was already agreed.
-	if (found.mode === "change" && !mayRun(plan, found, gate?.yolo === true)) return { refusal: REFUSALS.notAuthorized(found.id) };
+	if (found.mode === POLICY.enums.planMode.change && !mayRun(plan, found, gate?.yolo === true)) return { refusal: REFUSALS.notAuthorized(found.id) };
 	// Whether the task's commands reach the network is settled here, with the item as the user authorized it.
-	return { run: { mode: found.mode, item: found.id, text: found.text, ...(found.mode === "change" && found.network === true ? { network: true } : {}) } };
+	return { run: { mode: found.mode, item: found.id, text: found.text, ...(found.mode === POLICY.enums.planMode.change && found.network === true ? { network: true } : {}) } };
 }
 
 /**
@@ -102,13 +103,13 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 		description:
 			"Hand one self-contained piece of work to a task. The task continues from your context and ends by returning a report; only the report comes back to you. Without `item` the task only looks: read, search, list. With `item`, it carries out that item of the plan, and for a change item it can also write and edit files and run commands.",
 		parameters: obj({
-			brief: str({ minLength: 1, pattern: "\\S", description: "What the task must do, and what its report must contain" }),
-			item: opt(str({ minLength: 2, pattern: "^p[0-9]+$", description: "The plan item this task carries out (p2). Leave out for a task that only looks." })),
+			brief: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "What the task must do, and what its report must contain" }),
+			item: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.planId, description: "The plan item this task carries out (p2). Leave out for a task that only looks." })),
 		}),
 		// One model, one context: when a turn asks for several tasks they run in order, not at once.
 		executionMode: "sequential",
 		// Safe to run again after a crash: a rerun finds the fork and the submission it already made.
-		replay: "safe",
+		replay: POLICY.enums.toolReplay.safe,
 		execute: async (args, api, callContext) => {
 			const result = await run(args, api, callContext);
 			// A call that never started a task (an empty brief, a refused item) leaves nothing to keep.
@@ -122,7 +123,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			// The report is kept under an id, and one line of it goes into the record a collapse keeps
 			// (src/context.mjs). The id is taken once, also when this call runs again after a restart.
 			const id = (await api.memo("record", callContext)) ?? (await api.memo("record", reserveId(brainDir), callContext));
-			addRecord(brainDir, { id, at: api.now(), mode: result.details.mode ?? "look", item: result.details.item, brief: args.brief, report: text, summary: result.details.summary, failed: result.isError === true, undone: result.details.done === false, changed: result.details.changes?.length });
+			addRecord(brainDir, { id, at: api.now(), mode: result.details.mode ?? POLICY.enums.planMode.look, item: result.details.item, brief: args.brief, report: text, summary: result.details.summary, failed: result.isError === true, undone: result.details.done === false, changed: result.details.changes?.length });
 			text += `\n\n${KEPT_AS(id)}`;
 			return { ...result, output: [{ type: "text", text }], details: { ...result.details, report: id, ...(handed.added.length > 0 ? { shelved: handed.added } : {}) } };
 		},
@@ -134,12 +135,12 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 
 			// A rerun after a restart finds the task it already started, whatever happened to the plan since.
 			const started = await api.commit(async (tx) => {
-				const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
+				const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, POLICY.limits.taskHistory.startLookupEntries)).items[0];
 				if (existing === undefined) return undefined;
 				// The fork's own entries come right after the entry it was forked at; the brief is among the first.
-				const entries = await tx.scanEntries({ conversationId: existing.id, order: "ascending", minEntryId: existing.parent?.at }, 40);
+				const entries = await tx.scanEntries({ conversationId: existing.id, order: "ascending", minEntryId: existing.parent?.at }, POLICY.limits.taskHistory.contextEntries);
 				const brief = entries.items.find((entry) => entry.conversationId === existing.id && entry.kind === "carto.brief");
-				return { id: existing.id, run: brief?.data ?? { mode: "look" } };
+				return { id: existing.id, run: brief?.data ?? { mode: POLICY.enums.planMode.look } };
 			}, callContext);
 
 			// The graph as it is before the task writes to it. Taken once, also when this call runs again.
@@ -152,8 +153,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				if (kind.run === undefined) return fail(kind.refusal);
 				run = kind.run;
 				// How commands run as the task starts. Kept with the task: its note and its record say it.
-				if (run.mode === "change" && runner.mode === "direct") run.direct = true;
-				if (run.mode === "change") {
+				if (run.mode === POLICY.enums.planMode.change && runner.mode === "direct") run.direct = true;
+				if (run.mode === POLICY.enums.planMode.change) {
 					// The files as they are before the task touches anything. Taken once, also when this call runs again.
 					try {
 						run.before = await api.memo("before", callContext);
@@ -174,7 +175,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				started?.id ??
 				(await api.commit(async (tx) => {
 					// The entry that carries this call is the fork point.
-					const recent = await tx.scanEntries({ conversationId: api.conversationId }, 40);
+					const recent = await tx.scanEntries({ conversationId: api.conversationId }, POLICY.limits.taskHistory.recentEntries);
 					let calls;
 					const at = recent.items.find((entry) =>
 						(entry.model ?? []).some((message) => {
@@ -191,12 +192,12 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					await configure(tx, fork.id, { maxTurns: config.taskTurns + 2 });
 					// Every call of the turn gets a result in the fork: the brief for this one, a note for the others.
 					// The harness sends results in the order of the calls, so a note may come after the brief.
-					const note = run.mode === "change" ? CHANGE_NOTE(run.item, run.text, { commands: run.direct ? "direct" : runner.mode === "none" ? "none" : "sandbox", network: run.network === true }) : LOOK_NOTE;
+					const note = run.mode === POLICY.enums.planMode.change ? CHANGE_NOTE(run.item, run.text, { commands: run.direct ? "direct" : runner.mode === "none" ? "none" : "sandbox", network: run.network === true }) : LOOK_NOTE;
 					let briefGiven = false;
 					const tree = treeNow(root, brainDir, config);
 					for (const call of calls) {
 						const mine = call.id === api.callId;
-						const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === "change" ? "change" : "look"]}\n\n${tree === "" ? "" : `${tree}\n\n`}Brief:\n${args.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
+						const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\n${tree === "" ? "" : `${tree}\n\n`}Brief:\n${args.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
 						if (mine) briefGiven = true;
 						await tx.appendEntry(fork.id, {
 							kind: mine ? "carto.brief" : "carto.sibling",
@@ -233,7 +234,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			ends?.delete(child);
 			// The task's own words, newest last: what it leaves behind when it did not return.
 			const { lastMessage, notes, round } = await api.commit(async (tx) => {
-				const page = await tx.scanEntries({ conversationId: child }, 60);
+				const page = await tx.scanEntries({ conversationId: child }, POLICY.limits.task.historyPageEntries);
 				const own = page.items.filter((entry) => entry.conversationId === child).flatMap((entry) => (entry.model ?? []).filter((message) => message.role === "assistant"));
 				const newest = own[0];
 				const calls = (newest?.content ?? []).filter((part) => part.type === "toolCall");
@@ -241,8 +242,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			}, callContext);
 			let left = "";
 			for (const note of [...notes].reverse()) {
-				if (left.length + note.length > 3000 && left !== "") break;
-				left = `- ${note.length > 3000 ? `${note.slice(0, 3000)}…` : note}\n${left}`;
+				if (left.length + note.length > POLICY.limits.task.noteChars && left !== "") break;
+				left = `- ${note.length > POLICY.limits.task.noteChars ? `${note.slice(0, POLICY.limits.task.noteChars)}…` : note}\n${left}`;
 			}
 			left = left.trimEnd();
 			const said = returned?.report ?? "";
@@ -260,7 +261,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 
 			// What the task changed, from the record. Told to the main agent whether or not the task finished.
 			let record = spoken;
-			if (run.mode === "change" && run.before !== undefined) {
+			if (run.mode === POLICY.enums.planMode.change && run.before !== undefined) {
 				try {
 					const after = (await api.memo("after", callContext)) ?? (await api.memo("after", checkpoint(root, brainDir, `after ${run.item}`), callContext));
 					details.changes = changesBetween(root, brainDir, run.before, after);
@@ -283,10 +284,10 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				record += `\n\nBefore this task started, Cartographer recorded what changed while ${outside.names.length === 1 ? `window ${outside.names[0]}` : `windows ${outside.names.join(", ")}`} ran with no task around, as a step of its own:\n${changeRecord(outside.changes).join("\n")}`;
 			}
 			// The windows that are still at work: they outlive the task.
-			const busy = (windows?.list(0) ?? []).filter((win) => win.state === "busy");
+			const busy = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
 			if (busy.length > 0) {
 				details.windows = busy.map((win) => win.name);
-				record += `\n\nWindows still running after this task: ${busy.map((win) => `${win.name} (\`${win.command.split("\n")[0].slice(0, 80)}\`, for ${took(win.running)})`).join("; ")}. The windows block at the end of the request shows how they are doing.`;
+				record += `\n\nWindows still running after this task: ${busy.map((win) => `${win.name} (\`${win.command.split("\n")[0].slice(0, POLICY.limits.windows.commandSummaryChars)}\`, for ${took(win.running)})`).join("; ")}. The windows block at the end of the request shows how they are doing.`;
 			}
 
 			// What the task did to the graph, the same way.
@@ -295,11 +296,11 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			record += mapped.text;
 
 			const wrote = left === "" ? "It had written nothing." : `What it had written for itself:\n${left}`;
-			if (returned === undefined && settled.status !== "done") {
+			if (returned === undefined && settled.status !== POLICY.enums.entryStatus.done) {
 				const why =
 					settled.reason === "turn_limit"
 						? `it used all its turns without calling \`return\``
-						: `${settled.reason ?? settled.status}${settled.detail ? ` (${String(settled.detail).slice(0, 300)})` : ""}`;
+						: `${settled.reason ?? settled.status}${settled.detail ? ` (${String(settled.detail).slice(0, POLICY.limits.task.settledDetailChars)})` : ""}`;
 				return fail(`The task did not finish: ${why}.\n${wrote}\nGive a narrower brief, or split the work.${record}`, details);
 			}
 			// A reply that hits the output limit ends there. If it was in the middle of a tool call, the call is lost.
@@ -330,8 +331,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 						const { plan } = loadPlan(brainDir);
 						const item = plan?.items.find((entry) => entry.id === run.item);
 						if (item !== undefined && item.standing === true) marked = `\n\n[Cartographer: ${run.item} is a standing item, so it stays open.]`;
-						else if (item !== undefined && item.status !== "done") {
-							applyPlanOp(plan, { action: "done", id: run.item }, api.now(), { yolo: gate?.yolo === true });
+						else if (item !== undefined && item.status !== POLICY.enums.entryStatus.done) {
+							applyPlanOp(plan, { action: POLICY.enums.actions.done, id: run.item }, api.now(), { yolo: gate?.yolo === true });
 							savePlan(brainDir, plan);
 							details.marked = run.item;
 							marked = `\n\n[Cartographer: the task returned done, so ${run.item} is marked done in the plan. If the report or the record below shows that something is missing, add an item for it.]`;

@@ -28,6 +28,7 @@
 //
 // A task has the same means for its own steps, and only for those: what stands in
 // front of its brief is the main agent's and stays as it is (see `dressTask`).
+import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,28 +36,31 @@ import { TASK_HEADER } from "./prompt.mjs";
 import { stamp } from "./time.mjs";
 import { confine, LookError, readOne } from "./tools/look.mjs";
 
-const OPEN = "<context>";
-const CLOSE = "</context>";
+const OPEN = POLICY.markup.context.open;
+const CLOSE = POLICY.markup.context.close;
 const HEAD = "Written by Cartographer, not by the user.";
-const NOTE_OPEN = "<cartographer>";
-const NOTE_CLOSE = "</cartographer>";
+const NOTE_OPEN = POLICY.markup.note.open;
+const NOTE_CLOSE = POLICY.markup.note.close;
+const REPORT_ID = new RegExp(POLICY.patterns.reportId);
+const RECALLED_REPORT = new RegExp(POLICY.patterns.recalledReport);
+const FRONT_BLOCK = new RegExp(`${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
 
 /** Tokens of record lines a front block holds at most; older tasks are counted, not listed. */
-const RECORD_MAX_TOKENS = 3000;
+const RECORD_MAX_TOKENS = POLICY.limits.context.recordTokens;
 /** A collapse that would free less than this is not worth reading the kept part again. */
-export const FLOOR = 1500;
+export const FLOOR = POLICY.limits.context.collapseFloorTokens;
 /** The most of one result of the last reply that the front block quotes. */
-const NOW_MAX_CHARS = 16_000;
+const NOW_MAX_CHARS = POLICY.limits.context.resultChars;
 /** A task's result of at least this many characters gets a tag with its id and size. */
-const TAG_MIN_CHARS = 1200;
+const TAG_MIN_CHARS = POLICY.limits.context.resultTagChars;
 /** Lines of a file the shelf shows at most. */
-const SHELF_MAX_LINES = 1000;
+const SHELF_MAX_LINES = POLICY.limits.context.shelfLines;
 
 export const contextPath = (brainDir) => join(brainDir, "carto-context.json");
 export const reportsDir = (brainDir) => join(brainDir, "reports");
 
 /** A rough count of tokens: four characters each. The server's own count is used wherever there is one. */
-export const estimate = (text) => Math.ceil(String(text ?? "").length / 4);
+export const estimate = (text) => Math.ceil(String(text ?? "").length / POLICY.estimation.charsPerToken);
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const oneLine = (text, max) => {
 	const flat = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -71,7 +75,7 @@ const callsOf = (message) => (Array.isArray(message?.content) ? message.content.
 export function messageTokens(message) {
 	let chars = textOf(message).length + 12;
 	for (const call of callsOf(message)) chars += call.name.length + JSON.stringify(call.arguments ?? {}).length + 24;
-	return Math.ceil(chars / 4);
+	return Math.ceil(chars / POLICY.estimation.charsPerToken);
 }
 
 // ─── The store ───────────────────────────────────────────────────────────────
@@ -115,7 +119,7 @@ export function updateContext(brainDir, change) {
 
 /** The id the next finished task is recorded under. */
 export function reserveId(brainDir) {
-	return updateContext(brainDir, (store) => `t${store.next++}`);
+	return updateContext(brainDir, (store) => `${POLICY.idPrefixes.report}${store.next++}`);
 }
 
 /** The first line of a report that says something. */
@@ -123,8 +127,8 @@ function outcomeOf(report) {
 	const line = String(report ?? "")
 		.split("\n")
 		.map((entry) => entry.replace(/^[#>*\-\s]+/, "").trim())
-		.find((entry) => entry !== "" && !/^REPORT$/i.test(entry));
-	return oneLine(line ?? "(nothing written)", 180);
+		.find((entry) => entry !== "" && entry.toUpperCase() !== POLICY.sentinels.reportHeading);
+	return oneLine(line ?? "(nothing written)", POLICY.limits.context.recordSummaryChars);
 }
 
 /**
@@ -141,9 +145,9 @@ export function addRecord(brainDir, task) {
 			at: task.at,
 			mode: task.mode,
 			...(task.item ? { item: task.item } : {}),
-			brief: oneLine(task.brief, 140),
+			brief: oneLine(task.brief, POLICY.limits.context.briefChars),
 			// What the task itself asked to be remembered by (`summary` of `return`), or the start of its report.
-			outcome: String(task.summary ?? "").trim() !== "" ? oneLine(task.summary, 400) : outcomeOf(task.report),
+			outcome: String(task.summary ?? "").trim() !== "" ? oneLine(task.summary, POLICY.limits.context.summaryChars) : outcomeOf(task.report),
 			...(task.failed ? { failed: true } : {}),
 			...(task.undone && !task.failed ? { undone: true } : {}),
 			...(task.changed > 0 ? { changed: task.changed } : {}),
@@ -156,14 +160,14 @@ export function addRecord(brainDir, task) {
 
 /** A kept report in full, or undefined when there is none under this id. */
 export function loadReport(brainDir, id) {
-	if (!/^t\d+$/.test(String(id))) return undefined;
+	if (!REPORT_ID.test(String(id))) return undefined;
 	const path = join(reportsDir(brainDir), `${id}.md`);
 	return existsSync(path) ? readFileSync(path, "utf8").trimEnd() : undefined;
 }
 
 /** What a task report says at its end, so that the agent knows the id. */
 export const KEPT_AS = (id) => `This report is kept as ${id}.`;
-const KEPT_ALL = /This report is kept as (t\d+)\./g;
+const KEPT_ALL = new RegExp(POLICY.patterns.keptReport, "g");
 /** What follows a report that `context` brought back. */
 export const RECALLED = "[Recalled. It is in view until your context is next collapsed.]";
 /** The id of the report a stored tool result holds in full: as the task returned it, or as it was recalled. */
@@ -172,7 +176,7 @@ function reportIdOf(message) {
 	const text = textOf(message);
 	// The last one counts: a report may quote the line of another.
 	if (message.toolName === "task") return [...text.matchAll(KEPT_ALL)].at(-1)?.[1];
-	if ((message.toolName === "context" || message.toolName === "book") && text.endsWith(RECALLED)) return /^Report (t\d+) · /.exec(text)?.[1];
+	if ((message.toolName === "context" || message.toolName === "book") && text.endsWith(RECALLED)) return RECALLED_REPORT.exec(text)?.[1];
 	return undefined;
 }
 
@@ -305,7 +309,7 @@ function shelfBlock(root, items, max) {
 export const isFront = (message) => message?.role === "user" && textOf(message).startsWith(`${OPEN}\n${HEAD}`);
 
 /** Text with every front block removed (for the tests' stand-in, and for display). */
-export const withoutFront = (text) => text.replace(/<context>\nWritten by Cartographer[\s\S]*?\n<\/context>\n*/g, "");
+export const withoutFront = (text) => text.replace(FRONT_BLOCK, "");
 
 /**
  * Write the front block for a collapse that happens now, and remember what it holds.
@@ -471,7 +475,7 @@ export function stepsOf(messages) {
 			if (text !== "") notes.push(text);
 		} else if (message.role === "toolResult") {
 			const text = textOf(message);
-			results.push({ id: `s${results.length + 1}`, index, call: calls.get(message.toolCallId), tokens: messageTokens(message), chars: text.length, isError: message.isError === true, first: text.split("\n")[0] });
+			results.push({ id: `${POLICY.idPrefixes.taskStep}${results.length + 1}`, index, call: calls.get(message.toolCallId), tokens: messageTokens(message), chars: text.length, isError: message.isError === true, first: text.split("\n")[0] });
 		}
 	}
 	return { start, replies, results, notes };
@@ -482,20 +486,20 @@ export function callWords(call) {
 	if (call === undefined) return "a call";
 	const args = call.arguments ?? {};
 	if (call.name === "read") return `read ${[].concat(args.paths ?? []).join(", ")}${args.offset !== undefined ? ` from line ${args.offset}` : ""}`;
-	if (call.name === "search") return `search /${oneLine(args.pattern, 40)}/${args.path ? ` in ${args.path}` : ""}`;
+	if (call.name === "search") return `search /${oneLine(args.pattern, POLICY.limits.context.searchPatternChars)}/${args.path ? ` in ${args.path}` : ""}`;
 	if (call.name === "list") return `list ${args.path ?? "."}`;
 	if (call.name === "write" || call.name === "edit") return `${call.name} ${args.path ?? ""}`;
-	if (call.name === "shell") return `shell ${oneLine(args.command, 60)}`;
+	if (call.name === "shell") return `shell ${oneLine(args.command, POLICY.limits.context.shellCommandChars)}`;
 	if (call.name === "book") {
 		const ops = Array.isArray(args.ops) ? args.ops : [];
 		if (args.book === "context") {
 			const op = ops[0] ?? {};
-			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", 40)}`.trim();
+			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", POLICY.limits.context.operationChars)}`.trim();
 		}
 		const what = args.book === "plan" ? ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()) : ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim());
-		return `${args.book ?? "book"} ${oneLine(what.join(", "), 60)}`.trim();
+		return `${args.book ?? "book"} ${oneLine(what.join(", "), POLICY.limits.context.bookWordsChars)}`.trim();
 	}
-	return `${call.name} ${oneLine(JSON.stringify(args), 60)}`;
+	return `${call.name} ${oneLine(JSON.stringify(args), POLICY.limits.context.genericCallChars)}`;
 }
 
 /**
@@ -517,7 +521,7 @@ export function supersededBy(steps, args, dropped = {}) {
 		if (old?.name === "read" && !result.isError && dropped[result.id] === undefined) {
 			const oldPaths = [].concat(old.arguments?.paths ?? []);
 			const covered = oldPaths.length > 0 && oldPaths.every((path) => paths.has(path)) && (whole || (old.arguments?.offset === args.offset && old.arguments?.limit === args.limit));
-			if (covered && result.tokens >= 400 && behind <= result.tokens * 8) ids.push(result.id);
+			if (covered && result.tokens >= POLICY.limits.context.usefulResultTokens && behind <= result.tokens * POLICY.limits.context.reuseRatio) ids.push(result.id);
 		}
 		behind += size;
 	}
@@ -538,11 +542,11 @@ export function taskBlock(root, config, steps, state, { reason }) {
 	let used = 0;
 	const keptNotes = [];
 	for (const note of [...notes].reverse()) {
-		if (used + estimate(note) > 4000 && keptNotes.length > 0) break;
+		if (used + estimate(note) > POLICY.limits.context.keptNotesTokens && keptNotes.length > 0) break;
 		used += estimate(note);
 		keptNotes.unshift(note);
 	}
-	const done = steps.results.slice(-60).map((result) => `${result.id} ${callWords(result.call)} → ${result.isError ? "failed: " : ""}${oneLine(result.first, 90)}`);
+	const done = steps.results.slice(-POLICY.limits.context.resultRows).map((result) => `${result.id} ${callWords(result.call)} → ${result.isError ? "failed: " : ""}${oneLine(result.first, POLICY.limits.context.resultFirstChars)}`);
 	const shelf = shelfBlock(root, state.shelf ?? [], config.shelfTokens);
 	return [
 		NOTE_OPEN,

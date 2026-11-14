@@ -6,12 +6,13 @@
 // The clipboard is tried three ways, all of them: OSC 52 (the terminal sets the clipboard itself; inside tmux it
 // needs `set -g set-clipboard on`), tmux's own buffer when carto runs in tmux, and the desktop's tool when one is
 // installed (wl-copy, xclip, xsel, pbcopy).
+import { POLICY } from "../config.mjs";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The most that is sent through OSC 52; terminals drop longer ones. */
-const OSC_MAX = 100_000;
+const OSC_MAX = POLICY.limits.screen.oscChars;
 
 const stamp = (date = new Date()) => {
 	const two = (n) => String(n).padStart(2, "0");
@@ -34,7 +35,7 @@ export function toClipboard(text, { write, env = process.env } = {}) {
 	}
 	const run = (command, args) => {
 		try {
-			const done = spawnSync(command, args, { input: text, stdio: ["pipe", "ignore", "ignore"], timeout: 3000 });
+			const done = spawnSync(command, args, { input: text, stdio: ["pipe", "ignore", "ignore"], timeout: POLICY.limits.screen.copyTimeoutMs });
 			return done.status === 0;
 		} catch {
 			return false;

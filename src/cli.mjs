@@ -1,7 +1,7 @@
 // `carto`, run from a project folder.
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, CORE_DIR, loadConfig } from "./config.mjs";
+import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 
@@ -60,7 +60,7 @@ function parse(argv) {
 async function checkServer(config) {
 	let response;
 	try {
-		response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(5000) });
+		response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
 	} catch (error) {
 		throw new ConfigError(`The model server at ${config.server} does not answer (${error.cause?.code ?? error.message}). Is it running?`);
 	}
@@ -168,7 +168,7 @@ export async function main(argv) {
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, coreDir: CORE_DIR, config, runner, gate, servedModels: served?.models });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
@@ -178,7 +178,6 @@ export async function main(argv) {
 			config,
 			root: project.root,
 			brainDir,
-			coreDir: CORE_DIR,
 			servedModels: served?.models,
 			runner,
 			gate,
@@ -197,7 +196,7 @@ export async function main(argv) {
 		// Work that is still running is not waited for: it is stored, and continues at the next start.
 		// The shell windows are ended by the process's exit (src/windows.mjs), not closed here: closing would
 		// clear the record that lets the next start say which windows were running something and are gone.
-		setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
+		setTimeout(() => process.exit(process.exitCode ?? 0), POLICY.timing.gracefulExitMs).unref();
 		if (session !== undefined) await session.harness.close(session.context).catch(() => {});
 		process.exit(process.exitCode ?? 0);
 	}

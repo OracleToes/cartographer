@@ -6,20 +6,18 @@
 // src/terminal.mjs) do the same work, so the work lives here: an id names a row of one of the books, and each
 // function carries the operation out and returns the line to show.
 //
-// An id is read by its shape: t1 is a report, g1, q2 or n3 a ledger entry, p1 a plan item, x1 a proposal of the
-// agent's own prompt, and anything else the name of a node of the graph.
+// An id is read by its shape: t1 is a report, g1, q2 or n3 a ledger entry, p1 a plan item, and anything else the name of a node of the graph.
+import { POLICY } from "./config.mjs";
 import { archiveReports, deleteReports, foldReports, loadContext, recallReport, unarchiveReports, unshelveForUser } from "./context.mjs";
 import { loadAtlas, saveAtlas } from "./atlas.mjs";
 import { loadLedger, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan } from "./plan.mjs";
-import { decide, loadProposals } from "./proposals.mjs";
 
-const REPORT = /^t\d+$/;
-const ENTRY = /^[gqn]\d+$/;
-const ITEM = /^p\d+$/;
-const PROPOSAL = /^x\d+$/;
+const REPORT = new RegExp(POLICY.patterns.reportId);
+const ENTRY = new RegExp(POLICY.patterns.ledgerId);
+const ITEM = new RegExp(POLICY.patterns.planId);
 /** The books an id might name, and the words for them in a line of refusal. */
-export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a prompt proposal x1, a node of the graph its name`;
+export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
 
 /** The one row an id names, read out of its book. Returns the row and the words for what it is; undefined when no book holds it. */
 function row(brainDir, id) {
@@ -37,10 +35,6 @@ function row(brainDir, id) {
 		const { plan } = loadPlan(brainDir);
 		const item = plan?.items.find((entry) => entry.id === id);
 		return item === undefined ? undefined : { what: "plan item", archived: item.archived === true, kind: item.mode, found: item };
-	}
-	if (PROPOSAL.test(id)) {
-		const item = loadProposals(brainDir).items.find((entry) => entry.id === id);
-		return item === undefined ? undefined : { what: "proposal", archived: false, kind: "prompt", found: item };
 	}
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas?.nodes.find((entry) => entry.name === id);
@@ -110,18 +104,14 @@ export function unarchiveRow(brainDir, id) {
 
 /**
  * A row is gone for good: a report's record line and file are dropped, a ledger entry, a plan item or a node is
- * taken out of its book, a proposal is dropped out of the book of requests. Nothing is said to the agent: this
+ * taken out of its book. Nothing is said to the agent: this
  * is how the user makes the agent forget a thing it wrote down. @returns the line to show
  */
-export function dropRow(brainDir, coreDir, id) {
+export function dropRow(brainDir, id) {
 	if (REPORT.test(id)) return deleteReports(brainDir, [id]);
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
 	if (found.what === "report") return deleteReports(brainDir, [id]);
-	if (found.what === "proposal") {
-		const result = decide(brainDir, coreDir, id, false);
-		return result === undefined ? `There is no ${id}.` : `${id} is forgotten: the proposal is out of the book, and nothing of it is said to the agent.`;
-	}
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
 		ledger.items.splice(ledger.items.indexOf(found.found), 1);
@@ -170,4 +160,4 @@ function rows(brainDir, ids, one) {
 
 export const archiveRows = (brainDir, ids) => rows(brainDir, ids, archiveRow);
 export const unarchiveRows = (brainDir, ids) => rows(brainDir, ids, unarchiveRow);
-export const dropRows = (brainDir, coreDir, ids) => rows(brainDir, ids, (dir, id) => dropRow(dir, coreDir, id));
+export const dropRows = (brainDir, ids) => rows(brainDir, ids, dropRow);

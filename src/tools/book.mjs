@@ -1,6 +1,6 @@
-// The `book` tool: one front door to the agent's own books — ledger, plan, prompt, books, context —
+// The `book` tool: one front door to the agent's own books — ledger, plan, books, context —
 // each of which keeps rows the agent adds to, rewords, closes and takes away. The books themselves and
-// the verbs live in src/ledger.mjs, src/plan.mjs, src/proposals.mjs, src/books.mjs and src/context.mjs;
+// the verbs live in src/ledger.mjs, src/plan.mjs, src/books.mjs and src/context.mjs;
 // what is here is the shared shape of the call (`book` names one, `ops` carries the operations) and the
 // per-book run of it, whose wording, details and guards are exactly those of the tools it replaces.
 //
@@ -9,14 +9,13 @@
 // the old per-tool refusals used.
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { arr, bool, compile, lit, obj, oneOf, opt, str, union, unknown } from "@earendil-works/pi-schema";
-import { describe, REFUSALS, SECTION_MAX, STILL_TASK, TOOL_MAX } from "../prompt.mjs";
+import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, KINDS, LedgerError, loadLedger, open, openCounts, prune, saveLedger, TEXT_MAX as LEDGER_TEXT_MAX } from "../ledger.mjs";
-import { applyPlanOp, authorizationLine, ITEM_MAX, loadPlan, PlanError, savePlan } from "../plan.mjs";
+import { applyPlanOp, authorizationLine, ITEM_MAX, loadPlan, MODES, PlanError, savePlan } from "../plan.mjs";
 import { applyBookOp, BOOK_KINDS, BOOK_TEXT_MAX, BookError, loadBooks, renderBook, saveBooks } from "../books.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
-import { ProposalError, propose, targets } from "../proposals.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, RECALLED } from "../context.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
@@ -25,7 +24,7 @@ const ok = (text, shown) => ({ output: [{ type: "text", text }], details: { show
 const sameItem = (a, b) => a.path === b.path;
 
 /** What a task is told when it reaches for a book of the main agent. */
-const TASK_REFUSALS = { ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, prompt: REFUSALS.taskProposes, books: REFUSALS.taskAssesses };
+const TASK_REFUSALS = { ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, books: REFUSALS.taskAssesses };
 
 /** The label an operation carries when it could not be applied ("add g1"). */
 const opLabel = (op, second) => `${op?.action ?? "?"} ${op?.id ?? op?.[second] ?? ""}`.trim();
@@ -47,7 +46,7 @@ function runLedger({ brainDir, engine }, args, api) {
 	const shown = [];
 	let applied = 0;
 	const now = new Date(api.now()).toISOString();
-	const goalsBefore = new Set(open(ledger, "goal").map((item) => item.id));
+	const goalsBefore = new Set(open(ledger, POLICY.enums.ledgerKind.goal).map((item) => item.id));
 	for (const [index, op] of ops.entries()) {
 		try {
 			const result = applyOp(ledger, op, now);
@@ -64,7 +63,7 @@ function runLedger({ brainDir, engine }, args, api) {
 	lines.push(`Open: ${openCounts(ledger)}.`);
 	// A goal that closes is a moment to bring the top of the context up to date (src/top.mjs). Done before the
 	// ledger is saved: a crash in between then repeats both, and neither is done twice.
-	const closed = [...goalsBefore].filter((id) => ledger.items.find((item) => item.id === id)?.status === "done");
+	const closed = [...goalsBefore].filter((id) => ledger.items.find((item) => item.id === id)?.status === POLICY.enums.entryStatus.done);
 	let pinned = false;
 	if (closed.length > 0) {
 		pinned = pin(brainDir, { now: api.now(), reason: `goal ${closed.join(", ")} was closed` }).changed;
@@ -103,8 +102,8 @@ function runPlan({ brainDir, gate }, args, api) {
 		} catch (problem) {
 			if (!(problem instanceof PlanError)) throw problem;
 			let message = problem.message;
-			if (op?.action === "add" && (typeof op.text !== "string" || op.text.trim() === "")) {
-				const expected = { action: "add", mode: op.mode === "look" ? "look" : "change", text: "one-line description of what this item covers" };
+			if (op?.action === POLICY.enums.actions.add && (typeof op.text !== "string" || op.text.trim() === "")) {
+				const expected = { action: POLICY.enums.actions.add, mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "one-line description of what this item covers" };
 				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe item's wording belongs in \`text\`, not \`lines\`. Correct the call; do not repeat it unchanged.`;
 			}
 			lines.push(`Op ${index + 1} (${opLabel(op, "mode")}) not applied: ${message}`);
@@ -116,31 +115,6 @@ function runPlan({ brainDir, gate }, args, api) {
 	if (withdrawn) shown.push("authorization withdrawn: a change item was added or changed");
 	plan.lastCall = api.taskId;
 	savePlan(brainDir, plan);
-	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
-}
-
-/** The prompt proposals' run: see the `prompt` tool this replaces (src/tools/prompt.mjs in the last release). */
-function runPrompt({ brainDir }, args, api) {
-	const ops = Array.isArray(args.ops) ? args.ops : [];
-	if (ops.length === 0) {
-		const known = targets();
-		return fail(`\`ops\` is empty: give at least one proposal. Sections: ${known.sections.join(", ")}. Tool descriptions: ${known.tools.join(", ")}.`);
-	}
-	const lines = [];
-	const shown = [];
-	let recorded = 0;
-	for (const [index, op] of ops.entries()) {
-		try {
-			const result = propose(brainDir, op, api.now());
-			lines.push(result.line);
-			shown.push(result.shown);
-			recorded++;
-		} catch (problem) {
-			if (!(problem instanceof ProposalError)) throw problem;
-			lines.push(`Op ${index + 1} (${op?.action ?? "?"}) not recorded: ${problem.message}`);
-		}
-	}
-	if (recorded === 0) return fail(lines.join("\n"));
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
@@ -182,12 +156,12 @@ function runBooks({ brainDir }, args, api) {
 	saveBooks(brainDir, book);
 	// Keep assessment.md in step with the assessment entries, so the copy at the top of the
 	// context, /assessment and the user's own edits still read the same text.
-	const assessment = renderBook(book, "assessment");
-	if (book.items.some((item) => item.kind === "assessment")) {
+	const assessment = renderBook(book, POLICY.enums.bookKind.assessment);
+	if (book.items.some((item) => item.kind === POLICY.enums.bookKind.assessment)) {
 		saveAssessment(brainDir, assessment);
 		noteAssessed(brainDir, assessment);
 	}
-	const practice = renderBook(book, "practice");
+	const practice = renderBook(book, POLICY.enums.bookKind.practice);
 	return {
 		output: [{ type: "text", text: `${lines.join("\n")}${practice === "" ? "" : `\n\nYour practice now reads:\n${practice}`}` }],
 		details: { shown },
@@ -205,11 +179,11 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 	try {
 		for (const op of ops) {
 			const action = op?.action;
-			if (action === "recall") {
+			if (action === POLICY.enums.actions.recall) {
 				const id = String(op.id ?? "").trim();
-				if (id === "") return fail(`recall needs \`id\`: the report to bring back.${store.records.length > 0 ? ` Kept: ${store.records.slice(-12).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
+				if (id === "") return fail(`recall needs \`id\`: the report to bring back.${store.records.length > 0 ? ` Kept: ${store.records.slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
 				const report = loadReport(brainDir, id);
-				if (report === undefined) return fail(`There is no report ${id}.${store.records.length > 0 ? ` Kept: ${store.records.slice(-12).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
+				if (report === undefined) return fail(`There is no report ${id}.${store.records.length > 0 ? ` Kept: ${store.records.slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
 				if (reportsInView(messages).has(id) && !store.dropped.includes(id)) return fail(`Report ${id} is still in your context, further up: nothing was added.`);
 				// A report the main agent dropped comes back by this, too.
 				if (main && store.dropped.includes(id)) {
@@ -225,7 +199,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				continue;
 			}
 
-			if (action === "shelve") {
+			if (action === POLICY.enums.actions.shelve) {
 				const { item, tokens } = shelfItem(root, op.path, op.lines);
 				const mine = main ? store.shelf : (store.tasks[api.conversationId]?.shelf ?? []);
 				const others = mine.filter((entry) => !sameItem(entry, item));
@@ -253,7 +227,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				continue;
 			}
 
-			if (action === "unshelve") {
+			if (action === POLICY.enums.actions.unshelve) {
 				const given = String(op.path ?? "").trim();
 				if (given === "") return fail("unshelve needs `path`: the file to take off the shelf, or all.");
 				const mine = main ? store.shelf : (store.tasks[api.conversationId]?.shelf ?? []);
@@ -268,7 +242,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				continue;
 			}
 
-			if (action === "fold") {
+			if (action === POLICY.enums.actions.fold) {
 				const ids = String(op.id ?? "")
 					.split(/[\s,]+/)
 					.filter((id) => id !== "");
@@ -288,7 +262,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 					const again = messages.slice(first + 1).reduce((sum, message) => sum + messageTokens(message), 0);
 					shown.push(`dropped ${ids.join(", ")} · about ${count(freed)} tokens freed`);
 					lines.push(
-						`Dropped from view: ${ids.join(", ")}, about ${count(freed)} tokens. In ${ids.length === 1 ? "its" : "their"} place stands the record line. The server reads what follows again, about ${count(again)} tokens. ${ids.length === 1 ? `Its record: ${recordLine(store.records.find((record) => record.id === ids[0]) ?? { id: ids[0], at: Date.now(), mode: "look", brief: "?", outcome: "?" })}` : "recall brings one back."}`,
+						`Dropped from view: ${ids.join(", ")}, about ${count(freed)} tokens. In ${ids.length === 1 ? "its" : "their"} place stands the record line. The server reads what follows again, about ${count(again)} tokens. ${ids.length === 1 ? `Its record: ${recordLine(store.records.find((record) => record.id === ids[0]) ?? { id: ids[0], at: Date.now(), mode: POLICY.enums.planMode.look, brief: "?", outcome: "?" })}` : "recall brings one back."}`,
 					);
 					continue;
 				}
@@ -298,7 +272,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				const inView = (steps?.results ?? []).filter((result) => result.index >= steps.start + hidden && mine.dropped?.[result.id] === undefined);
 				const unknown = ids.filter((id) => !inView.some((result) => result.id === id));
 				if (unknown.length > 0) {
-					const large = inView.filter((result) => result.tokens >= 300);
+					const large = inView.filter((result) => result.tokens >= POLICY.limits.context.largeResultTokens);
 					return fail(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not a result in your view.${large.length > 0 ? ` Your larger results: ${large.map((result) => `${result.id} (${engine.callWords(result.call)}, about ${count(result.tokens)} tokens)`).join("; ")}.` : " You have no large result in view."}`);
 				}
 				const picked = inView.filter((result) => ids.includes(result.id));
@@ -314,7 +288,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				continue;
 			}
 
-			if (action === "note") {
+			if (action === POLICY.enums.actions.note) {
 				if (main) return fail(REFUSALS.mainNotes);
 				const text = String(op.text ?? "").trim();
 				if (text === "") return fail("note needs `text`: what to keep, with file paths and line numbers.");
@@ -326,8 +300,8 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				continue;
 			}
 
-			if (action === "collapse") {
-				const why = String(op.text ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+			if (action === POLICY.enums.actions.collapse) {
+				const why = String(op.text ?? "").replace(/\s+/g, " ").trim().slice(0, POLICY.limits.bookTool.refusalChars);
 				if (main) {
 					engine.want(why === "" ? "you asked for it" : `you asked for it: ${why}`, { asked: true, byAgent: true });
 					shown.push("collapse asked for");
@@ -353,77 +327,70 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 
 // The root stays flat for llama.cpp's Qwen tool-call path. The full internal schema uses conditionals so the
 // selected book narrows every action to exactly its valid fields; the model-facing schema is deliberately small.
-const line = (description, maxLength) => str({ minLength: 1, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
+const line = (description, maxLength) => str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
 const entryId = (description = "The entry (g1, q5, n7).") => line(description);
 
 const LEDGER_OP = union([
 	obj(
-		{ action: lit("add"), kind: oneOf(KINDS, { description: "goal, question or note." }), text: line("The entry itself, one line in your words.", LEDGER_TEXT_MAX), done_when: opt(line("For a goal: how you and the user will know it is reached.", LEDGER_TEXT_MAX)) },
+		{ action: lit(POLICY.enums.actions.add), kind: oneOf(KINDS, { description: "goal, question or note." }), text: line("The entry itself, one line in your words.", LEDGER_TEXT_MAX), done_when: opt(line("For a goal: how you and the user will know it is reached.", LEDGER_TEXT_MAX)) },
 		{ allOf: [
-			{ if: { properties: { kind: lit("goal") }, required: ["kind"] }, then: { required: ["done_when"] } },
-			{ if: { properties: { kind: oneOf(["question", "note"]) }, required: ["kind"] }, then: { not: { required: ["done_when"] } } },
+			{ if: { properties: { kind: lit(POLICY.enums.ledgerKind.goal) }, required: ["kind"] }, then: { required: ["done_when"] } },
+			{ if: { properties: { kind: oneOf(POLICY.enums.ledgerNonGoalKinds) }, required: ["kind"] }, then: { not: { required: ["done_when"] } } },
 		], description: "Add a ledger entry; goals need a done-when line." },
 	),
-	obj({ action: lit("done"), id: entryId(), text: opt(line("How it ended, one line.", LEDGER_TEXT_MAX)) }, { description: "Close a ledger entry." }),
+	obj({ action: lit(POLICY.enums.actions.done), id: entryId(), text: opt(line("How it ended, one line.", LEDGER_TEXT_MAX)) }, { description: "Close a ledger entry." }),
 	obj(
-		{ action: lit("edit"), id: entryId(), text: opt(line("The new wording, one line.", LEDGER_TEXT_MAX)), done_when: opt(line("For a goal: its new done-when line.", LEDGER_TEXT_MAX)) },
+		{ action: lit(POLICY.enums.actions.edit), id: entryId(), text: opt(line("The new wording, one line.", LEDGER_TEXT_MAX)), done_when: opt(line("For a goal: its new done-when line.", LEDGER_TEXT_MAX)) },
 		{ anyOf: [{ required: ["text"] }, { required: ["done_when"] }], description: "Edit an entry; change its wording or a goal's done-when line." },
 	),
-	obj({ action: lit("remove"), id: entryId() }, { description: "Remove a ledger entry." }),
+	obj({ action: lit(POLICY.enums.actions.remove), id: entryId() }, { description: "Remove a ledger entry." }),
 ]);
 
 const PLAN_OP = union([
 	obj(
-		{ action: lit("add"), mode: oneOf(["look", "change"], { description: "look: the task only reads. change: it writes files, which needs the user's authorization." }), text: line("Required: one line saying what this item covers.", ITEM_MAX), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })), before: opt(entryId("Put the new item in front of this one (p3). Default: at the end.")) },
-		{ allOf: [{ if: { properties: { mode: lit("look") }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], description: "Add a plan item; look items cannot have change-only flags." },
+		{ action: lit(POLICY.enums.actions.add), mode: oneOf(MODES, { description: "look: the task only reads. change: it writes files, which needs the user's authorization." }), text: line("Required: one line saying what this item covers.", ITEM_MAX), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })), before: opt(entryId("Put the new item in front of this one (p3). Default: at the end.")) },
+		{ allOf: [{ if: { properties: { mode: lit(POLICY.enums.planMode.look) }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], description: "Add a plan item; look items cannot have change-only flags." },
 	),
-	obj({ action: lit("done"), id: entryId("The item (p1, p4)."), text: opt(line("What came of it, one line.", ITEM_MAX)) }, { description: "Mark a plan item finished." }),
+	obj({ action: lit(POLICY.enums.actions.done), id: entryId("The item (p1, p4)."), text: opt(line("What came of it, one line.", ITEM_MAX)) }, { description: "Mark a plan item finished." }),
 	obj(
-		{ action: lit("edit"), id: entryId("The item (p1, p4)."), text: opt(line("The new wording, one line.", ITEM_MAX)), mode: opt(oneOf(["look", "change"], { description: "look or change." })), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })) },
-		{ allOf: [{ if: { properties: { mode: lit("look") }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], anyOf: [{ required: ["text"] }, { required: ["mode"] }, { required: ["network"] }, { required: ["standing"] }], description: "Edit a plan item; look items cannot have change-only flags." },
+		{ action: lit(POLICY.enums.actions.edit), id: entryId("The item (p1, p4)."), text: opt(line("The new wording, one line.", ITEM_MAX)), mode: opt(oneOf(MODES, { description: "look or change." })), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })) },
+		{ allOf: [{ if: { properties: { mode: lit(POLICY.enums.planMode.look) }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], anyOf: [{ required: ["text"] }, { required: ["mode"] }, { required: ["network"] }, { required: ["standing"] }], description: "Edit a plan item; look items cannot have change-only flags." },
 	),
-	obj({ action: lit("remove"), id: entryId("The item (p1, p4).") }, { description: "Remove a plan item." }),
-	obj({ action: lit("clear") }, { description: "Clear the plan." }),
+	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The item (p1, p4).") }, { description: "Remove a plan item." }),
+	obj({ action: lit(POLICY.enums.actions.clear) }, { description: "Clear the plan." }),
 ]);
 
 const BOOKS_OP = union([
-	obj({ action: lit("add"), kind: oneOf(BOOK_KINDS, { description: "assessment or practice." }), text: line("One short entry, in your words.", BOOK_TEXT_MAX), before: opt(entryId("Put the new entry in front of this one.")) }, { description: "Add an assessment or practice entry." }),
-	obj({ action: lit("edit"), id: entryId("The entry (a3, r7)."), text: line("The new wording of this one entry.", BOOK_TEXT_MAX) }, { description: "Reword one entry." }),
-	obj({ action: lit("done"), id: entryId("The entry (a3, r7)."), text: opt(line("How it was settled, one line.", 300)) }, { description: "Settle an entry." }),
-	obj({ action: lit("remove"), id: entryId("The entry (a3, r7).") }, { description: "Remove an entry." }),
-	obj({ action: lit("before"), id: entryId("The entry (a3, r7)."), before: opt(entryId("The entry to stand in front of.")) }, { description: "Reorder an entry." }),
-]);
-
-const PROMPT_OP = union([
-	obj({ action: lit("edit"), target: line("A section name, or a tool description such as tool.edit."), text: line("The whole new wording.", Math.max(SECTION_MAX, TOOL_MAX)), why: line("What misled you or what you observed, in one line.", 300) }, { description: "Reword a section or a tool description." }),
-	obj({ action: lit("add"), name: str({ minLength: 2, maxLength: 24, pattern: "^[a-z][a-z0-9-]+$", description: "A short name for the new section, in small letters." }), text: line("The new section's wording.", SECTION_MAX), before: opt(line("The section it stands in front of.")), why: line("What misled you or what you observed, in one line.", 300) }, { description: "Add a section." }),
-	obj({ action: lit("remove"), target: line("The section to drop."), why: line("What misled you or what you observed, in one line.", 300) }, { description: "Drop a section." }),
+	obj({ action: lit(POLICY.enums.actions.add), kind: oneOf(BOOK_KINDS, { description: "assessment or practice." }), text: line("One short entry, in your words.", BOOK_TEXT_MAX), before: opt(entryId("Put the new entry in front of this one.")) }, { description: "Add an assessment or practice entry." }),
+	obj({ action: lit(POLICY.enums.actions.edit), id: entryId("The entry (a3, r7)."), text: line("The new wording of this one entry.", BOOK_TEXT_MAX) }, { description: "Reword one entry." }),
+	obj({ action: lit(POLICY.enums.actions.done), id: entryId("The entry (a3, r7)."), text: opt(line("How it was settled, one line.", POLICY.limits.books.outcomeChars)) }, { description: "Settle an entry." }),
+	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The entry (a3, r7).") }, { description: "Remove an entry." }),
+	obj({ action: lit(POLICY.enums.actions.before), id: entryId("The entry (a3, r7)."), before: opt(entryId("The entry to stand in front of.")) }, { description: "Reorder an entry." }),
 ]);
 
 const CONTEXT_OP = union([
-	obj({ action: lit("recall"), id: entryId("The report to bring back (t12).") }, { description: "Recall a kept report." }),
-	obj({ action: lit("shelve"), path: line("A file inside the project."), lines: opt(line('A line range such as "10-80"; omit for the whole file.')), hand_on: opt(bool({ description: "In a task, put this file on the main agent's shelf when you return." })) }, { description: "Keep a file in view." }),
-	obj({ action: lit("unshelve"), path: line('The file to take off the shelf, or "all".') }, { description: "Take a file off the shelf." }),
-	obj({ action: lit("fold"), id: entryId("A report id (t12) or task step ids (s3, s5), separated by commas.") }, { description: "Fold a finished report or step." }),
-	obj({ action: lit("note"), text: line("What the task must keep, with file paths and line numbers.") }, { description: "Keep a finding in task context." }),
-	obj({ action: lit("collapse"), text: opt(line("Why to collapse, in a few words.")) }, { description: "Collapse context now." }),
+	obj({ action: lit(POLICY.enums.actions.recall), id: entryId("The report to bring back (t12).") }, { description: "Recall a kept report." }),
+	obj({ action: lit(POLICY.enums.actions.shelve), path: line("A file inside the project."), lines: opt(line('A line range such as "10-80"; omit for the whole file.')), hand_on: opt(bool({ description: "In a task, put this file on the main agent's shelf when you return." })) }, { description: "Keep a file in view." }),
+	obj({ action: lit(POLICY.enums.actions.unshelve), path: line('The file to take off the shelf, or "all".') }, { description: "Take a file off the shelf." }),
+	obj({ action: lit(POLICY.enums.actions.fold), id: entryId("A report id (t12) or task step ids (s3, s5), separated by commas.") }, { description: "Fold a finished report or step." }),
+	obj({ action: lit(POLICY.enums.actions.note), text: line("What the task must keep, with file paths and line numbers.") }, { description: "Keep a finding in task context." }),
+	obj({ action: lit(POLICY.enums.actions.collapse), text: opt(line("Why to collapse, in a few words.")) }, { description: "Collapse context now." }),
 ]);
 
 const branchFor = (book, operations) => ({
 	if: { properties: { book: lit(book) }, required: ["book"] },
-	then: { properties: { ops: arr(operations, { minItems: 1 }) }, required: ["ops"], not: { required: ["text"] } },
+	then: { properties: { ops: arr(operations, { minItems: POLICY.validation.nonEmptyArrayMinItems }) }, required: ["ops"], not: { required: ["text"] } },
 });
 // The legacy whole-assessment form keeps its length check in `runBooks`: rejecting a very long value in the
 // schema makes the validator echo the entire argument back into the conversation instead of the concise limit error.
 const BOOK_CONDITIONS = [
-	branchFor("ledger", LEDGER_OP),
-	branchFor("plan", PLAN_OP),
-	branchFor("prompt", PROMPT_OP),
-	branchFor("context", CONTEXT_OP),
+	branchFor(POLICY.enums.bookName.ledger, LEDGER_OP),
+	branchFor(POLICY.enums.bookName.plan, PLAN_OP),
+	branchFor(POLICY.enums.bookName.context, CONTEXT_OP),
 	{
-		if: { properties: { book: lit("books") }, required: ["book"] },
+		if: { properties: { book: lit(POLICY.enums.bookName.books) }, required: ["book"] },
 		then: {
-			properties: { ops: arr(BOOKS_OP, { minItems: 1 }), text: line("The whole assessment, for the legacy write form.") },
+			properties: { ops: arr(BOOKS_OP, { minItems: POLICY.validation.nonEmptyArrayMinItems }), text: line("The whole assessment, for the legacy write form.") },
 			anyOf: [{ required: ["ops"] }, { required: ["text"] }],
 			not: { required: ["ops", "text"] },
 		},
@@ -436,8 +403,8 @@ const BOOK_CONDITIONS = [
 export function bookTool({ root, brainDir, config, engine, gate }) {
 	const validationSchema = obj(
 		{
-			book: oneOf(["ledger", "plan", "prompt", "books", "context"], {
-				description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), prompt (a proposed change to your own prompt), books (entries about the project and your practice), context (fold, recall, shelve, note).",
+			book: oneOf(POLICY.enums.bookNames, {
+				description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), books (entries about the project and your practice), context (fold, recall, shelve, note).",
 			}),
 			ops: opt(arr(unknown(), { description: "Operations for the selected book." })),
 			text: opt(line("The whole assessment, for the legacy write form.")),
@@ -447,27 +414,24 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 	const validate = compile(validationSchema, { coerce: true });
 	const parameters = obj(
 		{
-			book: oneOf(["ledger", "plan", "prompt", "books", "context"]),
+			book: oneOf(POLICY.enums.bookNames),
 			ops: opt(arr(obj({
-				action: oneOf(["add", "done", "edit", "remove", "clear", "before", "recall", "shelve", "unshelve", "fold", "note", "collapse"]),
+				action: oneOf(POLICY.enums.bookToolActions),
 				kind: opt(oneOf([...KINDS, ...BOOK_KINDS])),
 				text: opt(str()),
 				done_when: opt(str()),
 				id: opt(str()),
-				mode: opt(oneOf(["look", "change"])),
+				mode: opt(oneOf(MODES)),
 				network: opt(bool()),
 				standing: opt(bool()),
 				before: opt(str()),
-				target: opt(str()),
-				why: opt(str()),
-				name: opt(str()),
 				path: opt(str()),
 				lines: opt(str()),
 				hand_on: opt(bool()),
-			}, { open: true }), { minItems: 1 })),
+			}, { open: true }), { minItems: POLICY.validation.nonEmptyArrayMinItems })),
 			text: opt(str()),
 		},
-		{ allOf: [{ if: { properties: { book: lit("books") }, required: ["book"] }, else: { not: { required: ["text"] } } }] },
+		{ allOf: [{ if: { properties: { book: lit(POLICY.enums.bookName.books) }, required: ["book"] }, else: { not: { required: ["text"] } } }] },
 	);
 	return defineTool({
 		name: "book",
@@ -478,8 +442,8 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			if (result.ok) return result.value;
 			const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
 			const issues = [...result.errors];
-			const planAdds = args?.book === "plan" && Array.isArray(args.ops) ? args.ops.filter((op) => op?.action === "add") : [];
-			const hasRootPlanText = args?.book === "plan" && Object.hasOwn(args, "text");
+			const planAdds = args?.book === POLICY.enums.bookName.plan && Array.isArray(args.ops) ? args.ops.filter((op) => op?.action === POLICY.enums.actions.add) : [];
+			const hasRootPlanText = args?.book === POLICY.enums.bookName.plan && Object.hasOwn(args, "text");
 			if (hasRootPlanText) {
 				// The conditional schema also reports this as an opaque `not` failure; replace it with the actionable cause.
 				for (let index = issues.length - 1; index >= 0; index--) {
@@ -498,14 +462,14 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
 		// and the rest of the books change nothing when the same words are written twice.
-		replay: "safe",
+		replay: POLICY.enums.toolReplay.safe,
 		execute: async (args, api) => {
 			const book = args.book;
-			if (book !== "context" && api.conversationId !== ROOT_CONVERSATION_ID) {
+			if (book !== POLICY.enums.bookName.context && api.conversationId !== ROOT_CONVERSATION_ID) {
 				return fail(`Tool call blocked: ${TASK_REFUSALS[book] ?? TASK_REFUSALS.ledger} ${STILL_TASK}`);
 			}
-			const runner = { ledger: runLedger, plan: runPlan, prompt: runPrompt, books: runBooks, context: runContext }[book];
-			if (runner === undefined) return fail(`\`book\` is one of ledger, plan, prompt, books, context.`);
+			const runner = { ledger: runLedger, plan: runPlan, books: runBooks, context: runContext }[book];
+			if (runner === undefined) return fail(`\`book\` is one of ledger, plan, books, context.`);
 			const result = runner({ root, brainDir, config, engine, gate }, args, api);
 			result.details = { book, ...result.details };
 			return result;

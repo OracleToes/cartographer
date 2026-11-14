@@ -16,6 +16,7 @@
 // How a window is built: `script` (util-linux) gives bash a terminal, so programs
 // print as they go and ask their questions; bash prints a mark with the exit status
 // and the folder before each prompt, which is how the end of a command is known.
+import { DEFAULTS, POLICY } from "./config.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -25,25 +26,25 @@ import { killFamily } from "./reaper.mjs";
 import { HEAD_LINES, LINE_MAX, Output, QUIET, sandboxArgs, SandboxError } from "./sandbox.mjs";
 
 /** Windows open at one time. */
-export const WINDOWS_MAX = 4;
+export const WINDOWS_MAX = POLICY.limits.windows.open;
 /** The longest one call may wait for a window, in seconds. */
-export const WAIT_MAX = 300;
+export const WAIT_MAX = POLICY.limits.windows.waitSeconds;
 /** Lines of output a window keeps. */
-export const KEEP_LINES = 2000;
+export const KEEP_LINES = POLICY.limits.windows.keptLines;
 /** A busy window whose last line has no line end and that printed nothing for this long may be waiting for input. */
-export const ASKS_AFTER_MS = 1500;
+export const ASKS_AFTER_MS = POLICY.timing.windows.promptAfterSilenceMs;
 /** The same, before the agent is woken for it. */
-export const ASKS_WAKE_MS = 5000;
+export const ASKS_WAKE_MS = POLICY.timing.windows.wakeAfterSilenceMs;
 /** After input was sent: how long the program must be silent, having answered, before the call returns. */
-export const QUIET_AFTER_MS = 1000;
+export const QUIET_AFTER_MS = POLICY.timing.windows.returnAfterInputSilenceMs;
 
 /** A request the window cannot carry out; the message is written for the agent. */
 export class WindowError extends Error {}
-const WHY_GONE = "it ended when Cartographer last exited";
+const WHY_GONE = POLICY.control.windowGoneReason;
 
-const NAME = /^[a-z][a-z0-9_-]{0,19}$/;
-const MARK = "\x1e";
-const SEP = "\x1f";
+const NAME = new RegExp(POLICY.patterns.windowName);
+const MARK = POLICY.sentinels.windowMark;
+const SEP = POLICY.sentinels.windowSeparator;
 const REAPER = fileURLToPath(new URL("./reaper.mjs", import.meta.url));
 
 const quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
@@ -61,7 +62,7 @@ let scriptFound;
 export function findScript() {
 	if (scriptFound === undefined) {
 		try {
-			execFileSync("script", ["--version"], { stdio: "ignore", timeout: 5000 });
+			execFileSync("script", ["--version"], { stdio: "ignore", timeout: POLICY.timing.windows.versionProbeMs });
 			scriptFound = true;
 		} catch {
 			scriptFound = false;
@@ -79,7 +80,7 @@ const RC = [
 	// A program sees what is typed into it, as in any terminal; bash's own prompt does not echo the line Cartographer types.
 	"PS0='$(stty echo 2>/dev/null)'",
 	`PROMPT_COMMAND='__carto=$?; stty -echo 2>/dev/null; printf "\\036%s\\037%s\\036" "$__carto" "$PWD"'`,
-	"stty -echo cols 120 rows 40 2>/dev/null",
+	`stty -echo cols ${POLICY.limits.windows.ptyColumns} rows ${POLICY.limits.windows.ptyRows} 2>/dev/null`,
 	"",
 ].join("\n");
 
@@ -108,7 +109,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		// No record, or one that cannot be read: nothing to tell.
 	}
 	const record = () => {
-		const open = [...windows.values()].filter((win) => win.state !== "closed").map((win) => ({ name: win.name, ...(win.state === "busy" ? { command: win.command } : {}) }));
+		const open = [...windows.values()].filter((win) => win.state !== POLICY.enums.windowStates.closed).map((win) => ({ name: win.name, ...(win.state === POLICY.enums.windowStates.busy ? { command: win.command } : {}) }));
 		try {
 			mkdirSync(brainDir, { recursive: true });
 			const temp = `${recordPath}.${process.pid}.tmp`;
@@ -139,7 +140,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 	const end = (win) => win.dropped + win.lines.length;
 	const push = (win, line) => {
 		// The first lines of what a command prints are kept apart: they outlast the window's own memory.
-		if (win.state === "busy" && win.head.length < HEAD_LINES) win.head.push({ at: end(win), text: line });
+		if (win.state === POLICY.enums.windowStates.busy && win.head.length < HEAD_LINES) win.head.push({ at: end(win), text: line });
 		win.lines.push(line);
 		if (win.lines.length > KEEP_LINES) {
 			win.lines.shift();
@@ -163,7 +164,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		const parts = (win.partial + data).split("\n");
 		win.partial = parts.pop();
 		for (const part of parts) push(win, tidy(part));
-		if (win.partial.length > 64_000) {
+		if (win.partial.length > POLICY.limits.windows.partialChars) {
 			push(win, tidy(win.partial));
 			win.partial = "";
 		}
@@ -175,19 +176,19 @@ export function createWindows({ root, brainDir, config, runner }) {
 			win.partial = "";
 		}
 		win.cwd = cwd;
-		if (win.state === "starting") {
-			win.state = "idle";
+		if (win.state === POLICY.enums.windowStates.starting) {
+			win.state = POLICY.enums.windowStates.idle;
 			win.ready?.();
 			return;
 		}
-		if (win.state !== "busy") return;
+		if (win.state !== POLICY.enums.windowStates.busy) return;
 		const now = Date.now();
 		win.last = { command: win.command, exit, ms: now - win.since, endedAt: now };
-		win.state = "idle";
+		win.state = POLICY.enums.windowStates.idle;
 		win.asked = undefined;
 		record();
 		const watched = win.waiters.size > 0;
-		settle(win, "done");
+		settle(win, POLICY.enums.windowWaitReasons.done);
 		if (!watched) emit({ type: "ended", name: win.name, command: win.last.command, exit, ms: win.last.ms, at: now });
 	};
 	const feed = (win, chunk) => {
@@ -203,7 +204,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			const close = data.indexOf(MARK, at + 1);
 			if (close < 0) {
 				// Half a mark: the rest comes with the next piece. Something that only looks like one is passed on.
-				if (data.length - at > 4200) text(win, data.slice(at + 1));
+				if (data.length - at > POLICY.limits.windows.markerChars) text(win, data.slice(at + 1));
 				else win.pending = data.slice(at);
 				return;
 			}
@@ -224,15 +225,15 @@ export function createWindows({ root, brainDir, config, runner }) {
 		}
 	};
 	const closed = (win, why) => {
-		if (win.state === "closed") return;
+		if (win.state === POLICY.enums.windowStates.closed) return;
 		const was = win.state;
-		win.state = "closed";
+		win.state = POLICY.enums.windowStates.closed;
 		win.closedBecause = why;
 		if (windows.get(win.name) === win) windows.delete(win.name);
 		record();
 		const watched = win.waiters.size > 0;
-		settle(win, "closed");
-		win.fail?.(new SandboxError(`the window could not be opened: ${since(win, 0).slice(-3).join(" ").trim() || why}`));
+		settle(win, POLICY.enums.windowWaitReasons.closed);
+		win.fail?.(new SandboxError(`the window could not be opened: ${since(win, 0).slice(-POLICY.limits.windows.startupErrorLines).join(" ").trim() || why}`));
 		if (was === "busy" && !watched && why === "its shell ended") emit({ type: "closed", name: win.name, command: win.command, ms: Date.now() - win.since, at: Date.now() });
 	};
 
@@ -249,7 +250,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			name,
 			network: mode === "direct" ? true : network,
 			sandbox: mode === "sandbox",
-			state: "starting",
+			state: POLICY.enums.windowStates.starting,
 			lines: [],
 			dropped: 0,
 			partial: "",
@@ -289,7 +290,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		child.on("close", ended);
 		child.on("exit", (code) => {
 			win.exitCode = code;
-			setTimeout(() => ended(code), 500).unref();
+			setTimeout(() => ended(code), POLICY.timing.windows.exitGraceMs).unref();
 		});
 		if (mode === "direct" && child.pid !== undefined) {
 			// Outside the sandbox nothing ends the window when Cartographer itself is killed. This does.
@@ -297,7 +298,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			reaper.on("error", () => {});
 			reaper.unref();
 		}
-		const timer = setTimeout(() => win.fail?.(new SandboxError("the window did not start within 15 s")), 15_000);
+		const timer = setTimeout(() => win.fail?.(new SandboxError(`the window did not start within ${POLICY.timing.windows.startupTimeoutMs / 1000} s`)), POLICY.timing.windows.startupTimeoutMs);
 		try {
 			await started;
 		} catch (error) {
@@ -321,11 +322,11 @@ export function createWindows({ root, brainDir, config, runner }) {
 	 */
 	const watch = (win, { from, waitMs, until, signal, nudgeable = false, main = false, quietMs, outputs = win.outputs }) =>
 		new Promise((resolve) => {
-			if (win.state === "closed") return resolve("closed");
+			if (win.state === POLICY.enums.windowStates.closed) return resolve(POLICY.enums.windowWaitReasons.closed);
 			const waiter = { nudgeable, main };
 			let timer;
 			let poll;
-			const onAbort = () => waiter.done("stopped");
+			const onAbort = () => waiter.done(POLICY.enums.windowWaitReasons.stopped);
 			waiter.done = (reason) => {
 				if (!win.waiters.delete(waiter)) return;
 				clearTimeout(timer);
@@ -335,21 +336,21 @@ export function createWindows({ root, brainDir, config, runner }) {
 			};
 			if (until !== undefined) {
 				waiter.output = () => {
-					if (since(win, from).some((line) => line.includes(until))) waiter.done("until");
+					if (since(win, from).some((line) => line.includes(until))) waiter.done(POLICY.enums.windowWaitReasons.until);
 				};
 			}
 			win.waiters.add(waiter);
-			timer = setTimeout(() => waiter.done("time"), Math.max(0, waitMs));
+			timer = setTimeout(() => waiter.done(POLICY.enums.windowWaitReasons.time), Math.max(0, waitMs));
 			// A program that printed something since this call began and now sits at a line without an end.
 			poll = setInterval(() => {
-				if (win.state === "busy" && win.outputs > outputs && tidy(win.partial).trim() !== "" && Date.now() - win.lastOutputAt >= ASKS_AFTER_MS) {
+				if (win.state === POLICY.enums.windowStates.busy && win.outputs > outputs && tidy(win.partial).trim() !== "" && Date.now() - win.lastOutputAt >= ASKS_AFTER_MS) {
 					// The caller is told, so nobody needs to be woken for it.
 					win.asked = Date.now();
-					waiter.done("asks");
+					waiter.done(POLICY.enums.windowWaitReasons.asks);
 				}
 				// An answer has come and nothing followed it.
-				else if (quietMs !== undefined && win.state === "busy" && win.outputs > outputs && tidy(win.partial).trim() === "" && Date.now() - win.lastOutputAt >= quietMs) waiter.done("quiet");
-			}, 200);
+				else if (quietMs !== undefined && win.state === POLICY.enums.windowStates.busy && win.outputs > outputs && tidy(win.partial).trim() === "" && Date.now() - win.lastOutputAt >= quietMs) waiter.done(POLICY.enums.windowWaitReasons.quiet);
+			}, POLICY.timing.windows.pollMs);
 			if (signal?.aborted) onAbort();
 			else signal?.addEventListener("abort", onAbort, { once: true });
 			waiter.output?.();
@@ -357,13 +358,13 @@ export function createWindows({ root, brainDir, config, runner }) {
 
 	/** Press Ctrl-C in a window and see whether its command ends. */
 	const interrupt = async (win) => {
-		if (win.state !== "busy") return true;
+		if (win.state !== POLICY.enums.windowStates.busy) return true;
 		const from = end(win);
 		win.child.stdin.write("\x03");
-		if ((await watch(win, { from, waitMs: 3000 })) === "done" || win.state !== "busy") return true;
+		if ((await watch(win, { from, waitMs: POLICY.timing.windows.interruptWaitMs[0] })) === POLICY.enums.windowWaitReasons.done || win.state !== POLICY.enums.windowStates.busy) return true;
 		win.child.stdin.write("\x03\x1c");
-		await watch(win, { from, waitMs: 2000 });
-		return win.state !== "busy";
+		await watch(win, { from, waitMs: POLICY.timing.windows.interruptWaitMs[1] });
+		return win.state !== POLICY.enums.windowStates.busy;
 	};
 
 	/** What a call reports about a window, with the output since `from`. */
@@ -377,15 +378,15 @@ export function createWindows({ root, brainDir, config, runner }) {
 			output.skip(kept - from - head.length);
 		}
 		for (const line of since(win, kept)) output.add(`${line}\n`);
-		const done = reason === "done" && win.last !== undefined;
+		const done = reason === POLICY.enums.windowWaitReasons.done && win.last !== undefined;
 		// What a call has returned is not returned again. What is printed between two calls goes to the next one.
-		if (reason !== "read" && reason !== "idle") win.seen = end(win);
+		if (reason !== POLICY.enums.windowWaitReasons.read && reason !== POLICY.enums.windowWaitReasons.idle) win.seen = end(win);
 		return {
 			window: win.name,
 			reason,
 			state: win.state,
 			// A command that ended the window's own shell: the status the shell left with.
-			...(done ? { exit: win.last.exit } : reason === "closed" && Number.isInteger(win.exitCode) ? { exit: win.exitCode } : {}),
+			...(done ? { exit: win.last.exit } : reason === POLICY.enums.windowWaitReasons.closed && Number.isInteger(win.exitCode) ? { exit: win.exitCode } : {}),
 			ms: done ? win.last.ms : Date.now() - began,
 			text: output.text(),
 			lines: output.lines,
@@ -393,7 +394,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			cwd: where(win.cwd),
 			network: win.network,
 			sandbox: win.sandbox,
-			...(win.state === "busy" ? { command: win.command, running: Date.now() - win.since } : {}),
+			...(win.state === POLICY.enums.windowStates.busy ? { command: win.command, running: Date.now() - win.since } : {}),
 		};
 	};
 
@@ -401,14 +402,14 @@ export function createWindows({ root, brainDir, config, runner }) {
 		const win = windows.get(name);
 		if (win !== undefined) return win;
 		const lost = gone.find((entry) => entry.name === name);
-		if (lost !== undefined) throw new WindowError(`Window ${name} is gone: ${lost.why ?? WHY_GONE}${lost.command ? `, and with it \`${lost.command.split("\n")[0].slice(0, 80)}\`` : ""}. \`shell\` with this window name opens a new one.`);
+		if (lost !== undefined) throw new WindowError(`Window ${name} is gone: ${lost.why ?? WHY_GONE}${lost.command ? `, and with it \`${lost.command.split("\n")[0].slice(0, POLICY.limits.windows.commandSummaryChars)}\`` : ""}. \`shell\` with this window name opens a new one.`);
 		const names = [...windows.keys()];
 		throw new WindowError(`There is no window ${JSON.stringify(name)}. ${names.length === 0 ? "No window is open: `shell` opens one when it runs a command." : `Open: ${names.join(", ")}.`}`);
 	};
 	const checkName = (name) => {
 		if (typeof name !== "string" || !NAME.test(name)) throw new WindowError(`A window name is a short word in lower case, such as main, server or tests; ${JSON.stringify(name)} is not.`);
 	};
-	const busyLine = (win) => `\`${win.command.split("\n")[0].slice(0, 80)}\` (running ${Math.max(0, Math.round((Date.now() - win.since) / 1000))} s)`;
+	const busyLine = (win) => `\`${win.command.split("\n")[0].slice(0, POLICY.limits.windows.commandSummaryChars)}\` (running ${Math.max(0, Math.round((Date.now() - win.since) / 1000))} s)`;
 
 	const manager = {
 		/**
@@ -424,7 +425,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 				if (windows.size >= WINDOWS_MAX) throw new WindowError(`${WINDOWS_MAX} windows are open, which is the limit: ${[...windows.keys()].join(", ")}. Close one with \`window\` first, or run this in one of them.`);
 				win = await open(name, network === true);
 			} else {
-				if (win.state === "busy") {
+				if (win.state === POLICY.enums.windowStates.busy) {
 					throw new WindowError(`Window ${name} is busy with ${busyLine(win)}. To run this beside it, give \`shell\` another \`window\` name. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input.`);
 				}
 				// The terminal closes every window when the user switches the sandbox; this is for a switch it did not see.
@@ -444,22 +445,22 @@ export function createWindows({ root, brainDir, config, runner }) {
 			writeFileSync(file, `${command}\n`);
 			const shown = command.split("\n");
 			push(win, `$ ${shown[0]}`);
-			for (const more of shown.slice(1, 6)) push(win, `  ${more}`);
+			for (const more of shown.slice(1, 1 + POLICY.limits.windows.commandPreviewLines)) push(win, `  ${more}`);
 			const from = end(win);
-			Object.assign(win, { command, since: began, state: "busy", asked: undefined, lastOutputAt: 0, head: [] });
+			Object.assign(win, { command, since: began, state: POLICY.enums.windowStates.busy, asked: undefined, lastOutputAt: 0, head: [] });
 			active.add(name);
 			record();
 			// Read from a file, so that a command with a mistake in it cannot leave bash waiting for the rest of a line.
 			win.child.stdin.write(` source ${quote(file)}\n`);
 			const reason = await watch(win, { from, waitMs, signal });
-			if (reason === "stopped") await interrupt(win);
+			if (reason === POLICY.enums.windowWaitReasons.stopped) await interrupt(win);
 			return report(win, reason, from, began);
 		},
 
 		/** Type a line into the program that is running in a window. */
 		async send(name, line, { waitMs, signal }) {
 			const win = find(name);
-			if (win.state !== "busy") throw new WindowError(`Nothing is running in window ${name}, so there is nothing to send input to. \`shell\` runs a command there.`);
+			if (win.state !== POLICY.enums.windowStates.busy) throw new WindowError(`Nothing is running in window ${name}, so there is nothing to send input to. \`shell\` runs a command there.`);
 			const began = Date.now();
 			const from = win.seen ?? end(win);
 			active.add(name);
@@ -476,26 +477,26 @@ export function createWindows({ root, brainDir, config, runner }) {
 			const began = Date.now();
 			const from = win.seen ?? end(win);
 			// A command that ended since the last call: its end is what the caller waits for.
-			if (win.state !== "busy") return report(win, win.last !== undefined && from < end(win) ? "done" : "idle", from, began);
+			if (win.state !== POLICY.enums.windowStates.busy) return report(win, win.last !== undefined && from < end(win) ? POLICY.enums.windowWaitReasons.done : POLICY.enums.windowWaitReasons.idle, from, began);
 			const reason = await watch(win, { from, waitMs, until, signal, nudgeable: true, main });
-			return { ...report(win, reason, from, began), ...(reason === "nudged" && nudgedBy !== undefined ? { nudgedBy } : {}) };
+			return { ...report(win, reason, from, began), ...(reason === POLICY.enums.windowWaitReasons.nudged && nudgedBy !== undefined ? { nudgedBy } : {}) };
 		},
 
 		/** The newest `count` lines of a window. */
-		read(name, count = 40) {
+		read(name, count = POLICY.limits.windows.outputReadDefaultLines) {
 			const win = find(name);
 			const lines = since(win, 0);
-			return { ...report(win, "read", end(win), Date.now()), text: lines.slice(-Math.max(1, Math.min(count, 400))).join("\n"), lines: lines.length, kept: end(win) };
+			return { ...report(win, POLICY.enums.windowWaitReasons.read, end(win), Date.now()), text: lines.slice(-Math.max(1, Math.min(count, POLICY.limits.windows.outputReadMaxLines))).join("\n"), lines: lines.length, kept: end(win) };
 		},
 
 		/** Ctrl-C. @returns whether the command ended */
 		async stop(name) {
 			const win = find(name);
-			if (win.state !== "busy") return { ...report(win, "idle", end(win), Date.now()), ended: true, wasBusy: false };
+			if (win.state !== POLICY.enums.windowStates.busy) return { ...report(win, POLICY.enums.windowWaitReasons.idle, end(win), Date.now()), ended: true, wasBusy: false };
 			const began = Date.now();
 			const from = win.seen ?? end(win);
 			const ended = await interrupt(win);
-			return { ...report(win, ended ? "done" : "time", from, began), ended, wasBusy: true };
+			return { ...report(win, ended ? POLICY.enums.windowWaitReasons.done : POLICY.enums.windowWaitReasons.time, from, began), ended, wasBusy: true };
 		},
 
 		/** End a window and everything in it. @returns what was running, if anything */
@@ -507,7 +508,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 				return { name, wasGone: true };
 			}
 			const win = find(name);
-			const running = win.state === "busy" ? win.command : undefined;
+			const running = win.state === POLICY.enums.windowStates.busy ? win.command : undefined;
 			kill(win);
 			closed(win, "it was closed");
 			// The agent did not do this, so it is told, in the state block, until it clears the line or reuses the name.
@@ -526,7 +527,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		},
 
 		/** Every window as it stands, for the windows block and the screen. `tail`: how many of its newest lines. */
-		list(tail = 10) {
+		list(tail = DEFAULTS.windowTail) {
 			const now = Date.now();
 			const open = [...windows.values()].map((win) => {
 				const lines = since(win, 0);
@@ -537,12 +538,12 @@ export function createWindows({ root, brainDir, config, runner }) {
 					cwd: where(win.cwd),
 					network: win.network,
 					sandbox: win.sandbox,
-					...(win.state === "busy" ? { command: win.command, running: now - win.since, quiet: win.lastOutputAt > 0 ? now - win.lastOutputAt : now - win.since, asks: partial.trim() !== "" && now - win.lastOutputAt >= ASKS_AFTER_MS } : {}),
+					...(win.state === POLICY.enums.windowStates.busy ? { command: win.command, running: now - win.since, quiet: win.lastOutputAt > 0 ? now - win.lastOutputAt : now - win.since, asks: partial.trim() !== "" && now - win.lastOutputAt >= ASKS_AFTER_MS } : {}),
 					...(win.last ? { last: { ...win.last, ago: now - win.last.endedAt } } : {}),
 					tail: lines.slice(-tail),
 				};
 			});
-			return [...open, ...gone.map((entry) => ({ name: entry.name, state: "gone", why: entry.why ?? WHY_GONE, ...(entry.command ? { command: entry.command } : {}), tail: [] }))];
+			return [...open, ...gone.map((entry) => ({ name: entry.name, state: POLICY.enums.windowStates.gone, why: entry.why ?? WHY_GONE, ...(entry.command ? { command: entry.command } : {}), tail: [] }))];
 		},
 
 		/** Whether a window of this name is open. */
@@ -574,7 +575,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		/** The windows that ran something since this was last asked. Those still busy count again next time. */
 		takeActive() {
 			const taken = [...active];
-			active = new Set([...windows.values()].filter((win) => win.state === "busy").map((win) => win.name));
+			active = new Set([...windows.values()].filter((win) => win.state === POLICY.enums.windowStates.busy).map((win) => win.name));
 			return taken;
 		},
 		/** The user wrote: a call that only waits should return, so that the agent reads the message. */
@@ -584,7 +585,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		 */
 		nudge(why, { mainOnly = false } = {}) {
 			nudgedBy = why;
-			for (const win of windows.values()) for (const waiter of [...win.waiters]) if (waiter.nudgeable && (!mainOnly || waiter.main)) waiter.done("nudged");
+			for (const win of windows.values()) for (const waiter of [...win.waiters]) if (waiter.nudgeable && (!mainOnly || waiter.main)) waiter.done(POLICY.enums.windowWaitReasons.nudged);
 		},
 		/** End everything, for good. */
 		shutdown() {
@@ -598,13 +599,13 @@ export function createWindows({ root, brainDir, config, runner }) {
 	const ticker = setInterval(() => {
 		const now = Date.now();
 		for (const win of windows.values()) {
-			if (win.state !== "busy" || win.waiters.size > 0 || win.lastOutputAt === 0) continue;
+			if (win.state !== POLICY.enums.windowStates.busy || win.waiters.size > 0 || win.lastOutputAt === 0) continue;
 			if (win.asked !== undefined && win.asked >= win.lastOutputAt) continue;
 			if (tidy(win.partial).trim() === "" || now - win.lastOutputAt < ASKS_WAKE_MS) continue;
 			win.asked = now;
-			emit({ type: "asks", name: win.name, command: win.command, line: tidy(win.partial).slice(0, 200), at: now });
+			emit({ type: "asks", name: win.name, command: win.command, line: tidy(win.partial).slice(0, POLICY.limits.windows.askLineChars), at: now });
 		}
-	}, 1000);
+	}, POLICY.timing.windows.tickerMs);
 	ticker.unref();
 	const atExit = () => {
 		for (const win of windows.values()) kill(win);

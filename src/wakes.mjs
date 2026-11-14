@@ -14,19 +14,20 @@
 // in <brain>/carto-wakes.json, so they outlast a restart. Nothing fires while
 // carto is not running: a time that came due meanwhile fires once at the start,
 // and a file trigger compares with the files as they are at the start.
+import { DEFAULTS, POLICY } from "./config.mjs";
 import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ago, took } from "./time.mjs";
 
 /** Seconds between two firings of one trigger, at least. A wake costs a whole turn; reading alone can take that long. */
-export const WAKE_MIN = 60;
+export const WAKE_MIN = DEFAULTS.wakeMin;
 /** Triggers that can be set at a time. */
-export const WAKES_MAX = 8;
-export const NOTE_MAX = 300;
-export const EVERY_MAX = 7 * 24 * 3600;
+export const WAKES_MAX = DEFAULTS.wakesMax;
+export const NOTE_MAX = POLICY.limits.wakes.noteChars;
+export const EVERY_MAX = POLICY.limits.wakes.intervalSeconds;
 /** Files of a watched folder that are compared; a larger folder is watched by its first files only. */
-const FILES_MAX = 2000;
-const SKIP = new Set([".git", ".atlas", "node_modules"]);
+const FILES_MAX = POLICY.limits.wakes.watchedFiles;
+const SKIP = new Set(POLICY.enums.wakeSkipDirs);
 
 export class WakeError extends Error {}
 
@@ -40,10 +41,10 @@ function load(brainDir) {
 	try {
 		const raw = JSON.parse(readFileSync(wakesPath(brainDir), "utf8"));
 		const wakes = (Array.isArray(raw?.wakes) ? raw.wakes : []).filter(
-			(wake) => typeof wake?.id === "string" && ["time", "file", "window"].includes(wake.kind) && Number.isFinite(wake.every) && Number.isInteger(wake.times),
+			(wake) => typeof wake?.id === "string" && Object.values(POLICY.enums.wakeKinds).includes(wake.kind) && Number.isFinite(wake.every) && Number.isInteger(wake.times),
 		);
 		// A time trigger without its next time is due at once.
-		for (const wake of wakes) if (wake.kind === "time" && !Number.isFinite(wake.due)) wake.due = 0;
+		for (const wake of wakes) if (wake.kind === POLICY.enums.wakeKinds.time && !Number.isFinite(wake.due)) wake.due = 0;
 		return { next: Number.isInteger(raw?.next) ? raw.next : wakes.length + 1, wakes };
 	} catch {
 		return { next: 1, wakes: [] };
@@ -97,13 +98,13 @@ function difference(rel, before, after) {
 	for (const path of before.keys()) if (!after.has(path)) found.push([path, "is gone"]);
 	if (found.length === 0) return undefined;
 	const names = found.sort(([a], [b]) => (a < b ? -1 : 1)).map(([path, how]) => `${path} ${how}`);
-	return names.length <= 3 ? names.join(", ") : `${names.slice(0, 3).join(", ")}, and ${names.length - 3} more under ${rel}`;
+	return names.length <= POLICY.limits.wakes.pathExamples ? names.join(", ") : `${names.slice(0, POLICY.limits.wakes.pathExamples).join(", ")}, and ${names.length - POLICY.limits.wakes.pathExamples} more under ${rel}`;
 }
 
 /** "every 5 m", "when src/app.js changes", 'when window server prints a line with "ERROR"' */
 export function wakeAbout(wake) {
-	if (wake.kind === "time") return `every ${took(wake.every * 1000)}`;
-	if (wake.kind === "file") return `when ${wake.path === "." ? "a file of the project" : wake.path} changes`;
+	if (wake.kind === POLICY.enums.wakeKinds.time) return `every ${took(wake.every * 1000)}`;
+	if (wake.kind === POLICY.enums.wakeKinds.file) return `when ${wake.path === "." ? "a file of the project" : wake.path} changes`;
 	return wake.match ? `when window ${wake.window} prints a line with ${JSON.stringify(wake.match)}` : `when window ${wake.window} prints something`;
 }
 
@@ -120,14 +121,14 @@ export function wakeRepeats(wake) {
  * @param {{ windowOpen?: (name: string) => boolean }} [see]
  */
 export function wakeLine(wake, now, see = {}) {
-	const gap = wake.kind !== "time" && (wake.times === 0 || (wake.left ?? wake.times) > 1) ? `, at most every ${took(wake.every * 1000)}` : "";
+	const gap = wake.kind !== POLICY.enums.wakeKinds.time && (wake.times === 0 || (wake.left ?? wake.times) > 1) ? `, at most every ${took(wake.every * 1000)}` : "";
 	const parts = [`${wake.id} · ${wakeAbout(wake)}${gap}, ${wakeRepeats(wake)}`, wake.note];
 	if (wake.fired > 0) {
-		parts.push(`fired ${wake.fired === 1 ? "once" : `${wake.fired} times`}, last ${ago(now - wake.lastFired)}${wake.kind !== "time" && wake.lastWhat ? `: ${wake.lastWhat}` : ""}`);
+		parts.push(`fired ${wake.fired === 1 ? "once" : `${wake.fired} times`}, last ${ago(now - wake.lastFired)}${wake.kind !== POLICY.enums.wakeKinds.time && wake.lastWhat ? `: ${wake.lastWhat}` : ""}`);
 		if (wake.lastActed !== undefined) parts.push(`you last acted on it ${ago(now - wake.lastActed)}`);
 	} else parts.push("not fired yet");
-	if (wake.kind === "time" && Number.isFinite(wake.due)) parts.push(wake.due <= now ? "due now" : `next in ${took(wake.due - now)}`);
-	if (wake.kind === "window" && see.windowOpen !== undefined && !see.windowOpen(wake.window)) parts.push(`window ${wake.window} is not open now`);
+	if (wake.kind === POLICY.enums.wakeKinds.time && Number.isFinite(wake.due)) parts.push(wake.due <= now ? "due now" : `next in ${took(wake.due - now)}`);
+	if (wake.kind === POLICY.enums.wakeKinds.window && see.windowOpen !== undefined && !see.windowOpen(wake.window)) parts.push(`window ${wake.window} is not open now`);
 	return parts.join(" · ");
 }
 
@@ -136,7 +137,7 @@ export function wakeLine(wake, now, see = {}) {
  * @param {{ root: string, brainDir: string, config?: { wakeMin?: number, wakesMax?: number }, windows?: any, tickMs?: number, clock?: () => number }} input
  *   windows: the session's shell windows (src/windows.mjs), for the window triggers; clock: the time, for the tests
  */
-export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500, clock = Date.now }) {
+export function createWakes({ root, brainDir, config = {}, windows, tickMs = POLICY.timing.wakePollMs, clock = Date.now }) {
 	const least = config.wakeMin ?? WAKE_MIN;
 	const most = config.wakesMax ?? WAKES_MAX;
 	let { next, wakes } = load(brainDir);
@@ -157,8 +158,8 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500
 	};
 	const find = (id) => wakes.find((wake) => wake.id === id);
 	const look = (wake) => {
-		if (wake.kind === "file") looks.set(wake.id, { files: filesAt(root, wake.path) });
-		else if (wake.kind === "window") looks.set(wake.id, { at: windows?.position?.(wake.window) });
+		if (wake.kind === POLICY.enums.wakeKinds.file) looks.set(wake.id, { files: filesAt(root, wake.path) });
+		else if (wake.kind === POLICY.enums.wakeKinds.window) looks.set(wake.id, { at: windows?.position?.(wake.window) });
 	};
 	for (const wake of wakes) look(wake);
 
@@ -167,7 +168,7 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500
 		wake.lastFired = now;
 		wake.lastWhat = what;
 		delete wake.pending;
-		if (wake.kind === "time") wake.due = now + wake.every * 1000;
+		if (wake.kind === POLICY.enums.wakeKinds.time) wake.due = now + wake.every * 1000;
 		let last = false;
 		if (wake.times > 0) {
 			wake.left = (wake.left ?? wake.times) - 1;
@@ -187,12 +188,12 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500
 	const check = () => {
 		const now = clock();
 		for (const wake of [...wakes]) {
-			if (wake.kind === "time") {
+			if (wake.kind === POLICY.enums.wakeKinds.time) {
 				if (now >= wake.due) fire(wake, "its time came", now);
 				continue;
 			}
 			const seen = looks.get(wake.id) ?? {};
-			if (wake.kind === "file") {
+			if (wake.kind === POLICY.enums.wakeKinds.file) {
 				const files = filesAt(root, wake.path);
 				const what = difference(wake.path, seen.files ?? new Map(), files);
 				if (what !== undefined) wake.pending = what;
@@ -205,7 +206,7 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500
 					if (at > from) {
 						const lines = windows.linesFrom(wake.window, from).filter((line) => line.trim() !== "");
 						const hit = wake.match ? lines.findLast((line) => line.includes(wake.match)) : lines.at(-1);
-						if (hit !== undefined) wake.pending = hit.length > 200 ? `${hit.slice(0, 200)}…` : hit;
+						if (hit !== undefined) wake.pending = hit.length > POLICY.limits.wakes.pendingChars ? `${hit.slice(0, POLICY.limits.wakes.pendingChars)}…` : hit;
 					}
 				}
 				looks.set(wake.id, { at });
@@ -236,26 +237,26 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500
 			const hasPath = typeof wanted.path === "string" && wanted.path.trim() !== "";
 			const hasWindow = typeof wanted.window === "string" && wanted.window.trim() !== "";
 			if (hasPath && hasWindow) throw new WakeError("Give `path` or `window`, not both: one wake watches one thing. Set a second wake for the other.");
-			const kind = hasPath ? "file" : hasWindow ? "window" : "time";
-			if (kind === "time" && wanted.every === undefined) throw new WakeError("Say what wakes you: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
-			if (wanted.match !== undefined && wanted.match !== "" && kind !== "window") throw new WakeError("`match` goes with `window`: it is the text a printed line must contain.");
+			const kind = hasPath ? POLICY.enums.wakeKinds.file : hasWindow ? POLICY.enums.wakeKinds.window : POLICY.enums.wakeKinds.time;
+			if (kind === POLICY.enums.wakeKinds.time && wanted.every === undefined) throw new WakeError("Say what wakes you: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
+			if (wanted.match !== undefined && wanted.match !== "" && kind !== POLICY.enums.wakeKinds.window) throw new WakeError("`match` goes with `window`: it is the text a printed line must contain.");
 			const every = wanted.every === undefined ? least : wanted.every;
 			if (!Number.isInteger(every) || every < least || every > EVERY_MAX) {
 				throw new WakeError(`\`every\` is ${JSON.stringify(wanted.every)}; it is a whole number of seconds from ${least} to ${EVERY_MAX}. A wake costs a whole turn, so ${took(least * 1000)} is the least.`);
 			}
-			const times = wanted.times === undefined ? 1 : wanted.times;
-			if (!Number.isInteger(times) || times < 0) throw new WakeError(`\`times\` is ${JSON.stringify(wanted.times)}; it is how often the wake fires: 1, 2, 3, …, or 0 for until you remove it.`);
+			const times = wanted.times === undefined ? POLICY.limits.wake.timesDefault : wanted.times;
+			if (!Number.isInteger(times) || times < POLICY.limits.wake.timesMin) throw new WakeError(`\`times\` is ${JSON.stringify(wanted.times)}; it is how often the wake fires: 1, 2, 3, …, or 0 for until you remove it.`);
 			const now = clock();
-			const wake = { id: `w${next}`, kind, every, times, ...(times > 0 ? { left: times } : {}), note, created: now, fired: 0 };
-			if (kind === "time") wake.due = now + every * 1000;
-			if (kind === "file") {
+			const wake = { id: `${POLICY.idPrefixes.wake}${next}`, kind, every, times, ...(times > 0 ? { left: times } : {}), note, created: now, fired: 0 };
+			if (kind === POLICY.enums.wakeKinds.time) wake.due = now + every * 1000;
+			if (kind === POLICY.enums.wakeKinds.file) {
 				const full = resolve(root, wanted.path.trim());
 				const rel = relative(root, full).split(sep).join("/");
 				if (rel.startsWith("..") || isAbsolute(rel)) throw new WakeError(`${JSON.stringify(wanted.path)} is outside the project. A wake watches a file or a folder of the project.`);
-				if (rel === ".atlas" || rel.startsWith(".atlas/")) throw new WakeError("`.atlas` is Cartographer's own folder and is not watched.");
+				if (rel === POLICY.sentinels.brainDir || rel.startsWith(`${POLICY.sentinels.brainDir}/`)) throw new WakeError("`.atlas` is Cartographer's own folder and is not watched.");
 				wake.path = rel === "" ? "." : rel;
 			}
-			if (kind === "window") {
+			if (kind === POLICY.enums.wakeKinds.window) {
 				wake.window = wanted.window.trim();
 				if (typeof wanted.match === "string" && wanted.match !== "") wake.match = wanted.match;
 			}
@@ -280,7 +281,7 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = 500
 		lines: (now = clock()) => wakes.map((wake) => wakeLine(wake, now, { windowOpen: windows?.has ? (name) => windows.has(name) : undefined })),
 		/** How long until the next time trigger is due, in ms; undefined when none is set. */
 		nextDue(now = clock()) {
-			const dues = wakes.filter((wake) => wake.kind === "time").map((wake) => Math.max(0, wake.due - now));
+			const dues = wakes.filter((wake) => wake.kind === POLICY.enums.wakeKinds.time).map((wake) => Math.max(0, wake.due - now));
 			return dues.length === 0 ? undefined : Math.min(...dues);
 		},
 		/** Be told when a trigger fires. */

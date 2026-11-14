@@ -1,60 +1,10 @@
-// Everything the model is told that is not the user's words.
+// The built-in system prompt and tool descriptions. Prompt wording is source code; there is no runtime
+// customization or overlay. A deliberate change to it is reviewed and made here.
 //
-// THE PROMPT IS A BOOK. Every section of the system prompt and every tool's
-// description has a name and a token budget. The built-in wording below is the
-// book as it ships. The user may approve the agent's own edits to it: those go
-// into one overlay file in the core folder (src/proposals.mjs) and are laid over
-// this wording the next time carto starts or a context is collapsed, in every
-// project. `systemPrompt`, `sections` and `describe` all read that overlay, so a
-// reworded section or description is what the model is actually sent.
-//
-// The one prompt serves both roles, because a task is a fork of the main
-// conversation and shares its prompt byte for byte: that is what makes starting
-// and ending a task cost only a few hundred tokens. Tools, too, are one list for
-// the main agent and every task; differing lists would break the prefix the
-// server has already read.
-//
-// Budgets are in tokens (four characters each, as everywhere in this project).
-// A section may hold 250 tokens, a tool's description 200, and the four tools
-// that carry the shell and wake rules 300. A proposal that does not fit its
-// budget is refused when it is made, so the fixed prefix cannot creep back up.
-
-/** @type {Map<string, { sections: Record<string, string | null>, added: [string, string, string][], tools: Record<string, string> }>} */
-const EMPTY_OVERLAY = { sections: {}, added: [], tools: {} };
-let overlay = EMPTY_OVERLAY;
-
-/** Put the approved wording in force for this run of carto. Safe to call again at a collapse. */
-export function loadPromptOverlay(value) {
-	if (value === undefined || value === null || typeof value !== "object") {
-		overlay = EMPTY_OVERLAY;
-		return;
-	}
-	overlay = {
-		sections: value.sections !== null && typeof value.sections === "object" ? value.sections : {},
-		added: Array.isArray(value.added) ? value.added.filter((entry) => Array.isArray(entry) && typeof entry[0] === "string" && typeof entry[1] === "string") : [],
-		tools: value.tools !== null && typeof value.tools === "object" ? value.tools : {},
-	};
-}
-
-/** Tokens are counted as four characters. */
-const CHARS_PER_TOKEN = 4;
-const SECTION_TOKENS = 250;
-const TOOL_TOKENS = 200;
-const BIG_TOOL_TOKENS = 300;
-/** The four descriptions that carry the shell and wake rules get the larger budget. */
-const BIG_TOOLS = new Set(["shell", "window", "wake", "sleep"]);
-
-/** Character budget for a section or a tool's description, by name. */
-export const budgetOf = (name) => {
-	const tool = name.startsWith("tool.") ? name.slice(5) : undefined;
-	const tokens = tool === undefined ? SECTION_TOKENS : BIG_TOOLS.has(tool) ? BIG_TOOL_TOKENS : TOOL_TOKENS;
-	return tokens * CHARS_PER_TOKEN;
-};
-/** The largest a whole new section's wording may be (used in the `prompt` tool's schema). */
-export const SECTION_MAX = SECTION_TOKENS * CHARS_PER_TOKEN;
-/** The largest most tool descriptions may be (the `prompt` tool's schema). `shell` and friends may be longer. */
-export const TOOL_MAX = TOOL_TOKENS * CHARS_PER_TOKEN;
-export const TOOL_BIG_MAX = BIG_TOOL_TOKENS * CHARS_PER_TOKEN;
+// The one prompt serves both roles because a task is a fork of the main conversation and shares its prompt byte for
+// byte. Tools, too, are one list for the main agent and every task; differing lists would break the prefix the server
+// has already read.
+import { POLICY } from "./config.mjs";
 
 // ─── Tool descriptions ─────────────────────────────────────────────────────
 // One place for every description, so editing one is editing what the model is
@@ -64,9 +14,8 @@ export const TOOLS = {
 	ask: "Ask the user a question and wait for the answer, which comes back as this call's result. Use it only when nothing can go on without their answer. For a matter of taste or a choice that others do not depend on, record a question in the ledger instead and keep working; the user answers it in the Requests view. With `choices`, a number picks one.",
 	return: "End this task. `report` is all the main agent gets: put in it what you found or changed, with file paths and line numbers, and what you left undone. `done` says whether the brief is carried out; returning early with `done` false and a clear finding is a good outcome. Call `return` in your last reply, and in no other way end a task.",
 	task: "Start one task: one thing, done atomically. Give a `brief` that says exactly what to do and what its report must contain. The task is a fork of you, with your context and your tools; only its report comes back. One task per reply when you can. For a change item of the plan, give its `item` id; a change item that waits for approval cannot start. Prefer a task with a clear brief to doing it yourself.",
-	book: 'Write to one book; `ops` is an array of action-tagged objects. Cartographer validates every action against the selected book branch. Examples:\nledger `{"book":"ledger","ops":[{"action":"add","kind":"goal","text":"...","done_when":"..."}]}`\nplan `{"book":"plan","ops":[{"action":"add","mode":"change","text":"..."}]}`\nprompt `{"book":"prompt","ops":[{"action":"edit","target":"tool.book","text":"...","why":"..."}]}`\nbooks `{"book":"books","ops":[{"action":"add","kind":"assessment","text":"..."}]}`\ncontext `{"book":"context","ops":[{"action":"shelve","path":"src/main.js"}]}`. Plan add needs `mode` and `text` inside its op. All operation fields go inside `ops`; root `text` is only for a legacy whole-assessment call with book=books.',
+	book: 'Write to one book; `ops` is an array of action-tagged objects. Cartographer validates every action against the selected book branch. Examples:\nledger `{"book":"ledger","ops":[{"action":"add","kind":"goal","text":"...","done_when":"..."}]}`\nplan `{"book":"plan","ops":[{"action":"add","mode":"change","text":"..."}]}`\nbooks `{"book":"books","ops":[{"action":"add","kind":"assessment","text":"..."}]}`\ncontext `{"book":"context","ops":[{"action":"shelve","path":"src/main.js"}]}`. Plan add needs `mode` and `text` inside its op. All operation fields go inside `ops`; root `text` is only for a legacy whole-assessment call with book=books.',
 	atlas: "Your map of the project's parts, as nodes that link to files and to each other. `add` a node with a one-line `gist` (or `edit`, `remove`, `confirm`, `link`, `unlink`, `look`, `tree`); tasks write nodes themselves while the knowledge is fresh. A node a changed file links to is marked as possibly out of date until a task confirms it. The tree of files is drawn for you in the state block.",
-	prompt: "Propose a change to your own prompt. Name a section or a tool's description, give the whole new wording (within its budget) and what you observed that misled you. Nothing changes until the user approves it in the Requests view; approved wording holds from the next collapse or start. Add a section, reword one, drop one, or reword a tool's description.",
 	read: "Read text files of the project with line numbers. Ask for several files in one call when you know which you need; a range reads part of a long file. Only a task reads files.",
 	search: "Find lines matching a pattern in the project's text files, with their paths and line numbers. Only a task searches.",
 	list: "List the files and folders at a path, with a tree of what is below it. Only a task lists.",
@@ -78,11 +27,8 @@ export const TOOLS = {
 	context: "Tend your own context. `fold` shrinks a report you have finished the bookkeeping for to its one-line record, recallable by `recall` (`drop` does the same); `shelve` a file you keep needing; `note` a finding into your own steps; `collapse` your context now. The state block lists what is in view in full with its size, so you see what you are carrying. The automatic collapse is the backstop.",
 };
 
-/** A tool's description with any approved wording laid over the built-in. */
-export const describe = (name) => {
-	const mine = overlay.tools[name];
-	return typeof mine === "string" ? mine : TOOLS[name];
-};
+/** A tool description. */
+export const describe = (name) => TOOLS[name];
 
 // ─── The named sections of the system prompt ───────────────────────────────
 // The role paragraph and TASK_HEADER carry wording tried on the target model in
@@ -95,7 +41,7 @@ const SECTIONS = [
 	],
 	[
 		"roles",
-		"You are in one of two roles at any time. You are one mind throughout, whichever it is. Main agent (the default). You talk with the user, decide what needs finding out or changing, and report what was done. You do not touch the project yourself: `read`, `search`, `list`, `write`, `edit` and `shell` are refused. Call `task` with a brief; only its report comes back. Tasks run one at a time, one thing each. Task. A message that begins \"You are now the task\" makes you that task until you call `return`. A look task has `read`, `search`, `list`; a change task has `write`, `edit` and `shell` too, and may run commands and send a window input. `task`, `book` (its ledger, plan, prompt and books operations), `wake` and `sleep` belong to the main agent and are refused inside a task; `chat`, `ask`, `atlas`, `book`'s context operations and plain-text notes work there as they do for you. A task ends only with `return`; `done` false with a clear finding is a good outcome.",
+		"You are in one of two roles at any time. You are one mind throughout, whichever it is. Main agent (the default). You talk with the user, decide what needs finding out or changing, and report what was done. You do not touch the project yourself: `read`, `search`, `list`, `write`, `edit` and `shell` are refused. Call `task` with a brief; only its report comes back. Tasks run one at a time, one thing each. Task. A message that begins \"You are now the task\" makes you that task until you call `return`. A look task has `read`, `search`, `list`; a change task has `write`, `edit` and `shell` too, and may run commands and send a window input. `task`, `book` (its ledger, plan and books operations), `wake` and `sleep` belong to the main agent and are refused inside a task; `chat`, `ask`, `atlas`, `book`'s context operations and plain-text notes work there as they do for you. A task ends only with `return`; `done` false with a clear finding is a good outcome.",
 	],
 	[
 		"talking",
@@ -107,7 +53,7 @@ const SECTIONS = [
 	],
 	[
 		"context",
-		"Your context. It holds less than a long piece of work produces, so Cartographer collapses it at times. After a collapse a block between <context> and </context> holds what was kept: one line for each finished task with an id, your shelf, and the last of your talk with the user. Your notes, tool results and reports in full are gone from view; a report can be recalled by its id. The ledger, plan, atlas and books are not part of the context and stay. Before a collapse Cartographer asks you one question answerable only with {\"handoff\": true} or {\"handoff\": false}: answer true to get one turn to write down what is recorded nowhere else. With `book`'s context operations you act yourself: `fold` a report once you have done its bookkeeping — large ones, when you will work on for a while — `shelve` a file you keep sending tasks to read, or `collapse` now.",
+		`Your context. It holds less than a long piece of work produces, so Cartographer collapses it at times. After a collapse a block between ${POLICY.markup.context.open} and ${POLICY.markup.context.close} holds what was kept: one line for each finished task with an id, your shelf, and the last of your talk with the user. Your notes, tool results and reports in full are gone from view; a report can be recalled by its id. The ledger, plan, atlas and books are not part of the context and stay. Before a collapse Cartographer asks you one question answerable only with {\"handoff\": true} or {\"handoff\": false}: answer true to get one turn to write down what is recorded nowhere else. With \`book\`'s context operations you act yourself: \`fold\` a report once you have done its bookkeeping — large ones, when you will work on for a while — \`shelve\` a file you keep sending tasks to read, or \`collapse\` now.`,
 	],
 	[
 		"goals",
@@ -123,7 +69,7 @@ const SECTIONS = [
 	],
 	[
 		"assessment",
-		"Your books hold short entries about the project (what it is, how it is built and run, its state) and your practice (what you have learned about this harness and the habits you want to keep). Both ride at the top of your context between <project> and </project>. Add to them, edit one entry, or compact by editing — never rewrite the whole. What you have learned about how Cartographer works belongs here; when a wording or a tool's description keeps misleading you, propose a change with `prompt` and keep working.",
+		`Your books hold short entries about the project (what it is, how it is built and run, its state) and your practice (what you have learned about this harness and the habits you want to keep). Both ride at the top of your context between ${POLICY.markup.project.open} and ${POLICY.markup.project.close}. Add to them, edit one entry, or compact by editing — never rewrite the whole. What you have learned about how Cartographer works belongs here; when you learn a durable lesson about the project or this harness, write it in the practice book and keep working.`,
 	],
 	[
 		"practice",
@@ -143,56 +89,17 @@ const SECTIONS = [
 	],
 	[
 		"running",
-		"Running. A change task runs commands with `shell`, which types them into a shell window: a bash that stays open under a name. A command that has not ended when the call returns keeps running in its window, so a server, watcher or long build runs while you and your tasks do other work. Every request ends with a block between <windows> and </windows> showing each window's state and newest lines. The same tool reads more of a window, waits for it, stops or closes it; typing takes a change task. Windows are sandboxes that write only inside the project and have no network unless the state block says otherwise. Have the task that writes something also run it once, and put the command and what it printed into the report. A check that still has to be run is its own change item; a step needing the network is marked `network` so the user sees it before approving.",
+		`Running. A change task runs commands with \`shell\`, which types them into a shell window: a bash that stays open under a name. A command that has not ended when the call returns keeps running in its window, so a server, watcher or long build runs while you and your tasks do other work. Every request ends with a block between ${POLICY.markup.windows.open} and ${POLICY.markup.windows.close} showing each window's state and newest lines. The same tool reads more of a window, waits for it, stops or closes it; typing takes a change task. Windows are sandboxes that write only inside the project and have no network unless the state block says otherwise. Have the task that writes something also run it once, and put the command and what it printed into the report. A check that still has to be run is its own change item; a step needing the network is marked \`network\` so the user sees it before approving.`,
 	],
 	[
 		"state",
-		"Each request ends with a block between <state> and </state>, written by Cartographer, not the user: the time, the tree, the atlas, the books, the ledger, the plan, what waits in Requests, and what is in view in full with its size. Trust it and the windows block over anything earlier, and do not repeat them back.",
+		`Each request ends with a block between ${POLICY.markup.state.open} and ${POLICY.markup.state.close}, written by Cartographer, not the user: the time, the tree, the atlas, the books, the ledger, the plan, what waits in Requests, and what is in view in full with its size. Trust it and the windows block over anything earlier, and do not repeat them back.`,
 	],
 ];
 
-/** The names a proposal may aim at, in the order sections stand. */
-export const SECTION_NAMES = SECTIONS.map(([name]) => name);
-
-/**
- * The sections as they stand, with approved wording laid over them: edits replace
- * a section, `null` drops it, and `added` inserts a new section before another.
- * @returns {[string, string][]}
- */
-export function sections() {
-	const out = [];
-	for (const [name, builtIn] of SECTIONS) {
-		const mine = overlay.sections[name];
-		if (mine === null) continue;
-		out.push([name, typeof mine === "string" ? mine : builtIn]);
-	}
-	for (const [name, text, before] of overlay.added) {
-		if (out.some(([existing]) => existing === name)) continue;
-		const at = out.findIndex(([existing]) => existing === before);
-		out.splice(at === -1 ? out.length : at, 0, [name, text]);
-	}
-	return out;
-}
-
-/** The current wording of a section or a tool's description, or undefined if there is none. */
-export function wordingOf(name) {
-	if (name.startsWith("tool.")) {
-		const tool = name.slice(5);
-		return TOOLS[tool] === undefined && overlay.tools[tool] === undefined ? undefined : describe(tool);
-	}
-	const mine = overlay.sections[name];
-	if (mine === null) return undefined;
-	if (typeof mine === "string") return mine;
-	const added = overlay.added.find(([existing]) => existing === name);
-	if (added !== undefined) return added[1];
-	return SECTIONS.find(([existing]) => existing === name)?.[1];
-}
-
-/** The whole system prompt, one named section after another. A change here is read again from its first token. */
+/** The whole system prompt, one named section after another. */
 export function systemPrompt(project) {
-	return sections()
-		.map(([, text]) => text.replace(/\$\{root\}/g, project.root))
-		.join("\n\n");
+	return SECTIONS.map(([, text]) => text.replace(/\$\{root\}/g, project.root)).join("\n\n");
 }
 
 // ─── The wording the fork is told about itself ─────────────────────────────
@@ -266,7 +173,7 @@ export const REPLIES_LEFT = (left) => `Cartographer: ${left === 1 ? "one more re
 
 /** How often the same note may be written, with no call in between, before the turn or the task is ended. */
 /** And how often the same call may fail, with no call succeeding in between. */
-export const LOOP_MAX = 3;
+export const LOOP_MAX = POLICY.limits.loops.sameCallFailures;
 
 /** Added to the result of each call that is part of such a run. `total`: how often the call was sent. */
 export const LOOP_STOP = (total) =>
@@ -282,7 +189,6 @@ export const REFUSALS = {
 	taskWritesLedger: "The ledger belongs to the main agent. If something should be recorded, say so in your report.",
 	taskWritesPlan: "The plan belongs to the main agent. If the plan should change, say so in your report.",
 	taskAssesses: "The assessment belongs to the main agent. If it should change, say so in your report.",
-	taskProposes: "Proposing a change to the prompt belongs to the main agent. Say what misled you in your report.",
 	taskWakes: "Wakes belong to the main agent. If something should be watched after this task, say what in your report. To wait for a command inside this task, use `shell` with action wait.",
 	taskSleeps: "A task does not sleep.",
 	mainRuns:
@@ -301,27 +207,27 @@ export const REFUSALS = {
  */
 export const ASK_MAIN = (reason) =>
 	[
-		"<cartographer>",
+		POLICY.markup.note.open,
 		`Written by Cartographer, not by the user. Your context is about to be collapsed (${reason}).`,
 		"",
 		"You keep: one line for each finished task, your shelf, the last of your talk with the user, and your ledger, plan, graph and books as they are.",
 		"You lose from view: your own notes and reasoning, every tool result, and reports in full (a report can be recalled by its id).",
 		"",
 		'Is there something in view that you will need and that is written in none of the things you keep? Answer {"handoff": true} to get one turn to write it down first. Answer {"handoff": false} to collapse now.',
-		"</cartographer>",
+		POLICY.markup.note.close,
 	].join("\n");
 
 /** The same question for a task, about its own steps. */
 export const ASK_TASK = (reason) =>
 	[
-		"<cartographer>",
+		POLICY.markup.note.open,
 		`Written by Cartographer, not by the user. ${reason}, so your steps since the brief are about to be collapsed.`,
 		"",
 		"You keep: the brief, the notes you wrote (plain text, and `book` with book context, action note), your shelf, and one line for each call you made.",
 		"You lose from view: the results of your calls.",
 		"",
 		'Is there something in those results that your report needs and that your notes do not hold yet? Answer {"handoff": true} to get one reply to write it down first. Answer {"handoff": false} to collapse now.',
-		"</cartographer>",
+		POLICY.markup.note.close,
 	].join("\n");
 
 /** Added to a tool result of the main agent that answered true while it was working. */
@@ -331,13 +237,13 @@ export const HANDOFF_IN_TURN = (reason) =>
 /** Sent as a turn of its own to the main agent that answered true while it rested. */
 export const HANDOFF_NOTE = (reason) =>
 	[
-		"<cartographer>",
+		POLICY.markup.note.open,
 		`Written by Cartographer, not by the user. Nobody typed this. Your context will be collapsed when this turn ends (${reason}), and you asked for a turn first.`,
 		"",
 		"Write what must not be lost with `book` (its ledger, its books for the assessment) or `atlas`, and put a file you keep needing on your shelf with `book`'s context operations. What you write as plain text is lost. Then end the turn: call `sleep`, or `chat` if the user should hear something.",
-		"</cartographer>",
+		POLICY.markup.note.close,
 	].join("\n");
 
 /** Put at the end of one request of a task that answered true. */
 export const TASK_HANDOFF =
-	"<cartographer>\nWritten by Cartographer, not by the user. Your steps will be collapsed after this reply, and you asked for a reply first. Call `book` with book context and action note now, and put into `text` what your report needs from the results above: findings with file paths and line numbers. Results you have not noted are gone after this reply.\n</cartographer>";
+	`${POLICY.markup.note.open}\nWritten by Cartographer, not by the user. Your steps will be collapsed after this reply, and you asked for a reply first. Call \`book\` with book context and action note now, and put into \`text\` what your report needs from the results above: findings with file paths and line numbers. Results you have not noted are gone after this reply.\n${POLICY.markup.note.close}`;

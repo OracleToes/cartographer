@@ -22,6 +22,7 @@
 // And it is a face, not a second program. The session is run by the plain terminal (src/terminal.mjs), which is
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
 // everything Cartographer has to say, exactly as it does line by line.
+import { DEFAULTS, POLICY } from "../config.mjs";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -29,7 +30,6 @@ import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
 import { archiveRow, dropRow, foldRow, unarchiveRow, unshelveRow } from "../ops.mjs";
-import { CORE_DIR } from "../config.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
 import { booksPath } from "../books.mjs";
@@ -82,14 +82,15 @@ const VIEWS = {
 /** Every view of every tab but Chat, by the name it is kept under. */
 const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.books", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
 /** How often a view is read again while it shows, in milliseconds. */
-const EVERY = { carto: 2000, diff: 5000, shells: 700, context: 700 };
+const EVERY = POLICY.timing.screenRefreshMs;
+const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 /** The marks of the spinner that turns while the agent works, and how long each stands. */
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPIN_MS = 80;
+const SPIN_MS = POLICY.timing.spinnerMs;
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
-	["requests", "what waits for you: change items, questions of taste, changes to the agent's prompt"],
+	["requests", "what waits for you: change items, questions of taste, "],
 	["approve", "approve requests by id, or the whole plan as it stands"],
 	["deny", "turn a request down: /deny ID [why]"],
 	["answer", "answer a question of taste: /answer ID words"],
@@ -98,8 +99,7 @@ const COMMANDS = [
 	["atlas", "the tree as the agent sees it, and the graph's nodes"],
 	["assessment", "the agent's summary of the project"],
 	["practice", "the agent's notes on how it works"],
-	["prompt", "the agent's approved changes to its own prompt"],
-	["diff", "what the last change task did to the files", ["all"]],
+		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
 	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
@@ -110,7 +110,7 @@ const COMMANDS = [
 	["fold", "take a kept report out of the context's view, leaving its one line"],
 	["archive", "take a row out of what the agent reads: a report, a ledger entry, a plan item, a node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["delete", "a row is gone for good, and the agent is not told: a report, a ledger entry, a plan item, a proposal, a node"],
+	["delete", "a row is gone for good, and the agent is not told: a report, a ledger entry, a plan item, a node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "keep a file in view from the next collapse on: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -153,7 +153,7 @@ export const KEYS_HELP = [
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, the system prompt's prompt.json, a tool where it is defined, a shelved file",
+	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file",
 	"  f, v, d, x       the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, a ledger entry, a plan item, a node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -220,7 +220,6 @@ function onPath(name) {
  */
 export async function runScreen(session, options, runTerminal) {
 	const { root, brainDir, config = {} } = options;
-	const coreDir = options.coreDir ?? CORE_DIR;
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
 	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
@@ -241,7 +240,7 @@ export async function runScreen(session, options, runTerminal) {
 	const terminal = new Term();
 	const tui = new TuiAltScreen(terminal, false, undefined, {
 		mouse: true,
-		wheelScrollLines: 3,
+		wheelScrollLines: POLICY.limits.screen.wheelScrollLines,
 		// What is selected with the mouse is copied when the button is let go, every way there is.
 		copySelection: async (text) => (toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) }).length > 0 ? true : "no way to the clipboard was found"),
 		scrollToEndIndicator: () => `${sgr("bgSel")} ↓ the newest · G or End \x1b[0m`,
@@ -281,7 +280,7 @@ export async function runScreen(session, options, runTerminal) {
 			tui.invalidate();
 			tui.requestRender(true);
 		};
-		tui.queryTerminalColors({ timeoutMs: 500, onLateReply: take }).then(take, () => {});
+		tui.queryTerminalColors({ timeoutMs: POLICY.timing.screen.colorQueryMs, onLateReply: take }).then(take, () => {});
 	};
 
 	const state = {
@@ -315,7 +314,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** Something to say in passing, which is not worth a line of the conversation. */
 	const flash = (text) => {
-		if (!state.closed) tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, 4000);
+		if (!state.closed) tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, POLICY.timing.screen.flashMs);
 	};
 
 	// ─── The terminal core's side ────────────────────────────────────────────
@@ -367,7 +366,7 @@ export async function runScreen(session, options, runTerminal) {
 			const done = Math.max(0, event.processed - event.cache);
 			state.prefill = { ...state.prefill, phase: "reading", fresh, done, total: event.total, ms: event.time_ms };
 		} else if ((event.phase === "writing" || event.phase === "done") && state.prefill?.id === event.id) {
-			if (state.prefill.fresh >= (config.prefillTokens ?? 1000)) state.lastPrefill = { fresh: state.prefill.fresh, ms: state.prefill.ms ?? event.at - event.began, at: event.at };
+			if (state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens)) state.lastPrefill = { fresh: state.prefill.fresh, ms: state.prefill.ms ?? event.at - event.began, at: event.at };
 			state.prefill = undefined;
 		}
 		draw();
@@ -378,15 +377,15 @@ export async function runScreen(session, options, runTerminal) {
 		const size = chat.liveSize();
 		const now = Date.now();
 		if (size < rateMark.size) rateMark = { at: now, size };
-		else if (now - rateMark.at >= 1500) {
+		else if (now - rateMark.at >= POLICY.timing.screen.rateWindowMs) {
 			const grown = size - rateMark.size;
-			state.rate = grown > 0 ? grown / 4 / ((now - rateMark.at) / 1000) : undefined;
+			state.rate = grown > 0 ? grown / POLICY.estimation.charsPerToken / ((now - rateMark.at) / 1000) : undefined;
 			rateMark = { at: now, size };
 		}
 	};
 	let brain = { at: 0 };
 	const readBrain = () => {
-		if (Date.now() - brain.at < 1000) return brain;
+		if (Date.now() - brain.at < POLICY.timing.screen.stateCacheMs) return brain;
 		const next = { at: Date.now() };
 		try {
 			const requests = listRequests(brainDir, { yolo: options.gate?.yolo === true });
@@ -399,7 +398,7 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			const { ledger } = loadLedger(brainDir);
 			if (ledger !== undefined) {
-				const goals = openEntries(ledger, "goal").length;
+				const goals = openEntries(ledger, POLICY.enums.ledgerKind.goal).length;
 				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}`;
 			}
 		} catch {
@@ -427,7 +426,7 @@ export async function runScreen(session, options, runTerminal) {
 			const doing = chat.doing();
 			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
 			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
-			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? 1000);
+			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
 			if (reading) {
 				const { fresh, done, ms } = state.prefill;
 				const rate = ms > 0 ? done / (ms / 1000) : 0;
@@ -436,22 +435,22 @@ export async function runScreen(session, options, runTerminal) {
 			} else if (doing !== undefined) first.push([` · ${doing.what}`, ""]);
 			else if (state.prefill?.phase === "sent") first.push([" · waiting for the model", "muted"]);
 			first.push([` · ${span(Date.now() - state.busySince)}`, "muted"]);
-			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < 10 ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
-			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < 20_000 && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
+			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < POLICY.limits.format.rateDecimalBelow ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
+			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < POLICY.timing.screen.prefillRecentMs && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
 		} else first.push(["○ ", "muted"], ["resting", ""], [` · ${span(Date.now() - state.restSince)}`, "muted"]);
 		if (core.paused?.()) first.push([" · paused: the agent gets nothing new · /pause or Ctrl-V lets it go on", "warn"]);
 
 		const second = [];
 		const size = core.contextSize();
 		const windowSize = options.contextWindow;
-		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > 0.8 ? "warn" : ""]);
+		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
 		const { plan, ledger, waits, requests } = readBrain();
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
 		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
-		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (windows.length > 0) {
-			const running = windows.filter((win) => win.state === "busy").length;
+			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
 			second.push([` · ${windows.length === 1 ? "1 window" : `${windows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
 		}
 		const wakes = session.wakes?.list() ?? [];
@@ -507,7 +506,7 @@ export async function runScreen(session, options, runTerminal) {
 	const refresh = (id = viewId(), force = false) => {
 		const page = pageOf(id);
 		if (page === undefined) return;
-		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? 2000)) return;
+		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
 		if (id === "context.parts") {
 			Promise.resolve(core.capture("/context"))
@@ -847,7 +846,7 @@ export async function runScreen(session, options, runTerminal) {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
 		if (line.kind === "group") inPlace(() => chat.toggle(line.item, to));
-		else if (line.kind === "call" || line.kind === "note" || line.kind === "detail") {
+		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
 			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
@@ -926,10 +925,10 @@ export async function runScreen(session, options, runTerminal) {
 			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
 			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
 			if (key === "d" && deletable) {
-				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < 6000) {
+				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
 					state.deleteArm = undefined;
 					if (item.editKind === "chat-you" || item.editKind === "chat-agent") deleteChat(item);
-					else flash(dropRow(brainDir, coreDir, bookId));
+					else flash(dropRow(brainDir, bookId));
 					refresh(viewId(), true);
 					return;
 				}
@@ -941,7 +940,7 @@ export async function runScreen(session, options, runTerminal) {
 			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
 			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
 				if (key === "a") {
-					if (/^q\d+$/.test(bookId)) return flash("a question is answered with words: /answer " + bookId + " words");
+					if (QUESTION_ID.test(bookId)) return flash("a question is answered with words: /answer " + bookId + " words");
 					setMode("type");
 					return void submit(`/approve ${bookId}`);
 				}
@@ -1108,7 +1107,7 @@ export async function runScreen(session, options, runTerminal) {
 		commandLine() {
 			const question = session.asks?.pending();
 			const typed = prompt.getText();
-			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), 40)})`;
+			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
 			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to type";
 			return [[" COMMANDS ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
@@ -1138,7 +1137,7 @@ export async function runScreen(session, options, runTerminal) {
 			chat.print(`! ${error?.message ?? error}\n`);
 		}
 	};
-	const windowNames = () => (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone").map((win) => win.name);
+	const windowNames = () => (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone).map((win) => win.name);
 	prompt.setAutocompleteProvider(
 		new CombinedAutocompleteProvider(
 			COMMANDS.map(([name, description, words]) => ({
@@ -1247,7 +1246,7 @@ export async function runScreen(session, options, runTerminal) {
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
 		const busy = core.busy();
-		if (Date.now() - lastFrame >= (busy ? SPIN_MS : 1000)) {
+		if (Date.now() - lastFrame >= (busy ? SPIN_MS : POLICY.timing.screen.idleFrameMs)) {
 			lastFrame = Date.now();
 			draw();
 		}

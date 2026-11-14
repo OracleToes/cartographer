@@ -9,6 +9,7 @@
 // as the server got it and in the order the model reads it: the system prompt, the tools, then every message, with
 // the blocks Cartographer adds (the copy of the assessment and the graph, what a collapse kept, the state block,
 // the windows block) as parts of their own. Then what has come since: the reply and what its calls returned.
+import { POLICY } from "../config.mjs";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,11 @@ import { listRequests } from "../requests.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
 import { short, width } from "./text.mjs";
+
+const PROJECT_BLOCK = new RegExp(`^${POLICY.markup.project.open}\\n[\\s\\S]*?\\n${POLICY.markup.project.close}\\n*`);
+const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.context.close}\\n*`);
+const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.state.close}`);
+const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.windows.close}\\s*$`);
 
 const heading = (text) => ({ key: `heading:${text}`, plain: true, head: [[text, "heading"]] });
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
@@ -93,29 +99,29 @@ export function ledgerView({ brainDir }) {
 		key: `entry:${item.id}`,
 		archived: item.archived === true,
 		head: [
-			[`${item.id}  `, item.status === "done" || item.archived === true ? "muted" : "tool"],
-			[item.text, item.status === "done" || item.archived === true ? "muted" : ""],
-			[item.kind === "goal" && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"],
+			[`${item.id}  `, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : "tool"],
+			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
+			[item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"],
 			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 		],
 		body: [
 			item.text,
-			item.kind === "goal" && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
-			item.status === "done" && item.outcome ? `outcome: ${item.outcome}` : undefined,
-			`${item.by === "user" ? "written by you" : "written by the agent"}${when(item.added) ? ` · added ${when(item.added)}` : ""}${item.status === "done" && when(item.closed) ? ` · closed ${when(item.closed)}` : ""}`,
+			item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
+			item.status === POLICY.enums.entryStatus.done && item.outcome ? `outcome: ${item.outcome}` : undefined,
+			`${item.by === "user" ? "written by you" : "written by the agent"}${when(item.added) ? ` · added ${when(item.added)}` : ""}${item.status === POLICY.enums.entryStatus.done && when(item.closed) ? ` · closed ${when(item.closed)}` : ""}`,
 		]
 			.filter((line) => line !== undefined)
 			.join("\n"),
 		copy: entryLine(item, now),
 		target: { file, line: jsonLine(file, "id", item.id) },
 	});
-	for (const [kind, title] of [["goal", "Goals"], ["question", "Questions for you"], ["note", "Notes"]]) {
-		const open = ledger.items.filter((item) => item.kind === kind && item.status === "open");
+	for (const [kind, title] of [[POLICY.enums.ledgerKind.goal, "Goals"], [POLICY.enums.ledgerKind.question, "Questions for you"], [POLICY.enums.ledgerKind.note, "Notes"]]) {
+		const open = ledger.items.filter((item) => item.kind === kind && item.status === POLICY.enums.entryStatus.open);
 		if (open.length === 0) continue;
 		items.push(heading(title));
 		items.push(...open.map(entry));
 	}
-	const done = ledger.items.filter((item) => item.status !== "open");
+	const done = ledger.items.filter((item) => item.status !== POLICY.enums.entryStatus.open);
 	if (done.length > 0) {
 		items.push(heading("Closed"));
 		items.push(...done.map(entry));
@@ -134,16 +140,16 @@ export function planView({ brainDir, yolo }) {
 		key: `item:${item.id}`,
 		archived: item.archived === true,
 		head: [
-			[item.status === "done" ? "✓ " : "○ ", item.status === "done" ? "ok" : "warn"],
+			[item.status === POLICY.enums.entryStatus.done ? "✓ " : "○ ", item.status === POLICY.enums.entryStatus.done ? "ok" : "warn"],
 			[`${item.id} `, "tool"],
 			[`[${item.mode}${item.network ? ", network" : ""}${item.standing ? ", standing" : ""}] `, "muted"],
-			[item.text, item.status === "done" || item.archived === true ? "muted" : ""],
-			[item.status === "done" && item.outcome ? `  → ${item.outcome}` : "", "muted"],
+			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
+			[item.status === POLICY.enums.entryStatus.done && item.outcome ? `  → ${item.outcome}` : "", "muted"],
 			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 		],
 		body: [
 			item.text,
-			item.status === "done" ? `done${when(item.closed) ? ` ${when(item.closed)}` : ""}${item.outcome ? `: ${item.outcome}` : ""}` : "open",
+			item.status === POLICY.enums.entryStatus.done ? `done${when(item.closed) ? ` ${when(item.closed)}` : ""}${item.outcome ? `: ${item.outcome}` : ""}` : "open",
 			item.undone ? "undone by you: the files are as they were before this item ran" : undefined,
 		]
 			.filter((line) => line !== undefined)
@@ -151,25 +157,25 @@ export function planView({ brainDir, yolo }) {
 		copy: itemLine(item),
 		target: { file, line: jsonLine(file, "id", item.id) },
 	}));
-	const waits = !yolo && plan.authorized === undefined && plan.items.some((item) => item.status === "open" && item.mode === "change");
+	const waits = !yolo && plan.authorized === undefined && plan.items.some((item) => item.status === POLICY.enums.entryStatus.open && item.mode === POLICY.enums.planMode.change);
 	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]]], items };
 }
 
-/** What waits for the user: change items, questions of taste, and changes to the agent's own prompt. */
+/** What waits for the user: change items and questions of taste. */
 export function requestsView({ brainDir, yolo }) {
 	const all = listRequests(brainDir, { yolo });
 	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
 	const items = all.map((request) => ({
 		key: `request:${request.id}`,
 		head: [
-			[request.kind === "approval" ? "● " : request.kind === "question" ? "? " : "◆ ", request.kind === "approval" ? "warn" : "tool"],
+			[request.kind === "approval" ? "● " : "? ", request.kind === "approval" ? "warn" : "tool"],
 			[`${request.id}  `, "tool"],
 			[`[${request.kind}] `, "muted"],
 			[request.text, ""],
 		],
 		body: [
 			...(request.detail ?? []),
-			request.kind === "question"
+			request.kind === POLICY.enums.ledgerKind.question
 				? `answer with /answer ${request.id} words · d forgets the question`
 				: `a approves it · n turns it down · d forgets it, and the agent is not told`,
 		].join("\n"),
@@ -226,7 +232,7 @@ export function treeView({ root, brainDir }, isOpen) {
 			let size = "";
 			try {
 				const bytes = statSync(join(root, path)).size;
-				size = bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+				size = bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`;
 			} catch {
 				size = "gone";
 			}
@@ -246,22 +252,22 @@ export function booksView({ brainDir }) {
 	const book = loadBooks(brainDir);
 	const entry = (item) => {
 		const first = item.text.split("\n")[0];
-		const more = item.text.includes("\n") || width(first) > 100;
+		const more = item.text.includes("\n") || width(first) > POLICY.limits.screen.rowWrapChars;
 		const target = file === store ? { file, line: jsonLine(file, "id", item.id) } : { file, line: lineOf(file, first) };
 		return {
 			key: `entry:${item.id}`,
-			head: [[`${item.id}  `, item.status === "done" ? "muted" : "tool"], [first, item.status === "done" ? "muted" : ""]],
+			head: [[`${item.id}  `, item.status === POLICY.enums.entryStatus.done ? "muted" : "tool"], [first, item.status === POLICY.enums.entryStatus.done ? "muted" : ""]],
 			...(more ? { body: item.text } : {}),
 			copy: bookLine(item),
 			target,
 		};
 	};
 	const items = [];
-	for (const [kind, title] of [["assessment", "Assessment of the project"], ["practice", "Practice: how the agent works"]]) {
+	for (const [kind, title] of [[POLICY.enums.bookKind.assessment, "Assessment of the project"], [POLICY.enums.bookKind.practice, "Practice: how the agent works"]]) {
 		const mine = book.items.filter((item) => item.kind === kind);
 		if (mine.length === 0) continue;
 		items.push(heading(title));
-		items.push(...mine.filter((item) => item.status === "open").map(entry), ...mine.filter((item) => item.status === "done").map(entry));
+		items.push(...mine.filter((item) => item.status === POLICY.enums.entryStatus.open).map(entry), ...mine.filter((item) => item.status === POLICY.enums.entryStatus.done).map(entry));
 	}
 	if (items.length === 0) return { header: [], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works.")] };
 	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice shows the second book on the terminal", "muted"]]], items };
@@ -343,15 +349,15 @@ export function diffView({ root, brainDir, started }, which) {
 // ─── Shells ─────────────────────────────────────────────────────────────────
 
 export function shellsView({ session }) {
-	const all = session.windows?.list(200) ?? [];
+	const all = session.windows?.list(POLICY.limits.screen.windowsListed) ?? [];
 	if (all.length === 0) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const one = (text) => (text.length > 70 ? `${text.slice(0, 70)}…` : text).replace(/\s+/g, " ");
+	const one = (text) => (text.length > POLICY.limits.screen.viewSummaryChars ? `${text.slice(0, POLICY.limits.screen.viewSummaryChars)}…` : text).replace(/\s+/g, " ");
 	const items = all.map((win) => {
 		const marks = win.sandbox === false ? " · no sandbox" : win.network ? " · network" : "";
 		const state =
-			win.state === "gone"
+			win.state === POLICY.enums.windowStates.gone
 				? [["gone", "err"], [`  ${win.why}`, "muted"]]
-				: win.state === "busy"
+				: win.state === POLICY.enums.windowStates.busy
 					? [["busy", "warn"], [` ${took(win.running)}`, ""], [`  $ ${one(win.command ?? "")}`, "bold"], [win.asks ? "  may be waiting for input" : "", "warn"]]
 					: [["free", "ok"], [win.last ? `  last: $ ${one(win.last.command)} → exit ${win.last.exit}, ${ago(win.last.ago)}` : "  nothing was run in it yet", "muted"]];
 		return {
@@ -412,12 +418,12 @@ function callText(name, args) {
 	}
 	const lines = [`call ${name}`];
 	for (const [key, value] of Object.entries(parsed ?? {})) {
-		if (typeof value === "string" && (value.includes("\n") || value.length > 80)) lines.push(`  ${key}:`, ...value.split("\n").map((line) => `    ${line}`));
+		if (typeof value === "string" && (value.includes("\n") || value.length > POLICY.limits.screen.jsonLongValueChars)) lines.push(`  ${key}:`, ...value.split("\n").map((line) => `    ${line}`));
 		else lines.push(`  ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`);
 	}
 	return lines.join("\n");
 }
-const firstWords = (text) => text.replace(/\s+/g, " ").trim().slice(0, 160);
+const firstWords = (text) => text.replace(/\s+/g, " ").trim().slice(0, POLICY.limits.screen.contextSummaryChars);
 
 /**
  * One message of a request cut into what Cartographer added to it and what it is itself.
@@ -433,10 +439,10 @@ function partsOfMessage(message, toolNames) {
 		to.push({ cat, title, text: found[0].trim() });
 		text = text.slice(0, found.index) + text.slice(found.index + found[0].length);
 	};
-	take(/^<project>\n[\s\S]*?\n<\/project>\n*/, "top", "Assessment and graph, as copied at the last collapse", parts);
-	take(/<context>\nWritten by Cartographer[\s\S]*?\n<\/context>\n*/, "kept", "What the last collapse kept", parts);
-	take(/\n*<state>\nWritten by Cartographer[\s\S]*?\n<\/state>/, "state", "State block: the time, the tree, the ledger, the plan", tail);
-	take(/\n*<windows>\nWritten by Cartographer[\s\S]*?\n<\/windows>\s*$/, "windows", "Windows block: the shell windows as they are", tail);
+	take(PROJECT_BLOCK, "top", "Assessment and graph, as copied at the last collapse", parts);
+	take(CONTEXT_BLOCK, "kept", "What the last collapse kept", parts);
+	take(STATE_BLOCK, "state", "State block: the time, the tree, the ledger, the plan", tail);
+	take(WINDOWS_BLOCK, "windows", "Windows block: the shell windows as they are", tail);
 	text = text.trim();
 	if (message.role === "assistant") {
 		const calls = message.tool_calls ?? [];
@@ -450,8 +456,8 @@ function partsOfMessage(message, toolNames) {
 		if (text.startsWith("You are now the task")) parts.push({ cat: "carto", title: "The task's brief", text });
 		else if (text !== "") parts.push({ cat: "result", title: `Result of ${toolNames.get(message.tool_call_id) ?? "a call"}`, text });
 	} else if (text !== "") {
-		if (text.startsWith("<cartographer>")) parts.push({ cat: "carto", title: "Cartographer's note", text });
-		else if (text.startsWith("<context>") || /^Cartographer: /.test(text)) parts.push({ cat: "carto", title: "Cartographer", text });
+		if (text.startsWith(POLICY.markup.note.open)) parts.push({ cat: "carto", title: "Cartographer's note", text });
+		else if (text.startsWith(POLICY.markup.context.open) || /^Cartographer: /.test(text)) parts.push({ cat: "carto", title: "Cartographer", text });
 		else parts.push({ cat: "you", title: "Chat · You", text });
 	}
 	return [...parts, ...tail];
@@ -557,7 +563,7 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 		if (part.key === "system") return { editKind: "prompt" };
 		if (part.key === "tools") return { editKind: "tools" };
 		if (typeof part.key === "string" && part.key.startsWith("tool:")) return { editKind: "tool" };
-		if (part.cat === "top") return { editKind: "assessment" };
+		if (part.cat === "top") return { editKind: POLICY.enums.bookKind.assessment };
 		if (part.cat === "kept") return { editKind: "store" };
 		if (part.cat === "you") return { editKind: "chat-you" };
 		if (part.cat === "agent") return { editKind: "chat-agent" };
@@ -723,14 +729,14 @@ export function toolSource(name) {
 
 /** The shell windows as a terminal emulator sees them: the newest lines of a window, the newest at the bottom. */
 export function shellsOutView({ session }, name) {
-	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 	const pick = all.find((win) => win.name === name) ?? all.at(-1);
 	if (pick === undefined) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const lines = (session.windows?.linesFrom(pick.name, 0) ?? []).slice(-400);
+	const lines = (session.windows?.linesFrom(pick.name, 0) ?? []).slice(-POLICY.limits.screen.shellViewLines);
 	const what =
-		pick.state === "busy"
+		pick.state === POLICY.enums.windowStates.busy
 			? [["busy", "warn"], [`  $ ${pick.command ?? ""}`, "bold"], [pick.asks ? "  · may be waiting for input" : "", "warn"]]
-			: pick.state === "gone"
+			: pick.state === POLICY.enums.windowStates.gone
 				? [["gone", "err"], [`  ${pick.why ?? ""}`, "muted"]]
 				: [["free", "ok"]];
 	const header = [
@@ -745,8 +751,7 @@ export function shellsOutView({ session }, name) {
 }
 
 /**
- * Where the wording of the system prompt lives: the source that builds it. e on the System prompt part opens
- * it there — the prompt is code, not an overwrite file, and the next run of carto reads what it says.
+ * Where the built-in system prompt lives: source code reviewed and changed by the developer.
  * @returns {string | undefined}
  */
 export function promptsSource() {

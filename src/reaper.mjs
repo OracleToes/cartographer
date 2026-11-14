@@ -1,3 +1,4 @@
+import { POLICY } from "./config.mjs";
 // Ending everything a shell window started, when the window runs without the sandbox.
 //
 // Inside the sandbox this is not needed: the sandbox's processes end with it. Outside,
@@ -90,5 +91,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
 		}
 		killFamily(root, known);
 		process.exit(0);
-	}, 400);
+	}, POLICY.timing.reaperPollMs);
 }

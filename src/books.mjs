@@ -12,22 +12,23 @@
 // context, /assessment and anything the user edits by hand still work. A project
 // that has no books file yet has its assessment.md split into entries by
 // paragraph, once, the first time the agent uses the entry verbs.
+import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAssessment } from "./assessment.mjs";
 import { applyEntryOp, flat } from "./rows.mjs";
 
-export const BOOK_KINDS = ["assessment", "practice"];
-export const BOOK_ACTIONS = ["add", "edit", "done", "remove", "before"];
+export const BOOK_KINDS = POLICY.enums.bookKinds;
+export const BOOK_ACTIONS = POLICY.enums.bookActions;
 /** One entry is short: a finding or a habit in a few lines. */
-export const BOOK_TEXT_MAX = 600;
-export const BOOK_ITEMS_MAX = 60;
+export const BOOK_TEXT_MAX = POLICY.limits.books.textChars;
+export const BOOK_ITEMS_MAX = POLICY.limits.books.items;
 
 export class BookError extends Error {}
 
 export const booksPath = (brainDir) => join(brainDir, "carto-books.json");
 
-const PREFIX = { assessment: "a", practice: "r" };
+const PREFIX = POLICY.idPrefixes.books;
 
 /** How this book speaks: see src/rows.mjs. */
 const BOOK_SPEC = {
@@ -39,7 +40,7 @@ const BOOK_SPEC = {
 	textRequired: () => "`text` is required and was left out or empty: one short entry, in your words.",
 	textTooLong: (_, length) => `\`text\` is ${length} characters; an entry may hold ${BOOK_TEXT_MAX}. Keep one thought per entry.`,
 	itemsMax: BOOK_ITEMS_MAX,
-	limitCount: (book) => book.items.filter((item) => item.status === "open").length,
+	limitCount: (book) => book.items.filter((item) => item.status === POLICY.enums.entryStatus.open).length,
 	limitText: () => `The books hold ${BOOK_ITEMS_MAX} open entries, their limit. Settle or remove some first.`,
 	findId: (id) => id,
 	findIds: (book) => book.items.map((entry) => entry.id),
@@ -50,7 +51,7 @@ const BOOK_SPEC = {
 	show: bookLine,
 	closedWord: "settled",
 	alreadyText: (id) => `${id} was already settled.`,
-	outcome: (op) => (op.text !== undefined && flat(op.text) !== "" ? flat(op.text).slice(0, 300) : undefined),
+	outcome: (op) => (op.text !== undefined && flat(op.text) !== "" ? flat(op.text).slice(0, POLICY.limits.books.outcomeChars) : undefined),
 	markClosed: false,
 	addBefore: true,
 	editTextRequired: true,
@@ -71,7 +72,7 @@ export function loadBooks(brainDir) {
 		const text = loadAssessment(brainDir).text;
 		let next = 1;
 		for (const paragraph of text.split(/\n\s*\n/).map((part) => part.trim()).filter((part) => part !== "")) {
-			items.push({ id: `a${next++}`, kind: "assessment", text: paragraph, status: "open" });
+			items.push({ id: `${PREFIX.assessment}${next++}`, kind: POLICY.enums.bookKind.assessment, text: paragraph, status: POLICY.enums.entryStatus.open });
 		}
 		return { version: 1, next, items };
 	}
@@ -79,8 +80,8 @@ export function loadBooks(brainDir) {
 		const raw = JSON.parse(readFileSync(path, "utf8"));
 		const items = (Array.isArray(raw?.items) ? raw.items : [])
 			.filter((item) => item !== null && typeof item === "object" && typeof item.id === "string" && BOOK_KINDS.includes(item.kind) && typeof item.text === "string")
-			.map((item) => ({ ...item, status: item.status === "done" ? "done" : "open" }));
-		const highest = items.reduce((max, item) => Math.max(max, Number(item.id.slice(1)) || 0), 0);
+			.map((item) => ({ ...item, status: item.status === POLICY.enums.entryStatus.done ? POLICY.enums.entryStatus.done : POLICY.enums.entryStatus.open }));
+		const highest = items.reduce((max, item) => Math.max(max, Number(item.id.slice(POLICY.idPrefixes.books[item.kind].length)) || 0), 0);
 		return { version: 1, next: Math.max(Number.isInteger(raw?.next) ? raw.next : 1, highest + 1), items };
 	} catch {
 		return { version: 1, next: 1, items: [] };
@@ -96,17 +97,17 @@ export function saveBooks(brainDir, book) {
 
 /** The open entries of one kind as text, one blank line between them. */
 export function renderBook(book, kind) {
-	return book.items.filter((item) => item.kind === kind && item.status === "open").map((item) => item.text).join("\n\n");
+	return book.items.filter((item) => item.kind === kind && item.status === POLICY.enums.entryStatus.open).map((item) => item.text).join("\n\n");
 }
 
 /** The practice entries of a project, for the copy at the top of the context. "" when there are none. */
 export function practiceText(brainDir) {
-	return renderBook(loadBooks(brainDir), "practice");
+	return renderBook(loadBooks(brainDir), POLICY.enums.bookKind.practice);
 }
 
 /** One line for an entry, as the agent and the user see it. */
 export function bookLine(item) {
-	return `${item.id} [${item.kind}] ${item.text}${item.status === "done" ? " (settled)" : ""}${item.outcome ? ` → ${item.outcome}` : ""}`;
+	return `${item.id} [${item.kind}] ${item.text}${item.status === POLICY.enums.entryStatus.done ? " (settled)" : ""}${item.outcome ? ` → ${item.outcome}` : ""}`;
 }
 
 export function applyBookOp(book, op, now) {

@@ -6,11 +6,12 @@
 // The folder name `.atlas/` is shared with the Orchestrator pi extension, which keeps
 // its own files there (graph.json, ledger.json, working-direction.json). Cartographer
 // leaves those alone, and a folder that holds only those is not a Cartographer brain.
+import { POLICY } from "./config.mjs";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-export const BRAIN = ".atlas";
+export const BRAIN = POLICY.sentinels.brainDir;
 /** The file that makes an `.atlas/` folder a Cartographer brain. */
 const SESSION = "session.sqlite";
 

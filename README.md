@@ -2,7 +2,7 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.atlas/`, which holds the agent's memory of that project.
 
-So far it has: install, launch from a project, the brain folder, chat, the ledger with goals, a plan whose change items you approve one by one, and tasks that look at the project or, under an approved item, write and edit its files and run commands in sandboxed shell windows that keep running, with a checkpoint around each task and an undo. The agent keeps an atlas of the project (a tree of the files and a graph of what it has understood) and two books of short entries — one about the project, one about how it works. What waits for you gathers in one Requests view: change items to approve, questions of taste to answer, and the agent's proposals for its own prompt, which you can approve into its system prompt. It is told the time, and it manages its own context, folding a report away itself once it has done the bookkeeping for it. On a terminal it runs in a full screen with tabs for the chat, the brain, the changes, the shell windows and the context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+So far it has: install, launch from a project, the brain folder, chat, the ledger with goals, a plan whose change items you approve one by one, and tasks that look at the project or, under an approved item, write and edit its files and run commands in sandboxed shell windows that keep running, with a checkpoint around each task and an undo. The agent keeps an atlas of the project (a tree of the files and a graph of what it has understood) and two books of short entries — one about the project, one about how it works. What waits for you gathers in one Requests view: change items to approve, questions of taste to answer. It is told the time, and it manages its own context, folding a report away itself once it has done the bookkeeping for it. On a terminal it runs in a full screen with tabs for the chat, the brain, the changes, the shell windows and the context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
@@ -269,7 +269,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `● top of the context rewritten` | The copy of the assessment and the graph at the start of the agent's context was replaced with the current ones. The next answer reads the whole context again |
 | `atlas: 3 nodes · assessment written 2 h ago` | At the start: what the atlas holds |
 | `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2` |
-| `requests  4 requests wait for you` | `/requests` lists them: change items, questions of taste, prompt proposals |
+| `requests  4 requests wait for you` | `/requests` lists them: change items and questions of taste |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: change items run without `/approve` |
 | `● model  model-a → model-b` | You switched the model with `/model`: the conversation goes on where it was, and a task forked after runs on the new one |
 | `context … · … read for this answer` | How full the context is, and how many tokens the server had to read rather than reuse for the last answer |
@@ -290,11 +290,10 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/plan` | The plan, whether its change items are approved, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/assessment`, `/practice`, `/books` | The two books: the assessment of the project, the agent's notes on how it works, or both, and where the file is |
-| `/requests` | What waits for you: change items to approve, questions of taste to answer, proposals for the agent's own prompt |
+| `/requests` | What waits for you: change items to approve and questions of taste to answer |
 | `/approve ID …` | Approve those requests. `/approve` alone approves the plan as it stands, the old whole-plan way |
-| `/deny ID [why]` | Turn one request down: a change item is taken out of the plan, a proposal dropped, a question closed |
+| `/deny ID [why]` | Turn one request down: a change item is taken out of the plan, a question closed |
 | `/answer ID words` | Answer a question of taste; the agent uses the answer and carries on |
-| `/prompt` | The agent's approved changes to its own prompt, and the targets a proposal can aim at. `/prompt reset TARGET` puts one piece back to its built-in wording |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
 | `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. The settings can hold the default (`yolo`); a switch while running is never remembered. See [Without approval](#without-approval-yolo) |
@@ -431,7 +430,6 @@ Everything that waits on you is a request, and they gather in one place:
 
 - a **change item** the agent added to the plan, which cannot start until you approve it;
 - a **question** of taste or design the agent recorded in the ledger instead of stopping for it;
-- a **proposal** for the agent's own prompt (below).
 
 You see them in the Requests view of the full screen (or `/requests`), and in the strip: `3 requests for you`. You decide with `/approve p2 q3`, `/deny p2 [why]` and `/answer q3 words` — on the terminal or typed on the prompt line of the full screen, where they work like any command. The agent is told what you decided at its next step, whenever that is: it does not have to have been waiting. Meanwhile it works on everything that does not depend on an answer, and sleeps only when everything left is waiting.
 
@@ -709,16 +707,9 @@ Findings:
   /home/momo/Projects/simpledice/.atlas/carto-atlas.json · edit it by hand, or tell the agent what to change
 ```
 
-## The agent's prompt as a book
+## The built-in prompt
 
-The system prompt is not fixed text you cannot reach. It is built from **named sections** (`one-mind`, `roles`, `talking`, `taste`, `context`, `goals`, `ledger`, `atlas`, `assessment`, `practice`, `time`, `plan`, `code`, `running`, `state`), and every tool's description is named too. When a wording keeps misleading the agent, it proposes a change with `prompt`: which piece, the whole new wording, and what it observed that misled it. Nothing changes until you approve the proposal in the Requests view.
-
-- **Budgets** keep the fixed part of the prompt from creeping back up: 250 tokens for a section, 200 for a tool's description, 300 for the four that carry the shell and wake rules. A proposal that does not fit is refused when it is made.
-- The agent can change **wording only**, never the shape of a tool's arguments — the schemas are code and are not part of the book.
-- Approved wording is stored in the **core folder** (`~/cartographer/prompt.json`), not in the project: the prompt is the agent's one mind, and it is up to you to reject a project-local addition. `/prompt` shows what is approved; `/prompt reset SECTION` puts one piece back to how it is built in.
-- It takes effect **at the next collapse or start**, never in the middle of a segment: the prompt is at the very front of the context, and a change there makes the server read the whole thing again.
-
-`/prompt` also lists the targets a proposal can aim at, so you can check one before approving it; the proposal's detail shows the wording now and the wording proposed, one `-` line and one `+` line.
+The system prompt and tool descriptions are source code in `src/prompt.mjs`. They are fixed for a run; changing them is a code change reviewed and made by the project maintainer. There is no agent-facing proposal, approval, or runtime overlay workflow. The old core `prompt.json` and project `.atlas/carto-proposals.json`, if present, are left untouched but are no longer read or applied.
 
 ### Time
 
@@ -1022,8 +1013,7 @@ And smaller things, named where they belong above: the full screen does not repl
 - the books: the entry verbs on the two lists, the migration of an old assessment.md by paragraph, the practice entries at the top of the context; and the copy at the front: written by the main agent only, the first message of the conversation identical in every request until a goal closes, `/pin` or `/new` replaces it, and identical between the main agent and its tasks;
 - time: the stamps on messages and task reports, the same words in every request, nothing of them stored;
 - wakes: each kind firing and not firing, the number of times, the least interval, every refusal, a restart, firings folded into one; in a session, a note that wakes a resting agent, `sleep` ending the turn with no further request, quiet turns leaving the request while the turns before them stay the same, a firing told in the state block while the agent works or a task runs, a wake ending the main agent's wait but not a task's, `/wakes`, and wakes in quick succession being spaced out and not dropped;
-- the requests: a change item, a question and a prompt proposal listed in one view, `/approve` per item and whole-plan, `/deny` and `/answer`, the agent told and going on, and approval switched off: `--yolo` and `/yolo`, change items and network items running without approval, what the agent and the screen are told, `/undo` under it, and that it is not remembered;
-- the prompt as a book: a proposal made, refused over budget or by target, the approved wording laid over the prompt at a start and a collapse, `/prompt` and `/prompt reset`;
+- the requests: a change item and a question listed in one view, `/approve` per item and whole-plan, `/deny` and `/answer`, the agent told and going on, and approval switched off: `--yolo` and `/yolo`, change items and network items running without approval, what the agent and the screen are told, `/undo` under it, and that it is not remembered;
 - standing items: needing `/approve`, running more than once, ending when marked done;
 - the context: the report ids and `/report`; a collapse at rest, after the size limit, after time away, by `/collapse` and at the agent's word; a collapse in the middle of a turn at a closed goal and at the fill limit, and that a reply which ends the turn waits for the rest; the question, its exact request, both answers at rest and in a turn, a server that refuses it; the read-ahead being the start of the next request to the letter, and being stopped by typing; the shelf with its limit, its refusals, a changed and a deleted file; what is in view listed with its sizes, recall, and the agent folding a report itself (`drop` as the old name); a task's marks, re-reads, drops, notes, shelf, its own collapse and the one near the limit, and that nothing before its brief changes; the talk held to its window; a restart; `/context` and `/new`;
 - a task's flow: notes followed up and counted, the reply limit with its warnings and the notes that come back, `return` with and without a report, `done` marking the plan item or leaving it open, the summary in the record, the main agent's tools refused without ending the task, `chat` from a task;
@@ -1049,8 +1039,7 @@ The stand-in is not a model. The tests show that the program does the right thin
 | `src/project.mjs` | Which folder is the project; creating and locking `.atlas/` |
 | `src/config.mjs` | Settings and where they come from |
 | `src/harness.mjs` | Opens the session: model provider, tools, and who may call which |
-| `src/prompt.mjs` | The system prompt as named sections, the tool descriptions as one book, the budgets, the task's role line, the refusals |
-| `src/proposals.mjs` | The prompt book's other half: proposals, the approved wording, laying it over the prompt |
+| `src/prompt.mjs` | The built-in system prompt, tool descriptions, the task's role line and refusals |
 | `src/books.mjs` | The two books of short entries: the assessment and the practice |
 | `src/requests.mjs` | The one list of what waits for the user, and carrying a decision out |
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |

@@ -15,6 +15,7 @@
 // It is also where the user authorizes the plan (/approve) and takes a change task
 // back (/undo): the two things only the user can do. And it is what wakes the agent
 // when something happens in a shell window while the agent is not working.
+import { POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
@@ -27,10 +28,7 @@ import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
 import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { listRequests, approveRequests, denyRequest, answerQuestion } from "./requests.mjs";
-import { loadOverlay, overlayPath, resetWording, targets } from "./proposals.mjs";
 import { booksPath } from "./books.mjs";
-import { SECTION_NAMES, TOOLS } from "./prompt.mjs";
-import { CORE_DIR } from "./config.mjs";
 import { stateBlock, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, pin, sinceTop } from "./top.mjs";
@@ -47,11 +45,11 @@ import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
  * not dropped: it is told with the next one. So an agent that runs in circles is slowed down, and one that
  * watches over something for days is never stopped.
  */
-export const WAKE_BURST = 12;
-const KILLED = "the user closed it with /kill";
+export const WAKE_BURST = POLICY.limits.terminal.wakeBurst;
+const KILLED = POLICY.control.windowKilledReason;
 
 /** Lines of a patch shown by /diff before it is cut; `/diff all` shows everything. */
-const DIFF_LINES = 150;
+const DIFF_LINES = POLICY.limits.terminal.diffLines;
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 const textOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
@@ -62,11 +60,12 @@ const notesOf = (message) => (message?.content ?? []).flatMap((part) => (part.ty
 const chatOf = (message) => callsOf(message).flatMap((call) => (call.name === "chat" && typeof call.arguments?.text === "string" && call.arguments.text !== "" ? [call.arguments.text] : [])).join("\n\n");
 /** In front of each line of the agent's own text. */
 const GUTTER = "┊ ";
+const KEPT_REPORT_SUFFIX = new RegExp(`\\n\\n${POLICY.patterns.keptReport}$`);
 const oneLine = (text, max) => {
 	const flat = String(text ?? "").replace(/\s+/g, " ").trim();
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
-const count = (n) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+const count = (n) => (n >= POLICY.limits.format.countTenThousands ? `${Math.round(n / POLICY.limits.format.countThousands)}k` : n >= POLICY.limits.format.countThousands ? `${(n / POLICY.limits.format.countThousands).toFixed(1)}k` : String(n));
 
 /** A harness message without its wrapping. */
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?|^Tool call blocked: /, "").trim();
@@ -76,35 +75,34 @@ export function describeCall(call) {
 	const args = call.arguments ?? {};
 	switch (call.name) {
 		case "task":
-			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, 100)}`;
+			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, POLICY.limits.terminal.callSummary.taskBrief)}`;
 		case "shell": {
 			// A command typed into a window, or one of the window actions; run is the default and needs no name of its own.
-			if (args.action !== undefined && args.action !== "run") {
-				const more = args.action === "send" ? `  ${oneLine(JSON.stringify(args.text ?? ""), 60)}` : args.action === "wait" && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), 50)}` : "";
-				return `window ${oneLine(args.window, 30)}  ${args.action}${more}`;
+			if (args.action !== undefined && args.action !== POLICY.enums.shellAction.run) {
+				const more = args.action === POLICY.enums.shellAction.send ? `  ${oneLine(JSON.stringify(args.text ?? ""), POLICY.limits.terminal.callSummary.sendText)}` : args.action === POLICY.enums.shellAction.wait && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), POLICY.limits.terminal.callSummary.waitUntil)}` : "";
+				return `window ${oneLine(args.window, POLICY.limits.terminal.callSummary.windowName)}  ${args.action}${more}`;
 			}
-			return `$ ${oneLine(args.command, 100)}${typeof args.window === "string" && args.window !== "" && args.window !== "main" ? `  (window ${oneLine(args.window, 30)})` : ""}`;
+			return `$ ${oneLine(args.command, POLICY.limits.terminal.callSummary.shellCommand)}${typeof args.window === "string" && args.window !== "" && args.window !== POLICY.sentinels.mainWindow ? `  (window ${oneLine(args.window, POLICY.limits.terminal.callSummary.windowName)})` : ""}`;
 		}
 		case "write":
-			return `write ${oneLine(args.path, 90)}`;
+			return `write ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
 		case "edit":
-			return `edit ${oneLine(args.path, 90)}`;
+			return `edit ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
 		case "book": {
 			const ops = Array.isArray(args.ops) ? args.ops : [];
 			if (args.book === "ledger") return `ledger ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
 			if (args.book === "plan") return `plan ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()).join(" · ")}`;
 			if (args.book === "books") return typeof args.text === "string" ? `assess  ${count(String(args.text).length)} characters` : `assess ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
-			if (args.book === "prompt") return `prompt ${ops.map((op) => `${op?.action ?? "?"} ${op?.target ?? op?.name ?? ""}`.trim()).join(" · ")}`;
 			const op = ops[0] ?? {};
-			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", 70)}${op.lines ? ` (lines ${oneLine(op.lines, 20)})` : ""}`.trim();
+			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", POLICY.limits.terminal.callSummary.contextOp)}${op.lines ? ` (lines ${oneLine(op.lines, POLICY.limits.terminal.callSummary.lineRange)})` : ""}`.trim();
 		}
 		case "read": {
 			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
 			const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
-			return `read ${oneLine(paths.join(", "), 90)}${range}`;
+			return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
 		}
 		case "search":
-			return `search /${oneLine(args.pattern, 50)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
+			return `search /${oneLine(args.pattern, POLICY.limits.terminal.callSummary.searchPattern)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
 		case "list":
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
 		case "atlas":
@@ -112,14 +110,14 @@ export function describeCall(call) {
 				`atlas ${(Array.isArray(args.ops) ? args.ops : [])
 					.map((op) => `${op?.action ?? "?"} ${op?.name ?? (Array.isArray(op?.names) ? op.names.join(", ") : (op?.anchor ?? (op?.depth !== undefined ? `depth ${op.depth}` : "")))}`.trim())
 					.join(" · ")}`,
-				100,
+				POLICY.limits.terminal.callSummary.atlasCall,
 			);
 		case "wake":
-			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", 80)}`.trim();
+			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
 			return "sleep";
 		default:
-			return `${call.name} ${oneLine(JSON.stringify(args), 80)}`;
+			return `${call.name} ${oneLine(JSON.stringify(args), POLICY.limits.terminal.callSummary.genericCall)}`;
 	}
 }
 
@@ -129,7 +127,7 @@ export function describeResult(message) {
 	// A command that ran: how it ended, how long it took, and the last thing it printed.
 	if (message.toolName === "shell" && message.details?.seconds !== undefined) {
 		const { exit, running, asks, stopped, closed, seconds, last, sandbox, action, lines } = message.details;
-		const time = `${seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)} s`;
+		const time = `${seconds < POLICY.limits.format.elapsedSecondPrecisionBelow ? seconds.toFixed(1) : Math.round(seconds)} s`;
 		const how = closed
 			? `${exit !== undefined ? `exit ${exit} · ` : ""}the window closed`
 			: action === "read"
@@ -141,21 +139,21 @@ export function describeResult(message) {
 						: stopped
 							? "stopped"
 							: "nothing is running there";
-		return `${how}${sandbox === false ? " · no sandbox" : ""}${last ? ` · ${oneLine(last, 70)}` : ""}`;
+		return `${how}${sandbox === false ? " · no sandbox" : ""}${last ? ` · ${oneLine(last, POLICY.limits.terminal.resultSummary.shellLast)}` : ""}`;
 	}
 	if (message.details?.window !== undefined && message.details?.closed) return "closed";
 	// What a task did about its own context, in the tool's own words.
-	if (message.toolName === "book" && message.details?.book === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), 110);
+	if (message.toolName === "book" && message.details?.book === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), POLICY.limits.terminal.resultSummary.context);
 	// The harness's own words for a call the user stopped, or one that a restart cut off.
 	if (message.isError && /^Tool \w+ was aborted/.test(plain(text))) return "stopped";
 	if (message.isError && /^Tool \w+ was interrupted/.test(plain(text))) return "cut off by a restart, and not run again";
-	if (message.isError) return `refused: ${oneLine(plain(text).replace(/^Refused: /, ""), 110)}`;
+	if (message.isError) return `refused: ${oneLine(plain(text).replace(/^Refused: /, ""), POLICY.limits.terminal.resultSummary.refusal)}`;
 	// What was written to the graph; for a call that only read, the first line of what it got.
-	if (message.toolName === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], 90);
-	if (message.toolName === "search") return oneLine(text.split("\n")[0], 80);
-	if (message.toolName === "list") return oneLine(text.split("\n")[0], 80);
+	if (message.toolName === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
+	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
+	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
 	// "Wrote roll.py: 34 lines, a new file." The path is already on the line.
-	if (message.toolName === "write" || message.toolName === "edit") return oneLine(text.slice(text.indexOf(": ") + 2).replace(/\.$/, ""), 80);
+	if (message.toolName === "write" || message.toolName === "edit") return oneLine(text.slice(text.indexOf(": ") + 2).replace(/\.$/, ""), POLICY.limits.terminal.resultSummary.write);
 	const lines = text.split("\n").length;
 	return `${count(lines)} lines`;
 }
@@ -238,7 +236,7 @@ export async function runTerminal(session, options) {
 	// message came in is kept, its end at least, so that switching it on shows it.
 	let thinking = options.thinking !== false;
 	let held = "";
-	const HELD_MAX = 8000;
+	const HELD_MAX = POLICY.limits.terminal.heldInputChars;
 
 	let lastReport;
 	let lastUsage;
@@ -311,7 +309,7 @@ export async function runTerminal(session, options) {
 			const loop = message.role === "toolResult" ? message.details?.loop : undefined;
 			if (loop?.call === undefined || saidLoop[depth] === loop.call) continue;
 			saidLoop[depth] = loop.call;
-			const what = `the same call was sent ${loop.total} times and failed each time: ${oneLine(loop.call, 120)}`;
+			const what = `the same call was sent ${loop.total} times and failed each time: ${oneLine(loop.call, POLICY.limits.loops.callKeyChars)}`;
 			line(`${depth === 0 ? "" : dim("│ ")}! ${loop.ends === false ? `The agent is told to stop: ${what}` : `Cartographer ended the ${depth === 0 ? "turn" : "task"}: ${what}`}`);
 		}
 	};
@@ -368,7 +366,7 @@ export async function runTerminal(session, options) {
 					if (message.stopReason === "length") line(`! The agent's reply was cut off at the output limit (maxTokens in the settings). Say "continue" to let it go on.`);
 				} else if (text.trim() !== "" && thinking) {
 					// A task's own words, beside its calls or as a note of their own.
-					line(`${bar}${dim(oneLine(text, 110))}`);
+					line(`${bar}${dim(oneLine(text, POLICY.limits.terminal.resultSummary.taskStream))}`);
 				}
 				// A reply cut off at the output limit may end in half a call, which is never carried out.
 				let commandShown = false;
@@ -394,7 +392,7 @@ export async function runTerminal(session, options) {
 					if (depth === 0 && call.name === "task" && before !== undefined) afterCall.set(before.id, `${bold("▸")} ${text}`);
 					else if (depth === 0 && call.name === "task") line(`${bold("▸")} ${text}`);
 					// So is a wait of the main agent for a window: it can take minutes.
-					else if (depth === 0 && call.name === "shell" && call.arguments?.action === "wait") {
+					else if (depth === 0 && call.name === "shell" && call.arguments?.action === POLICY.enums.shellAction.wait) {
 						line(`${bold("▸")} ${text}`);
 						pendingCalls.set(call.id, { text, shown: true });
 					}
@@ -406,15 +404,15 @@ export async function runTerminal(session, options) {
 				}
 			} else if (message.role === "toolResult") {
 				if (depth === 0 && message.toolName === "chat") {
-					if (message.isError) line(`${bold("●")} chat  not shown: ${oneLine(plain(textOf(message)), 200)}`);
+					if (message.isError) line(`${bold("●")} chat  not shown: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
 				} else if (depth === 0) {
 					if (message.toolName === "task") {
 						// Without the line that tells the agent the id: the report line here shows it.
-						const text = textOf(message).replace(/\n\nThis report is kept as t\d+\.$/, "");
+						const text = textOf(message).replace(KEPT_REPORT_SUFFIX, "");
 						if (message.isError && /was aborted/.test(text)) {
 							// A change task that was stopped has no record after it, but it may have written files already.
-							line(`${bold("◂")} task stopped${message.details?.mode === "change" ? " · it may have changed files already: /diff shows them, /undo takes them back" : ""}`);
-						} else if (message.isError) line(`${bold("◂")} ${oneLine(plain(text), 200)}`);
+							line(`${bold("◂")} task stopped${message.details?.mode === POLICY.enums.planMode.change ? " · it may have changed files already: /diff shows them, /undo takes them back" : ""}`);
+						} else if (message.isError) line(`${bold("◂")} ${oneLine(plain(text), POLICY.limits.terminal.messageSummaryChars)}`);
 						else {
 							lastReport = text;
 							line(`${bold("◂")} report${message.details?.report ? ` ${message.details.report}` : ""}  ${count(text.length)} characters${message.details?.done === false ? " · returned not done" : ""}  ${dim("(/report shows it)")}`);
@@ -432,7 +430,7 @@ export async function runTerminal(session, options) {
 							if (changes.length === 0) line(`${bold("◂")} no file was changed`);
 							else {
 								line(`${bold("◂")} changed ${changeSummary(changes)}  ${dim("(/diff shows the changes, /undo takes them back)")}`);
-								for (const text of changeRecord(changes, 12)) line(dim(text));
+								for (const text of changeRecord(changes, POLICY.limits.terminal.changeRecordLines)) line(dim(text));
 							}
 						}
 						// What shell windows changed before the task, with no task around them: a step of its own.
@@ -444,9 +442,9 @@ export async function runTerminal(session, options) {
 						const mapped = message.details?.atlas;
 						if (mapped !== undefined) {
 							const parts = [];
-							if (mapped.written?.length > 0) parts.push(`wrote ${oneLine(mapped.written.join(", "), 80)}`);
-							if (mapped.removed?.length > 0) parts.push(`removed ${oneLine(mapped.removed.join(", "), 60)}`);
-							if (mapped.stale?.length > 0) parts.push(`may now be out of date: ${oneLine(mapped.stale.join(", "), 60)}`);
+							if (mapped.written?.length > 0) parts.push(`wrote ${oneLine(mapped.written.join(", "), POLICY.limits.terminal.resultSummary.atlasWritten)}`);
+							if (mapped.removed?.length > 0) parts.push(`removed ${oneLine(mapped.removed.join(", "), POLICY.limits.terminal.resultSummary.atlasRemoved)}`);
+							if (mapped.stale?.length > 0) parts.push(`may now be out of date: ${oneLine(mapped.stale.join(", "), POLICY.limits.terminal.resultSummary.atlasStale)}`);
 							if (parts.length > 0) line(`${bold("◂")} atlas  ${parts.join(" · ")}  ${dim("(/atlas shows the graph)")}`);
 						}
 					} else if (message.toolName === "book") {
@@ -456,13 +454,13 @@ export async function runTerminal(session, options) {
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
 						if (name === "ledger" || name === "plan") {
-							if (message.isError || shown.length === 0) line(`${bold("●")} ${name}  not changed: ${oneLine(plain(textOf(message)), 200)}`);
+							if (message.isError || shown.length === 0) line(`${bold("●")} ${name}  not changed: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
 							// A goal's done-when line goes on a line of its own: together they are too long to read as one.
 							else for (const change of shown) line(`${bold("●")} ${name}  ${change.replace(/ \(done when: (.*)\)$/s, `\n${" ".repeat(name.length + 4)}done when: $1`)}`);
 							if (message.details?.pinned === true) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
 						} else if (name === "context") {
-							if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), 200)}`);
-							else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, 160)}`);
+							if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
+							else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, POLICY.limits.terminal.resultSummary.contextChange)}`);
 						} else if (name === "books" && !message.isError && shown.length > 0) {
 							for (const change of shown) line(`${bold("●")} ${change}  ${dim("(/assessment shows it)")}`);
 						} else {
@@ -473,12 +471,12 @@ export async function runTerminal(session, options) {
 					} else if (message.toolName === "wake" || message.toolName === "sleep") {
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
-						if (message.isError || shown.length === 0) line(`${bold("●")} ${message.toolName}  ${message.toolName === "wake" ? "not changed" : "refused"}: ${oneLine(plain(textOf(message)), 200)}`);
-						else for (const change of shown) line(`${bold("●")} ${message.toolName === "sleep" ? dim(change) : `wake  ${oneLine(change, 160)}`}`);
+						if (message.isError || shown.length === 0) line(`${bold("●")} ${message.toolName}  ${message.toolName === "wake" ? "not changed" : "refused"}: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
+						else for (const change of shown) line(`${bold("●")} ${message.toolName === "sleep" ? dim(change) : `wake  ${oneLine(change, POLICY.limits.terminal.resultSummary.wakeChange)}`}`);
 					} else if (message.toolName === "atlas" && !message.isError && (message.details?.shown?.length ?? 0) > 0) {
 						// What the main agent wrote to its map, one line each.
 						pendingCalls.delete(message.toolCallId);
-						for (const change of message.details.shown) line(`${bold("●")} atlas  ${oneLine(change, 150)}`);
+						for (const change of message.details.shown) line(`${bold("●")} atlas  ${oneLine(change, POLICY.limits.terminal.resultSummary.atlasChange)}`);
 					} else {
 						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);
@@ -502,7 +500,7 @@ export async function runTerminal(session, options) {
 	function windowStepLine(step) {
 		const who = step.names.length === 1 ? `window ${step.names[0]}` : `windows ${step.names.join(", ")}`;
 		line(`${bold("◂")} ${who} changed ${changeSummary(step.changes)} with no task running  ${dim("(/diff shows the changes, /undo takes them back)")}`);
-		for (const text of changeRecord(step.changes, 12)) line(dim(text));
+		for (const text of changeRecord(step.changes, POLICY.limits.terminal.changeRecordLines)) line(dim(text));
 	}
 
 	/** Print the main agent's reply as it is generated. */
@@ -537,7 +535,7 @@ export async function runTerminal(session, options) {
 		cutting = true;
 		cuts++;
 		const again = cuts > 1;
-		const what = `${JSON.stringify(oneLine(found.unit, 30))}, ${found.times} times over`;
+		const what = `${JSON.stringify(oneLine(found.unit, POLICY.limits.terminal.repeatedPhraseChars))}, ${found.times} times over`;
 		line(`! The ${depth > 0 ? "task" : "agent"}'s reply was repeating itself (${what}). Cartographer cut it off${again ? " again, and stopped the agent: say how it should go on. If this keeps happening, look at the model's sampling settings." : " and lets the agent try once more."}`);
 		cutDone = main
 			.abort(context)
@@ -617,7 +615,7 @@ export async function runTerminal(session, options) {
 						line(`! The agent used all its turns for this message (${detail ?? "the limit"}) without finishing. Say "continue" to let it go on.`);
 					} else if (reason !== "aborted") {
 						failed = true;
-						line(`! the run stopped: ${reason}${detail ? ` (${oneLine(detail, 300)})` : ""}`);
+						line(`! the run stopped: ${reason}${detail ? ` (${oneLine(detail, POLICY.limits.terminal.resultSummary.runFailure)})` : ""}`);
 					}
 				}
 				const nowBusy = live?.run !== undefined;
@@ -656,7 +654,7 @@ export async function runTerminal(session, options) {
 	/** A reason as the front block words it for the agent ("you asked for it"), worded for the user. */
 	const ofAgent = (reason) => reason.replace(/^you asked/, "the agent asked").replace(/ while you rested$/, " while it rested");
 	/** A reason as the engine words it for a task ("Your context held …"), worded for the user. */
-	const ofTask = (reason) => oneLine(reason, 80).replace(/^Your context/, "its context").replace(/^You asked/, "it asked");
+	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^Your context/, "its context").replace(/^You asked/, "it asked");
 	/** The question before a collapse and what came back. */
 	let saidFallback = false;
 	const askedLine = (event) => {
@@ -664,10 +662,10 @@ export async function runTerminal(session, options) {
 		// Said once: the server would not take the form of the answer, so the question is asked without it from here on.
 		if (event.fallback !== undefined && !saidFallback) {
 			saidFallback = true;
-			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, 160)}). From here on the question before a collapse is asked without it.`)}`);
+			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, POLICY.limits.terminal.resultSummary.handoffFallback)}). From here on the question before a collapse is asked without it.`)}`);
 		}
 		if (event.skipped) line(`${who}${dim("◆ not asked before collapsing: carto has only just started, and the question would make the server read the whole context first")}`);
-		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, 200)}). The context is collapsed without it.`);
+		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, POLICY.limits.terminal.messageSummaryChars)}). The context is collapsed without it.`);
 		else line(`${who}${dim(`◆ asked before collapsing (${event.task ? ofTask(event.reason) : event.reason}): does it need to write something down first? ${event.handoff ? "yes" : "no"} · ${(event.ms / 1000).toFixed(1)} s`)}`);
 	};
 	engine?.on((event) => {
@@ -731,7 +729,6 @@ export async function runTerminal(session, options) {
 		const { text, info } = engine.collapse({ reason });
 		await main.reset(text, context);
 		// A collapse is the boundary at which the prompt the agent approved for itself takes effect.
-		session.refreshWording?.();
 		collapsedLine();
 		if (config.readAhead !== false && !final) {
 			const ahead = engine.readAhead(text, info.at);
@@ -741,7 +738,7 @@ export async function runTerminal(session, options) {
 					enqueue(async () => {
 						if (readingAhead === ahead) readingAhead = undefined;
 						if (stopped || result.aborted) return;
-						if (result.error !== undefined) line(dim(`  the server could not read the new context ahead (${oneLine(result.error, 160)}); the next answer reads it`));
+						if (result.error !== undefined) line(dim(`  the server could not read the new context ahead (${oneLine(result.error, POLICY.limits.terminal.resultSummary.readAheadError)}); the next answer reads it`));
 						else line(dim(`  read ahead by the server${result.tokens ? `: ${tokens(result.tokens)} tokens` : ""} in ${(result.ms / 1000).toFixed(1)} s, so the next answer starts at once`));
 						reprompt();
 					}),
@@ -759,8 +756,8 @@ export async function runTerminal(session, options) {
 			const cut = cutDone;
 			await cut;
 			await harness.waitForIdle(context);
-			for (let i = 0; i < 3; i++) {
-				await new Promise((resolve) => setTimeout(resolve, 20));
+			for (let i = 0; i < POLICY.timing.terminal.settleFlushPasses; i++) {
+				await new Promise((resolve) => setTimeout(resolve, POLICY.timing.terminal.inputFlushMs));
 				await queue;
 			}
 			if (cut === cutDone && !cutting) break;
@@ -824,7 +821,7 @@ export async function runTerminal(session, options) {
 				line(`› ${answer}`);
 				asks.answer(answer);
 			}
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			await new Promise((resolve) => setTimeout(resolve, POLICY.timing.terminal.taskFlushMs));
 		}
 	};
 
@@ -842,7 +839,7 @@ export async function runTerminal(session, options) {
 	const ledgerLine = () => {
 		const { ledger, error } = loadLedger(options.brainDir);
 		if (ledger === undefined) return line(`! The ledger cannot be read: ${error}. Repair the file; until then the agent works without it.`);
-		if (open(ledger, "goal").length === 0) line(dim(`ledger: ${openCounts(ledger)} · no goal yet: say what you want to achieve`));
+		if (open(ledger, POLICY.enums.ledgerKind.goal).length === 0) line(dim(`ledger: ${openCounts(ledger)} · no goal yet: say what you want to achieve`));
 		else line(dim(`ledger: ${openCounts(ledger)} · /ledger shows them`));
 	};
 
@@ -950,7 +947,7 @@ export async function runTerminal(session, options) {
 				retry = setTimeout(() => {
 					retry = undefined;
 					onRetry();
-				}, Math.max(50, creditAt + spacing - Date.now()));
+				}, Math.max(POLICY.timing.terminal.retryMinimumMs, creditAt + spacing - Date.now()));
 				retry.unref();
 			}
 			return undefined;
@@ -987,7 +984,6 @@ export async function runTerminal(session, options) {
 		const argument = parts[0];
 		const args = parts.filter((part) => part !== "");
 		const tail = args.slice(1).join(" ");
-		const coreDir = options.coreDir ?? CORE_DIR;
 		switch (name) {
 			case "help":
 				line(
@@ -999,7 +995,7 @@ export async function runTerminal(session, options) {
 						"  /atlas    the tree as the agent sees it, the graph's nodes, and where the file is",
 						"  /assessment  the agent's summary of the project, and where the file is",
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
-						"  /requests what waits for you: change items, questions of taste, and changes to the agent's own prompt",
+						"  /requests what waits for you: change items, questions of taste, and ",
 						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
 						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
@@ -1018,7 +1014,7 @@ export async function runTerminal(session, options) {
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
 					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a prompt proposal (x1), a node of the graph",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1085,7 +1081,7 @@ export async function runTerminal(session, options) {
 				if (leaving.length > 0) line(`  taken off the shelf, gone at the next collapse: ${leaving.map(shelfLabel).join(", ")}`);
 				if (store.records.length > 0) {
 					line(`  kept reports: ${store.records.length} (${store.records[0].id} to ${store.records.at(-1).id}); the newest:`);
-					for (const record of store.records.slice(-5)) line(dim(`    ${oneLine(recordLine(record), 150)}`));
+					for (const record of store.records.slice(-POLICY.limits.terminal.recentReports)) line(dim(`    ${oneLine(recordLine(record), POLICY.limits.terminal.resultSummary.reportLine)}`));
 				}
 				if (store.last !== undefined) line(`  last collapse: ${stamp(store.last.at)} (${ofAgent(store.last.reason)})${store.last.before !== undefined && store.last.after !== undefined ? `, about ${tokens(store.last.before)} → ${tokens(store.last.after)} tokens` : ""}`);
 				line(
@@ -1163,19 +1159,19 @@ export async function runTerminal(session, options) {
 				// told what changed; it does not have to have been waiting. With no ids the old whole-plan /approve
 				// still works, so a plan described in a few lines can be agreed to in one word.
 				if (args.length > 0) {
-					const done = approveRequests(options.brainDir, coreDir, args);
-					const names = [...done.items, ...done.proposals.map((item) => item.id)];
+					const done = approveRequests(options.brainDir, args);
+					const names = done.items;
 					if (names.length === 0) line(`  None of ${args.join(", ")} names a request that waits. /requests lists them.`);
 					else {
-						line(`${bold("●")} requests  approved ${names.join(", ")}${done.proposals.length > 0 ? "  · the wording takes effect at the next collapse or start" : ""}`);
-						await send(`I approved ${names.join(", ")}. What waited on these requests can go on; everything else you were doing does not stop.${done.proposals.length > 0 ? " The new wording takes effect at the next collapse or start." : ""}`);
+						line(`${bold("●")} requests  approved ${names.join(", ")}`);
+						await send(`I approved ${names.join(", ")}. What waited on these requests can go on; everything else you were doing does not stop.`);
 					}
 					for (const id of done.unknown) line(dim(`  ${id} is not a request that waits. /requests lists them.`));
 					return true;
 				}
 				const { plan, error } = loadPlan(options.brainDir);
 				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
-				else if (openItems(plan, "change").length === 0) {
+				else if (openItems(plan, POLICY.enums.planMode.change).length === 0) {
 					line("  The plan has no open change item, so there is nothing to authorize. /plan shows it. The agent is told.");
 					// A model that described its plan in the chat instead of writing it would wait for an approval that cannot come.
 					await send(NOTHING_TO_APPROVE);
@@ -1185,7 +1181,7 @@ export async function runTerminal(session, options) {
 					const covered = authorize(plan, new Date().toISOString());
 					savePlan(options.brainDir, plan);
 					line(`${bold("●")} plan  authorized by you: ${plural(covered, "change item")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
-					for (const item of openItems(plan, "change")) line(dim(`  ${item.id} ${item.text}${item.network === true ? "  · its commands reach the network" : ""}${item.standing === true ? "  · standing: the agent may carry it out again and again" : ""}`));
+					for (const item of openItems(plan, POLICY.enums.planMode.change)) line(dim(`  ${item.id} ${item.text}${item.network === true ? "  · its commands reach the network" : ""}${item.standing === true ? "  · standing: the agent may carry it out again and again" : ""}`));
 					// The agent is told, so that it starts on the plan without another message from the user.
 					await send("I authorize the plan as it stands. Carry it out.");
 				}
@@ -1196,7 +1192,7 @@ export async function runTerminal(session, options) {
 					line("  /deny ID [why] turns down one request. /requests lists the ids.");
 					return true;
 				}
-				const turned = denyRequest(options.brainDir, coreDir, argument, tail);
+				const turned = denyRequest(options.brainDir, argument, tail);
 				if (turned === undefined) line(`  ${argument} is not a request that waits. /requests lists them.`);
 				else {
 					line(`${bold("●")} requests  ${argument} turned down${tail === "" ? "" : `: ${tail}`}`);
@@ -1217,30 +1213,9 @@ export async function runTerminal(session, options) {
 				}
 				return true;
 			}
-			case "prompt": {
-				const overlay = loadOverlay(overlayPath(coreDir));
-				const pieces = [
-					...Object.entries(overlay.sections).map(([name, text]) => [name, text]),
-					...overlay.added.map(([name, text]) => [name, text]),
-					...Object.entries(overlay.tools).map(([name, text]) => [`tool.${name}`, text]),
-				];
-				const toolNames = Object.keys(TOOLS);
-				if (argument === "reset") {
-					if (tail === "") line(`  /prompt reset SECTION|tool.NAME puts one piece back to its built-in wording. Sections: ${targets().sections.join(", ")}; tools: ${toolNames.join(", ")}.`);
-					else {
-						const removed = resetWording(coreDir, tail);
-						line(removed ? `${bold("●")} prompt  ${tail} is back to its built-in wording; it takes effect at the next collapse or start.` : `  ${tail} has no approved wording of its own.`);
-					}
-					return true;
-				}
-				line(`  ${bold("Prompt")}  ${overlayPath(coreDir)}  · ${plural(pieces.length, "piece")} of approved wording${pieces.length === 0 ? " (the built-in wording is in use)" : ""}`);
-				for (const [name, text] of pieces) line(`    ${name}  ${JSON.stringify(String(text).slice(0, 90))}${String(text).length > 90 ? "…" : ""}`);
-				line(dim(`  Sections: ${targets().sections.join(", ")} · tools: ${toolNames.join(", ")} · /prompt reset TARGET`));
-				return true;
-			}
 			case "yolo": {
 				const { plan } = loadPlan(options.brainDir);
-				const waiting = plan === undefined ? [] : openItems(plan, "change");
+				const waiting = plan === undefined ? [] : openItems(plan, POLICY.enums.planMode.change);
 				if (argument === undefined) {
 					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · change items wait for /approve"}`);
 					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets change items run without /approve"}`));
@@ -1343,12 +1318,12 @@ export async function runTerminal(session, options) {
 						let item = plan.items.find((entry) => entry.id === result.item);
 						const back = item === undefined;
 						if (back) {
-							item = { id: result.item, mode: "change", text: result.text, status: "open", added: now };
+							item = { id: result.item, mode: POLICY.enums.planMode.change, text: result.text, status: POLICY.enums.entryStatus.open, added: now };
 							plan.items.unshift(item);
-							const number = Number(result.item.slice(1));
+							const number = Number(result.item.slice(POLICY.idPrefixes.plan.length));
 							if (Number.isInteger(number) && number >= plan.next) plan.next = number + 1;
 						}
-						Object.assign(item, { status: "open", undone: now });
+						Object.assign(item, { status: POLICY.enums.entryStatus.open, undone: now });
 						delete item.outcome;
 						delete item.closed;
 						delete item.approved;
@@ -1391,7 +1366,7 @@ export async function runTerminal(session, options) {
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
 						const { plan } = loadPlan(options.brainDir);
-						const open = plan !== undefined && isAuthorized(plan) ? openItems(plan, "change").length : 0;
+						const open = plan !== undefined && isAuthorized(plan) ? openItems(plan, POLICY.enums.planMode.change).length : 0;
 						if (open > 0) line(`  The plan is authorized: its ${plural(open, "open change item")} will run without the sandbox.`);
 						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
 					}
@@ -1442,17 +1417,17 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "shells": {
-				const all = windows?.list(8) ?? [];
+				const all = windows?.list(POLICY.limits.terminal.shellListTail) ?? [];
 				if (all.length === 0) line("  No shell window is open. A change task opens one when it runs a command.");
 				else {
-					for (const text of windowLines(all, { busy: 8, free: 4 })) line(text.replace(/ `window` close clears this line\.$/, " The agent is told."));
+					for (const text of windowLines(all, { busy: POLICY.limits.terminal.shellBusyTail, free: POLICY.limits.terminal.shellFreeTail })) line(text.replace(/ `window` close clears this line\.$/, " The agent is told."));
 					line(dim("  /kill NAME closes a window and ends what runs in it; /kill all closes every one."));
 				}
 				return true;
 			}
 			case "kill": {
 				// Only windows that are open. A line about one that is gone is the agent's to read and clear.
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (argument === undefined || argument === "") {
 					line(all.length === 0 ? "  No shell window is open." : `  /kill NAME closes one window, /kill all every one. Open: ${all.map((win) => win.name).join(", ")}.`);
 					return true;
@@ -1464,7 +1439,7 @@ export async function runTerminal(session, options) {
 				}
 				for (const win of chosen) {
 					windows.close(win.name, { why: KILLED });
-					line(`${bold("●")} closed window ${win.name}${win.state === "busy" ? `, and \`${oneLine(win.command, 80)}\` ended with it` : ""}`);
+					line(`${bold("●")} closed window ${win.name}${win.state === POLICY.enums.windowStates.busy ? `, and \`${oneLine(win.command, POLICY.limits.terminal.resultSummary.windowCommand)}\` ended with it` : ""}`);
 				}
 				if (!busy) line(dim("  The agent sees this the next time it works. Tell it why, if it matters."));
 				return true;
@@ -1476,12 +1451,12 @@ export async function runTerminal(session, options) {
 					line("  /wait is for piped input. Here the agent is woken by itself when a window's command ends or a wake fires.");
 					return true;
 				}
-				const until = Date.now() + (Number.isFinite(Number(argument)) && Number(argument) > 0 ? Number(argument) : 30) * 1000;
+				const until = Date.now() + (Number.isFinite(Number(argument)) && Number(argument) > 0 ? Number(argument) : POLICY.timing.terminal.waitDefaultSeconds) * 1000;
 				for (;;) {
 					await woken();
-					const pending = (windows?.list(0) ?? []).some((win) => win.state === "busy") || (wakes?.list().length ?? 0) > 0 || heldFor() !== undefined;
+					const pending = (windows?.list(0) ?? []).some((win) => win.state === POLICY.enums.windowStates.busy) || (wakes?.list().length ?? 0) > 0 || heldFor() !== undefined;
 					if (!pending || Date.now() >= until) break;
-					await new Promise((resolve) => setTimeout(resolve, 100));
+					await new Promise((resolve) => setTimeout(resolve, POLICY.timing.terminal.inputPollMs));
 				}
 				return true;
 			}
@@ -1506,8 +1481,8 @@ export async function runTerminal(session, options) {
 				const on = await session.model?.();
 				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${on?.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
 				if (options.runner !== undefined) line(`  ${sandboxLine(options.runner)}`);
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
-				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === "busy").length} busy · /shells shows them`);
+				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === POLICY.enums.windowStates.busy).length} busy · /shells shows them`);
 				if (gate.yolo) line(`  ${YOLO_LINE}`);
 				const set = wakes?.list() ?? [];
 				if (set.length > 0) {
@@ -1520,7 +1495,7 @@ export async function runTerminal(session, options) {
 				// The list comes from the server each time: llama-swap serves what is loaded now.
 				let served = session.servedModels ?? [config.model];
 				try {
-					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(5000) });
+					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
 					const body = await response.json().catch(() => undefined);
 					const listed = (body?.data ?? []).map((entry) => entry?.id).filter((id) => typeof id === "string");
 					if (listed.length > 0) served = listed;
@@ -1601,10 +1576,10 @@ export async function runTerminal(session, options) {
 			case "delete": {
 				const ids = args;
 				if (ids.length === 0) {
-					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan item, a prompt proposal (x1), a node of the graph. /archive hides a row and keeps it.");
+					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan item, a node of the graph. /archive hides a row and keeps it.");
 					return true;
 				}
-				line(`  ${dropRows(options.brainDir, coreDir, ids)}`);
+				line(`  ${dropRows(options.brainDir, ids)}`);
 				return true;
 			}
 			case "send": {
@@ -1614,7 +1589,7 @@ export async function runTerminal(session, options) {
 				}
 				if (windows === undefined) return true;
 				try {
-					await windows.send(argument, tail, { waitMs: 1000 });
+					await windows.send(argument, tail, { waitMs: POLICY.timing.terminal.shellSendWaitMs });
 					line(dim(`  typed into ${argument}: ${tail}`));
 				} catch (error) {
 					line(`! ${error.message}`);
@@ -1632,16 +1607,16 @@ export async function runTerminal(session, options) {
 
 	/** A window keeps the way it was opened, so a switch of the sandbox closes every one. */
 	function closeForSwitch(to) {
-		const were = (windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+		const were = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (were.length === 0) return;
 		recordWindows();
 		windows.closeAll({ why: `the user switched the sandbox ${to}, which closes every window` });
-		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === "busy") ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
+		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
 	}
 
 	/** Which windows are still at work, said after the agent was stopped. */
 	function runningLine() {
-		const running = (windows?.list(0) ?? []).filter((win) => win.state === "busy");
+		const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
 		if (running.length > 0) line(dim(`  still running: ${running.map((win) => `window ${win.name}`).join(", ")} · /shells shows them, /kill NAME ends one, /kill all every one`));
 	}
 
@@ -1658,7 +1633,7 @@ export async function runTerminal(session, options) {
 	ledgerLine();
 	planLine();
 	atlasLine();
-	const lost = (windows?.list(0) ?? []).filter((win) => win.state === "gone");
+	const lost = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.gone);
 	if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
 	await follow(main.id, 0);
 	harness.resume();
@@ -1833,7 +1808,7 @@ export async function runTerminal(session, options) {
 			unlisten?.();
 			if (busy) line(dim("Leaving. Unfinished work continues the next time carto starts here."));
 			else recordWindows();
-			const running = (windows?.list(0) ?? []).filter((win) => win.state === "busy");
+			const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
 			if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
 			await stop();
 			resolve(0);
@@ -1889,7 +1864,7 @@ export async function runTerminal(session, options) {
 				return;
 			}
 			const now = Date.now();
-			if (now - armedQuit < 2000) return void leave();
+			if (now - armedQuit < POLICY.timing.terminal.quitConfirmMs) return void leave();
 			armedQuit = now;
 			line(dim(busy ? "  Ctrl-C again to leave; Ctrl-X stops the agent" : "  Ctrl-C again to leave"));
 		});

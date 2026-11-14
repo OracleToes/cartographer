@@ -23,6 +23,7 @@
 //   findIds        the ids named when an operation names none (the ledger: the open ones)
 //   findText       what is said when no entry carries that id; `where` says which field misspelled it
 //   show           one line for an entry, as the agent and the user see it, after the verb's sign
+import { POLICY } from "./config.mjs";
 //   closedWord     "closed" (ledger) or "settled" (books)
 //   alreadyText    what is said when `done` reaches an entry that is done already
 //   outcome        for `done`: the entry's outcome from `op.text`, or undefined to leave it out
@@ -58,29 +59,29 @@ export function applyEntryOp(store, op, spec, now) {
 		return item;
 	};
 	switch (op?.action) {
-		case "add": {
+		case POLICY.enums.actions.add: {
 			if (!spec.kinds.includes(op.kind)) throw new BookError(`\`kind\` is ${JSON.stringify(op.kind)}; it is one of ${spec.kinds.join(", ")}.`);
 			const text = checked(op.text, spec.addTextLabel);
 			if (spec.limitCount(store) >= spec.itemsMax) throw new BookError(spec.limitText());
 			const item = { id: `${spec.prefix[op.kind]}${store.next}`, kind: op.kind, text };
 			for (const [field, value] of Object.entries(spec.addFields?.(op, op.kind, checked) ?? {})) item[field] = value;
-			Object.assign(item, { status: "open", added: now });
+			Object.assign(item, { status: POLICY.enums.entryStatus.open, added: now });
 			store.next++;
 			let at = store.items.length;
 			if (spec.addBefore && op.before !== undefined && op.before !== "") at = store.items.indexOf(find(op.before, "before"));
 			store.items.splice(at, 0, item);
 			return { line: `${item.id} added.`, shown: `+ ${spec.show(item)}` };
 		}
-		case "done": {
+		case POLICY.enums.actions.done: {
 			const item = find(op.id);
-			if (item.status === "done") return { line: spec.alreadyText(item.id), shown: `✓ ${spec.show(item)}` };
-			item.status = "done";
+			if (item.status === POLICY.enums.entryStatus.done) return { line: spec.alreadyText(item.id), shown: `✓ ${spec.show(item)}` };
+			item.status = POLICY.enums.entryStatus.done;
 			if (spec.markClosed) item.closed = now;
 			const outcome = spec.outcome?.(op, checked);
 			if (outcome !== undefined) item.outcome = outcome;
 			return { line: `${item.id} ${spec.closedWord}.${spec.doneFollow?.(item) ?? ""}`, shown: `✓ ${spec.show(item)}` };
 		}
-		case "edit": {
+		case POLICY.enums.actions.edit: {
 			const item = find(op.id);
 			const hasText = op.text !== undefined && flat(op.text) !== "";
 			const extra = spec.editFields?.(item, op, hasText, checked) ?? {};
@@ -88,12 +89,12 @@ export function applyEntryOp(store, op, spec, now) {
 			for (const [field, value] of Object.entries(extra)) item[field] = value;
 			return { line: `${item.id} reworded.`, shown: `~ ${spec.show(item)}` };
 		}
-		case "remove": {
+		case POLICY.enums.actions.remove: {
 			const item = find(op.id);
 			store.items.splice(store.items.indexOf(item), 1);
 			return { line: `${item.id} removed.`, shown: `- ${spec.show(item)}` };
 		}
-		case "before": {
+		case POLICY.enums.actions.before: {
 			if (!spec.reorder) throw new BookError(spec.unknownAction(op));
 			const item = find(op.id);
 			store.items.splice(store.items.indexOf(item), 1);

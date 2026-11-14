@@ -19,6 +19,7 @@
 // message of every request, for the main agent and for tasks alike: a task's
 // prompt must begin exactly as the main agent's does. It is never stored in the
 // conversation.
+import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAssessment, textHash } from "./assessment.mjs";
@@ -26,8 +27,9 @@ import { loadAtlas, nodeChanges, nodeHashes, renderOutline } from "./atlas.mjs";
 import { practiceText } from "./books.mjs";
 import { stamp } from "./time.mjs";
 
-const OPEN = "<project>";
-const CLOSE = "</project>";
+const OPEN = POLICY.markup.project.open;
+const CLOSE = POLICY.markup.project.close;
+const TOP_BLOCK = new RegExp(`${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
 const HEAD = "Written by Cartographer from your own records of this project";
 
 export const topPath = (brainDir) => join(brainDir, "carto-top.json");
@@ -120,5 +122,5 @@ export function withTop(messages, block) {
 
 /** Text with the copy removed (for the tests' stand-in, which obeys what the user wrote). */
 export function withoutTop(text) {
-	return text.replace(/<project>\nWritten by Cartographer[\s\S]*?\n<\/project>\n*/g, "");
+	return text.replace(TOP_BLOCK, "");
 }

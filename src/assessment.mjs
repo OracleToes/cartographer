@@ -3,11 +3,12 @@
 // What the project is, how it is built and run, what state it is in, what matters
 // when changing it. The agent replaces it whole when its picture changes. It lives
 // in <project>/.atlas/assessment.md as plain text, so the user can read and edit it.
+import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const ASSESSMENT_MAX = 3000;
+export const ASSESSMENT_MAX = POLICY.limits.assessment.textChars;
 
 export const assessmentPath = (brainDir) => join(brainDir, "assessment.md");
 

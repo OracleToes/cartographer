@@ -3,6 +3,7 @@
 // They only read, and only inside the project directory. A path that leaves the
 // project, also through a symlink, is refused. The brain folder is left out of
 // listings and searches: it is the agent's own state, not the project.
+import { POLICY } from "../config.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
@@ -10,16 +11,16 @@ import { defineTool } from "@earendil-works/pi-durable";
 import { arr, bool, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { BRAIN } from "../project.mjs";
 
-const READ_DEFAULT_LINES = 300;
-const READ_MAX_LINES = 1000;
-const READ_MAX_FILES = 8;
-const LINE_MAX_CHARS = 400;
-const FILE_MAX_BYTES = 2_000_000;
-const SEARCH_DEFAULT = 60;
-const SEARCH_MAX = 200;
-const LIST_MAX_LINES = 400;
-const WALK_MAX_FILES = 20_000;
-const SKIP_DIRS = new Set([".git", "node_modules", BRAIN]);
+const READ_DEFAULT_LINES = POLICY.limits.look.readDefaultLines;
+const READ_MAX_LINES = POLICY.limits.look.readMaxLines;
+const READ_MAX_FILES = POLICY.limits.look.readMaxFiles;
+const LINE_MAX_CHARS = POLICY.limits.look.lineChars;
+const FILE_MAX_BYTES = POLICY.limits.look.fileBytes;
+const SEARCH_DEFAULT = POLICY.limits.look.searchDefault;
+const SEARCH_MAX = POLICY.limits.look.searchMax;
+const LIST_MAX_LINES = POLICY.limits.look.listLines;
+const WALK_MAX_FILES = POLICY.limits.look.walkFiles;
+const SKIP_DIRS = new Set([...POLICY.enums.lookSkipDirs, BRAIN]);
 
 export class LookError extends Error {}
 
@@ -62,7 +63,7 @@ export function projectFiles(root) {
 			const out = execFileSync("git", ["ls-files", "-co", "--exclude-standard", "-z"], {
 				cwd: root,
 				encoding: "utf8",
-				maxBuffer: 64 * 1024 * 1024,
+				maxBuffer: POLICY.limits.look.maxBufferBytes,
 				stdio: ["ignore", "pipe", "ignore"],
 			});
 			files = out.split("\0").filter((path) => path !== "");
@@ -94,7 +95,7 @@ export function projectFiles(root) {
 }
 
 function isBinary(buffer) {
-	return buffer.subarray(0, 8000).includes(0);
+	return buffer.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0);
 }
 
 function globToRegExp(glob) {
@@ -122,7 +123,7 @@ function matchesGlob(path, glob) {
 
 const clip = (line) => (line.length > LINE_MAX_CHARS ? `${line.slice(0, LINE_MAX_CHARS)} …[line cut, ${line.length} characters]` : line);
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const sizeOf = (bytes) => (bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
+const sizeOf = (bytes) => (bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`);
 
 // ─── read ────────────────────────────────────────────────────────────────────
 
@@ -199,7 +200,7 @@ export function searchProject(root, args) {
 			if (!regex.test(lines[i])) continue;
 			total++;
 			inFile++;
-			if (hits.length < max) hits.push(`${path}:${i + 1}: ${clip(lines[i].trim()).slice(0, 240)}`);
+			if (hits.length < max) hits.push(`${path}:${i + 1}: ${clip(lines[i].trim()).slice(0, POLICY.limits.look.searchHitChars)}`);
 		}
 		if (inFile > 0) filesWithHits++;
 	}
@@ -214,7 +215,7 @@ export function searchProject(root, args) {
 
 /** @returns {string} */
 export function listProject(root, args) {
-	const depth = Math.max(1, Math.min(6, Math.floor(args.depth ?? 2)));
+	const depth = Math.max(POLICY.validation.positiveIntegerMin, Math.min(POLICY.limits.tree.maxDepth, Math.floor(args.depth ?? POLICY.limits.tree.listDefaultDepth)));
 	const path = confine(root, args.path === undefined || args.path === "" ? "." : args.path);
 	if (!existsSync(path.abs)) return `${path.rel} does not exist.`;
 	if (!statSync(path.abs).isDirectory()) return `${path.rel} is a file. Use \`read\` to see it.`;
@@ -272,11 +273,11 @@ export function lookTools(root) {
 			name: "read",
 			description: `Read text files of the project, with line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless you set \`limit\`.`,
 			parameters: obj({
-				paths: arr(str({ minLength: 1, pattern: "\\S" }), { minItems: 1, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
-				offset: opt(int({ minimum: 1, description: "First line to read, counting from 1. Default 1." })),
-				limit: opt(int({ minimum: 1, maximum: READ_MAX_LINES, description: `How many lines of each file. Default ${READ_DEFAULT_LINES}, at most ${READ_MAX_LINES}.` })),
+				paths: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { minItems: POLICY.validation.nonEmptyArrayMinItems, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
+				offset: opt(int({ minimum: POLICY.validation.positiveIntegerMin, description: `First line to read, counting from ${POLICY.validation.positiveIntegerMin}. Default ${POLICY.validation.positiveIntegerMin}.` })),
+				limit: opt(int({ minimum: POLICY.validation.positiveIntegerMin, maximum: READ_MAX_LINES, description: `How many lines of each file. Default ${READ_DEFAULT_LINES}, at most ${READ_MAX_LINES}.` })),
 			}),
-			replay: "safe",
+			replay: POLICY.enums.toolReplay.safe,
 			execute: async (args) => {
 				const paths = (Array.isArray(args.paths) ? args.paths : [args.paths]).filter((path) => typeof path === "string" && path !== "");
 				if (paths.length === 0) return { ...text("`paths` is empty: name at least one file."), isError: true };
@@ -291,13 +292,13 @@ export function lookTools(root) {
 			description:
 				"Search the text of the project's files for a regular expression. Returns matching lines as path:line: text. Files that git ignores are not searched.",
 			parameters: obj({
-				pattern: str({ minLength: 1, description: "Regular expression (JavaScript syntax). Plain words work too." }),
-				path: opt(str({ minLength: 1, pattern: "\\S", description: "Folder or file to search in, relative to the project. Default: the whole project." })),
-				glob: opt(str({ minLength: 1, description: "Only files whose name matches, for example *.ts" })),
+				pattern: str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "Regular expression (JavaScript syntax). Plain words work too." }),
+				path: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Folder or file to search in, relative to the project. Default: the whole project." })),
+				glob: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "Only files whose name matches, for example *.ts" })),
 				ignore_case: opt(bool({ description: "Match upper and lower case alike. Default false." })),
-				max: opt(int({ minimum: 1, maximum: SEARCH_MAX, description: `Most matching lines to return. Default ${SEARCH_DEFAULT}, at most ${SEARCH_MAX}.` })),
+				max: opt(int({ minimum: POLICY.validation.positiveIntegerMin, maximum: SEARCH_MAX, description: `Most matching lines to return. Default ${SEARCH_DEFAULT}, at most ${SEARCH_MAX}.` })),
 			}),
-			replay: "safe",
+			replay: POLICY.enums.toolReplay.safe,
 			execute: async (args) => {
 				if (typeof args.pattern !== "string" || args.pattern === "") return { ...text("`pattern` is empty: say what to search for."), isError: true };
 				try {
@@ -312,10 +313,10 @@ export function lookTools(root) {
 			name: "list",
 			description: "List the files of the project or of one folder, as a tree with sizes. Files that git ignores are not listed.",
 			parameters: obj({
-				path: opt(str({ minLength: 1, pattern: "\\S", description: "Folder relative to the project. Default: the project directory." })),
-				depth: opt(int({ minimum: 1, maximum: 6, description: "How many levels to show. Default 2, at most 6." })),
+				path: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Folder relative to the project. Default: the project directory." })),
+				depth: opt(int({ minimum: POLICY.validation.positiveIntegerMin, maximum: POLICY.limits.tree.maxDepth, description: `How many levels to show. Default ${POLICY.limits.tree.listDefaultDepth}, at most ${POLICY.limits.tree.maxDepth}.` })),
 			}),
-			replay: "safe",
+			replay: POLICY.enums.toolReplay.safe,
 			execute: async (args) => {
 				try {
 					return text(listProject(root, args));

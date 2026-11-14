@@ -24,16 +24,16 @@ export function askTool({ brainDir, asks }) {
 			"With `choices`, the user can pick one by its number; they can also type an answer of their own.",
 		].join(" "),
 		parameters: obj({
-			text: str({ minLength: 1, pattern: "\\S", description: "The question, as the user reads it. One question, in plain sentences." }),
-			choices: opt(arr(str({ minLength: 1 }), { minItems: 2, maxItems: 9, description: "A few short answers to pick from. Leave out when the answer is open." })),
+			text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "The question, as the user reads it. One question, in plain sentences." }),
+			choices: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.limits.askChoices.min, maxItems: POLICY.limits.askChoices.max, description: "A few short answers to pick from. Leave out when the answer is open." })),
 		}),
 		executionMode: "sequential",
 		// After a restart the question is put again, unless it was answered before.
-		replay: "safe",
+		replay: POLICY.enums.toolReplay.safe,
 		execute: async (args, api, callContext) => {
 			const text = String(args.text ?? "").trim();
 			if (text === "") return fail("`text` is empty, so nothing was asked.");
-			const choices = (Array.isArray(args.choices) ? args.choices : []).map((choice) => String(choice).trim()).filter((choice) => choice !== "").slice(0, 9);
+			const choices = (Array.isArray(args.choices) ? args.choices : []).map((choice) => String(choice).trim()).filter((choice) => choice !== "").slice(0, POLICY.limits.askChoices.max);
 			const task = api.conversationId !== ROOT_CONVERSATION_ID;
 			let outcome = await api.memo("answer", callContext);
 			if (outcome === undefined) {

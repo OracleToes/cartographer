@@ -108,7 +108,6 @@ function lookCall(directive) {
 	// The book tools of old keep their test-facing directive spellings; they go out as the one `book` tool.
 	if (name === "plan" || name === "atlas") return name === "atlas" ? { name, args: { ops: JSON.parse(rest) } } : { name: "book", args: { book: "plan", ops: JSON.parse(rest) } };
 	if (name === "assess") return { name: "book", args: { book: "books", text: breaks(rest) } };
-	if (name === "prompt") return { name: "book", args: { book: "prompt", ops: JSON.parse(rest) } };
 	// wake: {"action":"set","note":"look at the log","every":60}
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
 	// context: {"action":"shelve","path":"a.txt"}

@@ -11,6 +11,7 @@
 //
 // Files that git ignores are not in a checkpoint, which is why change tasks are not
 // allowed to write to them (src/tools/change.mjs).
+import { POLICY } from "./config.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -45,13 +46,13 @@ function git(root, brainDir, args, options = {}) {
 			cwd: root,
 			env,
 			encoding: "utf8",
-			maxBuffer: 256 * 1024 * 1024,
+			maxBuffer: POLICY.limits.git.maxBufferBytes,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 	} catch (error) {
 		if (error.code === "ENOENT") throw new CheckpointError("git is not installed, and checkpoints need it");
 		if (options.quiet) return undefined;
-		throw new CheckpointError(`git ${args[0]} failed: ${String(error.stderr ?? error.message).trim().slice(0, 400)}`);
+		throw new CheckpointError(`git ${args[0]} failed: ${String(error.stderr ?? error.message).trim().slice(0, POLICY.limits.git.errorChars)}`);
 	}
 }
 
@@ -152,9 +153,9 @@ export function changeLines(changes) {
 /**
  * The changed files for the agent and the screen, bounded: a command can create thousands of files (a virtual
  * environment, a build folder), and a line for each would fill the agent's context. Past `max` files, a folder
- * with more than three changed files is given as one line.
+ * with more than the configured threshold of changed files is given as one line.
  */
-export function changeRecord(changes, max = 40) {
+export function changeRecord(changes, max = POLICY.limits.checkpoints.changeRecordLines) {
 	if (changes.length <= max) return changeLines(changes);
 	const groups = new Map();
 	for (const change of changes) {
@@ -165,7 +166,7 @@ export function changeRecord(changes, max = 40) {
 	}
 	const lines = [];
 	for (const [folder, members] of groups) {
-		if (folder === "" || members.length <= 3) lines.push(...changeLines(members));
+		if (folder === "" || members.length <= POLICY.limits.checkpoints.folderCollapseFiles) lines.push(...changeLines(members));
 		else {
 			const kinds = ["new", "changed", "deleted"].flatMap((status) => {
 				const n = members.filter((change) => change.status === status).length;
@@ -262,7 +263,7 @@ export function undo(root, brainDir) {
 		const paths = changesBetween(root, brainDir, task.before.id, task.after.id).map((change) => change.path);
 		const had = new Set(git(root, brainDir, ["ls-tree", "-r", "--name-only", "-z", task.before.id]).split("\0"));
 		const back = paths.filter((path) => had.has(path));
-		for (let i = 0; i < back.length; i += 200) git(root, brainDir, ["checkout", "-q", task.before.id, "--", ...back.slice(i, i + 200)], { literal: true });
+		for (let i = 0; i < back.length; i += POLICY.limits.git.checkoutBatchItems) git(root, brainDir, ["checkout", "-q", task.before.id, "--", ...back.slice(i, i + POLICY.limits.git.checkoutBatchItems)], { literal: true });
 		// A file the task created is removed, and so is a folder that this leaves empty.
 		for (const path of paths.filter((path) => !had.has(path))) {
 			rmSync(join(root, path), { force: true });
@@ -287,7 +288,7 @@ export function undo(root, brainDir) {
  * @returns {undefined | { steps: number, changes: ReturnType<typeof changesBetween>, patch: string }}  undefined when no step was taken since
  */
 export function changeSince(root, brainDir, since) {
-	const steps = history(root, brainDir).filter((entry) => entry.label.startsWith("before ") && entry.label !== "before undo" && Date.parse(entry.time) >= since - 1000);
+	const steps = history(root, brainDir).filter((entry) => entry.label.startsWith("before ") && entry.label !== "before undo" && Date.parse(entry.time) >= since - POLICY.limits.git.undoTimestampToleranceMs);
 	const first = steps.at(-1);
 	if (first === undefined) return undefined;
 	git(root, brainDir, ["add", "-A", "."]);
@@ -306,7 +307,7 @@ export function changeSince(root, brainDir, since) {
 export function uncommitted(root) {
 	const run = (args) => {
 		try {
-			return execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" } });
+			return execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: POLICY.limits.git.checkpointBufferBytes, stdio: ["ignore", "pipe", "ignore"], env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" } });
 		} catch {
 			return undefined;
 		}
