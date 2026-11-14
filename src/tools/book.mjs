@@ -7,6 +7,7 @@
 // A task may use the context operations (fold, recall, shelve, unshelve, note, collapse) as the old
 // `context` tool let it; the other books belong to the main agent, and are refused with the same words
 // the old per-tool refusals used.
+import { POLICY } from "../config.mjs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { arr, bool, compile, lit, obj, oneOf, opt, str, union, unknown } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";

@@ -3,6 +3,7 @@
 // `chat` tells the user something and never waits. `ask` is for the moment the agent cannot go on without an
 // answer: the call returns when the user has typed one, and their words are its result. With `choices` the user
 // can answer with a number; they can always type something else instead. The main agent and a task both have it.
+import { POLICY } from "../config.mjs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { noteChat } from "../context.mjs";
