@@ -69,7 +69,7 @@ const oneLine = (text, max) => {
 const count = (n) => (n >= 10_000 ? `${Math.round(n / 1000)}k` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 
 /** A harness message without its wrapping. */
-const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?/, "").trim();
+const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?|^Tool call blocked: /, "").trim();
 
 /** One line that says what a tool call is doing. */
 export function describeCall(call) {
@@ -87,8 +87,15 @@ export function describeCall(call) {
 			return `write ${oneLine(args.path, 90)}`;
 		case "edit":
 			return `edit ${oneLine(args.path, 90)}`;
-		case "plan":
-			return `plan ${(Array.isArray(args.ops) ? args.ops : []).map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()).join(" · ")}`;
+		case "book": {
+			const ops = Array.isArray(args.ops) ? args.ops : [];
+			if (args.book === "ledger") return `ledger ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
+			if (args.book === "plan") return `plan ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()).join(" · ")}`;
+			if (args.book === "books") return typeof args.text === "string" ? `assess  ${count(String(args.text).length)} characters` : `assess ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
+			if (args.book === "prompt") return `prompt ${ops.map((op) => `${op?.action ?? "?"} ${op?.target ?? op?.name ?? ""}`.trim()).join(" · ")}`;
+			const op = ops[0] ?? {};
+			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", 70)}${op.lines ? ` (lines ${oneLine(op.lines, 20)})` : ""}`.trim();
+		}
 		case "read": {
 			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
 			const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
@@ -98,8 +105,6 @@ export function describeCall(call) {
 			return `search /${oneLine(args.pattern, 50)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
 		case "list":
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
-		case "ledger":
-			return `ledger ${(Array.isArray(args.ops) ? args.ops : []).map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
 		case "atlas":
 			return oneLine(
 				`atlas ${(Array.isArray(args.ops) ? args.ops : [])
@@ -107,14 +112,10 @@ export function describeCall(call) {
 					.join(" · ")}`,
 				100,
 			);
-		case "assess":
-			return `assess  ${count(String(args.text ?? "").length)} characters`;
 		case "wake":
 			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", 80)}`.trim();
 		case "sleep":
 			return "sleep";
-		case "context":
-			return `context ${args.action ?? "?"} ${oneLine(args.id ?? args.path ?? args.text ?? "", 70)}${args.lines ? ` (lines ${oneLine(args.lines, 20)})` : ""}`.trim();
 		default:
 			return `${call.name} ${oneLine(JSON.stringify(args), 80)}`;
 	}
@@ -142,7 +143,7 @@ export function describeResult(message) {
 	}
 	if (message.toolName === "window" && message.details?.closed) return "closed";
 	// What a task did about its own context, in the tool's own words.
-	if (message.toolName === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), 110);
+	if (message.toolName === "book" && message.details?.book === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), 110);
 	// The harness's own words for a call the user stopped, or one that a restart cut off.
 	if (message.isError && /^Tool \w+ was aborted/.test(plain(text))) return "stopped";
 	if (message.isError && /^Tool \w+ was interrupted/.test(plain(text))) return "cut off by a restart, and not run again";
@@ -446,28 +447,36 @@ export async function runTerminal(session, options) {
 							if (mapped.stale?.length > 0) parts.push(`may now be out of date: ${oneLine(mapped.stale.join(", "), 60)}`);
 							if (parts.length > 0) line(`${bold("◂")} atlas  ${parts.join(" · ")}  ${dim("(/atlas shows the graph)")}`);
 						}
-					} else if (message.toolName === "ledger" || message.toolName === "plan") {
-						const name = message.toolName;
+					} else if (message.toolName === "book") {
+						// One tool for the books; each keeps the words on the screen it had as a tool of its own.
+						const name = message.details?.book ?? "book";
+						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
-						if (message.isError || shown.length === 0) line(`${bold("●")} ${name}  not changed: ${oneLine(plain(textOf(message)), 200)}`);
-						// A goal's done-when line goes on a line of its own: together they are too long to read as one.
-						else for (const change of shown) line(`${bold("●")} ${name}  ${change.replace(/ \(done when: (.*)\)$/s, `\n${" ".repeat(name.length + 4)}done when: $1`)}`);
-						if (message.details?.pinned === true) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
-					} else if (message.toolName === "context") {
-						pendingCalls.delete(message.toolCallId);
-						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
-						if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), 200)}`);
-						else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, 160)}`);
+						if (name === "ledger" || name === "plan") {
+							if (message.isError || shown.length === 0) line(`${bold("●")} ${name}  not changed: ${oneLine(plain(textOf(message)), 200)}`);
+							// A goal's done-when line goes on a line of its own: together they are too long to read as one.
+							else for (const change of shown) line(`${bold("●")} ${name}  ${change.replace(/ \(done when: (.*)\)$/s, `\n${" ".repeat(name.length + 4)}done when: $1`)}`);
+							if (message.details?.pinned === true) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
+						} else if (name === "context") {
+							if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), 200)}`);
+							else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, 160)}`);
+						} else if (name === "books" && !message.isError && shown.length > 0) {
+							for (const change of shown) line(`${bold("●")} ${change}  ${dim("(/assessment shows it)")}`);
+						} else {
+							if (call?.quiet && !message.isError) continue;
+							if (call?.shown && !call.quiet) line(`  ${dim(`→ ${describeResult(message)}`)}`);
+							else line(`${bold("▸")} ${call?.text ?? name}  ${dim(`→ ${describeResult(message)}`)}`);
+						}
 					} else if (message.toolName === "wake" || message.toolName === "sleep") {
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
 						if (message.isError || shown.length === 0) line(`${bold("●")} ${message.toolName}  ${message.toolName === "wake" ? "not changed" : "refused"}: ${oneLine(plain(textOf(message)), 200)}`);
 						else for (const change of shown) line(`${bold("●")} ${message.toolName === "sleep" ? dim(change) : `wake  ${oneLine(change, 160)}`}`);
-					} else if ((message.toolName === "atlas" || message.toolName === "assess") && !message.isError && (message.details?.shown?.length ?? 0) > 0) {
+					} else if (message.toolName === "atlas" && !message.isError && (message.details?.shown?.length ?? 0) > 0) {
 						// What the main agent wrote to its map, one line each.
 						pendingCalls.delete(message.toolCallId);
-						for (const change of message.details.shown) line(`${bold("●")} ${message.toolName === "assess" ? `${change}  ${dim("(/assessment shows it)")}` : `atlas  ${oneLine(change, 150)}`}`);
+						for (const change of message.details.shown) line(`${bold("●")} atlas  ${oneLine(change, 150)}`);
 					} else {
 						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);

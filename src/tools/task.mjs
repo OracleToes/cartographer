@@ -24,7 +24,7 @@ import { obj, opt, str } from "@earendil-works/pi-schema";
 import { fileMarks, loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../atlas.mjs";
 import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep } from "../checkpoints.mjs";
 import { addRecord, KEPT_AS, loadContext, reserveId } from "../context.mjs";
-import { endTaskContext } from "./context.mjs";
+import { endTaskContext } from "../context.mjs";
 import { applyPlanOp, loadPlan, mayRun, savePlan } from "../plan.mjs";
 import { CHANGE_NOTE, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";

@@ -172,7 +172,7 @@ function reportIdOf(message) {
 	const text = textOf(message);
 	// The last one counts: a report may quote the line of another.
 	if (message.toolName === "task") return [...text.matchAll(KEPT_ALL)].at(-1)?.[1];
-	if (message.toolName === "context" && text.endsWith(RECALLED)) return /^Report (t\d+) · /.exec(text)?.[1];
+	if ((message.toolName === "context" || message.toolName === "book") && text.endsWith(RECALLED)) return /^Report (t\d+) · /.exec(text)?.[1];
 	return undefined;
 }
 
@@ -486,6 +486,15 @@ export function callWords(call) {
 	if (call.name === "list") return `list ${args.path ?? "."}`;
 	if (call.name === "write" || call.name === "edit") return `${call.name} ${args.path ?? ""}`;
 	if (call.name === "shell") return `shell ${oneLine(args.command, 60)}`;
+	if (call.name === "book") {
+		const ops = Array.isArray(args.ops) ? args.ops : [];
+		if (args.book === "context") {
+			const op = ops[0] ?? {};
+			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", 40)}`.trim();
+		}
+		const what = args.book === "plan" ? ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()) : ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim());
+		return `${args.book ?? "book"} ${oneLine(what.join(", "), 60)}`.trim();
+	}
 	return `${call.name} ${oneLine(JSON.stringify(args), 60)}`;
 }
 
@@ -752,4 +761,28 @@ export function forgetChat(brainDir, text) {
 		}
 	});
 	return changed;
+}
+
+/**
+ * What a task hands on to the main agent's shelf when it ends, and the cleaning up after it.
+ * @returns {{ added: string[], refused: string[] }}
+ */
+export function endTaskContext(root, brainDir, config, conversationId) {
+	return updateContext(brainDir, (store) => {
+		const task = store.tasks[conversationId];
+		delete store.tasks[conversationId];
+		const added = [];
+		const refused = [];
+		for (const { handOn, ...item } of (task?.shelf ?? []).filter((entry) => entry.handOn === true)) {
+			const others = store.shelf.filter((entry) => entry.path !== item.path);
+			const total = [...others, item].reduce((sum, entry) => sum + estimate(shelfText(root, entry)), 0);
+			if (total > config.shelfTokens) {
+				refused.push(shelfLabel(item));
+				continue;
+			}
+			store.shelf = [...others, item];
+			added.push(shelfLabel(item));
+		}
+		return { added, refused };
+	});
 }

@@ -9,24 +9,21 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { describe, loadPromptOverlay, LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
 import { CORE_DIR } from "./config.mjs";
 import { loadOverlay, overlayPath } from "./proposals.mjs";
-import { promptTool } from "./tools/prompt.mjs";
+
 import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
+import { bookTool } from "./tools/book.mjs";
 import { returnTool } from "./tools/return.mjs";
 import { stamp } from "./time.mjs";
 import { chatTool } from "./tools/chat.mjs";
-import { contextTool } from "./tools/context.mjs";
 import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs";
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
 import { loadTop, pin } from "./top.mjs";
-import { assessTool } from "./tools/assess.mjs";
 import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
-import { ledgerTool } from "./tools/ledger.mjs";
 import { lookTools } from "./tools/look.mjs";
-import { planTool } from "./tools/plan.mjs";
 import { shellTool, windowTool } from "./tools/shell.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
@@ -39,9 +36,10 @@ const CHANGE = new Set(["write", "edit"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
 const types = (call) => call.name === "shell" || (call.name === "window" && call.arguments?.action === "send");
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
-const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, assess: REFUSALS.taskAssesses, prompt: REFUSALS.taskProposes, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
-const MAIN_ONLY = Object.fromEntries(MAIN_TOOLS.map((name) => [name, MAIN_ONLY_TEXT[name]]));
-for (const name of MAIN_TOOLS) if (MAIN_ONLY[name] === undefined) throw new Error(`no refusal text for ${name}`);
+// The book tool guards its own books inside the tool (a task may use its context operations);
+// the rest of the main agent's tools are wrapped here.
+const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
+const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
@@ -236,11 +234,8 @@ export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, 
 		askTool({ brainDir, asks }),
 		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
 		returnTool({ brainDir }),
-		forMain(ledgerTool({ brainDir, engine })),
-		forMain(planTool({ brainDir, gate })),
+		bookTool({ root, brainDir, config, engine, gate }),
 		atlasTool({ root, brainDir, gate }),
-		forMain(assessTool({ brainDir })),
-		forMain(promptTool({ brainDir })),
 		...lookTools(root),
 		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
 		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
@@ -248,7 +243,6 @@ export async function openSession({ root, brainDir, coreDir = CORE_DIR, config, 
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
-		contextTool({ root, brainDir, config, engine }),
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
 	// Approved wording from the core folder (src/proposals.mjs) is laid over the built-in prompt and
 	// tool descriptions at a start and at each collapse, and nowhere else: a change at the first bytes

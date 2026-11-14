@@ -94,7 +94,7 @@ function lookCall(directive) {
 			},
 		};
 	}
-	const [, name, rest] = /^(read|search|list|write|edit|task|ledger|plan|atlas|assess|wake|sleep|chat|ask|return|context|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
+	const [, name, rest] = /^(read|search|list|write|edit|task|ledger|plan|atlas|assess|wake|sleep|chat|ask|return|context|prompt|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
 	const breaks = (text) => text.replaceAll("\\n", "\n");
 	if (name === "write") {
 		const [path, content = ""] = rest.split(" <<< ");
@@ -105,12 +105,14 @@ function lookCall(directive) {
 		const [oldText, newText = ""] = change.split(" >>> ");
 		return { name: "edit", args: { path: path.trim(), old_text: breaks(oldText), new_text: breaks(newText) } };
 	}
-	if (name === "plan" || name === "atlas") return { name, args: { ops: JSON.parse(rest) } };
-	if (name === "assess") return { name: "assess", args: { text: breaks(rest) } };
+	// The book tools of old keep their test-facing directive spellings; they go out as the one `book` tool.
+	if (name === "plan" || name === "atlas") return name === "atlas" ? { name, args: { ops: JSON.parse(rest) } } : { name: "book", args: { book: "plan", ops: JSON.parse(rest) } };
+	if (name === "assess") return { name: "book", args: { book: "books", text: breaks(rest) } };
+	if (name === "prompt") return { name: "book", args: { book: "prompt", ops: JSON.parse(rest) } };
 	// wake: {"action":"set","note":"look at the log","every":60}
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
 	// context: {"action":"shelve","path":"a.txt"}
-	if (name === "context") return { name: "context", args: JSON.parse(rest) };
+	if (name === "context") return { name: "book", args: { book: "context", ops: [JSON.parse(rest)] } };
 	if (name === "sleep") return { name: "sleep", args: {} };
 	if (name === "chat") return { name: "chat", args: { text: rest } };
 	if (name === "ask") {
@@ -131,7 +133,7 @@ function lookCall(directive) {
 	}
 	if (name === "list") return { name: "list", args: rest === "" ? {} : { path: rest } };
 	if (name === "task") return { name: "task", args: { brief: rest } };
-	if (name === "ledger") return { name: "ledger", args: { ops: JSON.parse(rest) } };
+	if (name === "ledger") return { name: "book", args: { book: "ledger", ops: JSON.parse(rest) } };
 	if (name === "loop") return { name: "list", args: {} };
 	return undefined;
 }
@@ -163,7 +165,7 @@ export function decide(messages) {
 		// A task that said yes to the question before its steps collapse: it notes what its results began with.
 		if (message.role === "user" && raw.includes("Your steps will be collapsed after this reply")) {
 			const found = messages.slice(0, i).filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "context", args: { action: "note", text: `NOTED ${found.slice(-3).join(" | ")}` } }] };
+			return { calls: [{ name: "book", args: { book: "context", ops: [{ action: "note", text: `NOTED ${found.slice(-3).join(" | ")}` }] } }] };
 		}
 		// What follows a note inside a task is not a message to obey: the brief goes on.
 		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith("You are now the task"))) continue;

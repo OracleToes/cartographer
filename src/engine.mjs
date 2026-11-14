@@ -16,6 +16,7 @@
 // conversation: they need what the conversation's requests must never have, a fixed
 // reply shape and a different end.
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { describeCall } from "./terminal.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
 import { ASK_MAIN, ASK_TASK, HANDOFF_IN_TURN, TASK_HANDOFF } from "./prompt.mjs";
 import { withTimes } from "./request.mjs";
@@ -274,7 +275,7 @@ export function createEngine({ root, brainDir, config }) {
 					by: at.turn?.by ?? "user",
 					reminded: at.turn?.reminded ?? false,
 					...(at.turn?.by === "note" && turnStart !== undefined ? { note: textOf(turnStart).replace(/<\/?cartographer>\n?/g, "").trim().slice(0, 2000) } : {}),
-					calls: callsOf(reply).map((call) => ({ text: `${call.name} ${JSON.stringify(call.arguments ?? {}).slice(0, 300)}`, result: state.results.get(call.id) ?? "(no result)" })),
+					calls: callsOf(reply).map((call) => ({ text: describeCall(call), result: state.results.get(call.id) ?? "(no result)" })),
 				},
 			});
 			return { handoff: text };

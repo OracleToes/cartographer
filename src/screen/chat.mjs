@@ -35,13 +35,14 @@ const ITEMS_MAX = 1500;
 const BLANK = { spans: [] };
 
 /** The tab a call's work lives in, and the view inside it. */
-export function homeOf(name) {
+export function homeOf(name, args = {}) {
+	if (name === "book") name = args.book;
 	if (name === "write" || name === "edit") return { tab: "diff" };
 	if (name === "shell" || name === "window") return { tab: "shells" };
 	if (name === "plan") return { tab: "carto", view: "plan" };
 	if (name === "ledger") return { tab: "carto", view: "ledger" };
 	if (name === "atlas") return { tab: "carto", view: "atlas" };
-	if (name === "assess") return { tab: "carto", view: "assessment" };
+	if (name === "assess" || name === "books") return { tab: "carto", view: "assessment" };
 	if (name === "context") return { tab: "context" };
 	return undefined;
 }

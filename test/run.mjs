@@ -25,7 +25,8 @@ import { loadTop, noteAssessed, pin, sinceTop, topPath, withoutTop, withTop } fr
 import { drawTree, treeSection } from "../src/tree.mjs";
 import { atlasTool } from "../src/tools/atlas.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
-import { ledgerTool } from "../src/tools/ledger.mjs";
+import { bookTool } from "../src/tools/book.mjs";
+import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { confine, listProject, LookError, projectFiles, readOne, searchProject } from "../src/tools/look.mjs";
 import { findProject, setUpBrain } from "../src/project.mjs";
 import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
@@ -952,14 +953,14 @@ test("ledger: operations, limits and what a file must hold", () => {
 test("ledger: a call that is run again after a crash is not applied twice", async () => {
 	const dir = join(scratch, "ledger-rerun");
 	mkdirSync(dir, { recursive: true });
-	const tool = ledgerTool({ brainDir: dir });
-	const api = { taskId: "task-1", now: () => 0 };
-	const first = await tool.execute({ ops: [{ action: "add", kind: "note", text: "once" }] }, api);
+	const tool = bookTool({ brainDir: dir });
+	const api = { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID };
+	const first = await tool.execute({ book: "ledger", ops: [{ action: "add", kind: "note", text: "once" }] }, api);
 	assert.equal(first.output[0].text, "n1 added.\nOpen: no goals, no questions, 1 note.");
-	const again = await tool.execute({ ops: [{ action: "add", kind: "note", text: "once" }] }, api);
+	const again = await tool.execute({ book: "ledger", ops: [{ action: "add", kind: "note", text: "once" }] }, api);
 	has(again.output[0].text, "These operations were already applied, before a restart.", "the rerun says so");
 	assert.equal(loadLedger(dir).ledger.items.length, 1, "and adds nothing");
-	await tool.execute({ ops: [{ action: "add", kind: "note", text: "twice" }] }, { ...api, taskId: "task-2" });
+	await tool.execute({ book: "ledger", ops: [{ action: "add", kind: "note", text: "twice" }] }, { ...api, taskId: "task-2" });
 	assert.equal(loadLedger(dir).ledger.items.length, 2, "another call is applied");
 });
 
@@ -1413,13 +1414,22 @@ const NO_SANDBOX = () => (findSandbox().ok ? undefined : `no sandbox on this mac
 const RUN_ITEM = { action: "add", mode: "change", text: "Run things" };
 const NET_ITEM = { action: "add", mode: "change", network: true, text: "Fetch things" };
 /** The text of every result the server was sent for a call of tool `name`, in order, each once. */
-function resultsOf(server, name) {
+function resultsOf(server, name, book) {
 	const seen = new Map();
 	for (const request of server.requests) {
 		const calls = new Map();
 		for (const message of request.messages) {
-			for (const call of message.tool_calls ?? []) calls.set(call.id, call.function?.name);
-			if (message.role === "tool" && calls.get(message.tool_call_id) === name) seen.set(message.tool_call_id, messageText(message));
+			for (const call of message.tool_calls ?? []) calls.set(call.id, call.function);
+			if (message.role === "tool") {
+				const fn = calls.get(message.tool_call_id);
+				if (fn?.name !== name) continue;
+				if (book !== undefined) {
+					let args = {};
+					try { args = JSON.parse(fn.arguments ?? "{}"); } catch {}
+					if (args.book !== book) continue;
+				}
+				seen.set(message.tool_call_id, messageText(message));
+			}
 		}
 	}
 	return [...seen.values()];
@@ -2547,7 +2557,7 @@ test("terminal: one line per tool call", () => {
 	assert.equal(describeCall({ name: "task", arguments: { brief: "Write it", item: "p2" } }), "task p2  Write it");
 	assert.equal(describeCall({ name: "write", arguments: { path: "src/a.py", content: "x\n" } }), "write src/a.py");
 	assert.equal(describeCall({ name: "edit", arguments: { path: "src/a.py", old_text: "a", new_text: "b" } }), "edit src/a.py");
-	assert.equal(describeCall({ name: "plan", arguments: { ops: [{ action: "add", mode: "change" }, { action: "done", id: "p2" }, { action: "clear" }] } }), "plan add change · done p2 · clear");
+	assert.equal(describeCall({ name: "book", arguments: { book: "plan", ops: [{ action: "add", mode: "change" }, { action: "done", id: "p2" }, { action: "clear" }] } }), "plan add change · done p2 · clear");
 	assert.equal(describeCall({ name: "shell", arguments: { command: "python -m pytest\n  -q", window: "tests" } }), "$ python -m pytest -q  (window tests)");
 	assert.equal(describeCall({ name: "shell", arguments: { command: "ls", window: "main" } }), "$ ls");
 	assert.equal(describeCall({ name: "window", arguments: { window: "server", action: "wait", until: "ready" } }), 'window server  wait  until "ready"');
@@ -2565,7 +2575,7 @@ test("terminal: one line per tool call", () => {
 	assert.equal(shellResult(undefined, "<harness>\n[error] Tool shell was aborted\n</harness>", true), "stopped");
 	assert.equal(shellResult(undefined, "<harness>\n[error] Tool shell was interrupted by a restart and may have partially run\n</harness>", true), "cut off by a restart, and not run again");
 	assert.equal(shellResult(undefined, "Refused: `command` is empty: give the command line to run.", true), "refused: `command` is empty: give the command line to run.");
-	assert.equal(describeCall({ name: "ledger", arguments: { ops: [{ action: "add", kind: "goal" }, { action: "done", id: "q2" }] } }), "ledger add goal · done q2");
+	assert.equal(describeCall({ name: "book", arguments: { book: "ledger", ops: [{ action: "add", kind: "goal" }, { action: "done", id: "q2" }] } }), "ledger add goal · done q2");
 });
 
 // ─── The atlas, the assessment, and time ───────────────────────────────────
@@ -3125,7 +3135,7 @@ test("terminal: one line per call to the atlas and the assessment", () => {
 		describeCall({ name: "atlas", arguments: { ops: [{ action: "add", name: "dice" }, { action: "confirm", names: ["a", "b"] }, { action: "tree", anchor: "src" }, { action: "tree", depth: 2 }] } }),
 		"atlas add dice · confirm a, b · tree src · tree depth 2",
 	);
-	assert.equal(describeCall({ name: "assess", arguments: { text: "x".repeat(1200) } }), "assess  1.2k characters");
+	assert.equal(describeCall({ name: "book", arguments: { book: "books", text: "x".repeat(1200) } }), "assess  1.2k characters");
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "atlas", isError: false, details, content: [{ type: "text", text }] });
 	assert.equal(result({ shown: ["+ node a  what a is", "✓ confirmed b"] }, "a written.\nb confirmed."), "+ node a what a is · ✓ confirmed b");
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");
@@ -3694,7 +3704,7 @@ test("plan: a standing item stays open and can be carried out again and again", 
 		has(result.stdout, "◂ p1 is marked done. For further work, add a new item to the plan.", "once it is marked done, no task is started for it");
 		const after = server.requests.find((request) => request.messages.at(-1).role === "user" && messageText(request.messages.at(-1)).startsWith("task(p1): write: notes.txt <<< two"));
 		has(stateOf(after), "Beyond that, nothing of the plan is left to do once. p1 is a standing duty: start a task for it whenever its text calls for it, as often as that is, and do not mark it done while the duty lasts. A wake set with `wake` brings you back to check on it.", "the state block says what a standing item is for");
-		has(resultsOf(server, "plan").at(-1), "The standing duty has ended: no further task can be started for it.", "and what marking it done means");
+		has(resultsOf(server, "book", "plan").at(-1), "The standing duty has ended: no further task can be started for it.", "and what marking it done means");
 	} finally {
 		await server.close();
 	}
@@ -4394,7 +4404,7 @@ test("context: a goal closing collapses the context in the middle of the turn, a
 		const front = frontOf(first);
 		has(front, "\n\nThis collapse came in the middle of your turn, so the turn goes on.\nThe calls of your last reply, all carried out, and what each returned:\n▸ ledger ", "the block says where the turn stands");
 		has(front, "\ng1 closed. ", "with what the ledger returned");
-		has(front, "\n▸ assess {\"text\":\"Small and tidy.\"}\nAssessment saved (15 characters)", "and the other call of that reply");
+		has(front, "\n▸ assess  15 characters\nAssessment saved (15 characters)", "and the other call of that reply");
 		has(front, "\nGo on from here: do what is left of the turn, or end it.\n</context>", "and what to do");
 		has(front, `[user · `, "the talk is there");
 		has(front, "] ledger: [{\"action\":\"done\",\"id\":\"g1\"}] || assess: Small and tidy.", "with the message that began the turn");
@@ -4447,7 +4457,7 @@ test("context: in the middle of a turn the agent that says yes gets one more rep
 		assert.ok(order[0] !== -1 && order[0] < order[1] && order[1] < order[2], `closed, written, collapsed: ${order}`);
 		assert.equal(server.asides.length, 1, "asked once");
 		const first = server.requests.find((request) => (frontOf(request) ?? "").includes("goal g1 was closed"));
-		has(frontOf(first), "▸ ledger {\"ops\":[{\"action\":\"add\",\"kind\":\"note\",\"text\":\"the port is 8080\"}]}\nn2 added.", "the block ends with the reply it used");
+		has(frontOf(first), "▸ ledger add note\nn2 added.", "the block ends with the reply it used");
 		hasNot(frontOf(first), "your context will be collapsed after your next reply", "and without the notice");
 	} finally {
 		await server.close();
@@ -4466,7 +4476,7 @@ test("context: while the agent works, its context is collapsed when it is nearly
 		const first = server.requests.find((request) => /it held about \d\d% of what fits/.test(frontOf(request) ?? ""));
 		assert.deepEqual(first.messages.map((message) => message.role), ["system", "user"]);
 		has(frontOf(first), "This collapse came in the middle of your turn, so the turn goes on.", "the turn goes on");
-		has(frontOf(first), "\n▸ assess {\"text\":\"The project is a small one. ", "with the call it had just made");
+		has(frontOf(first), "\n▸ assess  8.4k characters", "with the call it had just made");
 		has(result.stdout, "\nCollapsed, going on.\n", "and it does");
 		// What is left is still more than the limit here, but nearly all of it is what a collapse keeps: no second one.
 		assert.equal(result.stdout.split("◆ context collapsed").length - 1, 1, "a collapse that would free next to nothing is not made, however full the context");
@@ -4610,7 +4620,7 @@ test("context: the main agent can drop a report from view and get it back; notes
 	const server = await startStandIn();
 	try {
 		const result = await carto(root, server, [], {
-			input: ['task: read: src/math.js', 'context: {"action":"drop","id":"t1"}', "say: dropped", 'context: {"action":"drop","id":"t1"}', 'context: {"action":"recall","id":"t1"}', "say: back", 'context: {"action":"note","text":"remember"}', 'context: {"action":"drop"}', 'context: {"action":"fly"}', ""].join("\n"),
+			input: ['task: read: src/math.js', 'context: {"action":"fold","id":"t1"}', "say: dropped", 'context: {"action":"fold","id":"t1"}', 'context: {"action":"recall","id":"t1"}', "say: back", 'context: {"action":"note","text":"remember"}', 'context: {"action":"fold"}', 'context: {"action":"fly"}', ""].join("\n"),
 		});
 		ok(result, "run");
 		assert.match(result.stdout, /● context  dropped t1 · about \d+ tokens freed\n/);
@@ -4628,8 +4638,8 @@ test("context: the main agent can drop a report from view and get it back; notes
 		assert.deepEqual(contextStore(root).dropped, []);
 		// What the tool refuses.
 		has(result.stdout, "● context  nothing done: A note of this kind is for a task's own steps. What you need after a collapse belongs in the ledger", "the main agent's notes go to the brain");
-		has(result.stdout, "● context  nothing done: drop needs `id`: the report to drop from view, like t12.", "no id");
-		has(result.stdout, '● context  nothing done: Validation failed for tool "context": - action: expected one of ["recall","shelve","unshelve","fold","drop","note","collapse"]', "an unknown action is refused by the tool's schema");
+		has(result.stdout, "● context  nothing done: fold needs `id`: the report to drop from view, like t12.", "no id");
+		has(result.stdout, 'refused: Validation failed for tool "book": - ops.0.action: expected one of ["add","edit","done","remove","before","cl…', "an unknown action is refused by the tool's schema");
 	} finally {
 		await server.close();
 	}
@@ -4647,7 +4657,7 @@ test("context: the agent can collapse its own context; it is not asked first, si
 		const first = server.requests.find((request) => frontOf(request) !== undefined);
 		has(frontOf(first), "Your context was collapsed on ", "collapsed");
 		has(frontOf(first), " (you asked for it: starting on the parser). What you had in view", "the block says it in the agent's words");
-		has(frontOf(first), '▸ context {"action":"collapse","text":"starting on the parser"}\nYour context is collapsed when the calls of this reply are done. Your next request begins with what was kept.\nGo on from here', "with the call that asked");
+		has(frontOf(first), '▸ context collapse starting on the parser\nYour context is collapsed when the calls of this reply are done. Your next request begins with what was kept.\nGo on from here', "with the call that asked");
 		has(result.stdout, "\nFresh.\n", "the turn goes on");
 	} finally {
 		await server.close();
@@ -4658,7 +4668,7 @@ test("context: a task tidies its own steps: marks on large results, a re-read re
 	const root = makeProject("context-task", { git: false });
 	const server = await startStandIn();
 	try {
-		const brief = ["read: long.txt @1+250", "read: src/math.js", "read: long.txt @1+250", 'context: {"action":"drop","id":"s1"}', 'context: {"action":"drop","id":"s3"}', 'context: {"action":"note","text":"line 7 is the one"}', 'context: {"action":"recall","id":"t1"}', 'context: {"action":"drop","id":"t1"}', "list:"].join("\\n");
+		const brief = ["read: long.txt @1+250", "read: src/math.js", "read: long.txt @1+250", 'context: {"action":"fold","id":"s1"}', 'context: {"action":"fold","id":"s3"}', 'context: {"action":"note","text":"line 7 is the one"}', 'context: {"action":"recall","id":"t1"}', 'context: {"action":"fold","id":"t1"}', "list:"].join("\\n");
 		const result = await carto(root, server, [], { input: `say: before\ntask: ${brief}\n` });
 		ok(result, "run");
 		const requests = taskRequests(server);
@@ -4671,16 +4681,16 @@ test("context: a task tidies its own steps: marks on large results, a re-read re
 		const again = resultsIn(requests[3]);
 		assert.match(again[0], /^\[s1: An earlier read of the same lines stood here; the newer one is further down\. It was: read long\.txt from line 1, about [\d,]+ tokens\. Call again if you need it\.\]$/, "the older copy is replaced");
 		assert.match(again[2], /^== long\.txt \(lines 1-250 of 700\)\n[\s\S]*\n\n\[s3 · about [\d,]+ tokens\]/, "the newer one is in full, under its own id");
-		assert.match(result.stdout, /│ context drop s1 +→ refused: s1 is not a result in your view\. Your larger results: s3 \(read long\.txt from line 1, about [\d,]+ tokens\)\./, "what is gone already cannot be dropped");
+		assert.match(result.stdout, /│ context fold s1 +→ refused: s1 is not a result in your view\. Your larger results: s3 \(read long\.txt from line 1, about [\d,]+ tokens\)\./, "what is gone already cannot be dropped");
 		// Dropped by the task itself.
-		assert.match(result.stdout, /│ context drop s3 +→ dropped s3 · about [\d,]+ tokens freed\n/);
+		assert.match(result.stdout, /│ context fold s3 +→ dropped s3 · about [\d,]+ tokens freed\n/);
 		const after = resultsIn(requests.at(-1));
 		assert.match(after[2], /^\[s3: You dropped this result\. It was: read long\.txt from line 1, about [\d,]+ tokens\. Call again if you need it\.\]$/, "one line in its place");
 		assert.match(after[4], /^Dropped: s3, about [\d,]+ tokens\. The server reads what follows again, about [\d,]+ tokens\.$/, "and the answer says what it cost");
 		assert.match(result.stdout, /│ context note line 7 is the one +→ noted · 17 characters\n/);
 		// A task has no reports to recall or drop.
 		assert.match(result.stdout, /│ context recall t1 +→ refused: There is no report t1\. No report is kept yet\./);
-		assert.match(result.stdout, /│ context drop t1 +→ refused: t1 is not a result in your view\./);
+		assert.match(result.stdout, /│ context fold t1 +→ refused: t1 is not a result in your view\./);
 		// Nothing before the brief was touched: the task's requests begin with the main agent's, to the letter.
 		const before = stored(main[1]).slice(0, -1);
 		for (const request of requests) assert.deepEqual(request.messages.slice(0, before.length), before, "what precedes the brief is the main agent's context, unchanged");
@@ -4693,7 +4703,7 @@ test("context: a task tidies its own steps: marks on large results, a re-read re
 
 test("context: a task's steps are collapsed when its context is nearly full, after it was asked; its notes, shelf and calls stay", async () => {
 	const root = makeProject("context-task-full", { git: false });
-	configure(root, { contextWindow: 24000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
+	configure(root, { contextWindow: 12000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
 	const server = await startStandIn();
 	try {
 		const reads = [1, 201, 401, 101, 301, 151, 351].map((from) => `read: long.txt @${from}+200`);
@@ -4709,7 +4719,7 @@ test("context: a task's steps are collapsed when its context is nearly full, aft
 		assert.deepEqual(collapsed.messages.slice(0, briefAt + 1), stored(requests[at - 1]).slice(0, briefAt + 1), "everything up to the brief is unchanged");
 		assert.deepEqual(collapsed.messages.slice(briefAt + 1).map((message) => message.role), ["user"], "after the brief: the block, and nothing else");
 		const block = rawText(collapsed.messages.at(-1));
-		assert.match(block, /^<cartographer>\nWritten by Cartographer, not by the user\. Your context held about \d\d% of what fits, so your steps up to here \(\d+ replies, \d+ calls\) were collapsed: their results are no longer in view\. You are still the task, and the brief above still holds\. What you kept:\n\nYour notes\n- the answer is in long\.txt\n\nYour calls so far \(call again for a result you need\)\ns1 context \{"action":"shelve","path":"src\/math\.js"\} → /, "the block: why, the notes, the calls");
+		assert.match(block, /^<cartographer>\nWritten by Cartographer, not by the user\. Your context held about \d\d% of what fits, so your steps up to here \(\d+ replies, \d+ calls\) were collapsed: their results are no longer in view\. You are still the task, and the brief above still holds\. What you kept:\n\nYour notes\n- the answer is in long\.txt\n\nYour calls so far \(call again for a result you need\)\ns1 context shelve src\/math\.js → /, "the block: why, the notes, the calls");
 		has(block, "\ns3 read long.txt from line 1 → == long.txt (lines 1-200 of 700)\n", "one line per call");
 		has(block, "\n\nYour shelf: 1 item, as the files are now\n== src/math.js (lines 1-4 of 4)\n1  export function add(a, b) {\n", "the shelf, in full");
 		has(block, "\n\nGo on with the brief from here. Your final message is still the report.\n</cartographer>", "and what to do");
@@ -4731,7 +4741,7 @@ test("context: a task's steps are collapsed when its context is nearly full, aft
 
 test("context: a task that says yes before its steps collapse gets one reply to note what it needs", async () => {
 	const root = makeProject("context-task-yes", { git: false });
-	configure(root, { contextWindow: 24000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
+	configure(root, { contextWindow: 19000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
 	const server = await startStandIn();
 	try {
 		const reads = [1, 201, 401, 101, 301, 151, 351].map((from) => `read: long.txt @${from}+200`);
@@ -4816,7 +4826,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 		assert.ok(server.asides.length >= 3, `the question was sent: ${server.asides.length} requests on the side`);
 		const questions = server.asides.filter((aside) => aside.max_tokens === 16);
 		for (const aside of questions) assert.equal(aside.tool_choice, "none", "every question says that no tool can be the answer");
-		for (const aside of questions) assert.ok(aside.tools.length === 19 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
+		for (const aside of questions) assert.ok(aside.tools.length === 15 && aside.return_progress === undefined, "and carries the tools as the prompt had them, and nothing else");
 		assert.deepEqual(questions.map((aside) => aside.response_format !== undefined), [true, false, false], `the form of the answer is tried once, then left out:\n${JSON.stringify(questions.map((aside) => Object.keys(aside)))}`);
 		assert.equal(result.stdout.split("the model server refused the form the answer must have").length - 1, 1, `the user is told once:\n${result.stdout}`);
 		has(result.stdout, "does it need to write something down first? no · ", "and the question is answered all the same");
@@ -4825,7 +4835,7 @@ test("context: the question is asked with tool_choice none; a server that refuse
 	}
 });
 
-test("context: /context shows the parts and their sizes, /new starts with nothing in view, and the tools are nineteen flat objects", async () => {
+test("context: /context shows the parts and their sizes, /new starts with nothing in view, and the tools are fifteen flat objects", async () => {
 	const root = makeProject("context-view", { git: false });
 	const server = await startStandIn();
 	try {
@@ -4847,14 +4857,14 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.ok(existsSync(join(root, ".atlas", "reports", "t1.md")), "the report is still on disk");
 		assert.equal(store.next, 2, "and ids are not reused");
 		// The tools: one more, and each a flat object (a schema with a choice at its root breaks tool calls on llama.cpp with Qwen).
-		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "assess", "atlas", "chat", "context", "edit", "ledger", "list", "plan", "prompt", "read", "return", "search", "shell", "sleep", "task", "wake", "window", "write"]);
+		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "atlas", "book", "chat", "edit", "list", "read", "return", "search", "shell", "sleep", "task", "wake", "window", "write"]);
 		for (const tool of fresh.tools) assert.equal(tool.function.parameters.anyOf ?? tool.function.parameters.oneOf, undefined, `${tool.function.name} is a flat object`);
-		const context = fresh.tools.find((tool) => tool.function.name === "context").function.parameters;
-		assert.equal(context.type, "object");
-		assert.equal(context.anyOf ?? context.oneOf, undefined);
-		assert.deepEqual(context.required, ["action"]);
-		assert.deepEqual(Object.keys(context.properties).sort(), ["action", "hand_on", "id", "lines", "path", "text"]);
-		assert.deepEqual(context.properties.action.enum, ["recall", "shelve", "unshelve", "fold", "drop", "note", "collapse"]);
+		const book = fresh.tools.find((tool) => tool.function.name === "book").function.parameters;
+		assert.equal(book.type, "object");
+		assert.equal(book.anyOf ?? book.oneOf, undefined);
+		assert.deepEqual(book.required, ["book"]);
+		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
+		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "prompt", "books", "context"]);
 	} finally {
 		await server.close();
 	}
@@ -5407,7 +5417,7 @@ test("screen: on a terminal carto takes the whole screen: two modes, tabs, items
 		const context = at("What the main agent sees");
 		assert.match(context, /\nWhat the main agent sees {2}· {2}about [\d.]+k of 100k tokens \(\d+%\) {2}· {2}the server counted [\d.]+k\nrequest \d+ of this run, sent \d\d:\d\d \([^)]*\), as the server got it · part sizes are estimates\n/, `the Context tab says whose window it is, how full, and which request it shows:\n${context}`);
 		assert.match(context, /\n■+□+\n■ System prompt \.+ +[\d.]+k +[\d.]+% +■ Tools \.+ +[\d.]+k +[\d.]+%/, `then the window as one row, and what each part of it is:\n${context}`);
-		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 19: /, `then every part as one line, folded:\n${context}`);
+		assert.match(context, /\n▸ ■ +[\d.]+k {2}System prompt {2}You are Cartographer[^\n]*\n▸ ■ +[\d.]+k {2}Tools · 15: /, `then every part as one line, folded:\n${context}`);
 		assert.match(at("You are in one of two roles at any time."), /\n▾ ■ +[\d.]+k {2}System prompt/, "+ opens every part: the tab is then the whole window, word for word");
 		const end = at("since that request");
 		has(end, "── since that request: what the next one will hold as well ──", "the reply and what its calls returned follow what was sent");

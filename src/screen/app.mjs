@@ -850,7 +850,7 @@ export async function runScreen(session, options, runTerminal) {
 		else if (line.kind === "call" || line.kind === "note" || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
-			const home = row?.kind === "call" ? homeOf(row.name) : undefined;
+			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
 			// Work that lives in a tab is shown there; anything else opens where it stands.
 			if (jump && home !== undefined && line.kind === "call" && !row.open && row.state !== "failed") {
 				if (home.view !== undefined) state.view[home.tab] = home.view;
