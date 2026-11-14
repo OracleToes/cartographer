@@ -413,6 +413,8 @@ const branchFor = (book, operations) => ({
 	if: { properties: { book: lit(book) }, required: ["book"] },
 	then: { properties: { ops: arr(operations, { minItems: 1 }) }, required: ["ops"], not: { required: ["text"] } },
 });
+// The legacy whole-assessment form keeps its length check in `runBooks`: rejecting a very long value in the
+// schema makes the validator echo the entire argument back into the conversation instead of the concise limit error.
 const BOOK_CONDITIONS = [
 	branchFor("ledger", LEDGER_OP),
 	branchFor("plan", PLAN_OP),
@@ -421,7 +423,7 @@ const BOOK_CONDITIONS = [
 	{
 		if: { properties: { book: lit("books") }, required: ["book"] },
 		then: {
-			properties: { ops: arr(BOOKS_OP, { minItems: 1 }), text: line("The whole assessment, for the legacy write form.", ASSESSMENT_MAX) },
+			properties: { ops: arr(BOOKS_OP, { minItems: 1 }), text: line("The whole assessment, for the legacy write form.") },
 			anyOf: [{ required: ["ops"] }, { required: ["text"] }],
 			not: { required: ["ops", "text"] },
 		},

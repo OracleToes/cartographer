@@ -3101,7 +3101,7 @@ test("assessment: the main agent writes it and a task cannot; it reaches the top
 		const told = server.requests.filter(isTask).map((request) => messageText(request.messages.at(-1)));
 		assert.ok(told.some((text) => text.includes("The assessment belongs to the main agent. If it should change, say so in your report.")), `the task is told: ${JSON.stringify(told.slice(-2))}`);
 		ok(await carto(root, server, ["-p", `assess: ${"x".repeat(ASSESSMENT_MAX + 1)}`]), "an assessment that is too long");
-		has(messageText(server.requests.at(-1).messages.at(-1)), "text: expected at most 3000 characters", "the schema refuses an assessment over its limit");
+		has(messageText(server.requests.at(-1).messages.at(-1)), "The assessment is 3001 characters; the limit is 3000.", "the assessment handler refuses text over its limit");
 		assert.equal(readFileSync(file, "utf8"), "A demo project.\nTwo files, no build step.\n", "and the file is as it was");
 
 		const shown = await carto(root, server, [], { input: lines("/assessment") });
@@ -4812,7 +4812,9 @@ test("context: a task's steps are collapsed when its context is nearly full, aft
 
 test("context: a task that says yes before its steps collapse gets one reply to note what it needs", async () => {
 	const root = makeProject("context-task-yes", { git: false });
-	configure(root, { contextWindow: 19000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 60 });
+	// Tool schemas count toward the fixed prompt. At 60%, this fixture crosses the threshold twice; 70% keeps
+	// the exercise focused on one ask, one note, and one collapse after the reads.
+	configure(root, { contextWindow: 19000, chatWindow: 2000, shelfTokens: 2000, collapseFull: 70 });
 	const server = await startStandIn();
 	try {
 		const reads = [1, 201, 401, 101, 301, 151, 351].map((from) => `read: long.txt @${from}+200`);
