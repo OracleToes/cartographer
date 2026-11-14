@@ -356,6 +356,14 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 const line = (description, maxLength) => str({ minLength: 1, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
 const entryId = (description = "The entry (g1, q5, n7).") => line(description);
 
+// The book description gives one compact example per branch. Do not send the many field/operation descriptions
+// again inside the schema: they add hundreds of repeated tokens, while the conditional constraints remain intact.
+const compactSchema = (value) => {
+	if (Array.isArray(value)) return value.map(compactSchema);
+	if (value === null || typeof value !== "object") return value;
+	return Object.fromEntries(Object.entries(value).filter(([key]) => key !== "description").map(([key, child]) => [key, compactSchema(child)]));
+};
+
 const LEDGER_OP = union([
 	obj(
 		{ action: lit("add"), kind: oneOf(KINDS, { description: "goal, question or note." }), text: line("The entry itself, one line in your words.", LEDGER_TEXT_MAX), done_when: opt(line("For a goal: how you and the user will know it is reached.", LEDGER_TEXT_MAX)) },
@@ -437,7 +445,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 	return defineTool({
 		name: "book",
 		description: describe("book"),
-		parameters: obj(
+		parameters: compactSchema(obj(
 			{
 				book: oneOf(["ledger", "plan", "prompt", "books", "context"], {
 					description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), prompt (a proposed change to your own prompt), books (entries about the project and your practice), context (fold, recall, shelve, note).",
@@ -446,7 +454,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 				text: opt(line("The whole assessment, for the legacy write form.")),
 			},
 			{ allOf: BOOK_CONDITIONS },
-		),
+		)),
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
 		// and the rest of the books change nothing when the same words are written twice.

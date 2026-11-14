@@ -1061,7 +1061,12 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 });
 
 test("tool schemas: every action accepts only its own valid shape", () => {
-	const book = compile(bookTool({}).parameters);
+	const bookDefinition = bookTool({});
+	const bookSchema = JSON.stringify(bookDefinition.parameters);
+	assert.ok(bookSchema.length < 8000, `the conditional schema stays compact (got ${bookSchema.length} characters)`);
+	assert.equal(bookSchema.includes("description"), false, "examples live once in the tool description, not repeated on every schema branch");
+	for (const name of ["ledger", "plan", "prompt", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a compact ${name} example`);
+	const book = compile(bookDefinition.parameters);
 	for (const [args, valid, note] of [
 		[{ book: "plan", ops: [{ action: "add", mode: "change", text: "build it" }] }, true, "plan add"],
 		[{ book: "plan", ops: [{ action: "add", mode: "change" }] }, false, "plan add without text"],
@@ -1107,7 +1112,7 @@ test("plan: a missing item text shows the exact call and a corrected example", a
 	const dir = join(scratch, "plan-missing-text");
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ brainDir: dir });
-	has(tool.description, "For a plan add, `text` is required", "the book description states the required field");
+	has(tool.description, "Plan add needs `text`", "the book description states the required field");
 	assert.equal(tool.parameters.anyOf ?? tool.parameters.oneOf, undefined, "the root remains a flat object");
 	const planBranch = tool.parameters.allOf.find((branch) => branch.if?.properties?.book?.const === "plan");
 	assert.ok(planBranch, "book=plan selects a conditional schema branch");
