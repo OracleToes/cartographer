@@ -1870,7 +1870,7 @@ test("shell: only a change task of the authorized plan types into a window; the 
 		has(briefs.find((text) => text.includes("plan item p1")), "`write`, `edit` and `shell` work for you, inside the project directory. Change only what the brief asks for. Cartographer records every file you change, and the user can undo it. When what you wrote can be run, run it, and put the command and what it printed into your report. Commands in this task have no network;", "the brief of a change task");
 		has(briefs.find((text) => text.includes("plan item p2")), "Commands in this task can reach the network.", "the brief of a task with network");
 		has(server.requests[0].messages[0].content, "Running. A change task runs commands with `shell`, which types them into a shell window: a bash that stays open under a name.", "the prompt says how commands are run");
-		assert.deepEqual(server.requests[0].tools.map((tool) => tool.function.name).filter((name) => name === "shell" || name === "window"), ["shell", "window"], "the two tools");
+		assert.deepEqual(server.requests[0].tools.map((tool) => tool.function.name).filter((name) => name === "shell" || name === "window"), ["shell"], "the one tool for the windows");
 
 		// The undo takes back what the commands did.
 		const undone = await carto(root, server, [], { input: lines("/undo", "/undo") });
