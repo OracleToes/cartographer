@@ -1088,14 +1088,14 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 test("tool schemas: every action accepts only its own valid shape", () => {
 	const bookDefinition = bookTool({});
 	const bookSchema = JSON.stringify(bookDefinition.parameters);
-	assert.ok(bookSchema.length < 1000, `the model-facing schema stays compact (got ${bookSchema.length} characters)`);
-	assert.equal(bookSchema.includes("anyOf"), false, "the model-facing schema does not repeat every operation branch");
-	assert.deepEqual(bookDefinition.parameters.properties.ops.items.properties.action.enum, ["add", "done", "edit", "remove", "archive", "unarchive", "delete", "clear", "before", "recall", "shelve", "unshelve", "fold", "note", "collapse"]);
-	assert.ok(bookDefinition.parameters.properties.ops.items.properties.mode, "the compact schema shows operation fields such as plan mode");
+	assert.ok(bookSchema.length > 1000, `the provider receives the full conditional schema (got ${bookSchema.length} characters)`);
+	assert.equal(bookDefinition.parameters.allOf.length, 4, "the provider sees each book's operation branch");
 	const advertisedBook = compile(bookDefinition.parameters);
-	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add" }], text: "wrong place" }), false, "the model-facing condition disallows root text for a plan");
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add", mode: "change", text: "build it" }] }), true, "the provider schema accepts the complete plan add shape");
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add", mode: "change" }] }), false, "the provider schema marks plan text required");
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add" }], text: "wrong place" }), false, "the provider schema disallows root text for a plan");
 	assert.equal(advertisedBook.check({ book: "books", text: "legacy assessment" }), true, "the legacy root-text form remains available for books");
-	for (const name of ["ledger", "plan", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a compact ${name} example`);
+	for (const name of ["ledger", "plan", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a ${name} example`);
 	const acceptsBook = (args) => {
 		try {
 			bookDefinition.prepareArguments(args);
@@ -1148,11 +1148,12 @@ test("plan: a missing item text shows the exact call and a corrected example", a
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ brainDir: dir });
 	has(tool.description, "Plan add needs `mode` and `text` inside its op", "the book description states the required fields and location");
-	assert.equal(tool.parameters.anyOf ?? tool.parameters.oneOf, undefined, "the model-facing root remains a flat object");
+	assert.equal(tool.parameters.type, "object", "the provider receives a full schema with an object root");
+	assert.equal(tool.parameters.allOf.length, 4, "the provider schema includes the plan operation branch");
 	assert.throws(
 		() => tool.prepareArguments({ book: "plan", ops: [{ action: "add", mode: "change" }] }),
 		/ops\.0\.text: missing/,
-		"the full conditional schema remains active in local validation",
+		"the full conditional schema rejects an incomplete plan add before execution",
 	);
 	const oversized = "x".repeat(5000);
 	assert.throws(
@@ -4986,7 +4987,7 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual([store.rows.filter((row) => row.species === "composed").length, store.chat.length, store.shelf.length, store.front], [0, 2, 0, undefined], "the record and the shelf are empty; the talk begins again");
 		assert.ok(existsSync(join(root, ".atlas", "reports", "t1.md")), "the report is still on disk");
 		assert.equal(store.next, 2, "and ids are not reused");
-		// The tools: one more, and each a flat object (a schema with a choice at its root breaks tool calls on llama.cpp with Qwen).
+		// The tools: one more, each with an object at the root; `book` carries its full conditional branches.
 		assert.deepEqual(fresh.tools.map((tool) => tool.function.name).sort(), ["ask", "atlas", "book", "chat", "edit", "list", "read", "return", "search", "shell", "sleep", "task", "wake", "write"]);
 		for (const tool of fresh.tools) assert.equal(tool.function.parameters.anyOf ?? tool.function.parameters.oneOf, undefined, `${tool.function.name} is a flat object`);
 		const book = fresh.tools.find((tool) => tool.function.name === "book").function.parameters;
@@ -4995,11 +4996,9 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual(book.required, ["book"]);
 		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
 		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "books", "context"]);
-		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays flat");
-		assert.ok(JSON.stringify(book).length < 1000, "the transmitted book schema is a compact dispatch shape");
-		assert.deepEqual(book.properties.ops.items.required, ["action"], "the compact dispatch shape keeps the action tag required");
-		assert.ok(book.properties.ops.items.properties.mode && book.properties.ops.items.properties.text, "the model sees operation fields it needs to form valid calls");
-		assert.equal(book.allOf.length, 1, "only the small books-only root-text condition is sent, not all operation branches");
+		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays an object, like the other tools");
+		assert.ok(JSON.stringify(book).length > 1000, "the provider receives the full book schema");
+		assert.equal(book.allOf.length, 4, "the transmitted schema includes every book-specific operation branch");
 	} finally {
 		await server.close();
 	}

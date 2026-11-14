@@ -345,8 +345,8 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-// The root stays flat for llama.cpp's Qwen tool-call path. The full internal schema uses conditionals so the
-// selected book narrows every action to exactly its valid fields; the model-facing schema is deliberately small.
+// Send the same full conditional schema to the model that local validation enforces, so each book/action
+// advertises its actual required fields instead of a compact shape with every operation field optional.
 const line = (description, maxLength) => str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
 const entryId = (description = "The entry (g1, q5, n7).") => line(description);
 
@@ -440,32 +440,10 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		{ allOf: BOOK_CONDITIONS },
 	);
 	const validate = compile(validationSchema, { coerce: true });
-	const parameters = obj(
-		{
-			book: oneOf(POLICY.enums.bookNames),
-			ops: opt(arr(obj({
-				action: oneOf(POLICY.enums.bookToolActions),
-				kind: opt(oneOf([...KINDS, ...BOOK_KINDS])),
-				text: opt(str()),
-				done_when: opt(str()),
-				id: opt(str()),
-				mode: opt(oneOf(MODES)),
-				network: opt(bool()),
-				standing: opt(bool()),
-				before: opt(str()),
-				path: opt(str()),
-				lines: opt(str()),
-				hand_on: opt(bool()),
-				when: opt(oneOf(CONTEXT_WHEN)),
-			}, { open: true }), { minItems: POLICY.validation.nonEmptyArrayMinItems })),
-			text: opt(str()),
-		},
-		{ allOf: [{ if: { properties: { book: lit(POLICY.enums.bookName.books) }, required: ["book"] }, else: { not: { required: ["text"] } } }] },
-	);
 	return defineTool({
 		name: "book",
 		description: describe("book"),
-		parameters,
+		parameters: validationSchema,
 		prepareArguments(args) {
 			const result = validate.parse(args);
 			if (result.ok) return result.value;
