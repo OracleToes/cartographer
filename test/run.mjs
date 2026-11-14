@@ -3493,7 +3493,7 @@ test("wake: `sleep` ends the turn at once; a wake that repeats until removed; /w
 		assert.equal(result.stdout.split("\n").filter((line) => /^● resting · next wake in \d+ s$/.test(line)).length, notes.length, `the screen says that it rests, and until when:\n${result.stdout}`);
 		for (const request of notes) assert.equal(request.messages.filter((message) => rawText(message).startsWith("<cartographer>")).length, 1, "a turn with `sleep` alone is quiet");
 		const wakesView = result.stdout.split("\n").filter((line) => line.includes("w1 ·") || line.includes("carto-wakes.json") || line.includes("woken 12 times")).join("\n");
-		assert.match(wakesView, /w1 · every 1 s, until removed · is it up · fired \d times, last (?:just now|\d s ago) · (?:next in \d+ s|due now)\n {2}\S+carto-wakes\.json · \/wakes remove ID takes one away/, `/wakes shows it, and the file:\n${wakesView}`);
+		assert.match(wakesView, /w1 · every 1 s, until removed · is it up · fired \d+ times, last (?:just now|\d s ago) · (?:next in \d+ s|due now)\n {2}\S+carto-wakes\.json · \/wakes remove ID takes one away/, `/wakes shows it, and the file:\n${wakesView}`);
 		hasNot(result.stdout, "you last acted on it", "it never did anything about it");
 		has(result.stdout, "● wake  - w1 every 1 s · removed by you\n  The agent has set no wake.\n", "the user can take it away");
 		has(result.stdout, "\n  No wake is set.\n", "what is not there cannot be removed");
