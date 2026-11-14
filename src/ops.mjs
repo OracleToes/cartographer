@@ -6,36 +6,39 @@
 // src/terminal.mjs) do the same work, so the work lives here: an id names a row of one of the books, and each
 // function carries the operation out and returns the line to show.
 //
-// An id is read by its shape: t1 is a report, g1, q2 or n3 a ledger entry, p1 a plan item, and anything else the name of a node of the graph.
+// Resolve a row by searching the owning books; an id prefix is not a dispatch mechanism for context-row species.
 import { POLICY } from "./config.mjs";
-import { archiveReports, deleteReports, foldReports, loadContext, recallReport, unarchiveReports, unshelveForUser } from "./context.mjs";
+import { applyContextRowAction, ContextRowError, foldReports, loadContext, recallReport, unshelveForUser } from "./context.mjs";
 import { loadAtlas, saveAtlas } from "./atlas.mjs";
 import { loadLedger, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan } from "./plan.mjs";
 
-const REPORT = new RegExp(POLICY.patterns.reportId);
-const ENTRY = new RegExp(POLICY.patterns.ledgerId);
-const ITEM = new RegExp(POLICY.patterns.planId);
 /** The books an id might name, and the words for them in a line of refusal. */
-export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
+export const BOOKS = `a report is t1 or a curated context row c1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
+const contextAction = (brainDir, id, action) => {
+	try {
+		return applyContextRowAction(brainDir, id, action);
+	} catch (error) {
+		if (error instanceof ContextRowError) return error.message;
+		throw error;
+	}
+};
 
 /** The one row an id names, read out of its book. Returns the row and the words for what it is; undefined when no book holds it. */
 function row(brainDir, id) {
-	if (REPORT.test(id)) {
-		const { records } = loadContext(brainDir);
-		const record = records.find((entry) => entry.id === id);
-		return record === undefined ? undefined : { what: "report", archived: record.archived === true, kind: "report" };
-	}
-	if (ENTRY.test(id)) {
-		const { ledger } = loadLedger(brainDir);
-		const entry = ledger?.items.find((item) => item.id === id);
-		return entry === undefined ? undefined : { what: "ledger entry", archived: entry.archived === true, kind: entry.kind, found: entry };
-	}
-	if (ITEM.test(id)) {
-		const { plan } = loadPlan(brainDir);
-		const item = plan?.items.find((entry) => entry.id === id);
-		return item === undefined ? undefined : { what: "plan item", archived: item.archived === true, kind: item.mode, found: item };
-	}
+	const contextRow = loadContext(brainDir).rows.find((entry) => entry.id === id);
+	if (contextRow !== undefined) return {
+		what: contextRow.species === POLICY.enums.contextRowSpecies.composed ? "report" : "curated context row",
+		archived: contextRow.archived === true,
+		kind: contextRow.species,
+		found: contextRow,
+	};
+	const { ledger } = loadLedger(brainDir);
+	const entry = ledger?.items.find((item) => item.id === id);
+	if (entry !== undefined) return { what: "ledger entry", archived: entry.archived === true, kind: entry.kind, found: entry };
+	const { plan } = loadPlan(brainDir);
+	const item = plan?.items.find((entry) => entry.id === id);
+	if (item !== undefined) return { what: "plan item", archived: item.archived === true, kind: item.mode, found: item };
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas?.nodes.find((entry) => entry.name === id);
 	return node === undefined ? undefined : { what: "node", archived: node.archived === true, kind: node.kind ?? "node", found: node };
@@ -47,11 +50,9 @@ function row(brainDir, id) {
  * @returns the line to show
  */
 export function archiveRow(brainDir, id) {
-	// A report goes by the words of the context store, which say more about what archiving one means.
-	if (REPORT.test(id)) return archiveReports(brainDir, [id]);
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
-	if (found.what === "report") return archiveReports(brainDir, [id]);
+	if (found.what === "report" || found.what === "curated context row") return contextAction(brainDir, id, POLICY.enums.actions.archive);
 	if (found.archived) return `${id} is archived already.`;
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
@@ -76,10 +77,9 @@ export function archiveRow(brainDir, id) {
 
 /** The reverse of `archiveRow`: the row stands in what the agent reads again. @returns the line to show */
 export function unarchiveRow(brainDir, id) {
-	if (REPORT.test(id)) return unarchiveReports(brainDir, [id]);
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
-	if (found.what === "report") return unarchiveReports(brainDir, [id]);
+	if (found.what === "report" || found.what === "curated context row") return contextAction(brainDir, id, POLICY.enums.actions.unarchive);
 	if (!found.archived) return `${id} is not archived.`;
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
@@ -108,10 +108,9 @@ export function unarchiveRow(brainDir, id) {
  * is how the user makes the agent forget a thing it wrote down. @returns the line to show
  */
 export function dropRow(brainDir, id) {
-	if (REPORT.test(id)) return deleteReports(brainDir, [id]);
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
-	if (found.what === "report") return deleteReports(brainDir, [id]);
+	if (found.what === "report" || found.what === "curated context row") return contextAction(brainDir, id, POLICY.enums.actions.delete);
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
 		ledger.items.splice(ledger.items.indexOf(found.found), 1);
@@ -140,7 +139,8 @@ export function dropRow(brainDir, id) {
  * @returns the line to show
  */
 export function foldRow(brainDir, id) {
-	if (!REPORT.test(id)) return `Only a report (t1) folds: ${BOOKS}.`;
+	const found = row(brainDir, id);
+	if (found?.what !== "report") return `Only a composed report row folds: ${BOOKS}.`;
 	const { dropped } = loadContext(brainDir);
 	return dropped.includes(id) ? recallReport(brainDir, id) : foldReports(brainDir, [id]);
 }

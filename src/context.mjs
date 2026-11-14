@@ -34,6 +34,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, 
 import { join } from "node:path";
 import { TASK_HEADER } from "./prompt.mjs";
 import { stamp } from "./time.mjs";
+import { applyEntryOp } from "./rows.mjs";
 import { confine, LookError, readOne } from "./tools/look.mjs";
 
 const OPEN = POLICY.markup.context.open;
@@ -80,7 +81,47 @@ export function messageTokens(message) {
 
 // ─── The store ───────────────────────────────────────────────────────────────
 
-const empty = () => ({ version: 1, next: 1, records: [], chat: [], seenUser: 0, shelf: [], dropped: [], tasks: {} });
+const ROW_SPECIES = POLICY.enums.contextRowSpecies;
+const empty = () => ({ version: 1, next: 1, curatedNext: 1, rows: [], chat: [], seenUser: 0, shelf: [], dropped: [], tasks: {} });
+const clone = (value) => JSON.parse(JSON.stringify(value));
+export const composedRows = (store) => store.rows.filter((row) => row.species === ROW_SPECIES.composed);
+export const curatedRows = (store) => store.rows.filter((row) => row.species === ROW_SPECIES.curated);
+const activeRows = (rows) => rows.filter((row) => row.archived !== true).map(clone);
+const reportNumber = (id) => Number(String(id).slice(POLICY.idPrefixes.report.length)) || 0;
+const contextRowNumber = (id) => Number(String(id).slice(POLICY.idPrefixes.contextRow.length)) || 0;
+const VISIBILITY = POLICY.enums.contextVisibility;
+export class ContextRowError extends Error {}
+export const curatedRowLine = (row) => `${row.id} ${row.status === POLICY.enums.entryStatus.done ? "✓ " : ""}${row.text}${row.outcome ? ` → ${row.outcome}` : ""}`;
+const CURATED_SPEC = {
+	Error: ContextRowError,
+	kinds: [ROW_SPECIES.curated],
+	kindField: "species",
+	prefix: { [ROW_SPECIES.curated]: POLICY.idPrefixes.contextRow },
+	accepts: (row) => row.species === ROW_SPECIES.curated,
+	textMax: POLICY.limits.context.curatedRowChars,
+	addTextLabel: "`text`",
+	textRequired: () => "`text` is required and was left out or empty: write one self-contained row.",
+	textTooLong: (_, length) => `\`text\` is ${length} characters; a curated row may hold ${POLICY.limits.context.curatedRowChars}.`,
+	itemsMax: POLICY.limits.context.curatedRows,
+	limitCount: (store) => store.items.filter((row) => row.species === ROW_SPECIES.curated).length,
+	limitText: () => `The context holds ${POLICY.limits.context.curatedRows} curated rows, its limit. Delete one before adding another.`,
+	findId: (id) => String(id ?? "").trim(),
+	findIds: (store) => store.items.filter((row) => row.species === ROW_SPECIES.curated).map((row) => row.id).join(", "),
+	findText: (id, ids) => `There is no curated row ${JSON.stringify(id)}.${ids === "" ? " The list is empty." : ` Curated rows: ${ids}.`}`,
+	show: curatedRowLine,
+	closedWord: "done",
+	alreadyText: (id) => `${id} was already done.`,
+	outcome: (op, checked) => (op.text !== undefined && String(op.text).trim() !== "" ? checked(op.text, "`text`") : undefined),
+	markClosed: false,
+	addBefore: true,
+	editTextRequired: true,
+	reorder: true,
+	unknownAction: (op) => `Unknown row action ${JSON.stringify(op?.action)}; the actions are add, done, edit, remove, before.`,
+};
+
+const visibleNow = (when) => when === undefined || when === VISIBILITY.now;
+const rowSnapshot = (rows) => activeRows(rows).map(({ species, id, text, status, outcome, ref, at, mode, item, brief, failed, undone, changed }) => ({ species, id, text, status, outcome, ref, at, mode, item, brief, failed, undone, changed }));
+const rowContent = (row) => row.species === ROW_SPECIES.composed ? recordLine(row) : curatedRowLine(row);
 
 /** What is kept for the next collapse. A file that cannot be read counts as an empty one. */
 export function loadContext(brainDir) {
@@ -90,10 +131,28 @@ export function loadContext(brainDir) {
 		const store = JSON.parse(readFileSync(path, "utf8"));
 		if (store === null || typeof store !== "object" || Array.isArray(store)) return empty();
 		const base = empty();
-		for (const key of ["records", "chat", "shelf", "dropped"]) if (!Array.isArray(store[key])) store[key] = base[key];
+		// Version 1 stored task reports in `records`. Migrate them in memory to the tagged row collection;
+		// the next ordinary write persists the new form, while report ids and files remain untouched.
+		if (!Array.isArray(store.rows)) {
+			store.rows = (Array.isArray(store.records) ? store.records : []).map((record) => ({
+				...record,
+				species: ROW_SPECIES.composed,
+				ref: { type: "report", id: record.id },
+			}));
+		}
+		for (const row of store.rows) {
+			if (row.species === undefined) row.species = ROW_SPECIES.composed;
+			if (row.species === ROW_SPECIES.composed) row.ref ??= { type: "report", id: row.id };
+		}
+		delete store.records;
+		for (const key of ["chat", "shelf", "dropped"]) if (!Array.isArray(store[key])) store[key] = base[key];
 		if (store.tasks === null || typeof store.tasks !== "object" || Array.isArray(store.tasks)) store.tasks = {};
-		if (!Number.isInteger(store.next) || store.next < 1) store.next = store.records.length + 1;
+		const highestReport = Math.max(0, ...composedRows(store).map((row) => reportNumber(row.id)));
+		const highestCurated = Math.max(0, ...curatedRows(store).map((row) => contextRowNumber(row.id)));
+		if (!Number.isInteger(store.next) || store.next <= highestReport) store.next = highestReport + 1;
+		if (!Number.isInteger(store.curatedNext) || store.curatedNext <= highestCurated) store.curatedNext = highestCurated + 1;
 		if (!Number.isFinite(store.seenUser)) store.seenUser = 0;
+		if (store.front && !Array.isArray(store.front.rows)) store.front.rows = rowSnapshot(store.rows);
 		return store;
 	} catch {
 		return empty();
@@ -141,6 +200,8 @@ export function addRecord(brainDir, task) {
 	writeFileSync(join(reportsDir(brainDir), `${task.id}.md`), `${head}\n${task.report}\n`);
 	updateContext(brainDir, (store) => {
 		const record = {
+			species: ROW_SPECIES.composed,
+			ref: { type: "report", id: task.id },
 			id: task.id,
 			at: task.at,
 			mode: task.mode,
@@ -152,9 +213,12 @@ export function addRecord(brainDir, task) {
 			...(task.undone && !task.failed ? { undone: true } : {}),
 			...(task.changed > 0 ? { changed: task.changed } : {}),
 		};
-		const at = store.records.findIndex((entry) => entry.id === task.id);
-		if (at >= 0) store.records[at] = record;
-		else store.records.push(record);
+		const at = store.rows.findIndex((entry) => entry.species === ROW_SPECIES.composed && entry.id === task.id);
+		if (at >= 0) store.rows[at] = record;
+		else store.rows.push(record);
+		// The report is already present in the live conversation. Reflect just this row,
+		// without accidentally flushing unrelated next-boundary edits.
+		reflectRows(store, VISIBILITY.now, [task.id]);
 	});
 }
 
@@ -182,6 +246,101 @@ function reportIdOf(message) {
 
 export const recordLine = (record) =>
 	`${record.id} · ${stamp(record.at)} · ${record.mode}${record.item ? ` ${record.item}` : ""} · asked: ${record.brief} → ${record.failed ? "did not end well: " : record.undone ? "not done: " : ""}${record.outcome}${record.changed ? ` · ${record.changed === 1 ? "1 file" : `${record.changed} files`} changed` : ""}`;
+
+const checkWhen = (when) => {
+	if (when !== undefined && !Object.values(VISIBILITY).includes(when)) throw new ContextRowError(`\`when\` is ${JSON.stringify(when)}; it is now or next-boundary.`);
+	return when;
+};
+// Apply only the rows changed by this operation to the active projection. A prior
+// next-boundary change to some other row must not become visible as a side effect.
+function reflectRows(store, when, ids, { beforeId, reposition = false, atEnd = false } = {}) {
+	if (!store.front || !visibleNow(when)) return;
+	const visible = [...(store.front.rows ?? [])];
+	for (const id of ids) {
+		const oldAt = visible.findIndex((row) => row.id === id);
+		if (oldAt >= 0) visible.splice(oldAt, 1);
+		const current = store.rows.find((row) => row.id === id && row.archived !== true);
+		if (current === undefined) continue;
+		const snapshot = rowSnapshot([current])[0];
+		if (oldAt >= 0 && !reposition) {
+			visible.splice(Math.min(oldAt, visible.length), 0, snapshot);
+			continue;
+		}
+		let at = beforeId === undefined ? -1 : visible.findIndex((row) => row.id === beforeId);
+		if (at < 0 && !atEnd) {
+			const ordered = store.rows.filter((row) => row.archived !== true);
+			const index = ordered.findIndex((row) => row.id === id);
+			for (const next of ordered.slice(index + 1)) {
+				at = visible.findIndex((row) => row.id === next.id);
+				if (at >= 0) break;
+			}
+			if (at < 0) {
+				for (const previous of ordered.slice(0, index).reverse()) {
+					const previousAt = visible.findIndex((row) => row.id === previous.id);
+					if (previousAt >= 0) { at = previousAt + 1; break; }
+				}
+			}
+		}
+		visible.splice(at < 0 ? visible.length : at, 0, snapshot);
+	}
+	store.front.rows = visible;
+}
+
+/** Apply the shared entry verbs to the independently curated context rows. */
+export function applyCuratedRowOp(brainDir, op, now = Date.now()) {
+	const when = checkWhen(op?.when);
+	return updateContext(brainDir, (store) => {
+		const priorIds = new Set(store.rows.map((row) => row.id));
+		const entries = { items: store.rows, next: store.curatedNext };
+		const result = applyEntryOp(entries, { ...op, kind: ROW_SPECIES.curated }, CURATED_SPEC, new Date(now).toISOString());
+		store.rows = entries.items;
+		store.curatedNext = entries.next;
+		const id = op.action === POLICY.enums.actions.add ? store.rows.find((row) => !priorIds.has(row.id))?.id : String(op.id ?? "").trim();
+		const anchor = op.action === POLICY.enums.actions.add || op.action === POLICY.enums.actions.before ? String(op.before ?? "").trim() : "";
+		if (id !== undefined && id !== "") reflectRows(store, when, [id], {
+			beforeId: anchor === "" ? undefined : anchor,
+			reposition: op.action === POLICY.enums.actions.before,
+			atEnd: op.action === POLICY.enums.actions.before && anchor === "",
+		});
+		return result;
+	});
+}
+
+/** Apply a shared archive, unarchive, or delete to any context row. The report body remains a referenced file. */
+export function applyContextRowAction(brainDir, id, action, when) {
+	checkWhen(when);
+	const row = updateContext(brainDir, (store) => {
+		const found = store.rows.find((entry) => entry.id === id);
+		if (found === undefined) throw new ContextRowError(`There is no context row ${JSON.stringify(id)}.`);
+		if (action === POLICY.enums.actions.archive) {
+			if (found.archived) throw new ContextRowError(`${id} is archived already.`);
+			found.archived = true;
+			if (found.species === ROW_SPECIES.composed && visibleNow(when)) store.dropped = [...new Set([...store.dropped, id])];
+		} else if (action === POLICY.enums.actions.unarchive) {
+			if (!found.archived) throw new ContextRowError(`${id} is not archived.`);
+			delete found.archived;
+			if (found.species === ROW_SPECIES.composed && visibleNow(when)) store.dropped = store.dropped.filter((entry) => entry !== id);
+		} else if (action === POLICY.enums.actions.delete) {
+			store.rows = store.rows.filter((entry) => entry.id !== id);
+			if (visibleNow(when)) store.dropped = store.dropped.filter((entry) => entry !== id);
+		} else throw new ContextRowError(`Unknown row operation ${JSON.stringify(action)}.`);
+		reflectRows(store, when, [id]);
+		return clone(found);
+	});
+	if (action === POLICY.enums.actions.delete && row.species === ROW_SPECIES.composed) {
+		try { unlinkSync(join(reportsDir(brainDir), `${id}.md`)); } catch { /* A missing body does not restore its deleted row. */ }
+	}
+	const content = rowContent(row);
+	if (action === POLICY.enums.actions.archive) return row.species === ROW_SPECIES.composed
+		? `${id} archived: the record line leaves the kept block, the report stays on disk, recall by id still finds it.`
+		: `${id} archived: the row leaves what the agent reads; its content remains available. ${content}`;
+	if (action === POLICY.enums.actions.unarchive) return row.species === ROW_SPECIES.composed
+		? `${id} back in the record: the next collapse lists its line again.`
+		: `${id} is back in what the agent reads. ${content}`;
+	return row.species === ROW_SPECIES.composed
+		? `${id} deleted: the record line is gone and its file is gone from ${join(reportsDir(brainDir), `${id}.md`)}.`
+		: `${id} deleted: the row is gone for good.`;
+}
 
 function recordText(records) {
 	// A record the user has archived stands out of the block for good (its report stays, and recall knows the id);
@@ -254,18 +413,44 @@ export function parseLines(lines) {
 	return { from, to };
 }
 
-/** One shelved item as the agent reads it: the file's lines with their numbers. */
-export function shelfText(root, item) {
+/** Resolve a typed reference to the full content the shelf should show. Add resolvers here, not kind-specific shelf flows. */
+const SHELF_RESOLVERS = {
+	report: (brainDir, id) => {
+		const row = composedRows(loadContext(brainDir)).find((entry) => entry.id === id);
+		return row === undefined ? undefined : loadReport(brainDir, id);
+	},
+};
+const referenceOf = (given) => {
+	const match = /^([a-z][a-z0-9_-]*):(.+)$/.exec(String(given ?? ""));
+	return match === null ? undefined : { type: match[1], id: match[2] };
+};
+
+/** One shelved item as the agent reads it: either a referenced entity or a file's lines. */
+export function shelfText(root, item, brainDir) {
+	if (item.ref !== undefined) {
+		const content = SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref.id);
+		return content === undefined ? `== ${shelfLabel(item)} ==\nNot found. The referenced item is no longer available.` : `== ${shelfLabel(item)} ==\n${content}`;
+	}
 	return item.from === undefined ? readOne(root, item.path, 1, SHELF_MAX_LINES) : readOne(root, item.path, item.from, Math.min(SHELF_MAX_LINES, item.to - item.from + 1));
 }
 
-export const shelfLabel = (item) => `${item.path}${item.from === undefined ? "" : ` (lines ${item.from}-${item.to})`}`;
+export const shelfLabel = (item) => item.ref === undefined ? `${item.path}${item.from === undefined ? "" : ` (lines ${item.from}-${item.to})`}` : `${item.ref.type}:${item.ref.id}`;
+export const sameShelfItem = (a, b) => a.ref !== undefined || b.ref !== undefined
+	? a.ref?.type === b.ref?.type && a.ref?.id === b.ref?.id
+	: a.path === b.path;
 
 /**
- * Check a path for the shelf and measure it.
- * @returns {{ item: { path: string, from?: number, to?: number }, tokens: number }}
+ * Resolve a project path/range or a typed reference and measure its full content.
+ * @returns {{ item: object, tokens: number }}
  */
-export function shelfItem(root, given, lines) {
+export function shelfItem(root, given, lines, brainDir) {
+	const ref = referenceOf(given);
+	if (ref !== undefined && SHELF_RESOLVERS[ref.type] !== undefined) {
+		const item = { ref };
+		const text = shelfText(root, item, brainDir);
+		if (/\nNot found\. /.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" "));
+		return { item, tokens: estimate(text) };
+	}
 	let path;
 	try {
 		path = confine(root, given);
@@ -276,21 +461,21 @@ export function shelfItem(root, given, lines) {
 	if (!existsSync(path.abs)) throw new ShelfError(`${path.rel} does not exist. The tree in the state block shows the files.`);
 	if (!statSync(path.abs).isFile()) throw new ShelfError(`${path.rel} is a directory: the shelf holds files, or line ranges of files.`);
 	const item = { path: path.rel, ...parseLines(lines) };
-	const text = shelfText(root, item);
+	const text = shelfText(root, item, brainDir);
 	if (!/^== .* \(lines \d+-\d+ of \d+\)\n/.test(text) && !/\n\(empty file\)$/.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" ") || `${path.rel} cannot be read.`);
 	return { item, tokens: estimate(text) };
 }
 
-/** The shelf's items with their text as the files are now, in order, up to `max` tokens. */
-function shelfBlock(root, items, max) {
+/** The shelf's items with their full current content, in order, up to `max` tokens. */
+function shelfBlock(root, items, max, brainDir) {
 	const shown = [];
 	const left = [];
 	let used = 0;
 	for (const item of items) {
-		const text = shelfText(root, item);
+		const text = shelfText(root, item, brainDir);
 		const size = estimate(text);
 		if (/\nNot found\. /.test(text)) {
-			left.push({ item, why: "the file is gone" });
+			left.push({ item, why: item.ref === undefined ? "the file is gone" : "the reference is no longer available" });
 			continue;
 		}
 		if (used + size > max) {
@@ -321,18 +506,20 @@ export const withoutFront = (text) => text.replace(FRONT_BLOCK, "");
  */
 export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 	return updateContext(brainDir, (store) => {
-		const record = recordText(store.records);
-		const shelf = shelfBlock(root, store.shelf, config.shelfTokens);
+		const record = recordText(composedRows(store));
+		const curated = curatedRows(store).filter((row) => row.archived !== true);
+		const shelf = shelfBlock(root, store.shelf, config.shelfTokens, brainDir);
 		// What no longer fits or is gone leaves the shelf, and the block says so.
 		store.shelf = shelf.shown.map((entry) => entry.item);
 		store.chat = chatWindow(store.chat, config.chatWindow);
 		const talk = store.chat.map(chatLine).join("\n");
 		const parts = [
 			OPEN,
-			`${HEAD} Your context was collapsed on ${stamp(now)} (${reason}). What you had in view before is gone except for what stands here: one line for each finished task, your shelf, and the last of your talk with the user. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them.`,
+			`${HEAD} Your context was collapsed on ${stamp(now)} (${reason}). What you had in view before is gone except for what stands here: one line for each finished task, ${curated.length > 0 ? "your curated rows, " : ""}your shelf, and the last of your talk with the user. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them.`,
 			"",
 			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
 			record.text,
+			...(curated.length > 0 ? ["", "Curated rows (`book` with context add, edit, done and remove)", ...curated.map(curatedRowLine)] : []),
 			"",
 			shelf.shown.length === 0 ? "Your shelf is empty." : `Your shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`,
 			...shelf.shown.map((entry) => entry.text),
@@ -363,6 +550,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 		store.front = {
 			at: now,
 			reason,
+			rows: rowSnapshot(store.rows),
 			shelf: shelf.shown.map((entry) => ({ ...entry.item, hash: entry.hash })),
 			tokens,
 			kept: { tasks: record.listed, shelf: shelf.shown.length, talk: store.chat.length },
@@ -376,7 +564,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 export function clearFront(brainDir) {
 	updateContext(brainDir, (store) => {
 		store.chat = [];
-		store.records = [];
+		store.rows = store.rows.filter((row) => row.species !== ROW_SPECIES.composed);
 		store.shelf = [];
 		store.dropped = [];
 		store.front = undefined;
@@ -411,13 +599,27 @@ export function contextLines(brainDir, root, { used, window }) {
 	if (Number.isFinite(used) && used > 0) lines.push(`Your context holds about ${count(used)} of ${count(window)} tokens.`);
 	// Folding by the agent: it sees exactly which reports stand in view in full, with their size, so it can
 	// decide when each has had its bookkeeping done and fold it to its one-line record (recallable by id).
-	const full = store.records.filter((record) => !store.dropped.includes(record.id));
-	if (full.length > 0) lines.push(`In view in full: ${full.map((record) => `${record.id} (about ${count(estimate(record.report ?? ""))} tokens)`).join(", ")}. Fold one with \`context\` once you have done its bookkeeping.`);
+	const visibleRows = store.front?.rows ?? composedRows(store).filter((record) => record.archived !== true);
+	const full = visibleRows.filter((record) => record.species === ROW_SPECIES.composed && !store.dropped.includes(record.id));
+	if (full.length > 0) lines.push(`In view in full: ${full.map((record) => `${record.id} (about ${count(estimate(loadReport(brainDir, record.id) ?? ""))} tokens)`).join(", ")}. Fold one with \`book\` once you have done its bookkeeping.`);
+	if (store.front && Array.isArray(store.front.rows)) {
+		const before = new Map(store.front.rows.map((row) => [row.id, row]));
+		const after = new Map(activeRows(store.rows).map((row) => [row.id, row]));
+		const added = [...after.keys()].filter((id) => !before.has(id));
+		const changed = [...after.keys()].filter((id) => before.has(id) && rowContent(before.get(id)) !== rowContent(after.get(id)));
+		const leaving = [...before.keys()].filter((id) => !after.has(id));
+		const common = new Set([...before.keys()].filter((id) => after.has(id)));
+		const priorOrder = store.front.rows.map((row) => row.id).filter((id) => common.has(id));
+		const nextOrder = activeRows(store.rows).map((row) => row.id).filter((id) => common.has(id));
+		if (added.length > 0) lines.push(`Rows entering context at the next boundary: ${added.join(", ")}.`);
+		if (changed.length > 0) lines.push(`Rows changed for the next boundary: ${changed.join(", ")}.`);
+		if (leaving.length > 0) lines.push(`Rows leaving context at the next boundary: ${leaving.map((id) => `${id} (${store.rows.some((row) => row.id === id) ? "archived" : "deleted"})`).join(", ")}.`);
+		if (priorOrder.join("\0") !== nextOrder.join("\0")) lines.push(`Rows reordered for the next boundary: ${nextOrder.join(", ")}.`);
+	}
 	const shown = store.front?.shelf ?? [];
-	const key = (item) => `${item.path}:${item.from ?? ""}-${item.to ?? ""}`;
-	const waiting = store.shelf.filter((item) => !shown.some((entry) => key(entry) === key(item)));
-	const leaving = shown.filter((entry) => !store.shelf.some((item) => key(item) === key(entry)));
-	const changed = shown.filter((entry) => store.shelf.some((item) => key(item) === key(entry)) && hashOf(shelfText(root, entry)) !== entry.hash);
+	const waiting = store.shelf.filter((item) => !shown.some((entry) => sameShelfItem(entry, item)));
+	const leaving = shown.filter((entry) => !store.shelf.some((item) => sameShelfItem(item, entry)));
+	const changed = shown.filter((entry) => store.shelf.some((item) => sameShelfItem(item, entry)) && hashOf(shelfText(root, entry, brainDir)) !== entry.hash);
 	if (waiting.length > 0) lines.push(`Marked for your shelf, in view from the next collapse on: ${waiting.map(shelfLabel).join(", ")}.`);
 	if (leaving.length > 0) lines.push(`Taken off your shelf, gone from view at the next collapse: ${leaving.map(shelfLabel).join(", ")}.`);
 	if (changed.length > 0) lines.push(`Changed since your shelf was written, so the copy on the shelf is old: ${changed.map(shelfLabel).join(", ")}.`);
@@ -438,15 +640,45 @@ export function reportsInView(messages) {
 
 const withText = (message, text) => ({ ...message, content: [{ type: "text", text }] });
 
-/** The main agent's messages with the reports it dropped replaced by their record line. The input is not changed. */
+/** Reconcile the front block's row sections with the active row snapshot. */
+function dressFrontRows(message, store) {
+	let text = textOf(message);
+	const currentRows = store.front?.rows ?? [];
+	const reportHeading = "Finished tasks (`book` with book context, action recall and the id brings a report back in full)";
+	const reportStart = text.indexOf(`${reportHeading}\n`);
+	const shelfStart = text.indexOf("\n\nYour shelf", reportStart);
+	if (reportStart >= 0 && shelfStart >= 0) {
+		const start = reportStart + reportHeading.length + 1;
+		const record = recordText(currentRows.filter((row) => row.species === ROW_SPECIES.composed)).text;
+		text = `${text.slice(0, start)}${record}${text.slice(shelfStart)}`;
+	}
+	const marker = "Curated rows (`book` with context add, edit, done and remove)";
+	const curated = currentRows.filter((row) => row.species === ROW_SPECIES.curated && row.archived !== true);
+	const sectionStart = text.indexOf(`\n\n${marker}`);
+	const sectionEnd = sectionStart < 0 ? -1 : text.indexOf("\n\nYour shelf", sectionStart);
+	if (curated.length > 0) {
+		const section = `\n\n${marker}\n${curated.map(curatedRowLine).join("\n")}`;
+		if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${section}${text.slice(sectionEnd)}`;
+		else text = text.replace("\n\nYour shelf", `${section}\n\nYour shelf`);
+	} else if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${text.slice(sectionEnd)}`;
+	return text === textOf(message) ? message : withText(message, text);
+}
+
+/** The main agent's messages reconciled to the active row view; the input is not changed. */
 export function dressMain(messages, brainDir) {
 	const store = loadContext(brainDir);
-	if (store.dropped.length === 0) return messages;
 	return messages.map((message) => {
+		if (isFront(message)) return dressFrontRows(message, store);
 		const id = reportIdOf(message);
-		if (id === undefined || !store.dropped.includes(id)) return message;
-		const record = store.records.find((entry) => entry.id === id);
-		return withText(message, `[You dropped report ${id} from view. Its record: ${record ? recordLine(record) : "(no line kept)"}. \`context\` with action recall and ${id} brings it back.]`);
+		if (id === undefined) return message;
+		const record = composedRows(store).find((entry) => entry.id === id);
+		const active = store.front ? store.front.rows.some((entry) => entry.id === id) : record !== undefined && record.archived !== true;
+		if (active && !store.dropped.includes(id)) return message;
+		if (record?.archived === true) return withText(message, `[Report ${id} is archived. Its record: ${recordLine(record)}.]`);
+		if (record !== undefined && !active) return withText(message, `[Report ${id} is queued to enter context at the next boundary: ${recordLine(record)}.]`);
+		if (store.dropped.includes(id)) return withText(message, `[You dropped report ${id} from view. Its record: ${record ? recordLine(record) : "(no line kept)"}. \`book\` with context recall and ${id} brings it back.]`);
+		if (record === undefined) return withText(message, `[Report ${id} was deleted from the brain and is no longer in context.]`);
+		return message;
 	});
 }
 
@@ -612,26 +844,29 @@ export function taskState(store, conversationId) {
  * thousand finished tasks does not read a thousand one-liners. The report stays on disk and recall by id
  * still finds it. Returns the line to show.
  */
-export function archiveReports(brainDir, ids) {
+export function archiveReports(brainDir, ids, when = VISIBILITY.now) {
 	const store = loadContext(brainDir);
-	const known = ids.filter((id) => store.records.some((record) => record.id === id));
+	const known = ids.filter((id) => composedRows(store).some((record) => record.id === id));
 	const open = ids.filter((id) => !known.includes(id));
 	if (known.length === 0) return `There is no report ${ids.join(", ")}. /context lists the kept ones.`;
 	updateContext(brainDir, (next) => {
-		for (const record of next.records) if (known.includes(record.id)) record.archived = true;
-		next.dropped = [...new Set([...next.dropped, ...known])];
+		for (const record of next.rows) if (record.species === ROW_SPECIES.composed && known.includes(record.id)) record.archived = true;
+		if (visibleNow(when)) next.dropped = [...new Set([...next.dropped, ...known])];
+		reflectRows(next, when, known);
 	});
 	return `${known.join(", ")} archived: the record ${known.length === 1 ? "line leaves" : "lines leave"} the kept block, the report ${known.length === 1 ? "stays" : "stay"} on disk, recall by id still finds ${known.length === 1 ? "it" : "them"}. ${open.length > 0 ? `No report ${open.join(", ")}.` : ""}`.trim();
 }
 
 /** The user brings archived reports back into the record. Returns the line to show. */
-export function unarchiveReports(brainDir, ids) {
+export function unarchiveReports(brainDir, ids, when = VISIBILITY.now) {
 	const store = loadContext(brainDir);
-	const held = ids.filter((id) => store.records.some((record) => record.id === id && record.archived === true));
+	const held = ids.filter((id) => composedRows(store).some((record) => record.id === id && record.archived === true));
 	const rest = ids.filter((id) => !held.includes(id));
 	if (held.length === 0) return `${ids.join(", ")} ${ids.length === 1 ? "is" : "are"} not archived.`;
 	updateContext(brainDir, (next) => {
-		for (const record of next.records) if (held.includes(record.id)) delete record.archived;
+		for (const record of next.rows) if (record.species === ROW_SPECIES.composed && held.includes(record.id)) delete record.archived;
+		if (visibleNow(when)) next.dropped = next.dropped.filter((entry) => !held.includes(entry));
+		reflectRows(next, when, held);
 	});
 	return `${held.join(", ")} back in the record: the next collapse lists ${held.length === 1 ? "its" : "their"} line${held.length === 1 ? "" : "s"} again. ${rest.length > 0 ? `${rest.join(", ")} ${rest.length === 1 ? "was" : "were"} not archived.` : ""}`.trim();
 }
@@ -640,14 +875,15 @@ export function unarchiveReports(brainDir, ids) {
  * The user deletes reports for good: the record line and the report's file are gone, and nothing recalls
  * them again. Returns the line to show.
  */
-export function deleteReports(brainDir, ids) {
+export function deleteReports(brainDir, ids, when = VISIBILITY.now) {
 	const store = loadContext(brainDir);
-	const known = ids.filter((id) => store.records.some((record) => record.id === id));
+	const known = ids.filter((id) => composedRows(store).some((record) => record.id === id));
 	const open = ids.filter((id) => !known.includes(id));
 	if (known.length === 0) return `There is no report ${ids.join(", ")}. /context lists the kept ones.`;
 	updateContext(brainDir, (next) => {
-		next.records = next.records.filter((record) => !known.includes(record.id));
-		next.dropped = next.dropped.filter((entry) => !known.includes(entry));
+		next.rows = next.rows.filter((record) => record.species !== ROW_SPECIES.composed || !known.includes(record.id));
+		if (visibleNow(when)) next.dropped = next.dropped.filter((entry) => !known.includes(entry));
+		reflectRows(next, when, known);
 	});
 	const gone = [];
 	for (const id of known) {
@@ -665,7 +901,7 @@ export function deleteReports(brainDir, ids) {
 /** The user's message, as it shows in the talk, was edited: the line the context keeps is rewritten to match. */
 
 /** Two shelf items are the same file. */
-const sameItem = (a, b) => a.path === b.path;
+const sameItem = sameShelfItem;
 // The same operations the agent has with `context`, for the person watching: /fold, /recall, /shelve and
 // /unshelve on the terminal, and the keys of the Context tab in the full screen. Nothing here is a tool; the
 // user is the one the requests are for, and these change the stored context exactly as the agent's calls do.
@@ -673,28 +909,28 @@ const sameItem = (a, b) => a.path === b.path;
 /** The user folds reports out of view, leaving their record lines. Returns the line to show. */
 export function foldReports(brainDir, ids) {
 	const store = loadContext(brainDir);
-	const unknown = ids.filter((id) => !store.records.some((record) => record.id === id));
+	const unknown = ids.filter((id) => !composedRows(store).some((record) => record.id === id));
 	const foldable = ids.filter((id) => {
-		const record = store.records.find((entry) => entry.id === id);
+		const record = composedRows(store).find((entry) => entry.id === id);
 		return record !== undefined && record.archived !== true && !store.dropped.includes(id);
 	});
 	if (foldable.length === 0) {
-		const open = store.records.filter((record) => record.archived !== true && !store.dropped.includes(record.id)).map((record) => record.id);
+		const open = composedRows(store).filter((record) => record.archived !== true && !store.dropped.includes(record.id)).map((record) => record.id);
 		return unknown.length === ids.length
-			? `There is no report ${ids.join(", ")}. The kept ones: ${store.records.map((record) => record.id).join(", ") || "none yet"}.`
+			? `There is no report ${ids.join(", ")}. The kept ones: ${composedRows(store).map((record) => record.id).join(", ") || "none yet"}.`
 			: `${ids.join(", ")} ${ids.length === 1 ? "is" : "are"} already out of view.${open.length > 0 ? ` In full: ${open.join(", ")}.` : ""}`;
 	}
 	updateContext(brainDir, (next) => {
 		next.dropped = [...new Set([...next.dropped, ...foldable])];
 	});
-	const said = foldable.map((id) => `${id}: ${recordLine(store.records.find((record) => record.id === id))}`).join("\n  ");
+	const said = foldable.map((id) => `${id}: ${recordLine(composedRows(store).find((record) => record.id === id))}`).join("\n  ");
 	return `${unknown.length > 0 ? `no report ${unknown.join(", ")}; ` : ""}out of view, the record line stands in ${foldable.length === 1 ? "its" : "their"} place:\n  ${said}\n/recall ${foldable.join(" ")} brings ${foldable.length === 1 ? "it" : "them"} back.`;
 }
 
 /** The user recalls a kept report. One that is only folded stands in view again; one that is not is printed for the user to read, and stays out of the model's view. Returns the line to show, or undefined. */
 export function recallReport(brainDir, id) {
 	const store = loadContext(brainDir);
-	if (!store.records.some((record) => record.id === id)) return undefined;
+	if (!composedRows(store).some((record) => record.id === id)) return undefined;
 	if (store.dropped.includes(id)) {
 		updateContext(brainDir, (next) => {
 			next.dropped = next.dropped.filter((entry) => entry !== id);
@@ -707,10 +943,10 @@ export function recallReport(brainDir, id) {
 
 /** The user shelves a file, as the agent does: in view from the next collapse on. Throws ShelfError. */
 export function shelveForUser(root, brainDir, config, path, lines) {
-	const { item, tokens } = shelfItem(root, path, lines);
+	const { item, tokens } = shelfItem(root, path, lines, brainDir);
 	const store = loadContext(brainDir);
 	const others = store.shelf.filter((entry) => !sameItem(entry, item));
-	const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry)), 0) + tokens;
+	const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0) + tokens;
 	if (total > config.shelfTokens) {
 		throw new ShelfError(`${shelfLabel(item)} is about ${count(tokens)} tokens, and the shelf would then hold ${count(total)} of at most ${count(config.shelfTokens)}. Shelve a range of lines instead, or take something off first${others.length > 0 ? `: ${others.map(shelfLabel).join(", ")}` : ""}.`);
 	}
@@ -725,7 +961,7 @@ export function shelveForUser(root, brainDir, config, path, lines) {
 /** The user takes a file, or everything, off the shelf. Throws ShelfError for a name that is not on it. */
 export function unshelveForUser(brainDir, path) {
 	const store = loadContext(brainDir);
-	const gone = path === "all" ? [...store.shelf] : store.shelf.filter((entry) => entry.path === path || entry.path === path.replace(/^\.\//, ""));
+	const gone = path === "all" ? [...store.shelf] : store.shelf.filter((entry) => shelfLabel(entry) === path || entry.path === path || entry.path === path.replace(/^\.\//, ""));
 	if (gone.length === 0) throw new ShelfError(`${path} is not on the shelf.${store.shelf.length > 0 ? ` On it: ${store.shelf.map(shelfLabel).join(", ")}.` : " The shelf is empty."}`);
 	updateContext(brainDir, (next) => {
 		next.shelf = next.shelf.filter((entry) => !gone.some((other) => sameItem(other, entry)));
@@ -778,8 +1014,8 @@ export function endTaskContext(root, brainDir, config, conversationId) {
 		const added = [];
 		const refused = [];
 		for (const { handOn, ...item } of (task?.shelf ?? []).filter((entry) => entry.handOn === true)) {
-			const others = store.shelf.filter((entry) => entry.path !== item.path);
-			const total = [...others, item].reduce((sum, entry) => sum + estimate(shelfText(root, entry)), 0);
+			const others = store.shelf.filter((entry) => !sameShelfItem(entry, item));
+			const total = [...others, item].reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0);
 			if (total > config.shelfTokens) {
 				refused.push(shelfLabel(item));
 				continue;

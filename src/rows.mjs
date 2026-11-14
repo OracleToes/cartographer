@@ -12,6 +12,7 @@
 //   Error          the book's own error class, so a caller can tell its failures from real ones
 //   kinds          the entry kinds, in the order they are named in messages
 //   prefix         kind → the letter its ids begin with (goal → g, assessment → a)
+//   kindField      persisted field for the kind when a book names it differently (a plan uses `mode`)
 //   textMax        the most characters one entry may hold
 //   addTextLabel   what the add's `text` is called in its errors (the ledger says what a text is for)
 //   textRequired   the error for a missing or empty text
@@ -29,9 +30,13 @@ import { POLICY } from "./config.mjs";
 //   outcome        for `done`: the entry's outcome from `op.text`, or undefined to leave it out
 //   markClosed     whether `done` stamps the time it happened (the ledger keeps it, the books do not)
 //   doneFollow     for `done`: what else the agent is told (the ledger: what a closed goal asks of it)
+//   afterDone      for `done`: book-specific cleanup after shared status/outcome handling
 //   addFields      for `add`: the fields beyond id, kind and text (the ledger: a goal's doneWhen)
 //   addBefore      whether `add` may position the entry with `before`
 //   editFields     for `edit`: the fields beyond `text` (the ledger: a goal's new done-when line)
+//   afterEdit      for `edit`: book-specific cleanup after shared fields are applied
+//   editResult     the book's wording for a successful `edit`
+//   kindInvalid    the book's wording when an added kind is not allowed
 //   editTextRequired  whether `edit` must have `text` (the books) or may change other fields instead
 //   reorder        whether `before` is an action of its own
 //   unknownAction  the error for an action the book does not know
@@ -54,31 +59,33 @@ export function applyEntryOp(store, op, spec, now) {
 	};
 	const find = (id, where = "id") => {
 		const wanted = spec.findId(id);
-		const item = store.items.find((entry) => entry.id === wanted);
+		const item = store.items.find((entry) => entry.id === wanted && (spec.accepts?.(entry) ?? true));
 		if (item === undefined) throw new BookError(spec.findText(wanted, spec.findIds(store), where));
 		return item;
 	};
 	switch (op?.action) {
 		case POLICY.enums.actions.add: {
-			if (!spec.kinds.includes(op.kind)) throw new BookError(`\`kind\` is ${JSON.stringify(op.kind)}; it is one of ${spec.kinds.join(", ")}.`);
+			if (!spec.kinds.includes(op.kind)) throw new BookError(spec.kindInvalid?.(op.kind) ?? `\`kind\` is ${JSON.stringify(op.kind)}; it is one of ${spec.kinds.join(", ")}.`);
 			const text = checked(op.text, spec.addTextLabel);
 			if (spec.limitCount(store) >= spec.itemsMax) throw new BookError(spec.limitText());
-			const item = { id: `${spec.prefix[op.kind]}${store.next}`, kind: op.kind, text };
+			const kindField = spec.kindField ?? "kind";
+			const item = { id: `${spec.prefix[op.kind]}${store.next}`, [kindField]: op.kind, text };
 			for (const [field, value] of Object.entries(spec.addFields?.(op, op.kind, checked) ?? {})) item[field] = value;
 			Object.assign(item, { status: POLICY.enums.entryStatus.open, added: now });
-			store.next++;
 			let at = store.items.length;
 			if (spec.addBefore && op.before !== undefined && op.before !== "") at = store.items.indexOf(find(op.before, "before"));
+			store.next++;
 			store.items.splice(at, 0, item);
 			return { line: `${item.id} added.`, shown: `+ ${spec.show(item)}` };
 		}
 		case POLICY.enums.actions.done: {
 			const item = find(op.id);
 			if (item.status === POLICY.enums.entryStatus.done) return { line: spec.alreadyText(item.id), shown: `✓ ${spec.show(item)}` };
+			const outcome = spec.outcome?.(op, checked);
 			item.status = POLICY.enums.entryStatus.done;
 			if (spec.markClosed) item.closed = now;
-			const outcome = spec.outcome?.(op, checked);
 			if (outcome !== undefined) item.outcome = outcome;
+			spec.afterDone?.(item, op, now);
 			return { line: `${item.id} ${spec.closedWord}.${spec.doneFollow?.(item) ?? ""}`, shown: `✓ ${spec.show(item)}` };
 		}
 		case POLICY.enums.actions.edit: {
@@ -87,7 +94,8 @@ export function applyEntryOp(store, op, spec, now) {
 			const extra = spec.editFields?.(item, op, hasText, checked) ?? {};
 			if (spec.editTextRequired || hasText) item.text = checked(op.text, "`text`");
 			for (const [field, value] of Object.entries(extra)) item[field] = value;
-			return { line: `${item.id} reworded.`, shown: `~ ${spec.show(item)}` };
+			spec.afterEdit?.(item, op, hasText);
+			return { line: spec.editResult?.(item) ?? `${item.id} reworded.`, shown: `~ ${spec.show(item)}` };
 		}
 		case POLICY.enums.actions.remove: {
 			const item = find(op.id);
@@ -97,12 +105,12 @@ export function applyEntryOp(store, op, spec, now) {
 		case POLICY.enums.actions.before: {
 			if (!spec.reorder) throw new BookError(spec.unknownAction(op));
 			const item = find(op.id);
+			const other = op.before === undefined || op.before === "" ? undefined : find(op.before);
+			if (other === item) throw new BookError("An entry cannot stand in front of itself.");
 			store.items.splice(store.items.indexOf(item), 1);
-			if (op.before === undefined || op.before === "") {
+			if (other === undefined) {
 				store.items.push(item);
 			} else {
-				const other = find(op.before);
-				if (other === item) throw new BookError("An entry cannot stand in front of itself.");
 				store.items.splice(store.items.indexOf(other), 0, item);
 			}
 			return { line: `${item.id} moved.`, shown: `↕ ${spec.show(item)}` };

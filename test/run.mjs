@@ -11,7 +11,7 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, r
 import { tmpdir, availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { addRecord, archiveReports, deleteReports, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unarchiveReports, unshelveForUser, updateContext, writeFront, withoutTags } from "../src/context.mjs";
+import { addRecord, archiveReports, deleteReports, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unarchiveReports, unshelveForUser, updateContext, writeFront, withoutTags, applyCuratedRowOp, applyContextRowAction, contextLines, shelfItem, shelfText } from "../src/context.mjs";
 import { TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
@@ -1065,6 +1065,9 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 	refuse({ action: "add", mode: "write", text: "x" }, "it is look (the task only reads) or change (the task writes files)");
 	refuse({ action: "add", mode: "look" }, "`text` is required");
 	refuse({ action: "add", mode: "look", text: "x".repeat(ITEM_MAX + 1) }, `the limit is ${ITEM_MAX}`);
+	const nextBeforeUnknownPosition = plan.next;
+	refuse({ action: "add", mode: "look", text: "Placed nowhere", before: "p404" }, "`before` names no item");
+	assert.equal(plan.next, nextBeforeUnknownPosition, "a rejected placement does not consume an id");
 	refuse({ action: "done", id: "p99" }, 'There is no item "p99". The plan has p7.');
 	refuse({ action: "edit", id: "p7" }, "An edit needs `text`, `mode`, `network` or `standing`.");
 	refuse({ action: "approve" }, "the actions are add, edit, done, remove, clear");
@@ -1087,7 +1090,7 @@ test("tool schemas: every action accepts only its own valid shape", () => {
 	const bookSchema = JSON.stringify(bookDefinition.parameters);
 	assert.ok(bookSchema.length < 1000, `the model-facing schema stays compact (got ${bookSchema.length} characters)`);
 	assert.equal(bookSchema.includes("anyOf"), false, "the model-facing schema does not repeat every operation branch");
-	assert.deepEqual(bookDefinition.parameters.properties.ops.items.properties.action.enum, ["add", "done", "edit", "remove", "clear", "before", "recall", "shelve", "unshelve", "fold", "note", "collapse"]);
+	assert.deepEqual(bookDefinition.parameters.properties.ops.items.properties.action.enum, ["add", "done", "edit", "remove", "archive", "unarchive", "delete", "clear", "before", "recall", "shelve", "unshelve", "fold", "note", "collapse"]);
 	assert.ok(bookDefinition.parameters.properties.ops.items.properties.mode, "the compact schema shows operation fields such as plan mode");
 	const advertisedBook = compile(bookDefinition.parameters);
 	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add" }], text: "wrong place" }), false, "the model-facing condition disallows root text for a plan");
@@ -4101,7 +4104,7 @@ test("task: `return` carries the report, marks a plan item done or leaves it ope
 		has(resultsOf(server, "return").find((text) => text.startsWith("Not on your shelf")), "Not on your shelf: nope.txt. Your shelf is empty. The task has not ended: call `return` again without `shelf`, or name files from your shelf.", "a file that is not on the task's shelf cannot be handed on");
 		has(reports[3], "Second try.", "and the task ends with the next `return`");
 		// What is remembered of each task: its summary, or the start of its report.
-		const records = contextStore(root).records;
+		const records = contextStore(root).rows.filter((row) => row.species === "composed");
 		assert.deepEqual(records.map((record) => [record.id, record.outcome, record.undone === true]), [["t1", "a.txt: one line", false], ["t2", "== a.txt", true], ["t3", "Half of it.", true], ["t4", "Second try.", false]], "the record line is the summary when one was given");
 		has(readFileSync(join(root, ".atlas", "reports", "t1.md"), "utf8"), "Report:\nThe file a.txt holds one line. Nothing else was read.", "the report is stored in full");
 	} finally {
@@ -4355,7 +4358,7 @@ test("context: every report is kept under an id; /report shows it, and the agent
 		assert.match(rawText(after.messages.at(-1)), /^REPORT\n== src\/math\.js \(lines 1-4 of 4\)\n\nThis report is kept as t1\.\n\n\[task ended /, "the report names its id");
 		// One line per task in the store.
 		const store = contextStore(root);
-		assert.deepEqual(store.records.map((record) => [record.id, record.mode, record.brief]), [["t1", "look", "read: src/math.js"], ["t2", "look", "list:"]]);
+		assert.deepEqual(store.rows.filter((record) => record.species === "composed").map((record) => [record.id, record.mode, record.brief]), [["t1", "look", "read: src/math.js"], ["t2", "look", "list:"]]);
 		assert.equal(store.next, 3);
 		// /report with an id shows that report; an unknown id is said.
 		assert.match(result.stdout, /\nReport t1 · [^\n]* · look task\n\nBrief:\nread: src\/math\.js\n\nReport:\nREPORT\n== src\/math\.js \(lines 1-4 of 4\)\n  There is no report t9\. \/context lists the kept ones\.\nREPORT\nproject: 5 files\n› /, "/report t1 shows the kept one, an unknown id is said, /report alone shows the last");
@@ -4752,7 +4755,7 @@ test("context: the main agent can drop a report from view and get it back; notes
 		// In the request after the drop the report is one line; before it, it was there in full.
 		const report = (request) => rawText(request.messages.find((message) => message.role === "tool" && /REPORT|dropped report/.test(rawText(message))));
 		const dropped = server.requests.find((request) => messageText(request.messages.at(-1)).startsWith("say: dropped"));
-		assert.match(report(dropped), /^\[You dropped report t1 from view\. Its record: t1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\. `context` with action recall and t1 brings it back\.\]\n\n\[task ended /, "one line in its place");
+		assert.match(report(dropped), /^\[You dropped report t1 from view\. Its record: t1 · [^\n]* · look · asked: read: src\/math\.js → == src\/math\.js \(lines 1-4 of 4\)\. `book` with context recall and t1 brings it back\.\]\n\n\[task ended /, "one line in its place");
 		const answer = server.requests.find((request) => rawText(request.messages.at(-1)).startsWith("Dropped from view: t1, about "));
 		assert.match(messageText(answer.messages.at(-1)), /^Dropped from view: t1, about \d+ tokens\. In its place stands the record line\. The server reads what follows again, about \d+ tokens\. Its record: t1 · /, "the answer says what it cost");
 		has(result.stdout, "● context  nothing done: t1 is not in your context in full, so there is nothing to drop. No report is.", "twice is refused");
@@ -4764,7 +4767,7 @@ test("context: the main agent can drop a report from view and get it back; notes
 		// What the tool refuses.
 		has(result.stdout, "● context  nothing done: A note of this kind is for a task's own steps. What you need after a collapse belongs in the ledger", "the main agent's notes go to the brain");
 		has(result.stdout, "Validation failed for tool \"book\": - ops.0.id: missing", "the context action schema requires an id for fold");
-		has(result.stdout, 'ops.0.action: expected one of ["recall","shelve","unshelve","fold","note","collapse"]', "an unknown context action is refused by the tool's schema");
+		has(result.stdout, 'ops.0.action: expected one of ["add","edit","done","remove","before","archive","unarchive","delete","recall","shelve","unshelve","fold","note","collapse"]', "an unknown context action is refused by the tool's schema");
 	} finally {
 		await server.close();
 	}
@@ -4980,7 +4983,7 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual(fresh.messages.map((message) => message.role), ["system", "user"], "a fresh context");
 		assert.equal(frontOf(fresh), undefined, "without a block");
 		const store = contextStore(root);
-		assert.deepEqual([store.records.length, store.chat.length, store.shelf.length, store.front], [0, 2, 0, undefined], "the record and the shelf are empty; the talk begins again");
+		assert.deepEqual([store.rows.filter((row) => row.species === "composed").length, store.chat.length, store.shelf.length, store.front], [0, 2, 0, undefined], "the record and the shelf are empty; the talk begins again");
 		assert.ok(existsSync(join(root, ".atlas", "reports", "t1.md")), "the report is still on disk");
 		assert.equal(store.next, 2, "and ids are not reused");
 		// The tools: one more, and each a flat object (a schema with a choice at its root breaks tool calls on llama.cpp with Qwen).
@@ -6001,7 +6004,7 @@ test("the user's hands: /shelve, /unshelve, /fold, /recall and /send do for the 
 		has(result.stdout, "t1 archived: the record line leaves the kept block, the report stays on disk, recall by id still finds it.", "/archive hides the line and keeps the report");
 		has(result.stdout, "t1 back in the record", "/unarchive brings it back");
 		has(result.stdout, "t1 deleted: the record line is gone and its file is gone from", "/delete removes record and file");
-		has(result.stdout, "There is no report t1. /context lists the kept ones.", "deleting what is gone says so");
+		has(result.stdout, "There is no t1. a report is t1 or a curated context row c1", "deleting what is gone says so without dispatching by its id prefix");
 	} finally {
 		await server.close();
 	}
@@ -6029,6 +6032,31 @@ test("settings: yolo and bwrap start from the settings, and a switch while runni
 	} finally {
 		await server.close();
 	}
+});
+
+test("context: curated rows share the tagged row projection, defer visibility independently, and shelf full report references", () => {
+	const root = makeProject("context-curated-rows", { git: false });
+	const brainDir = join(root, ".atlas");
+	addRecord(brainDir, { id: "t1", at: Date.now(), mode: "look", brief: "Inspect the project", report: "The full report body.", changed: 0 });
+	writeFront(brainDir, root, { shelfTokens: 12_000, chatWindow: 8_000 }, { now: Date.now(), reason: "a test" });
+
+	const pending = applyCuratedRowOp(brainDir, { action: "add", text: "Deferred row", when: "next-boundary" });
+	assert.match(pending.line, /c1 added/);
+	assert.deepEqual(loadContext(brainDir).front.rows.map((row) => row.id), ["t1"], "the active projection is unchanged");
+	assert.match(contextLines(brainDir, root, { window: 100_000 }), /Rows entering context at the next boundary: c1/);
+	applyCuratedRowOp(brainDir, { action: "add", text: "Immediate row", when: "now" });
+	assert.deepEqual(loadContext(brainDir).front.rows.map((row) => row.id), ["t1", "c2"], "a now operation does not flush the deferred c1 row");
+	applyCuratedRowOp(brainDir, { action: "edit", id: "c1", text: "Edited now", when: "now" });
+	assert.deepEqual(loadContext(brainDir).front.rows.map((row) => row.id), ["t1", "c1", "c2"], "only the edited row is reconciled into the active projection");
+	applyContextRowAction(brainDir, "t1", "archive", "next-boundary");
+	assert.ok(loadContext(brainDir).front.rows.some((row) => row.id === "t1"), "deferred archive leaves the active report visible");
+	assert.match(contextLines(brainDir, root, { window: 100_000 }), /Rows leaving context at the next boundary: t1 \(archived\)/);
+	applyCuratedRowOp(brainDir, { action: "remove", id: "c2", when: "next-boundary" });
+	assert.ok(loadContext(brainDir).front.rows.some((row) => row.id === "c2"), "deferred removal leaves the current projection intact");
+	assert.match(contextLines(brainDir, root, { window: 100_000 }), /c2 \(deleted\)/, "the state block explains a pending removal");
+	const { item } = shelfItem(root, "report:t1", undefined, brainDir);
+	assert.equal(item.ref.type, "report");
+	assert.match(shelfText(root, item, brainDir), /The full report body\./, "a report reference resolves to its full stored content");
 });
 
 test("screen: Hands lists the shelf and the reports with the agent's operations, and Shells has an Output view", async () => {
@@ -6071,7 +6099,7 @@ test("screen: Hands lists the shelf and the reports with the agent's operations,
 	assert.equal(archived.archived, false, "the view says it stands again");
 	assert.match(deleteReports(brainDir, ["t1"]), /t1 deleted/, "d deletes a report for good");
 	assert.ok(!existsSync(join(brainDir, "reports", "t1.md")), "and the file is gone with it");
-	assert.equal(loadContext(brainDir).records.length, 0, "and the record holds it no more");
+	assert.equal(loadContext(brainDir).rows.filter((row) => row.species === "composed").length, 0, "and the record holds it no more");
 	assert.match(deleteReports(brainDir, ["t1"]), /There is no report t1/, "deleting what is gone says so");
 
 	// The chat tab's messages: the user's and the agent's words can be said anew, tool work cannot.
@@ -6231,6 +6259,11 @@ test("screen: in Requests, a approves a change item and n turns down a question"
 			["1 request waits for you", "n", false],
 			["q1 turned down", "", false],
 			[2.2, "<ESC>", false],
+			["COMMANDS", "2", false],
+			["Atlas", "]", false],
+			["Ledger", "]", false],
+			["Plan", "]", false],
+			["Requests", "]", false],
 			[0.4, "/quit"],
 		], { rows: 30 });
 		if (result === undefined) return "python3 is needed for a terminal";

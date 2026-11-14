@@ -108,9 +108,9 @@ const COMMANDS = [
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
-	["archive", "take a row out of what the agent reads: a report, a ledger entry, a plan item, a node"],
+	["archive", "take a row out of what the agent reads: a report, curated row, ledger entry, plan item, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["delete", "a row is gone for good, and the agent is not told: a report, a ledger entry, a plan item, a node"],
+	["delete", "a row is gone for good, and the agent is not told: a report, curated row, ledger entry, plan item, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "keep a file in view from the next collapse on: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -154,7 +154,7 @@ export const KEYS_HELP = [
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file",
-	"  f, v, d, x       the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, a ledger entry, a plan item, a node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	"  f, v, d, x       the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, curated row, ledger entry, plan item, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
@@ -901,14 +901,14 @@ export async function runScreen(session, options, runTerminal) {
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
-			const deletable = rowKey !== undefined && (/^(?:report|entry|item|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
+			const deletable = rowKey !== undefined && (/^(?:report|curated|entry|item|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
 			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
 				const said = foldRow(brainDir, bookId);
 				flash(said.replace(/\n+/g, " "));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+			if (key === "v" && rowKey !== undefined && /^(?:report|curated|entry|item|node):/.test(rowKey)) {
 				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
 				refresh(viewId(), true);
 				return;

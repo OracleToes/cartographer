@@ -17,7 +17,7 @@ import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
 import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText } from "../context.mjs";
+import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, curatedRows, curatedRowLine } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
@@ -653,23 +653,45 @@ export const isFolder = (path) => {
 export function handsView({ root, brainDir }) {
 	const store = loadContext(brainDir);
 	const header = [
-		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and the reports of finished work", "muted"]],
-		[["On a report: f folds it out of view or brings it back, v archives it out of the record, d deletes it (d again). On the shelf: x takes a file off. a shelves one.", "faint"]],
+		[["Your hands on what the agent keeps", "bold"], ["  ·  curated rows, the shelf, and reports of finished work", "muted"]],
+		[["On rows: v archives or restores, d deletes (d again); curated rows are edited with /row. On a report: f folds or recalls. On the shelf: x takes an item off.", "faint"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · in view from the next collapse on, and read by every task at its start"));
 	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `context`, action shelve."));
 	for (const item of store.shelf) {
 		items.push({
-			key: `shelf:${item.path}`,
+			key: `shelf:${shelfLabel(item)}`,
 			kind: "shelf",
-			head: [[`${shelfLabel(item)}  `, ""], [`about ${short(estimate(shelfText(root, item)))} tokens`, "muted"]],
-			body: () => shelfText(root, item),
-			path: join(root, item.path),
+			head: [[`${shelfLabel(item)}  `, ""], [`about ${short(estimate(shelfText(root, item, brainDir)))} tokens`, "muted"]],
+			body: () => shelfText(root, item, brainDir),
+			...(item.path === undefined ? {} : { path: join(root, item.path) }),
 		});
 	}
-	const standing = store.records.filter((record) => record.archived !== true);
-	const archived = store.records.filter((record) => record.archived === true);
+	const curated = curatedRows(store);
+	const livingCurated = curated.filter((row) => row.archived !== true);
+	const archivedCurated = curated.filter((row) => row.archived === true);
+	items.push(heading("  Curated rows · independent notes kept in the context (edit with /row)"));
+	if (livingCurated.length === 0 && archivedCurated.length === 0) items.push(note("  No curated rows yet. Use /row add TEXT to keep one."));
+	for (const row of livingCurated) items.push({
+		key: `curated:${row.id}`,
+		kind: "curated",
+		archived: false,
+		head: [[`${row.id}  `, "bold"], [curatedRowLine(row), ""]],
+		body: row.text,
+	});
+	if (archivedCurated.length > 0) {
+		items.push(heading("  Archived curated rows"));
+		for (const row of archivedCurated) items.push({
+			key: `curated:${row.id}`,
+			kind: "curated",
+			archived: true,
+			head: [[`${row.id}  `, "muted"], ["· archived  ", "muted"], [curatedRowLine(row), "faint"]],
+			body: row.text,
+		});
+	}
+	const standing = composedRows(store).filter((record) => record.archived !== true);
+	const archived = composedRows(store).filter((record) => record.archived === true);
 	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d deletes it (press d again)"));
 	if (standing.length === 0 && archived.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
 	for (const record of standing) {

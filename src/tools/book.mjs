@@ -17,12 +17,13 @@ import { applyBookOp, BOOK_KINDS, BOOK_TEXT_MAX, BookError, loadBooks, renderBoo
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
-import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, RECALLED } from "../context.mjs";
+import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, RECALLED, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem } from "../context.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 const ok = (text, shown) => ({ output: [{ type: "text", text }], details: { shown: [].concat(shown) } });
-const sameItem = (a, b) => a.path === b.path;
+const sameItem = sameShelfItem;
+const CONTEXT_WHEN = Object.values(POLICY.enums.contextVisibility);
 
 /** What a task is told when it reaches for a book of the main agent. */
 const TASK_REFUSALS = { ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, books: REFUSALS.taskAssesses };
@@ -173,18 +174,36 @@ function runBooks({ brainDir }, args, api) {
 function runContext({ root, brainDir, config, engine }, args, api) {
 	const main = api.conversationId === ROOT_CONVERSATION_ID;
 	const ops = Array.isArray(args.ops) ? args.ops : [];
-	const store = loadContext(brainDir);
+	let store = loadContext(brainDir);
 	const messages = engine.messagesOf(api.conversationId) ?? [];
 	const lines = [];
 	const shown = [];
 	try {
 		for (const op of ops) {
 			const action = op?.action;
+			if ([POLICY.enums.actions.add, POLICY.enums.actions.done, POLICY.enums.actions.edit, POLICY.enums.actions.remove, POLICY.enums.actions.before].includes(action)) {
+				if (!main) return fail("Curated context rows belong to the shared project brain; only the main agent can change them.");
+				const result = applyCuratedRowOp(brainDir, op, api.now());
+				store = loadContext(brainDir);
+				shown.push(result.shown);
+				lines.push(`${result.line}${op.when === POLICY.enums.contextVisibility.nextBoundary ? " This is saved now and enters context at the next boundary." : " It is saved and in context now."}`);
+				continue;
+			}
+			if ([POLICY.enums.actions.archive, POLICY.enums.actions.unarchive, POLICY.enums.actions.delete].includes(action)) {
+				if (!main) return fail("Context row operations belong to the shared project brain; only the main agent can apply them.");
+				const id = String(op.id ?? "").trim();
+				if (id === "") return fail(`${action} needs \`id\`: the context row to change.`);
+				const result = applyContextRowAction(brainDir, id, action, op.when);
+				store = loadContext(brainDir);
+				shown.push(`${action} ${id}`);
+				lines.push(`${result}${op.when === POLICY.enums.contextVisibility.nextBoundary ? " The saved change takes effect in context at the next boundary." : " It takes effect in context now."}`);
+				continue;
+			}
 			if (action === POLICY.enums.actions.recall) {
 				const id = String(op.id ?? "").trim();
-				if (id === "") return fail(`recall needs \`id\`: the report to bring back.${store.records.length > 0 ? ` Kept: ${store.records.slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
+				if (id === "") return fail(`recall needs \`id\`: the report to bring back.${composedRows(store).length > 0 ? ` Kept: ${composedRows(store).slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
 				const report = loadReport(brainDir, id);
-				if (report === undefined) return fail(`There is no report ${id}.${store.records.length > 0 ? ` Kept: ${store.records.slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
+				if (report === undefined) return fail(`There is no report ${id}.${composedRows(store).length > 0 ? ` Kept: ${composedRows(store).slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
 				if (reportsInView(messages).has(id) && !store.dropped.includes(id)) return fail(`Report ${id} is still in your context, further up: nothing was added.`);
 				// A report the main agent dropped comes back by this, too.
 				if (main && store.dropped.includes(id)) {
@@ -201,10 +220,10 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 			}
 
 			if (action === POLICY.enums.actions.shelve) {
-				const { item, tokens } = shelfItem(root, op.path, op.lines);
+				const { item, tokens } = shelfItem(root, op.path, op.lines, brainDir);
 				const mine = main ? store.shelf : (store.tasks[api.conversationId]?.shelf ?? []);
 				const others = mine.filter((entry) => !sameItem(entry, item));
-				const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry)), 0) + tokens;
+				const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0) + tokens;
 				if (total > config.shelfTokens) {
 					return fail(
 						`${shelfLabel(item)} is about ${count(tokens)} tokens, and the shelf would then hold ${count(total)} of at most ${count(config.shelfTokens)}. Shelve a range of lines instead, or take something off first${others.length > 0 ? `: ${others.map(shelfLabel).join(", ")}` : ""}.`,
@@ -232,7 +251,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				const given = String(op.path ?? "").trim();
 				if (given === "") return fail("unshelve needs `path`: the file to take off the shelf, or all.");
 				const mine = main ? store.shelf : (store.tasks[api.conversationId]?.shelf ?? []);
-				const gone = given === "all" ? mine : mine.filter((entry) => entry.path === given || entry.path === given.replace(/^\.\//, ""));
+				const gone = given === "all" ? mine : mine.filter((entry) => shelfLabel(entry) === given || entry.path === given || entry.path === given.replace(/^\.\//, ""));
 				if (gone.length === 0) return fail(`${given} is not on your shelf.${mine.length > 0 ? ` On it: ${mine.map(shelfLabel).join(", ")}.` : " The shelf is empty."}`);
 				updateContext(brainDir, (next) => {
 					if (main) next.shelf = next.shelf.filter((entry) => !gone.some((other) => sameItem(other, entry)));
@@ -263,7 +282,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 					const again = messages.slice(first + 1).reduce((sum, message) => sum + messageTokens(message), 0);
 					shown.push(`dropped ${ids.join(", ")} · about ${count(freed)} tokens freed`);
 					lines.push(
-						`Dropped from view: ${ids.join(", ")}, about ${count(freed)} tokens. In ${ids.length === 1 ? "its" : "their"} place stands the record line. The server reads what follows again, about ${count(again)} tokens. ${ids.length === 1 ? `Its record: ${recordLine(store.records.find((record) => record.id === ids[0]) ?? { id: ids[0], at: Date.now(), mode: POLICY.enums.planMode.look, brief: "?", outcome: "?" })}` : "recall brings one back."}`,
+						`Dropped from view: ${ids.join(", ")}, about ${count(freed)} tokens. In ${ids.length === 1 ? "its" : "their"} place stands the record line. The server reads what follows again, about ${count(again)} tokens. ${ids.length === 1 ? `Its record: ${recordLine(composedRows(store).find((record) => record.id === ids[0]) ?? { id: ids[0], at: Date.now(), mode: POLICY.enums.planMode.look, brief: "?", outcome: "?" })}` : "recall brings one back."}`,
 					);
 					continue;
 				}
@@ -317,10 +336,10 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				lines.push("Your steps so far are collapsed before your next reply. You keep the brief, your notes, your shelf and one line for each call.");
 				continue;
 			}
-			return fail("`action` is one of recall, shelve, unshelve, fold, note, collapse.");
+			return fail("`action` is one of add, edit, done, remove, before, archive, unarchive, delete, recall, shelve, unshelve, fold, note, collapse.");
 		}
 	} catch (problem) {
-		if (!(problem instanceof ShelfError)) throw problem;
+		if (!(problem instanceof ShelfError) && !(problem instanceof ContextRowError)) throw problem;
 		return fail(problem.message);
 	}
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
@@ -370,9 +389,17 @@ const BOOKS_OP = union([
 ]);
 
 const CONTEXT_OP = union([
+	obj({ action: lit(POLICY.enums.actions.add), text: line("A self-contained context row to keep." , POLICY.limits.context.curatedRowChars), before: opt(entryId("Put the row in front of this curated row.")), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Add a curated context row; now makes it visible after this call, next-boundary at the next collapse." }),
+	obj({ action: lit(POLICY.enums.actions.edit), id: entryId("The curated row (c1)."), text: line("The complete replacement text for this row.", POLICY.limits.context.curatedRowChars), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Edit a curated context row." }),
+	obj({ action: lit(POLICY.enums.actions.done), id: entryId("The curated row (c1)."), text: opt(line("How it was settled.", POLICY.limits.context.curatedRowChars)), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Mark a curated row done." }),
+	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The curated row (c1)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Remove a curated context row." }),
+	obj({ action: lit(POLICY.enums.actions.before), id: entryId("The curated row to move (c1)."), before: opt(entryId("The curated row to stand in front of.")), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Reorder curated context rows." }),
+	obj({ action: lit(POLICY.enums.actions.archive), id: entryId("The context row (c1 or t12)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Archive a context row without deleting its content." }),
+	obj({ action: lit(POLICY.enums.actions.unarchive), id: entryId("The archived context row (c1 or t12)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Restore an archived context row." }),
+	obj({ action: lit(POLICY.enums.actions.delete), id: entryId("The context row to delete (c1 or t12)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Delete a context row and its content." }),
 	obj({ action: lit(POLICY.enums.actions.recall), id: entryId("The report to bring back (t12).") }, { description: "Recall a kept report." }),
-	obj({ action: lit(POLICY.enums.actions.shelve), path: line("A file inside the project."), lines: opt(line('A line range such as "10-80"; omit for the whole file.')), hand_on: opt(bool({ description: "In a task, put this file on the main agent's shelf when you return." })) }, { description: "Keep a file in view." }),
-	obj({ action: lit(POLICY.enums.actions.unshelve), path: line('The file to take off the shelf, or "all".') }, { description: "Take a file off the shelf." }),
+	obj({ action: lit(POLICY.enums.actions.shelve), path: line("A project file/range or typed reference such as report:t12."), lines: opt(line('For files, a line range such as "10-80"; omit for the whole file.')), hand_on: opt(bool({ description: "In a task, put this file or reference on the main agent's shelf when you return." })) }, { description: "Keep a file or typed reference in view." }),
+	obj({ action: lit(POLICY.enums.actions.unshelve), path: line('The file/reference to take off the shelf, or "all".') }, { description: "Take a file off the shelf." }),
 	obj({ action: lit(POLICY.enums.actions.fold), id: entryId("A report id (t12) or task step ids (s3, s5), separated by commas.") }, { description: "Fold a finished report or step." }),
 	obj({ action: lit(POLICY.enums.actions.note), text: line("What the task must keep, with file paths and line numbers.") }, { description: "Keep a finding in task context." }),
 	obj({ action: lit(POLICY.enums.actions.collapse), text: opt(line("Why to collapse, in a few words.")) }, { description: "Collapse context now." }),
@@ -405,7 +432,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 	const validationSchema = obj(
 		{
 			book: oneOf(POLICY.enums.bookNames, {
-				description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), books (entries about the project and your practice), context (fold, recall, shelve, note).",
+				description: "Which book to write to: ledger (goals, questions, notes), plan (the work for the open goals), books (entries about the project and your practice), context (curated rows, reports, shelf, collapse).",
 			}),
 			ops: opt(arr(unknown(), { description: "Operations for the selected book." })),
 			text: opt(line("The whole assessment, for the legacy write form.")),
@@ -429,6 +456,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 				path: opt(str()),
 				lines: opt(str()),
 				hand_on: opt(bool()),
+				when: opt(oneOf(CONTEXT_WHEN)),
 			}, { open: true }), { minItems: POLICY.validation.nonEmptyArrayMinItems })),
 			text: opt(str()),
 		},

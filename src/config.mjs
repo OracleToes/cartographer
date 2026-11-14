@@ -23,7 +23,7 @@ const freezeTree = (value) => {
 	return value;
 };
 
-const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close" });
+const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close" });
 const LEDGER_KIND = freezeTree({ goal: "goal", question: "question", note: "note" });
 const PLAN_MODE = freezeTree({ look: "look", change: "change" });
 const BOOK_KIND = freezeTree({ assessment: "assessment", practice: "practice" });
@@ -104,7 +104,7 @@ export const POLICY = freezeTree({
 		plan: { itemChars: 300, items: 30 },
 		atlas: { nameChars: 40, gistChars: 200, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
 		assessment: { textChars: 3000 },
-		context: { recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
+		context: { recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, curatedRowChars: 3000, curatedRows: 80, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
 		git: { errorChars: 400, maxBufferBytes: 256 * 1024 * 1024, checkoutBatchItems: 200, undoTimestampToleranceMs: 1000, checkpointBufferBytes: 64 * 1024 * 1024 },
 		checkpoints: { changeRecordLines: 40, folderCollapseFiles: 3 },
 		engine: { serverErrorChars: 300, handoffErrorChars: 120, noteChars: 2000, askMaxTokens: 16 },
@@ -194,6 +194,8 @@ export const POLICY = freezeTree({
 	enums: {
 		actions: ACTION,
 		entryStatus: { open: "open", done: "done" },
+		contextRowSpecies: { composed: "composed", curated: "curated" },
+		contextVisibility: { now: "now", nextBoundary: "next-boundary" },
 		ledgerKind: LEDGER_KIND,
 		ledgerKinds: Object.values(LEDGER_KIND),
 		planMode: PLAN_MODE,
@@ -206,7 +208,7 @@ export const POLICY = freezeTree({
 		bookActions: [ACTION.add, ACTION.edit, ACTION.done, ACTION.remove, ACTION.before],
 		bookName: BOOK_NAME,
 		bookNames: Object.values(BOOK_NAME),
-		bookToolActions: [ACTION.add, ACTION.done, ACTION.edit, ACTION.remove, ACTION.clear, ACTION.before, ACTION.recall, ACTION.shelve, ACTION.unshelve, ACTION.fold, ACTION.note, ACTION.collapse],
+		bookToolActions: [ACTION.add, ACTION.done, ACTION.edit, ACTION.remove, ACTION.archive, ACTION.unarchive, ACTION.delete, ACTION.clear, ACTION.before, ACTION.recall, ACTION.shelve, ACTION.unshelve, ACTION.fold, ACTION.note, ACTION.collapse],
 		ledgerNonGoalKinds: [LEDGER_KIND.question, LEDGER_KIND.note],
 		wakeActions: [ACTION.set, ACTION.remove],
 		atlasKinds: ["component", "finding", "dead_end"],
@@ -228,10 +230,12 @@ export const POLICY = freezeTree({
 		wake: "w",
 		books: { assessment: "a", practice: "r" },
 		taskStep: "s",
+		contextRow: "c",
 	},
 	patterns: {
 		windowName: "^[a-z][a-z0-9_-]{0,19}$",
 		reportId: "^t\\d+$",
+		contextRowId: "^c\\d+$",
 		ledgerId: "^[gqn]\\d+$",
 		planId: "^p\\d+$",
 		questionId: "^q\\d+$",
