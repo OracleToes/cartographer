@@ -445,11 +445,30 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		{ allOf: BOOK_CONDITIONS },
 	);
 	const validate = compile(validationSchema, { coerce: true });
-	const parameters = obj({
-		book: oneOf(["ledger", "plan", "prompt", "books", "context"]),
-		ops: opt(arr(obj({ action: str() }, { open: true }), { minItems: 1 })),
-		text: opt(str()),
-	});
+	const parameters = obj(
+		{
+			book: oneOf(["ledger", "plan", "prompt", "books", "context"]),
+			ops: opt(arr(obj({
+				action: oneOf(["add", "done", "edit", "remove", "clear", "before", "recall", "shelve", "unshelve", "fold", "note", "collapse"]),
+				kind: opt(oneOf([...KINDS, ...BOOK_KINDS])),
+				text: opt(str()),
+				done_when: opt(str()),
+				id: opt(str()),
+				mode: opt(oneOf(["look", "change"])),
+				network: opt(bool()),
+				standing: opt(bool()),
+				before: opt(str()),
+				target: opt(str()),
+				why: opt(str()),
+				name: opt(str()),
+				path: opt(str()),
+				lines: opt(str()),
+				hand_on: opt(bool()),
+			}, { open: true }), { minItems: 1 })),
+			text: opt(str()),
+		},
+		{ allOf: [{ if: { properties: { book: lit("books") }, required: ["book"] }, else: { not: { required: ["text"] } } }] },
+	);
 	return defineTool({
 		name: "book",
 		description: describe("book"),
@@ -458,10 +477,24 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			const result = validate.parse(args);
 			if (result.ok) return result.value;
 			const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
-			const errors = result.errors.map((error) => `  - ${path(error.path)}: ${error.message}`).join("\n");
+			const issues = [...result.errors];
+			const planAdds = args?.book === "plan" && Array.isArray(args.ops) ? args.ops.filter((op) => op?.action === "add") : [];
+			const hasRootPlanText = args?.book === "plan" && Object.hasOwn(args, "text");
+			if (hasRootPlanText) {
+				// The conditional schema also reports this as an opaque `not` failure; replace it with the actionable cause.
+				for (let index = issues.length - 1; index >= 0; index--) {
+					if (issues[index].path === "" && issues[index].keyword === "not") issues.splice(index, 1);
+				}
+				issues.push({ path: "/text", message: "root text is only for the legacy whole-assessment form with book=books; plan wording belongs inside each add operation" });
+			}
+			const errors = issues.map((error) => `  - ${path(error.path)}: ${error.message}`).join("\n");
+			const hints = planAdds.some((op) => op.mode === undefined || op.text === undefined)
+				? '\nPlan add shape: {"action":"add","mode":"look or change","text":"one-line plan item"}. Put both `mode` and `text` in every add operation.'
+				: "";
 			// Do not echo the arguments: malformed text can be very large and the agent already has its original call.
-			throw new Error(`Validation failed for tool "book":\n${errors}`);
+			throw new Error(`Validation failed for tool "book":\n${errors}${hints}`);
 		},
+
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
 		// and the rest of the books change nothing when the same words are written twice.

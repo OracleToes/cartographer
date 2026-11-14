@@ -1063,8 +1063,13 @@ test("plan: operations, when the authorization is withdrawn, limits and what a f
 test("tool schemas: every action accepts only its own valid shape", () => {
 	const bookDefinition = bookTool({});
 	const bookSchema = JSON.stringify(bookDefinition.parameters);
-	assert.ok(bookSchema.length < 400, `the model-facing schema stays compact (got ${bookSchema.length} characters)`);
-	assert.equal(bookSchema.includes("allOf"), false, "the model-facing schema does not repeat the conditional branches");
+	assert.ok(bookSchema.length < 1000, `the model-facing schema stays compact (got ${bookSchema.length} characters)`);
+	assert.equal(bookSchema.includes("anyOf"), false, "the model-facing schema does not repeat every operation branch");
+	assert.deepEqual(bookDefinition.parameters.properties.ops.items.properties.action.enum, ["add", "done", "edit", "remove", "clear", "before", "recall", "shelve", "unshelve", "fold", "note", "collapse"]);
+	assert.ok(bookDefinition.parameters.properties.ops.items.properties.mode, "the compact schema shows operation fields such as plan mode");
+	const advertisedBook = compile(bookDefinition.parameters);
+	assert.equal(advertisedBook.check({ book: "plan", ops: [{ action: "add" }], text: "wrong place" }), false, "the model-facing condition disallows root text for a plan");
+	assert.equal(advertisedBook.check({ book: "books", text: "legacy assessment" }), true, "the legacy root-text form remains available for books");
 	for (const name of ["ledger", "plan", "prompt", "books", "context"]) has(bookDefinition.description, `"book":"${name}"`, `a compact ${name} example`);
 	const acceptsBook = (args) => {
 		try {
@@ -1119,7 +1124,7 @@ test("plan: a missing item text shows the exact call and a corrected example", a
 	const dir = join(scratch, "plan-missing-text");
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ brainDir: dir });
-	has(tool.description, "Plan add needs `text`", "the book description states the required field");
+	has(tool.description, "Plan add needs `mode` and `text` inside its op", "the book description states the required fields and location");
 	assert.equal(tool.parameters.anyOf ?? tool.parameters.oneOf, undefined, "the model-facing root remains a flat object");
 	assert.throws(
 		() => tool.prepareArguments({ book: "plan", ops: [{ action: "add", mode: "change" }] }),
@@ -1132,6 +1137,17 @@ test("plan: a missing item text shows the exact call and a corrected example", a
 		(error) => error.message.includes("ops.0.id: missing") && error.message.includes("ops.0.text: unknown field") && !error.message.includes(oversized),
 		"local schema errors reject extra fields without echoing a large argument into context",
 	);
+	let repeatedPlanError;
+	try {
+		tool.prepareArguments({ book: "plan", ops: Array.from({ length: 3 }, () => ({ action: "add" })), text: "Polish: contact shadows, spin trails and die colors" });
+	} catch (error) {
+		repeatedPlanError = error.message;
+	}
+	assert.ok(repeatedPlanError, "the reported incomplete plan call is rejected");
+	has(repeatedPlanError, "root text is only for the legacy whole-assessment form", "the misplaced root field gets an actionable explanation");
+	has(repeatedPlanError, 'Plan add shape: {"action":"add","mode":"look or change","text":"one-line plan item"}', "the retry gets the exact operation shape");
+	hasNot(repeatedPlanError, "must not match the schema in not", "opaque conditional errors are hidden");
+	hasNot(repeatedPlanError, "Polish: contact shadows", "the original argument is not echoed");
 	const args = { book: "plan", ops: [{ action: "add", mode: "change", lines: "Build the die", name: "Build", target: "plan" }] };
 	const result = await tool.execute(args, { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID });
 	const text = result.output[0].text;
@@ -4957,9 +4973,10 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
 		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "prompt", "books", "context"]);
 		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays flat");
-		assert.ok(JSON.stringify(book).length < 400, "the transmitted book schema is a compact dispatch shape");
+		assert.ok(JSON.stringify(book).length < 1000, "the transmitted book schema is a compact dispatch shape");
 		assert.deepEqual(book.properties.ops.items.required, ["action"], "the compact dispatch shape keeps the action tag required");
-		assert.equal(book.properties.ops.items.additionalProperties, undefined, "operation fields are left to local conditional validation");
+		assert.ok(book.properties.ops.items.properties.mode && book.properties.ops.items.properties.text, "the model sees operation fields it needs to form valid calls");
+		assert.equal(book.allOf.length, 1, "only the small books-only root-text condition is sent, not all operation branches");
 	} finally {
 		await server.close();
 	}
