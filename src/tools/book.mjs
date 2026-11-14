@@ -8,7 +8,7 @@
 // `context` tool let it; the other books belong to the main agent, and are refused with the same words
 // the old per-tool refusals used.
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { arr, bool, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
+import { arr, bool, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
 import { applyPlanOp, authorizationLine, loadPlan, PlanError, savePlan } from "../plan.mjs";
@@ -354,6 +354,38 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 /** The actions the loose operation schema names, and the fields each book reads. */
 const ACTIONS = ["add", "edit", "done", "remove", "before", "clear", "recall", "shelve", "unshelve", "fold", "note", "collapse"];
 
+// Keep the top-level tool arguments a flat object for llama.cpp's Qwen tool-call path, but narrow the
+// `ops` branch when book=plan. The plan's nested action union worked before the books were combined; each
+// branch makes the fields it needs required and excludes fields that belong to the other books.
+const PLAN_OP = union([
+	obj(
+		{
+			action: lit("add"),
+			mode: oneOf(["look", "change"], { description: "look: the task only reads. change: it writes files, which needs the user's authorization." }),
+			text: str({ description: "Required: one line saying what this item covers." }),
+			network: opt(bool({ description: "true: this change item's commands can reach the network." })),
+			standing: opt(bool({ description: "true: this is a duty that stays open and may be carried out again." })),
+			before: opt(str({ description: "Put the new item in front of this one (p3). Default: at the end." })),
+		},
+		{ description: "Add a plan item." },
+	),
+	obj({ action: lit("done"), id: str({ description: "The item (p1, p4)." }), text: opt(str({ description: "What came of it, one line." })) }, { description: "Mark a plan item finished." }),
+	obj(
+		{
+			action: lit("edit"),
+			id: str({ description: "The item (p1, p4)." }),
+			text: opt(str({ description: "The new wording, one line." })),
+			mode: opt(oneOf(["look", "change"])),
+			network: opt(bool()),
+			standing: opt(bool()),
+		},
+		{ description: "Edit a plan item." },
+	),
+	obj({ action: lit("remove"), id: str({ description: "The item (p1, p4)." }) }, { description: "Remove a plan item." }),
+	obj({ action: lit("clear") }, { description: "Clear the plan." }),
+]);
+const PLAN_OPS = arr(PLAN_OP, { description: "Plan operations, each with only the fields that action takes." });
+
 /**
  * @param {{ root: string, brainDir: string, config: object, engine: object, gate?: { yolo: boolean } }} input
  */
@@ -389,7 +421,16 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 					{ description: "Operations, applied in order. Each stands on its own: one that cannot be applied is reported, and the others are saved." },
 				)),
 			text: opt(str({ description: "For the books, instead of ops: the whole assessment, replacing the entries' rendering once." })),
-		}),
+		},
+		{
+			allOf: [
+				{
+					if: { properties: { book: lit("plan") }, required: ["book"] },
+					then: { properties: { ops: PLAN_OPS }, required: ["ops"] },
+				},
+			],
+		},
+		),
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
 		// and the rest of the books change nothing when the same words are written twice.

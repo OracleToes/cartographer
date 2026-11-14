@@ -1062,7 +1062,12 @@ test("plan: a missing item text shows the exact call and a corrected example", a
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ brainDir: dir });
 	has(tool.description, "For a plan add, `text` is required", "the book description states the required field");
-	has(tool.parameters.properties.ops.items.properties.text.description, "REQUIRED", "the field schema says when text is needed");
+	assert.equal(tool.parameters.anyOf ?? tool.parameters.oneOf, undefined, "the root remains a flat object");
+	const planBranch = tool.parameters.allOf.find((branch) => branch.if?.properties?.book?.const === "plan");
+	assert.ok(planBranch, "book=plan selects a conditional schema branch");
+	const planAdd = planBranch.then.properties.ops.items.anyOf.find((branch) => branch.properties.action.const === "add");
+	assert.deepEqual(planAdd.required, ["action", "mode", "text"], "plan add structurally requires its needed fields");
+	assert.equal(planAdd.properties.lines, undefined, "the plan variant excludes the unrelated shelve field");
 	const args = { book: "plan", ops: [{ action: "add", mode: "change", lines: "Build the die", name: "Build", target: "plan" }] };
 	const result = await tool.execute(args, { taskId: "task-1", now: () => 0, conversationId: ROOT_CONVERSATION_ID });
 	const text = result.output[0].text;
@@ -4885,6 +4890,9 @@ test("context: /context shows the parts and their sizes, /new starts with nothin
 		assert.deepEqual(book.required, ["book"]);
 		assert.deepEqual(Object.keys(book.properties).sort(), ["book", "ops", "text"]);
 		assert.deepEqual(book.properties.book.enum, ["ledger", "plan", "prompt", "books", "context"]);
+		assert.equal(book.anyOf ?? book.oneOf, undefined, "the transmitted root stays flat");
+		const planBranch = book.allOf.find((branch) => branch.if?.properties?.book?.const === "plan");
+		assert.deepEqual(planBranch.then.properties.ops.items.anyOf.find((branch) => branch.properties.action.const === "add").required, ["action", "mode", "text"], "the transmitted plan add branch requires its fields");
 	} finally {
 		await server.close();
 	}
