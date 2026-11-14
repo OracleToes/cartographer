@@ -8,7 +8,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, availableParallelism } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addRecord, archiveReports, deleteReports, droppable, dressTask, foldReports, KEPT_AS, loadContext, parseLines, recallReport, ShelfError, shelfLabel, shelveForUser, reviseNote, stepsOf, supersededBy, unarchiveReports, unshelveForUser, updateContext, writeFront, withoutTags } from "../src/context.mjs";
@@ -50,14 +50,36 @@ const scratch = realpathSync(mkdtempSync(join(tmpdir(), "carto-test-")));
 const EMPTY_CONFIG = join(scratch, "empty-config.json");
 writeFileSync(EMPTY_CONFIG, "{}\n");
 process.env.CARTO_CONFIG = EMPTY_CONFIG;
-const only = process.argv[2];
+let only; // a substring filter: `node test/run.mjs ledger` runs the tests whose names hold it
+// How many tests run beside each other: --jobs N (or -j N, or CARTO_TEST_JOBS), else one per core to a cap of 8.
+// Tests wait on the machine most of the time, so several at once are safe; the waits that measure it get SLOW,
+// the same factor, so that a loaded run is not failed by a clock.
+let jobsArg;
+{
+	const argv = process.argv.slice(2);
+	for (let i = 0; i < argv.length; i++) {
+		if (argv[i] === "--jobs" || argv[i] === "-j") jobsArg = Number(argv[++i]);
+		else if (argv[i].startsWith("--jobs=")) jobsArg = Number(argv[i].slice("--jobs=".length));
+		else if (only === undefined) only = argv[i];
+	}
+}
+const JOBS = Number.isInteger(jobsArg) && jobsArg >= 1 ? jobsArg : Math.min(8, Math.max(1, availableParallelism() - 1));
+const SLOW = 1 + (JOBS - 1) * 0.5;
+process.env.CARTO_TEST_SLOW = String(SLOW);
 
 const tests = [];
-const test = (name, run) => tests.push({ name, run });
+/** A test that must run with no other test beside it takes `{ alone: true }`: it changes something that
+ * every other test reads while it runs — one swaps this process's environment for its shell windows. */
+const test = (name, run, { alone = false } = {}) => tests.push({ name, run, alone });
 
-/** A throwaway project with a few files. `git: true` makes it a repository. */
+/** A throwaway project with a few files. `git: true` makes it a repository.
+ * Tests that run beside each other must not share a folder (a project holds a lock, and its brain one
+ * session), so a name a second test asks for gets a number: three tests say "kill", each has its own. */
+const projectCounts = new Map();
 function makeProject(name, { git = true } = {}) {
-	const root = join(scratch, name);
+	const seen = projectCounts.get(name) ?? 0;
+	projectCounts.set(name, seen + 1);
+	const root = join(scratch, seen === 0 ? name : `${name}-${seen + 1}`);
 	mkdirSync(join(root, "src", "deep", "er"), { recursive: true });
 	writeFileSync(join(root, "README.md"), "# Demo project\nA small thing for tests.\n");
 	writeFileSync(join(root, "src", "math.js"), "export function add(a, b) {\n  // MARKER-ONLY-IN-FILE\n  return a + b;\n}\n");
@@ -83,7 +105,7 @@ function run(command, args, { cwd, env = {}, input, timeoutMs = 30_000, throughN
 		let stderr = "";
 		child.stdout.on("data", (chunk) => (stdout += chunk));
 		child.stderr.on("data", (chunk) => (stderr += chunk));
-		const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+		const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs * SLOW);
 		// A command that cannot be started at all is a result like any other, not a crash of the test run.
 		child.on("error", (error) => {
 			clearTimeout(timer);
@@ -1458,7 +1480,7 @@ const LOOP = (file) => `while :; do echo $(date +%s%N) > ${file}; sleep 0.05; do
 /** Whether such a file is still being rewritten. */
 async function beating(file) {
 	const before = readFileSync(file, "utf8");
-	await new Promise((resolve) => setTimeout(resolve, 400));
+	await new Promise((resolve) => setTimeout(resolve, 400 * SLOW));
 	return readFileSync(file, "utf8") !== before;
 }
 /** How the tests start `carto` so that commands run on this machine: in the sandbox where there is one. */
@@ -1566,7 +1588,7 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		delete process.env.CARTO_TEST_SECRET;
 		await server.close();
 	}
-});
+}, { alone: true });
 
 test("windows: a command outlives the call that started it; wait, read, send, stop and close reach it", async () => {
 	const skip = NO_WINDOWS();
@@ -6129,32 +6151,64 @@ test("screen: d in the Context window takes a message of yours out of the talk t
 });
 
 async function until(condition, what, timeoutMs = 15_000) {
+	const limit = timeoutMs * SLOW;
 	const start = Date.now();
 	while (!condition()) {
-		if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting until ${what}`);
+		if (Date.now() - start > limit) throw new Error(`timed out waiting until ${what}`);
 		await new Promise((resolve) => setTimeout(resolve, 20));
 	}
 }
 
+// ─── The run ────────────────────────────────────────────────────────────────
+// Tests are independent: each makes its own project and its own stand-in server, so they run several at a
+// time — `--jobs N` (or CARTO_TEST_JOBS, or `-j N`) says how many, `npm test` lets the defaults decide:
+// one per core to a cap of 8. A test marked `alone` runs with none beside it, so batches keep the order.
+// One line per test, whatever the moment it ended on, so the log reads the same as ever: ok, skip, FAIL.
 let passed = 0;
 let failed = 0;
 let skipped = 0;
-for (const { name, run: body } of tests) {
-	if (only !== undefined && !name.includes(only)) continue;
-	try {
-		const note = await body();
-		if (typeof note === "string") {
-			skipped++;
-			console.log(`skip  ${name}  (${note})`);
-		} else {
-			passed++;
-			console.log(`ok    ${name}`);
+const strays = []; // rejections no test awaited: counted, so the run still ends, and red
+process.on("unhandledRejection", (error) => strays.push(error));
+
+const write = (text) => process.stdout.write(`${text}\n`);
+const secs = (ms) => (ms >= 1000 ? `  (${(ms / 1000).toFixed(1)} s)` : "");
+const chosen = tests.filter((t) => only === undefined || t.name.includes(only));
+const batches = [];
+for (const t of chosen) {
+	const last = batches.at(-1);
+	if (t.alone) batches.push({ alone: true, tests: [t] });
+	else if (last !== undefined && !last.alone) last.tests.push(t);
+	else batches.push({ alone: false, tests: [t] });
+}
+for (const batch of batches) {
+	const list = batch.tests;
+	let at = 0;
+	const runOne = async ({ name, run: body }) => {
+		const start = Date.now();
+		try {
+			const note = await body();
+			if (typeof note === "string") {
+				skipped++;
+				write(`skip  ${name}  (${note})`);
+			} else {
+				passed++;
+				write(`ok    ${name}${secs(Date.now() - start)}`);
+			}
+		} catch (error) {
+			failed++;
+			write(`FAIL  ${name}\n      ${String(error?.message ?? error).split("\n").join("\n      ")}`);
 		}
-	} catch (error) {
-		failed++;
-		console.log(`FAIL  ${name}\n      ${String(error?.message ?? error).split("\n").join("\n      ")}`);
-	}
+	};
+	// One worker pulls the next test as soon as it is free; a batch of one runs by itself, as it asked.
+	await Promise.all(Array.from({ length: Math.min(JOBS, list.length) }, async () => {
+		while (at < list.length) await runOne(list[at++]);
+	}));
+}
+for (const error of strays) {
+	failed++;
+	write(`FAIL  (a rejection no test awaited)\n      ${String(error?.message ?? error).split("\n").join("\n      ")}`);
 }
 rmSync(scratch, { recursive: true, force: true });
-console.log(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
+write(`\n${passed} passed, ${failed} failed${skipped ? `, ${skipped} skipped` : ""}`);
+await new Promise((resolve) => setImmediate(resolve));
 process.exit(failed === 0 ? 0 : 1);

@@ -114,10 +114,11 @@ def pump(until, limit):
             except OSError: return until is None
             feed(dec.decode(data))
     return until is None
+slow = float(os.environ.get("CARTO_TEST_SLOW") or 1)
 shots = []
 for step in steps:
     wait, keys = step[0], step[1]
-    ok = pump(None, wait) if isinstance(wait, (int, float)) else pump(wait, 20)
+    ok = pump(None, wait) if isinstance(wait, (int, float)) else pump(wait, 20 * slow)
     shots.append(screen())
     if not ok:
         shots.append("TIMEOUT waiting for: " + str(wait))
@@ -129,7 +130,7 @@ for step in steps:
     if not (len(step) > 2 and not step[2]):
         try: os.write(fd, b"\r")
         except OSError: pass
-pump(None, 3)
+pump(None, 3 * slow)
 shots.append(screen())
 try: os.kill(pid, 15)
 except OSError: pass
