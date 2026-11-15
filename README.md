@@ -366,7 +366,7 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | Tool | Who | What |
 |---|---|---|
 | `task` | orchestrating context | Enter one bounded focus context. A change focus names an open plan item and runs only when authorized |
-| `book` | orchestrating and focused contexts | One `target` + `action` per call. Resolves project files, reports, ledger/plan/atlas/books/curated rows, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
+| `book` | orchestrating and focused contexts | First call with only a `target` to load that target's action schema; then make one `target` + `action` operation call. Resolves project files, reports, ledger/plan/atlas/books/curated rows, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
 | `atlas` | orchestrating and focused contexts | Write, link, confirm, remove and read graph nodes. The orchestrating context also moves the tree with it |
 | `search` | any focus | A regular expression over project files; returns `path:line: text` |
 | `list` | any focus | Project files as a tree with sizes |

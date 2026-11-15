@@ -2,30 +2,19 @@ import { createHash } from "node:crypto";
 import { defineTool } from "@earendil-works/pi-durable";
 import { POLICY } from "./config.mjs";
 import { nativeReference, readReferenceVersion, retainReferenceVersion } from "./catalog.mjs";
-import { BOOK_BRANCH_ACTIONS, bookBranchParameters, bookBranchVariants } from "./tools/book.mjs";
-import { oneOf, obj, opt } from "@earendil-works/pi-schema";
+import { BOOK_BRANCH_ACTIONS, bookTargetParameters } from "./tools/book.mjs";
+import { oneOf, obj } from "@earendil-works/pi-schema";
 
-export const SCHEMA_SELECTOR = "tool_schema";
 const BOOK_BRANCHES = Object.keys(BOOK_BRANCH_ACTIONS);
-const BOOK_ACTIONS = [...new Set(Object.values(BOOK_BRANCH_ACTIONS).flat())];
-const VARIANTS = [...new Set([
-	...BOOK_ACTIONS,
-	...Object.values(POLICY.enums.atlasActions),
-	...POLICY.enums.shellActions,
-	"set-time", "set-path", "set-window", "text", "network", "standing", "open", "choices", "ref", "path", "file-ref", "report-ref", "schema-ref",
-	...POLICY.enums.planModes,
-	...POLICY.enums.ledgerKinds,
-])];
-const FIELD_CHOICES = ["links", "files", "both"];
 const STRICT_KEYWORDS = new Set([
 	"type", "properties", "required", "additionalProperties", "items", "enum", "const", "anyOf",
 	"description", "title", "default", "minLength", "maxLength", "pattern", "minimum", "maximum",
 	"exclusiveMinimum", "exclusiveMaximum", "minItems", "maxItems", "uniqueItems", "format",
 ]);
-
+const bookBranchRequest = obj({ target: oneOf(BOOK_BRANCHES, { description: "Select one book branch to load its full action schema; this does not perform an operation." }) });
 const allowsNull = (schema) => schema?.type === "null" || (Array.isArray(schema?.type) && schema.type.includes("null")) || schema?.const === null || schema?.enum?.includes?.(null) || schema?.anyOf?.some(allowsNull);
 
-/** Convert optional object properties to the OpenAI strict-required/nullable form, refusing unsupported schemas. */
+/** Convert optional object properties to the provider's strict-required/nullable form, refusing unsupported schemas. */
 function strictSchema(schema, location = "$") {
 	if (schema === null || typeof schema !== "object" || Array.isArray(schema)) throw new Error(`Strict schema at ${location} must be an object.`);
 	for (const [key, value] of Object.entries(schema)) {
@@ -37,9 +26,6 @@ function strictSchema(schema, location = "$") {
 			schema.items = strictSchema(value, `${location}.items`);
 		} else if (key === "anyOf") {
 			if (!Array.isArray(value) || value.length === 0) throw new Error(`Strict schema at ${location}.anyOf must be non-empty.`);
-			if (value.some((child) => child?.type === "object" || child?.type === "array" || child?.properties !== undefined || child?.items !== undefined)) {
-				throw new Error(`Strict schema at ${location}.anyOf has an object/array union unsupported by strict sampling.`);
-			}
 			schema.anyOf = value.map((child, index) => strictSchema(child, `${location}.anyOf[${index}]`));
 		}
 	}
@@ -51,119 +37,23 @@ function strictSchema(schema, location = "$") {
 		for (const [name, child] of Object.entries(properties)) {
 			if (required.has(name) || allowsNull(child)) continue;
 			if (child.type === "array") properties[name] = { ...child, type: ["array", "null"] };
-			else if (child.type === "object" || child.properties !== undefined) throw new Error(`Optional object property ${location}.${name} must be selected as a required schema branch.`);
 			else properties[name] = { anyOf: [child, { type: "null" }] };
 		}
 		schema.required = Object.keys(properties);
 		schema.additionalProperties = false;
+	} else if (schema.properties !== undefined && Array.isArray(schema.required)) {
+		if (schema.required.some((key) => !(key in schema.properties))) throw new Error(`Strict schema at ${location} requires a missing property.`);
 	}
 	return schema;
 }
 
-function objectBranch(source, { allow, required, constants = {} }) {
-	const schema = structuredClone(source);
-	if (schema?.type !== "object" || !schema.properties) throw new Error("The selected operation has no object schema to specialize.");
-	for (const condition of schema.allOf ?? []) {
-		const keys = Object.keys(condition?.if?.properties ?? {});
-		if (keys.some((key) => !["action", "match"].includes(key))) throw new Error("The selected action schema has an unrelated conditional that cannot be safely specialized.");
-	}
-	delete schema.allOf;
-	for (const key of Object.keys(schema.properties)) if (!allow.includes(key)) delete schema.properties[key];
-	for (const [key, value] of Object.entries(constants)) {
-		const description = schema.properties[key]?.description;
-		schema.properties[key] = { type: "string", const: value, ...(description ? { description } : {}) };
-	}
-	schema.required = [...new Set(required)];
-	schema.additionalProperties = false;
-	return schema;
-}
-
-function actionBranch(schema, action) {
-	return (schema?.anyOf ?? []).find((branch) => branch.properties?.action?.const === action);
-}
-
-function atlasBranchSchema(source, action, field) {
-	const op = source?.properties?.ops?.items;
-	const branch = actionBranch(op, action);
-	if (branch === undefined) throw new Error(`Atlas has no operation schema for ${action}.`);
-	const item = structuredClone(branch);
-	if ([POLICY.enums.atlasActions.link, POLICY.enums.atlasActions.unlink].includes(action)) {
-		if (!["links", "files", "both"].includes(field)) throw new Error(`Atlas ${action} needs a links, files, or both field choice.`);
-		if (field !== "both") delete item.properties[field === "links" ? "files" : "links"];
-		delete item.anyOf;
-		item.required = [...new Set([...(item.required ?? []), ...(field === "both" ? ["links", "files"] : [field])])];
-	} else if ([POLICY.enums.atlasActions.add, POLICY.enums.atlasActions.edit].includes(action)) {
-		// Empty arrays are equivalent to omission for these merge-style operations, avoiding a nullable array union.
-		item.required = [...new Set([...(item.required ?? []), "links", "files"] )];
-	}
-	const shaped = structuredClone(source);
-	shaped.properties.ops.items = item;
-	shaped.properties.ops.minItems = 1;
-	shaped.required = ["ops"];
-	shaped.additionalProperties = false;
-	return shaped;
-}
-
-function askBranchSchema(source, variant) {
-	if (!["open", "choices"].includes(variant)) throw new Error("ask needs an open or choices branch selection.");
-	const schema = structuredClone(source);
-	if (variant === "choices") schema.required = [...new Set([...(schema.required ?? []), "choices"])];
-	else delete schema.properties.choices;
-	schema.additionalProperties = false;
-	return schema;
-}
-
-function shellBranchSchema(source, action) {
-	const root = source.properties;
-	const actionValues = root.action?.enum ?? [];
-	if (!actionValues.includes(action)) throw new Error(`Shell has no action ${action}.`);
-	const schema = objectBranch(source, {
-		allow: action === "run" ? ["action", "command", "window", "wait"]
-			: action === "read" ? ["action", "window", "lines"]
-				: action === "wait" ? ["action", "window", "seconds", "until"]
-					: action === "send" ? ["action", "window", "text", "seconds"] : ["action", "window"],
-		required: action === "run" ? ["action", "command"]
-			: action === "read" || action === "wait" || action === "stop" || action === "close" ? ["action", "window"]
-				: ["action", "window", "text"],
-		constants: { action },
-	});
-	return schema;
-}
-
-function wakeBranchSchema(source, variant) {
-	const set = POLICY.enums.actions.set;
-	const remove = POLICY.enums.actions.remove;
-	if (variant === "remove") return objectBranch(source, { allow: ["action", "id"], required: ["action", "id"], constants: { action: remove } });
-	if (!["set-time", "set-path", "set-window"].includes(variant)) throw new Error(`Wake has no branch ${variant}.`);
-	const allow = variant === "set-time" ? ["action", "note", "every", "times"]
-		: variant === "set-path" ? ["action", "note", "path", "every", "times"]
-			: ["action", "note", "window", "every", "times", "match"];
-	const required = variant === "set-time" ? ["action", "note", "every"]
-		: variant === "set-path" ? ["action", "note", "path"]
-			: ["action", "note", "window"];
-	return objectBranch(source, { allow, required, constants: { action: set } });
-}
-
-function selectedSchema(tool, source, choice, bookShape) {
-	if (tool === "book") return bookShape(source, choice.branch, choice.action, choice.variant);
-	if (tool === "atlas") return atlasBranchSchema(source, choice.variant, choice.field);
-	if (tool === "shell") return shellBranchSchema(source, choice.variant);
-	if (tool === "wake") return wakeBranchSchema(source, choice.variant);
-	if (tool === "ask") return askBranchSchema(source, choice.variant);
-	return structuredClone(source);
-}
-
-function nullableSchema(schema) {
-	return schema?.anyOf?.some((branch) => branch.type === "null") || schema?.type === "null" || (Array.isArray(schema?.type) && schema.type.includes("null")) || schema?.enum?.includes?.(null) || schema?.const === null;
-}
-
-/** Remove strict-mode null sentinels only where the implementation's original schema marks that field optional. */
+/** Remove strict-mode null sentinels only where the original schema marks that field optional. */
 function cleanNullableArgs(value, schema) {
 	if (Array.isArray(value)) return value.map((item) => cleanNullableArgs(item, schema?.items));
 	if (value === null || typeof value !== "object") return value;
 	const branches = schema?.anyOf ?? schema?.oneOf;
 	if (Array.isArray(branches)) {
-		const matching = branches.find((branch) => Object.entries(branch.properties ?? {}).every(([key, part]) => part.const === undefined || value[key] === part.const));
+		const matching = branches.find((branch) => matchesSchema(value, branch, { requireAll: false }));
 		if (matching) schema = matching;
 	}
 	if (schema?.type !== "object" && !schema?.properties) return value;
@@ -171,25 +61,26 @@ function cleanNullableArgs(value, schema) {
 	const clean = {};
 	for (const [key, item] of Object.entries(value)) {
 		const child = schema.properties?.[key] ?? (typeof schema.additionalProperties === "object" ? schema.additionalProperties : undefined);
-		if (item === null && (nullableSchema(child) || !required.has(key))) continue;
+		if (item === null && (allowsNull(child) || !required.has(key))) continue;
 		clean[key] = cleanNullableArgs(item, child);
 	}
 	return clean;
 }
 
-function matchesSchema(value, schema) {
+/** A lightweight shape check to select the right local cleanup schema; full validation remains tool-local. */
+function matchesSchema(value, schema, { requireAll = true } = {}) {
 	if (value === null) return allowsNull(schema);
 	if (schema?.const !== undefined && value !== schema.const) return false;
 	if (Array.isArray(schema?.enum) && !schema.enum.includes(value)) return false;
-	if (Array.isArray(schema?.anyOf) && !schema.anyOf.some((branch) => matchesSchema(value, branch))) return false;
-	if (Array.isArray(schema?.type) && !schema.type.some((type) => matchesSchema(value, { ...schema, type }))) return false;
+	if (Array.isArray(schema?.anyOf) && !schema.anyOf.some((branch) => matchesSchema(value, branch, { requireAll }))) return false;
+	if (Array.isArray(schema?.type) && !schema.type.some((type) => matchesSchema(value, { ...schema, type }, { requireAll }))) return false;
 	if (schema?.type === "object" || schema?.properties !== undefined) {
 		if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-		if ((schema.required ?? []).some((key) => !Object.hasOwn(value, key))) return false;
+		if (requireAll && (schema.required ?? []).some((key) => !Object.hasOwn(value, key))) return false;
 		if (schema.additionalProperties === false && Object.keys(value).some((key) => !Object.hasOwn(schema.properties ?? {}, key))) return false;
-		return Object.entries(schema.properties ?? {}).every(([key, child]) => !Object.hasOwn(value, key) || matchesSchema(value[key], child));
+		return Object.entries(schema.properties ?? {}).every(([key, child]) => !Object.hasOwn(value, key) || matchesSchema(value[key], child, { requireAll }));
 	}
-	if (schema?.type === "array") return Array.isArray(value) && value.every((item) => matchesSchema(item, schema.items));
+	if (schema?.type === "array") return Array.isArray(value) && value.every((item) => matchesSchema(item, schema.items, { requireAll }));
 	if (schema?.type === "string") return typeof value === "string";
 	if (schema?.type === "integer") return Number.isInteger(value);
 	if (schema?.type === "number") return typeof value === "number" && Number.isFinite(value);
@@ -198,175 +89,152 @@ function matchesSchema(value, schema) {
 	return true;
 }
 
+function isBookBranchRequest(args) {
+	return args !== null && typeof args === "object" && !Array.isArray(args)
+		&& typeof args.target === "string" && BOOK_BRANCHES.includes(args.target)
+		&& Object.keys(args).length === 1;
+}
+
 function providerTool(payload, name) {
-	if (!Array.isArray(payload?.tools)) throw new Error("The selected provider request has no tools array; strict tool routing is unavailable.");
+	if (!Array.isArray(payload?.tools)) throw new Error("The provider request has no tools array; strict book schema routing is unavailable.");
 	const tool = payload.tools.find((entry) => entry?.type === "function" && entry.function?.name === name);
-	if (!tool) throw new Error(`Provider request did not contain the selected tool ${name}; refusing to send an unconstrained request.`);
+	if (!tool) throw new Error(`Provider request did not contain the top-level ${name} tool; refusing to send an incomplete request.`);
 	return tool;
 }
 
 /**
- * Two-phase tool schema lifecycle. The provider sees only a compact selector until it chooses an operation;
- * the next request contains only that operation with a strict schema. Invalid calls retain the selection for retry.
+ * Keep all top-level tools visible. `book` first exposes its target choices; a `book` call with only a target
+ * loads that branch's complete schema, and the next request exposes that schema on the ordinary `book` tool.
  */
-export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, brainDir, bookShape = bookBranchParameters } = {}) {
-	const operations = tools.filter((tool) => tool.name !== SCHEMA_SELECTOR && (tool.callers === undefined || tool.callers.includes("model")));
+export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, brainDir } = {}) {
+	const operations = tools.filter((tool) => tool.callers === undefined || tool.callers.includes("model"));
 	const byName = new Map(operations.map((tool) => [tool.name, tool]));
+	const book = byName.get("book");
+	if (book === undefined) throw new Error("The top-level book tool is required for hierarchical schema routing.");
 	const pending = new Map();
-	const toolNames = operations.map((tool) => tool.name);
-	const selector = defineTool({
-		name: SCHEMA_SELECTOR,
-		description: "Choose the operation to perform next. This only loads that operation's exact argument schema; it does not perform the operation. Then call the selected tool with arguments matching its schema.",
-		parameters: obj({
-			tool: oneOf(toolNames, { description: "The exact tool to use next." }),
-			branch: opt(oneOf(BOOK_BRANCHES, { description: "For book, the selected target branch; otherwise omit." })),
-			action: opt(oneOf(BOOK_ACTIONS, { description: "For book, the operation within the selected target branch; otherwise omit." })),
-			variant: opt(oneOf(VARIANTS, { description: "For a conditional tool, select the exact operation branch; for book operation payloads, select a ledger kind, plan mode, or locator when requested." })),
-			field: opt(oneOf(FIELD_CHOICES, { description: "For atlas link/unlink, choose node links, project files, or both." })),
-		}),
-		constrainedSampling: { type: "json_schema", strict: "require" },
-		executionMode: "sequential",
-		replay: POLICY.enums.toolReplay.safe,
-		execute: async (args, api) => {
-			const selected = byName.get(args.tool);
-			if (!selected) return { isError: true, output: [{ type: "text", text: `Unknown operation ${JSON.stringify(args.tool)}; choose one of the listed tools.` }] };
-			const choice = { branch: args.branch, action: args.action, variant: args.variant, field: args.field };
-			if (args.tool === "book" && (choice.branch === undefined || choice.action === undefined)) return { isError: true, output: [{ type: "text", text: "Choose both the book target branch (for example atlas, ledger, or plan) and its action before loading its schema." }] };
-			if (args.tool !== "book" && (choice.branch !== undefined || choice.action !== undefined)) return { isError: true, output: [{ type: "text", text: "Only book schema selections use branch and action; omit both for other tools." }] };
-			if (args.tool === "book") {
-				if (choice.field !== undefined) return { isError: true, output: [{ type: "text", text: "The field choice is only used for atlas link/unlink; omit it for book." }] };
-				const choices = bookBranchVariants(choice.branch, choice.action);
-				if (choices.length > 0 && !choices.includes(choice.variant)) return { isError: true, output: [{ type: "text", text: `Book ${choice.branch}.${choice.action} needs variant ${choices.join(" or ")}; select one before loading its schema.` }] };
-				if (choices.length === 0 && choice.variant !== undefined) return { isError: true, output: [{ type: "text", text: `Book ${choice.branch}.${choice.action} has no variant; omit it.` }] };
-			}
-			if (choice.field !== undefined && !(args.tool === "atlas" && [POLICY.enums.atlasActions.link, POLICY.enums.atlasActions.unlink].includes(choice.variant))) return { isError: true, output: [{ type: "text", text: "The field choice is only used for atlas link/unlink; omit it otherwise." }] };
-			if (args.tool === "atlas" && [POLICY.enums.atlasActions.link, POLICY.enums.atlasActions.unlink].includes(choice.variant) && choice.field === undefined) return { isError: true, output: [{ type: "text", text: `Atlas ${choice.variant} needs a field choice: links, files, or both.` }] };
-			if (args.tool === "atlas" && ![POLICY.enums.atlasActions.link, POLICY.enums.atlasActions.unlink].includes(choice.variant) && choice.field !== undefined) return { isError: true, output: [{ type: "text", text: "Only atlas link/unlink uses a field choice." }] };
-			if (["atlas", "shell", "wake", "ask"].includes(args.tool) && choice.variant === undefined) return { isError: true, output: [{ type: "text", text: `${args.tool} needs an exact operation branch before its schema can be loaded.` }] };
-			if (!["book", "atlas", "shell", "wake", "ask"].includes(args.tool) && choice.variant !== undefined) return { isError: true, output: [{ type: "text", text: `${args.tool} has no operation variant; omit it.` }] };
-			let parameters;
-			try {
-				parameters = strictSchema(selectedSchema(args.tool, selected.parameters, choice, bookShape));
-			} catch (error) {
-				return { isError: true, output: [{ type: "text", text: `Cannot load a strict schema for ${args.tool}${choice.branch === undefined ? "" : `.${choice.branch}.${choice.action}`}${choice.variant === undefined ? "" : `.${choice.variant}`}: ${error.message} No operation was enabled.` }] };
-			}
-			const schemaText = JSON.stringify(parameters);
-			const schemaVersion = createHash("sha256").update(schemaText).digest("hex");
-			const schemaId = args.tool === "book" ? `cartographer:book:${choice.branch}:${choice.action}${choice.variant ? `:${choice.variant}` : ""}` : `cartographer:${selected.name}${choice.variant ? `:${choice.variant}` : ""}${choice.field ? `:${choice.field}` : ""}`;
-			const schemaRef = brainDir === undefined ? undefined : nativeReference(brainDir, "schema", schemaId, schemaVersion);
-			const referenceText = schemaRef === undefined ? "" : `Schema reference: ${JSON.stringify(schemaRef)}\n`;
-			const label = choice.branch === undefined ? `${selected.name}${choice.variant ? `.${choice.variant}` : ""}${choice.field ? `.${choice.field}` : ""}` : `book.${choice.branch}.${choice.action}${choice.variant ? `.${choice.variant}` : ""}`;
-			const prelude = `${referenceText}Loaded the full schema for ${label}. Make the operation call now.\n\n`;
-			const estimatedTokens = Math.ceil((schemaText.length + prelude.length + 32) / POLICY.estimation.charsPerToken);
-			if (estimatedTokens > schemaBudgetTokens) return { isError: true, output: [{ type: "text", text: `The ${selected.name} schema is about ${estimatedTokens} tokens, above the ${schemaBudgetTokens}-token schema budget; no operation was enabled.` }] };
-			if (brainDir !== undefined) retainReferenceVersion(brainDir, schemaRef, parameters);
-			const selection = { name: selected.name, ...choice, parameters, description: selected.description, schemaVersion, schemaRef };
-			pending.set(api.conversationId, selection);
-			return {
-				output: [{ type: "text", text: `${prelude.replace(". Make the operation call now.", ` (about ${estimatedTokens} tokens). Make the operation call now.`)}${schemaText}` }],
-				details: {
-					schemaRef: { ...(schemaRef ?? {}), estimatedTokens },
-					schemaSelection: { tool: selected.name, branch: choice.branch, action: choice.action, variant: choice.variant, field: choice.field, description: selected.description },
-				},
-			};
-		},
-	});
+
+	async function loadBookBranch(args, api) {
+		const target = args.target;
+		let parameters;
+		try {
+			parameters = strictSchema(bookTargetParameters(book.parameters, target));
+		} catch (error) {
+			return { isError: true, output: [{ type: "text", text: `Cannot load a strict schema for book.${target}: ${error.message} No operation was enabled.` }] };
+		}
+		const schemaText = JSON.stringify(parameters);
+		const schemaVersion = createHash("sha256").update(schemaText).digest("hex");
+		const schemaId = `cartographer:book:${target}:tree`;
+		const schemaRef = brainDir === undefined ? undefined : nativeReference(brainDir, "schema", schemaId, schemaVersion);
+		const referenceText = schemaRef === undefined ? "" : `Schema reference: ${JSON.stringify(schemaRef)}\n`;
+		const prelude = `${referenceText}Loaded the complete book.${target} action schema. Use the action and matching payload from this branch in the next book call.\n\n`;
+		const estimatedTokens = Math.ceil((schemaText.length + prelude.length + 32) / POLICY.estimation.charsPerToken);
+		if (estimatedTokens > schemaBudgetTokens) return { isError: true, output: [{ type: "text", text: `The book.${target} schema is about ${estimatedTokens} tokens, above the ${schemaBudgetTokens}-token schema budget; no operation was enabled.` }] };
+		if (brainDir !== undefined) retainReferenceVersion(brainDir, schemaRef, parameters);
+		pending.set(api.conversationId, { name: "book", branch: target, parameters, description: book.description, schemaVersion, schemaRef });
+		return {
+			output: [{ type: "text", text: `${prelude}${schemaText}` }],
+			details: {
+				schemaRef: { ...(schemaRef ?? {}), estimatedTokens },
+				schemaSelection: { tool: "book", branch: target, phase: "book-target", description: book.description },
+			},
+		};
+	}
 
 	return {
-		selector,
 		pending,
+		isBookBranchRequest: (call) => call?.name === "book" && isBookBranchRequest(call.arguments),
 		normalizeTool: (tool) => {
 			const originalPrepare = tool.prepareArguments;
+			const originalExecute = tool.execute;
 			return {
 				...tool,
 				prepareArguments: (args) => {
-					const selected = [...pending.values()].find((entry) => entry.name === tool.name && matchesSchema(args, entry.parameters));
+					if (tool.name === "book" && isBookBranchRequest(args)) return args;
+					const selected = [...pending.values()].find((entry) => entry.name === tool.name && matchesSchema(args, entry.parameters, { requireAll: false }));
 					const cleaned = cleanNullableArgs(args, selected?.parameters ?? tool.parameters);
 					return originalPrepare ? originalPrepare(cleaned) : cleaned;
 				},
+				...(originalExecute ? { execute: async (args, api, ...rest) => tool.name === "book" && isBookBranchRequest(args)
+					? loadBookBranch(args, api)
+					: originalExecute(args, api, ...rest) } : {}),
 			};
 		},
-
-		/** Replace the provider's wire tool set before sending. No missing strict support is silently downgraded. */
+		/** Keep every top-level call available; only swap the `book` schema between target selection and branch use. */
 		beforeProviderRequest: ({ payload, model }, api) => {
-			if (model.api !== "openai-completions") throw new Error(`Strict on-demand schemas require the OpenAI-compatible adapter; ${model.api} cannot be verified.`);
+			if (model.api !== "openai-completions") throw new Error(`Strict on-demand book schemas require the OpenAI-compatible adapter; ${model.api} cannot be verified.`);
 			const selection = pending.get(api.conversationId);
-			if (selection === undefined) {
-				const compact = providerTool(payload, SCHEMA_SELECTOR);
-				const parameters = strictSchema(structuredClone(compact.function.parameters));
-				return { payload: { ...payload, tools: [{ ...compact, function: { ...compact.function, parameters, strict: true } }] } };
-			}
-			const declared = providerTool(payload, selection.name);
-			const schema = strictSchema(structuredClone(selection.parameters));
-			return {
-				payload: {
-					...payload,
-					tools: [{ ...declared, function: { ...declared.function, description: selection.description, parameters: schema, strict: true } }],
-				},
-			};
+			const parameters = selection === undefined
+				? strictSchema(structuredClone(bookBranchRequest))
+				: strictSchema(structuredClone(selection.parameters));
+			const declared = providerTool(payload, "book");
+			const description = selection === undefined
+				? "Select a book target to load its full action schema; this call does not perform an operation. Then call book again using that branch's schema."
+				: selection.description;
+			const tools = payload.tools.map((entry) => entry === declared
+				? { ...entry, function: { ...entry.function, description, parameters, strict: true } }
+				: entry);
+			return { payload: { ...payload, tools } };
 		},
 		beforeTool: (call, api) => {
-			if (call.parent !== undefined || call.name === SCHEMA_SELECTOR) return undefined;
+			if (call.parent !== undefined || call.name !== "book") return undefined;
+			if (isBookBranchRequest(call.arguments)) return undefined;
 			const selection = pending.get(api.conversationId);
-			if (selection === undefined || selection.name !== call.name) return { block: `Tool call refused: ${call.name} has no matching on-demand schema selection. Choose its schema first.` };
-			if (!matchesSchema(call.arguments, selection.parameters)) return { block: `Tool call refused: arguments do not match the selected strict ${selection.name} schema. The operation was not run; retry with the required fields and exact selected branch.` };
-			const args = cleanNullableArgs(call.arguments, selection.parameters);
-			if (selection.name === "book" && (args?.target !== selection.branch || args?.action !== selection.action)) return { block: `Tool call refused: the selected book operation is ${selection.branch}.${selection.action}; target and action must match it.` };
-			if (selection.name === "atlas" && !args?.ops?.every((op) => op.action === selection.variant && (selection.field === undefined || (selection.field === "both" ? Object.hasOwn(op, "links") && Object.hasOwn(op, "files") : Object.hasOwn(op, selection.field) && !Object.hasOwn(op, selection.field === "links" ? "files" : "links"))))) return { block: `Tool call refused: the selected atlas action is ${selection.variant}${selection.field ? ` with ${selection.field}` : ""}.` };
-			if (selection.name === "ask" && (selection.variant === "choices" ? !Array.isArray(args?.choices) : args?.choices !== undefined)) return { block: `Tool call refused: the selected ask branch is ${selection.variant}.` };
-			if (selection.name === "shell" && args?.action !== selection.variant) return { block: `Tool call refused: the selected shell action is ${selection.variant}.` };
-			if (selection.name === "wake" && (selection.variant === "remove" ? args?.action !== POLICY.enums.actions.remove : args?.action !== POLICY.enums.actions.set)) return { block: `Tool call refused: the selected wake branch is ${selection.variant}.` };
-			return { arguments: args };
+			if (selection === undefined || selection.branch !== call.arguments?.target) return { block: `Tool call refused: load the book.${call.arguments?.target ?? "?"} schema first by calling book with only its target.` };
+			if (!matchesSchema(call.arguments, selection.parameters, { requireAll: false })) return { block: `Tool call refused: arguments do not match the loaded book.${selection.branch} schema. The operation was not run; retry with that branch's required fields and action.` };
+			return { arguments: cleanNullableArgs(call.arguments, selection.parameters) };
 		},
 		afterResponse: (message, api) => {
 			const selection = pending.get(api.conversationId);
 			if (selection === undefined) return;
-			const count = (message.content ?? []).filter((part) => part.type === "toolCall" && part.name === selection.name).length;
+			const count = (message.content ?? []).filter((part) => part.type === "toolCall" && part.name === "book" && !isBookBranchRequest(part.arguments)).length;
 			if (count > 0) {
 				selection.remaining = count;
 				selection.failed = false;
 			} else pending.delete(api.conversationId);
 		},
 		afterTool: (call, result, api) => {
-			if (call.parent !== undefined || call.name === SCHEMA_SELECTOR) return;
+			if (call.parent !== undefined || call.name !== "book" || isBookBranchRequest(call.arguments)) return;
 			const selection = pending.get(api.conversationId);
-			if (selection?.name !== call.name) return;
+			if (selection === undefined || selection.branch !== call.arguments?.target) return;
 			if (result?.isError) selection.failed = true;
 			if (Number.isInteger(selection.remaining)) selection.remaining--;
 			const done = selection.remaining === undefined || selection.remaining <= 0;
 			if (done && !selection.failed) pending.delete(api.conversationId);
 			const details = result?.details !== null && typeof result?.details === "object" && !Array.isArray(result.details) ? result.details : {};
-			return { ...result, details: { ...details, schemaRef: selection.schemaRef ?? { tool: selection.name, branch: selection.branch, action: selection.action, version: selection.schemaVersion } } };
+			return { ...result, details: { ...details, selectedSchemaRef: selection.schemaRef ?? { tool: "book", branch: selection.branch, version: selection.schemaVersion } } };
 		},
 		forRequest: (messages, conversationId) => {
 			let selection = pending.get(conversationId);
-			const selectorResults = messages.filter((message) => message.role === "toolResult" && message.toolName === SCHEMA_SELECTOR);
-			let activeSchemaResult = selection === undefined ? undefined : selectorResults.findLast((message) => message.details?.schemaRef?.version === selection.schemaVersion);
+			const probeIds = new Set(messages.flatMap((message) => message.role === "assistant" && Array.isArray(message.content)
+				? message.content.filter((part) => part.type === "toolCall" && part.name === "book" && isBookBranchRequest(part.arguments)).map((part) => part.id)
+				: []));
+			const branchResults = messages.filter((message) => message.role === "toolResult" && message.toolName === "book" && probeIds.has(message.toolCallId));
+			let activeSchemaResult = selection === undefined ? undefined : branchResults.findLast((message) => message.details?.schemaRef?.version === selection.schemaVersion);
 			if (selection === undefined) {
-				const latestSelectorResult = selectorResults.at(-1);
-				if (latestSelectorResult?.isError === true) {
-					const at = messages.indexOf(latestSelectorResult);
-					if (!messages.slice(at + 1).some((message) => message.role === "assistant")) activeSchemaResult = latestSelectorResult;
+				const latest = branchResults.at(-1);
+				if (latest?.isError === true) {
+					const index = messages.indexOf(latest);
+					if (!messages.slice(index + 1).some((message) => message.role === "assistant")) activeSchemaResult = latest;
 				}
 			}
 			if (selection === undefined && brainDir !== undefined) {
-				const candidate = selectorResults.at(-1);
-				if (candidate?.details?.schemaRef?.version && candidate.details.schemaSelection) {
+				const candidate = branchResults.at(-1);
+				if (candidate?.details?.schemaRef?.version && candidate.details.schemaSelection?.phase === "book-target") {
 					const ref = candidate.details.schemaRef;
 					const index = messages.indexOf(candidate);
-					const meta = candidate.details.schemaSelection;
 					const tail = messages.slice(index + 1);
-					const lastOperationResult = tail.findLast((message) => message.role === "toolResult" && message.toolName === meta.tool && message.details?.schemaRef?.version === ref.version);
+					const meta = candidate.details.schemaSelection;
+					const lastOperationResult = tail.findLast((message) => message.role === "toolResult" && message.toolName === "book" && message.details?.selectedSchemaRef?.version === ref.version);
 					const lastAssistant = tail.findLast((message) => message.role === "assistant");
-					const answeredWithoutOperation = lastAssistant?.stopReason === "stop" && !(lastAssistant.content ?? []).some((part) => part.type === "toolCall" && part.name === meta.tool);
-					const calls = (lastAssistant?.content ?? []).filter((part) => part.type === "toolCall" && part.name === meta.tool);
+					const answeredWithoutOperation = lastAssistant?.stopReason === "stop" && !(lastAssistant.content ?? []).some((part) => part.type === "toolCall" && part.name === "book" && !isBookBranchRequest(part.arguments));
+					const calls = (lastAssistant?.content ?? []).filter((part) => part.type === "toolCall" && part.name === "book" && !isBookBranchRequest(part.arguments));
 					const callIds = new Set(calls.map((call) => call.id));
-					const results = tail.filter((message) => message.role === "toolResult" && message.toolName === meta.tool && callIds.has(message.toolCallId));
+					const results = tail.filter((message) => message.role === "toolResult" && message.toolName === "book" && callIds.has(message.toolCallId));
 					const pendingCall = calls.length > 0 && (results.length < calls.length || results.some((message) => message.isError === true));
 					if (!answeredWithoutOperation && (pendingCall || (calls.length === 0 && (lastOperationResult === undefined || lastOperationResult.isError === true)))) {
 						const parameters = readReferenceVersion(brainDir, ref);
 						if (parameters !== undefined) {
-							selection = { name: meta.tool, branch: meta.branch, action: meta.action, variant: meta.variant, field: meta.field, description: meta.description, parameters, schemaVersion: ref.version, schemaRef: ref };
+							selection = { name: "book", branch: meta.branch, description: meta.description, parameters, schemaVersion: ref.version, schemaRef: ref };
 							pending.set(conversationId, selection);
 							activeSchemaResult = candidate;
 						}
@@ -377,10 +245,10 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 				const index = messages.indexOf(activeSchemaResult);
 				const tail = messages.slice(index + 1);
 				const lastAssistant = tail.findLast((message) => message.role === "assistant");
-				const answeredWithoutOperation = lastAssistant?.stopReason === "stop" && !(lastAssistant.content ?? []).some((part) => part.type === "toolCall" && part.name === selection.name);
-				const calls = (lastAssistant?.content ?? []).filter((part) => part.type === "toolCall" && part.name === selection.name);
+				const answeredWithoutOperation = lastAssistant?.stopReason === "stop" && !(lastAssistant.content ?? []).some((part) => part.type === "toolCall" && part.name === "book" && !isBookBranchRequest(part.arguments));
+				const calls = (lastAssistant?.content ?? []).filter((part) => part.type === "toolCall" && part.name === "book" && !isBookBranchRequest(part.arguments));
 				const callIds = new Set(calls.map((call) => call.id));
-				const results = tail.filter((message) => message.role === "toolResult" && message.toolName === selection.name && callIds.has(message.toolCallId));
+				const results = tail.filter((message) => message.role === "toolResult" && message.toolName === "book" && callIds.has(message.toolCallId));
 				const finishedSuccessfully = calls.length > 0 && results.length === calls.length && results.every((message) => message.isError !== true);
 				if (answeredWithoutOperation || finishedSuccessfully) {
 					pending.delete(conversationId);
@@ -388,12 +256,12 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 					activeSchemaResult = undefined;
 				}
 			}
-			const removeIds = new Set(selectorResults.filter((message) => message !== activeSchemaResult).map((message) => message.toolCallId).filter(Boolean));
+			const removeIds = new Set(branchResults.filter((message) => message !== activeSchemaResult).map((message) => message.toolCallId).filter(Boolean));
 			if (removeIds.size === 0) return messages;
 			return messages.flatMap((message) => {
-				if (message.role === "toolResult" && message.toolName === SCHEMA_SELECTOR && removeIds.has(message.toolCallId)) return [];
+				if (message.role === "toolResult" && message.toolName === "book" && removeIds.has(message.toolCallId)) return [];
 				if (message.role === "assistant" && Array.isArray(message.content)) {
-					const content = message.content.filter((part) => !(part.type === "toolCall" && part.name === SCHEMA_SELECTOR && removeIds.has(part.id)));
+					const content = message.content.filter((part) => !(part.type === "toolCall" && part.name === "book" && removeIds.has(part.id)));
 					if (content.length === 0) return [];
 					return [{ ...message, content }];
 				}

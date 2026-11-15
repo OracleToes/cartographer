@@ -246,7 +246,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
 	const schemaLifecycle = createToolSchemaLifecycle(sessionTools, { schemaBudgetTokens: Math.floor(config.contextWindow * POLICY.limits.toolSchemas.contextShare), brainDir });
 	for (let index = 0; index < sessionTools.length; index++) sessionTools[index] = schemaLifecycle.normalizeTool(sessionTools[index]);
-	sessionTools.push(schemaLifecycle.normalizeTool(schemaLifecycle.selector));
 	const core = defineExtension({
 		name: "cartographer",
 		// One section that never changes within a project: a change here makes the server read the whole prompt again.
@@ -284,7 +283,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				afterTool: async (call, result, api) => {
 					result = schemaLifecycle.afterTool(call, result, api) ?? result;
 					if (call.parent !== undefined) return undefined;
-					const looped = loopCheck(call, result, api);
+					const looped = schemaLifecycle.isBookBranchRequest(call) ? undefined : loopCheck(call, result, api);
 					const out = looped ?? result;
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {

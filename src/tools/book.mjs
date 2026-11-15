@@ -960,6 +960,7 @@ const operationBranch = (schema, action) => (schema?.anyOf ?? []).find((branch) 
 export function bookBranchVariants(target, action) {
 	if (target === "file" && ["inspect", "read"].includes(action)) return ["ref", "path"];
 	if (target === "shelf" && action === "add") return ["file-ref", "report-ref", "schema-ref", "path"];
+	if (target === "atlas" && ["link", "unlink"].includes(action)) return ["links", "files", "both"];
 	if (target === "ledger" && action === "add") return [...KINDS];
 	if (target === "plan" && action === "add") return [...MODES];
 	if (target === "plan" && action === "edit") return [...MODES, "text", "network", "standing"];
@@ -1013,6 +1014,12 @@ export function bookBranchParameters(source, target, action, variant) {
 					delete operationSchema.properties.name;
 					operationSchema.required = (operationSchema.required ?? []).filter((key) => key !== "name");
 				}
+				if (target === "atlas" && ["link", "unlink"].includes(action)) {
+					if (!["links", "files", "both"].includes(variant)) throw new Error(`atlas.${action} needs a links, files, or both branch.`);
+					if (variant !== "both") delete operationSchema.properties[variant === "links" ? "files" : "links"];
+					delete operationSchema.anyOf;
+					operationSchema.required = [...new Set([...(operationSchema.required ?? []), ...(variant === "both" ? ["links", "files"] : [variant])])];
+				}
 				if (operationSchema === undefined && target === "plan" && action === "before") {
 					const add = operationBranch(PLAN_OP, "add");
 					operationSchema = obj({ action: lit(action), id: add.properties.before, before: opt(add.properties.before) });
@@ -1048,6 +1055,53 @@ export function bookBranchParameters(source, target, action, variant) {
 	delete schema.allOf;
 	schema.additionalProperties = false;
 	return schema;
+}
+
+const schemaAllowsNull = (schema) => schema?.type === "null" || (Array.isArray(schema?.type) && schema.type.includes("null")) || schema?.const === null || schema?.enum?.includes?.(null) || schema?.anyOf?.some(schemaAllowsNull);
+function nonNullSchema(schema) {
+	if (schema?.type === "null" || schema?.const === null) return { type: "null" };
+	if (schema?.anyOf) {
+		const branches = schema.anyOf.filter((branch) => !(branch?.type === "null" || branch?.const === null));
+		if (branches.length === 1) return structuredClone(branches[0]);
+		if (branches.length > 1) return { anyOf: structuredClone(branches) };
+	}
+	if (Array.isArray(schema?.type) && schema.type.includes("null")) return { ...structuredClone(schema), type: schema.type.filter((type) => type !== "null") };
+	return structuredClone(schema);
+}
+const withNullable = (schema) => schemaAllowsNull(schema) ? structuredClone(schema) : { anyOf: [structuredClone(schema), { type: "null" }] };
+
+/** Strict-schema tree for one book target: all actions/variants for that target, and none from sibling targets. */
+export function bookTargetParameters(source, target) {
+	const actions = BOOK_BRANCH_ACTIONS[target];
+	if (!actions) throw new Error(`The book target ${target} has no operation tree.`);
+	const projections = actions.flatMap((action) => {
+		const variants = bookBranchVariants(target, action);
+		return (variants.length === 0 ? [undefined] : variants).map((variant) => bookBranchParameters(source, target, action, variant));
+	});
+	const sourceProps = source.properties ?? {};
+	const keys = new Set(projections.flatMap((schema) => Object.keys(schema.properties ?? {})));
+	keys.delete("book"); keys.delete("ops"); keys.delete("text");
+	const properties = {};
+	for (const key of keys) {
+		if (key === "target") properties.target = { type: "string", const: target, description: "Selected book target." };
+		else if (key === "action") properties.action = oneOf(actions, { description: `An action supported by ${target}.` });
+		else if (key === "operation") {
+			const branches = [...new Map(projections.map((schema) => schema.properties?.operation).filter(Boolean).map((branch) => [JSON.stringify(branch), branch])).values()];
+			properties.operation = { anyOf: [...branches, { type: "null" }] };
+		} else properties[key] = structuredClone(sourceProps[key]);
+	}
+	const anyOf = projections.map((projection) => {
+		const required = new Set(projection.required ?? []);
+		const branchProps = {};
+		for (const key of keys) {
+			if (key === "target") { branchProps.target = projection.properties.target; continue; }
+			if (key === "action") { branchProps.action = projection.properties.action; continue; }
+			const property = projection.properties?.[key];
+			branchProps[key] = property === undefined ? { type: "null" } : required.has(key) ? nonNullSchema(property) : withNullable(property);
+		}
+		return { type: "object", properties: branchProps, required: [...new Set(["target", ...(projection.required ?? [])])], additionalProperties: false };
+	});
+	return { type: "object", properties, required: ["target", "action"], anyOf, additionalProperties: false };
 }
 
 function specializeOperation(target, action, operationSchema, variant) {
