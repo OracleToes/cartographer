@@ -4,7 +4,7 @@
 // be out of date. The main agent has no tools that look at files; the tree is how
 // it sees where things are. It shows a few levels below an anchor folder: the
 // agent moves the anchor into a folder to look around there, and back to the
-// project root, and sets how many levels are drawn (the `atlas` tool, src/tools/atlas.mjs).
+// project root, and sets how many levels are drawn (`book` with target=atlas, action=tree).
 //
 // A file or folder that a node of the graph links to carries the node's name, so
 // the agent sees what it has written something about and what is blank.

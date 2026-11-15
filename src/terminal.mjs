@@ -103,13 +103,7 @@ export function describeCall(call) {
 			return `search /${oneLine(args.pattern, POLICY.limits.terminal.callSummary.searchPattern)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
 		case "list":
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
-		case "atlas":
-			return oneLine(
-				`atlas ${(Array.isArray(args.ops) ? args.ops : [])
-					.map((op) => `${op?.action ?? "?"} ${op?.name ?? (Array.isArray(op?.names) ? op.names.join(", ") : (op?.anchor ?? (op?.depth !== undefined ? `depth ${op.depth}` : "")))}`.trim())
-					.join(" · ")}`,
-				POLICY.limits.terminal.callSummary.atlasCall,
-			);
+
 		case "wake":
 			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
@@ -146,8 +140,8 @@ export function describeResult(message) {
 	if (message.isError && /^Tool \w+ was aborted/.test(plain(text))) return "stopped";
 	if (message.isError && /^Tool \w+ was interrupted/.test(plain(text))) return "cut off by a restart, and not run again";
 	if (message.isError) return `refused: ${oneLine(plain(text).replace(/^Refused: /, ""), POLICY.limits.terminal.resultSummary.refusal)}`;
-	// What was written to the graph; for a call that only read, the first line of what it got.
-	if (message.toolName === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
+	// What was written to the graph (through `book` with target=atlas); for a call that only read, the first line of what it got.
+	if (message.toolName === "book" && message.details?.target === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
 	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
 	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
 	// "Wrote roll.py: 34 lines, a new file." The path is already on the line.
@@ -461,6 +455,10 @@ export async function runTerminal(session, options) {
 							else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, POLICY.limits.terminal.resultSummary.contextChange)}`);
 						} else if (name === "books" && !message.isError && shown.length > 0) {
 							for (const change of shown) line(`${bold("●")} ${change}  ${dim("(/assessment shows it)")}`);
+						} else if (name === "atlas") {
+							// What the agent wrote to its map, one line each.
+							if (message.isError || shown.length === 0) line(`${bold("●")} atlas  not changed: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
+							else for (const change of shown) line(`${bold("●")} atlas  ${oneLine(change, POLICY.limits.terminal.resultSummary.atlasChange)}`);
 						} else {
 							if (call?.quiet && !message.isError) continue;
 							if (call?.shown && !call.quiet) line(`  ${dim(`→ ${describeResult(message)}`)}`);
@@ -471,10 +469,6 @@ export async function runTerminal(session, options) {
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
 						if (message.isError || shown.length === 0) line(`${bold("●")} ${message.toolName}  ${message.toolName === "wake" ? "not changed" : "refused"}: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
 						else for (const change of shown) line(`${bold("●")} ${message.toolName === "sleep" ? dim(change) : `wake  ${oneLine(change, POLICY.limits.terminal.resultSummary.wakeChange)}`}`);
-					} else if (message.toolName === "atlas" && !message.isError && (message.details?.shown?.length ?? 0) > 0) {
-						// What the main agent wrote to its map, one line each.
-						pendingCalls.delete(message.toolCallId);
-						for (const change of message.details.shown) line(`${bold("●")} atlas  ${oneLine(change, POLICY.limits.terminal.resultSummary.atlasChange)}`);
 					} else {
 						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);

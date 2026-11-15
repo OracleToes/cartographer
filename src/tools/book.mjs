@@ -4,6 +4,7 @@
 // src/atlas.mjs and src/context.mjs; this file routes target/action calls to them. One flat declaration
 // (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
+import { projectFiles } from "./look.mjs";
 import { createHash } from "node:crypto";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { bool, compile, obj, opt, str, unknown } from "@earendil-works/pi-schema";
@@ -79,6 +80,8 @@ const CAPABILITIES = {
 		unlink: { ref: "required", versionPrecondition: true, operation: "required" },
 		confirm: { ref: "required", versionPrecondition: true, operation: "required" },
 		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		look: { operation: "required", operationFields: ["name"] },
+		tree: {},
 	},
 	assessment: {
 		list: {},
@@ -514,6 +517,17 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail(`context ${action} needs an operation object with the target-specific fields.`);
 			return runContext({ root, brainDir, config, engine }, { ops: [{ ...payload, action }] }, api);
 		}
+		if (target === "atlas" && (action === "look" || action === "tree")) {
+			if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`The atlas ${action} operation needs an object with the target-specific fields.`);
+			const { atlas, error } = loadAtlas(brainDir);
+			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
+			const { plan } = loadPlan(brainDir);
+			try {
+				const result = applyAtlasOp(atlas, { ...(args.operation ?? {}), action }, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
+				if (result.changed) saveAtlas(brainDir, atlas);
+				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
+			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
+		}
 		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
 		const isAdd = action === "add";
 		if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
@@ -541,7 +555,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			const atlasOp = { ...operation, ...(isAdd ? {} : { name: args.ref.id }) };
 			const { plan } = loadPlan(brainDir);
 			try {
-				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => [], created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
+				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
 				if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
 				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
 			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }

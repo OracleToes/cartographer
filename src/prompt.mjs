@@ -14,8 +14,7 @@ export const TOOLS = {
 	ask: "Ask the user a question and wait for the answer, which comes back as this call's result. Use it only when nothing can go on without their answer. For a matter of taste or a choice that others do not depend on, record a question in the ledger instead and keep working; the user answers it in the Requests view. With `choices`, a number picks one.",
 	return: "End this focused context. Before returning, keep durable findings in the shared books or atlas; `report` carries the outcome and what remains to the orchestrating context. `done` says whether the assigned work is carried out. Call `return` in your last reply; this focus ends there.",
 	task: "Enter one focused context for one bounded piece of work. Give a `brief` that says what to do and what must be kept or reported. This is the same agent, sharing the books and atlas; the working context is temporary. One focus at a time. For a project change, name its plan `item`; a change item that waits for approval cannot start. Keep lasting findings before returning.",
-	book: "The universal content interface. Make one call with a `target` and one `action`, plus arguments matching that target's schema. Pass a stable `{namespace,kind,id,version?}` `ref` for an existing entity. Examples: inspect a file by path {\"target\":\"file\",\"action\":\"inspect\",\"path\":\"src/main.js\"}; read a file by ref; add it to the shelf with `target=shelf, action=add, ref, range`; list/remove shelf placements with `shelf list` and `shelf remove` plus its `placementId`. Use `list`, then `inspect`/`read` on returned refs for brain records, Durable messages/tool calls/results, prompt entries, tools, and exact schemas. Lists return at most 200 references and take the `cursor` from the previous page when there is more. Brain mutations carry their target-specific fields in `operation`, plus `expectedVersion` for existing records; atlas/ledger/plan/books/context keep their established verbs. A chat message `edit` is soft-forget only and reports generic success. Project-file actions dispatch to one short focus from the orchestrator; when already focused they run inline. File create/edit require an authorized change plan item; edits also require the current SHA-256 `expectedVersion`. `file rebind` explicitly attaches a known identity to a moved file using its current version. `context` also takes `fold` (operation `{id}`: drop a kept report, like t12, or task-step result ids, from view), `note` (operation `{text}`: what to keep, with file paths and line numbers) and `collapse` (operation `{text}` optional: ask for this context to collapse after this reply). One `operation` per call. If one is refused, the message names the exact field at fault — change that field, not the shape of the call.",
-	atlas: "Your map of the project's parts, as nodes that link to files and to each other. `add` a node with a one-line `gist` (or `edit`, `remove`, `confirm`, `link`, `unlink`, `look`, `tree`); any focused context can write what it learns while the knowledge is fresh. A node a changed file links to is marked as possibly out of date until you confirm it. The tree of files is drawn for you in the state block.",
+	book: "The universal content interface. Make one call with a `target` and one `action`, plus arguments matching that target's schema. Pass a stable `{namespace,kind,id,version?}` `ref` for an existing entity. Examples: inspect a file by path {\"target\":\"file\",\"action\":\"inspect\",\"path\":\"src/main.js\"}; read a file by ref; add it to the shelf with `target=shelf, action=add, ref, range`; list/remove shelf placements with `shelf list` and `shelf remove` plus its `placementId`. Use `list`, then `inspect`/`read` on returned refs for brain records, Durable messages/tool calls/results, prompt entries, tools, and exact schemas. Lists return at most 200 references and take the `cursor` from the previous page when there is more. Brain mutations carry their target-specific fields in `operation`, plus `expectedVersion` for existing records; atlas/ledger/plan/books/context keep their established verbs; for the atlas: `add`/`edit` a node with a `name` and a one-line `gist` (plus `confirm`, `link`, `unlink`, `remove`, `look`, `tree`). A chat message `edit` is soft-forget only and reports generic success. Project-file actions dispatch to one short focus from the orchestrator; when already focused they run inline. File create/edit require an authorized change plan item; edits also require the current SHA-256 `expectedVersion`. `file rebind` explicitly attaches a known identity to a moved file using its current version. `context` also takes `fold` (operation `{id}`: drop a kept report, like t12, or task-step result ids, from view), `note` (operation `{text}`: what to keep, with file paths and line numbers) and `collapse` (operation `{text}` optional: ask for this context to collapse after this reply). One `operation` per call. If one is refused, the message names the exact field at fault — change that field, not the shape of the call.",
 	read: "Read text files of the project. Each displayed line uses a line number followed by `│`; only the bytes after `│` are file content. A line marked cut is incomplete and is not safe to copy into `edit`. Ask for several files when you know which you need; a range reads part of a long file. Read from this focus context.",
 	search: "Find lines matching a pattern in the project's text files, with their paths and line numbers. Use from a focused context.",
 	list: "List the files and folders at a path, with a tree of what is below it. Use from a focused context.",
@@ -64,7 +63,7 @@ const SECTIONS = [
 	],
 	[
 		"atlas",
-		"The atlas is your map of the project: a tree of its files (drawn in the state block) and a graph of nodes you and your tasks write — what a part does, what was found, what was ruled out, and how these connect. A task that read the files knows them best, so tasks write nodes themselves. A node a changed file links to is marked as possibly out of date until confirmed. Write what you would want to know on returning with an empty context.",
+		"The atlas is your map of the project: a tree of its files (drawn in the state block) and a graph of nodes you and your tasks write — what a part does, what was found, what was ruled out, and how these connect. A task that read the files knows them best, so tasks write nodes themselves. A node a changed file links to is marked as possibly out of date until confirmed. Write what you would want to know on returning with an empty context. `book` with `target=atlas` writes and reads the nodes, one node per call.",
 	],
 	[
 		"assessment",
@@ -131,7 +130,7 @@ export const TASK_EXAMPLE = {
 };
 
 /** Which kind of task it is; follows TASK_HEADER. */
-export const LOOK_NOTE = "This is a look task: `book` with target=file and action=inspect/read works for project content; `search` and `list` find files. `book` file create/edit and `shell` are refused without an authorized change item, so report any change needed. `shell` with action read or wait lets you read an open shell window and wait for it, never type into it. `atlas` works too: before returning, record lasting findings as nodes linked to their files.";
+export const LOOK_NOTE = "This is a look task: `book` with target=file and action=inspect/read works for project content; `search` and `list` find files. `book` file create/edit and `shell` are refused without an authorized change item, so report any change needed. `shell` with action read or wait lets you read an open shell window and wait for it, never type into it. `book` with `target=atlas` works too: before returning, record lasting findings as nodes linked to their files.";
 /**
  * @param {{ commands: "sandbox" | "direct" | "none", network: boolean }} can
  *   commands: how this session runs commands (src/sandbox.mjs), as it stands when the task starts
@@ -146,7 +145,7 @@ export const CHANGE_NOTE = (item, text, can = { commands: "none", network: false
 				"The user has switched the sandbox off: your commands run directly on this machine, as the user, with the network. They can change and delete files anywhere the user can, and what a command does outside the project directory is not recorded and cannot be undone. `book` file create/edit still reach the project directory only. Work inside it unless the brief names a path outside it. When what you wrote can be run, run it, and put the command and what it printed into your report.",
 			none: "`shell` is refused in this session, so nothing can be run: say in your report how to run what you wrote.",
 		}[can.commands],
-		"When a node of the atlas describes something you changed, rewrite the node with `atlas` so that it stays true.",
+		"When a node of the atlas describes something you changed, rewrite the node with `book` (`target=atlas`) so that it stays true.",
 		"In your report, name each file you changed and say what you left undone.",
 	].join(" ");
 
@@ -227,7 +226,7 @@ export const ASK_TASK = (reason) =>
 
 /** Added to a tool result of the main agent that answered true while it was working. */
 export const HANDOFF_IN_TURN = (reason) =>
-	`Cartographer: your context will be collapsed after your next reply (${reason}), and you asked for a turn first. Use that reply for it: write what must not be lost with \`ledger\`, \`atlas\` or \`assess\`, and put a file you keep needing on your shelf with \`context\`. What you write as plain text is lost.`;
+	`Cartographer: your context will be collapsed after your next reply (${reason}), and you asked for a turn first. Use that reply for it: write what must not be lost with \`book\` (target=ledger, target=atlas or the books), and put a file you keep needing on your shelf with \`book\` (target=shelf, action=add). What you write as plain text is lost.`;
 
 /** Sent as a turn of its own to the main agent that answered true while it rested. */
 export const HANDOFF_NOTE = (reason) =>
@@ -235,7 +234,7 @@ export const HANDOFF_NOTE = (reason) =>
 		POLICY.markup.note.open,
 		`Written by Cartographer, not by the user. Nobody typed this. Your context will be collapsed when this turn ends (${reason}), and you asked for a turn first.`,
 		"",
-		"Write what must not be lost with `book` (its ledger, its books for the assessment) or `atlas`, and put a file you keep needing on your shelf with `book` (target=shelf, action=add). What you write as plain text is lost. Then end the turn: call `sleep`, or `chat` if the user should hear something.",
+		"Write what must not be lost with `book` (its ledger, its books for the assessment, its atlas), and put a file you keep needing on your shelf with `book` (target=shelf, action=add). What you write as plain text is lost. Then end the turn: call `sleep`, or `chat` if the user should hear something.",
 		POLICY.markup.note.close,
 	].join("\n");
 

@@ -47,7 +47,6 @@ export function homeOf(name, args = {}) {
 	if (name === "shell") return { tab: "shells" };
 	if (name === "plan") return { tab: "carto", view: "plan" };
 	if (name === "ledger") return { tab: "carto", view: "ledger" };
-	if (name === "atlas") return { tab: "carto", view: "atlas" };
 	if (name === "assess" || name === "books") return { tab: "carto", view: "assessment" };
 	if (name === "context") return { tab: "context" };
 	return undefined;

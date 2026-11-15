@@ -20,7 +20,6 @@ import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
 import { loadTop, pin } from "./top.mjs";
-import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
 import { shellTool } from "./tools/shell.mjs";
@@ -235,7 +234,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
 		returnTool({ root, brainDir, config }),
 		bookTool({ root, brainDir, config, engine, gate }),
-		atlasTool({ root, brainDir, gate }),
 		...lookTools(root),
 		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
 		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
