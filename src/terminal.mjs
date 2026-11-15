@@ -701,7 +701,8 @@ export async function runTerminal(session, options) {
 			engine.forget();
 			return false;
 		}
-		if (!asked) {
+		// O1: the metacognition question before a collapse is opt-in (config handoffQuestion). Off, the collapse is mechanical.
+		if (!asked && config.handoffQuestion === true) {
 			const results = view.messages.slice(view.messages.findLastIndex((message) => message.role === "assistant") + 1).filter((message) => message.role === "toolResult");
 			const choice = await engine.ask(main.id, { reason, results });
 			askedLine({ reason, ...choice });

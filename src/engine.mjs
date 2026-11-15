@@ -258,11 +258,14 @@ export function createEngine({ root, brainDir, config }) {
 			let note;
 			if (!due.asked) {
 				due.asked = true;
-				const choice = await ask(ROOT_CONVERSATION_ID, { reason: due.reason });
-				emit({ type: "asked", reason: due.reason, ...choice });
-				if (choice.handoff) {
-					due.round = at.round;
-					note = HANDOFF_IN_TURN(due.reason);
+				// O1: the metacognition question before a collapse is opt-in (config handoffQuestion). Off: the collapse carries the last reply mechanically, with no ask.
+				if (config.handoffQuestion === true) {
+					const choice = await ask(ROOT_CONVERSATION_ID, { reason: due.reason });
+					emit({ type: "asked", reason: due.reason, ...choice });
+					if (choice.handoff) {
+						due.round = at.round;
+						note = HANDOFF_IN_TURN(due.reason);
+					}
 				}
 			}
 			// The reply that was told gets its turn: the collapse comes with a later one.
@@ -301,14 +304,17 @@ export function createEngine({ root, brainDir, config }) {
 			if (mine.pending === "now" || mine.pending === "told") why = mine.reason ?? "You asked for it";
 			else if (nearlyFull) {
 				why = `Your context held about ${Math.round((state.used / config.contextWindow) * 100)}% of what fits`;
-				const results = messages.slice(messages.findLastIndex((message) => message.role === "assistant") + 1).filter((message) => message.role === "toolResult");
-				const choice = await ask(conversationId, { reason: why, task: true, results });
-				emit({ type: "asked", task: true, reason: why, ...choice });
-				if (choice.handoff) {
-					updateContext(brainDir, (store) => {
-						Object.assign(taskState(store, conversationId), { pending: "told", reason: why });
-					});
-					return TASK_HANDOFF;
+				// O1: opt-in (config handoffQuestion). Off: the task's steps are cut with the mechanical carry, no ask.
+				if (config.handoffQuestion === true) {
+					const results = messages.slice(messages.findLastIndex((message) => message.role === "assistant") + 1).filter((message) => message.role === "toolResult");
+					const choice = await ask(conversationId, { reason: why, task: true, results });
+					emit({ type: "asked", task: true, reason: why, ...choice });
+					if (choice.handoff) {
+						updateContext(brainDir, (store) => {
+							Object.assign(taskState(store, conversationId), { pending: "told", reason: why });
+						});
+						return TASK_HANDOFF;
+					}
 				}
 			}
 			if (why === undefined) return undefined;

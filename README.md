@@ -715,6 +715,15 @@ Findings:
 
 The system prompt and tool descriptions are source code in `src/prompt.mjs`. They are fixed for a run; changing them is a code change reviewed and made by the project maintainer. There is no agent-facing proposal, approval, or runtime overlay workflow. The old core `prompt.json` and project `.atlas/carto-proposals.json`, if present, are left untouched but are no longer read or applied.
 
+Besides the tool descriptions, the prompt tells the agent how to work when nobody is talking to it. In substance:
+
+- **The dyad.** You work beside the agent at a shared screen. Chat is the steering wheel: interrupt any time, and answer while it works; your messages may drop or redirect the work, and your edits to the brain are taken as they are.
+- **Two modes.** With approval required (the default), each change item is a request you answer in your own time; looking, recording, testing and proposing never wait for it. With approval off (`/yolo`), the agent's judgment governs — still one plan item at a time, still with checkpoints, still inside the plan gate and the sandbox. Approval off is trust, never a wider reach. The state block says which mode you are in.
+- **The standing duty.** At the start of a session, and after every wake with nothing owed to you, the agent's turn is its own: map the project, record it in the books and the atlas, form hypotheses and test them (with the commands it may run), work what stands approved, and keep the map honest. Your silence is "not authorized yet", never "do not look".
+- **Sleep, with evidence.** `sleep` is a conclusion the agent reaches after checking a written list — nothing waiting from you, no open wake, no approved item uncarried, no question owed to you, no untested hypothesis, no unmapped ground in view, no found weakness unplanned. If anything remains, that is the next work, not a reason to sleep.
+
+What the state block says (time, tree, atlas, books, ledger, plan, requests, shelf, fold-ins) is built fresh for every request and is never stored; see [How the agent sees its brain](#how-the-agent-sees-its-brain).
+
 ### Time
 
 The model has no clock, so Cartographer tells it the time in three places, always written the same way:
@@ -858,7 +867,7 @@ Your talk with the user, word for word; what was said before it is gone
 
 A collapse that would free next to nothing is not made, however full the context is. That case means the shelf, the talk and the fixed part fill the window by themselves; lower `shelfTokens` or `chatWindow`.
 
-**The question.** Before a collapse that the agent did not ask for itself, Cartographer asks it whether something in view is written down nowhere and will be needed. The request is the last one again with the question added at its end, so the server has read all of it but the question; the reply is limited by a schema to `{"handoff": true}` or `{"handoff": false}`, with thinking switched off for that one request. `false` costs the reading of the last reply and of the question, a second or two as a rule, and the collapse follows at once. `true` gives the agent one turn to write down what it needs, in the ledger, the graph, the assessment or on the shelf, and then the collapse follows. If the server cannot answer such a request, the screen says so with the server's words and the collapse is made without the question.
+**The question (opt-in, off by default).** With `"handoffQuestion": true`, before a collapse that the agent did not ask for itself, Cartographer asks it whether something in view is written down nowhere and will be needed. With the default `false` the collapse carries the last reply mechanically — the block quotes the calls of the last reply and what each returned, never asks — and nothing of that one request is spent on the question. The request is the last one again with the question added at its end, so the server has read all of it but the question; the reply is limited by a schema to `{"handoff": true}` or `{"handoff": false}`, with thinking switched off for that one request. `false` costs the reading of the last reply and of the question, a second or two as a rule, and the collapse follows at once. `true` gives the agent one turn to write down what it needs, in the ledger, the graph, the assessment or on the shelf, and then the collapse follows. If the server cannot answer such a request, the screen says so with the server's words and the collapse is made without the question.
 
 **The read-ahead.** A new context has to be read by the server once, and at about 740 tokens a second a block of 15,000 tokens takes 20 seconds. After a collapse at rest Cartographer therefore sends the new start of the context at once, asking for one token of answer, so that it is read while you are away. When you type before it is done, it is stopped and your message goes first. `readAhead: false` switches it off. A collapse in the middle of a turn needs none: the agent's next request reads the new context.
 
@@ -866,7 +875,7 @@ A collapse that would free next to nothing is not made, however full the context
 
 A task reads a file, reports, and the file text is gone with the task. When the agent keeps sending tasks to the same file, it can put the file on its shelf: `{"action":"shelve","path":"src/roll.py"}`, or with `"lines":"1-80"`. Marking changes nothing at that moment, since putting text at the front of the context would make the server read everything again. From the next collapse on the file stands in the block, and since a task continues from the main agent's context, every task then starts with it already read.
 
-The shelf holds at most `shelfTokens` (12,000); a file that would not fit is refused, with the sizes. The block shows a shelved file as it was at the collapse. When the file changes afterwards the block is left as it is and the state block says which copy is old; the next collapse writes the current text. A file that was deleted leaves the shelf, and both you and the agent are told. `/context` shows what is on the shelf, what waits for the next collapse, and what was taken off.
+The shelf holds at most `shelfTokens` (12,000); a file that would not fit is refused, with the sizes. The block shows a shelved file as it was at the collapse. When the file changes afterwards the block is left as it is and the state block names the file as changed, one line with the line delta (read or re-shelve it to see the difference); the next collapse writes the current text. A file that was deleted leaves the shelf, and both you and the agent are told. `/context` shows what is on the shelf, what waits for the next collapse, and what was taken off.
 
 ### Recalling and folding
 
@@ -884,7 +893,7 @@ A focus has its own collapsible working conversation, but it is the same agent a
 - When a task reads the same lines of a file again, the older copy is replaced by one line without being asked. This is done only where it pays: the copy is at least about 400 tokens, and what follows it, which the server then reads again, is at most eight times its size.
 - `{"action":"note","text":"…"}` writes down a finding. Notes stay when the steps are collapsed.
 - A focus has a shelf. Its items stay in view when its steps collapse. With `"hand_on": true`, or by naming a path/reference in `return.shelf`, the item is handed to the shared shelf when the focus ends; `return.shelf` adds it first if it is not already there.
-- When the context is `collapseFull` percent full during a task, the task is asked the same question, with the same two answers. Then its steps become one block: its notes, one line per call, and its shelf. The task goes on with its brief. It can ask for this itself with `collapse`.
+- When the context is `collapseFull` percent full during a task, the task's steps become one block: its notes, one line per call, and its shelf. With `handoffQuestion` on, the task is first asked the question, with the same two answers; with the default off the cut is mechanical. The task goes on with its brief. It can ask for this itself with `collapse`.
 
 ### What `/context` shows
 
@@ -985,6 +994,7 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `collapseMinutes` | 5 | And after you have been away this many minutes, whatever would go. 0: never for that reason |
 | `collapseFull` | 80 | While the agent works, its context is collapsed when it is this full, in percent of `contextWindow`, 30 to 95. The same limit holds for a task's steps |
 | `readAhead` | true | Whether the server is sent the collapsed context at once, so that it is read when your next message comes |
+| `handoffQuestion` | false | Whether a collapse the agent did not ask for is preceded by the `{"handoff": true|false}` question. false: the collapse carries the last reply mechanically |
 | `shellRead` | `[]` | More folders a command may read, besides the system and the project: full paths, or starting with `~/`. For programs installed in your home folder that the sandbox does not show by itself |
 
 ## What is not here yet

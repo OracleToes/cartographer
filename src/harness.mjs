@@ -244,7 +244,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		name: "cartographer",
 		// One section that never changes within a project: a change here makes the server read the whole prompt again.
 		// It is built from the named sections of src/prompt.mjs.
-		sections: [section("preamble", () => systemPrompt({ root }), { tag: false })],
+		sections: [section("preamble", () => systemPrompt({ root, handoffQuestion: config.handoffQuestion === true }), { tag: false })],
 		// One flat list of tools for the main agent and every task: a fork shares the main conversation's
 		// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
 		// Tool descriptions are built into the tool definitions.

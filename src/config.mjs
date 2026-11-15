@@ -85,6 +85,9 @@ export const DEFAULTS = freezeTree({
 	// Whether the terminal shows what the agent thinks and notes for itself when it starts. Ctrl-T switches it.
 	thinking: true,
 	// The context engine (src/context.mjs). Sizes are in tokens.
+	// Whether a collapse that the agent did not ask for itself is preceded by the metacognition question ({"handoff": true|false}).
+	// Off by default (O1): the collapse carries the last reply mechanically. Turn it on to get the question back.
+	handoffQuestion: false,
 	// How much of the talk between the user and the agent a collapse keeps word for word.
 	chatWindow: 8000,
 	// How much the shelf holds: files the agent keeps in view across collapses.
@@ -107,7 +110,7 @@ export const POLICY = freezeTree({
 		plan: { itemChars: 300, items: 30 },
 		atlas: { nameChars: 40, gistChars: 200, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
 		assessment: { textChars: 3000 },
-		context: { recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, shelfDiffLines: 120, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, curatedRowChars: 3000, curatedRows: 80, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, operationReplay: 256, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
+		context: { recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, curatedRowChars: 3000, curatedRows: 80, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, operationReplay: 256, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
 		git: { errorChars: 400, maxBufferBytes: 256 * 1024 * 1024, checkoutBatchItems: 200, undoTimestampToleranceMs: 1000, checkpointBufferBytes: 64 * 1024 * 1024 },
 		checkpoints: { changeRecordLines: 40, folderCollapseFiles: 3 },
 		engine: { serverErrorChars: 300, handoffErrorChars: 120, noteChars: 2000, askMaxTokens: 16 },
@@ -328,7 +331,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	if (config.chatWindow + config.shelfTokens > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow and shelfTokens together must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
-	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap", "initiate"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
+	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
 	if (!Number.isInteger(config.writeLines) || config.writeLines < POLICY.validation.writeLinesMin) throw new ConfigError(`config: writeLines must be a whole number of lines, ${POLICY.validation.writeLinesMin} or more`);
 	if (!POLICY.enums.colors.includes(config.colors)) throw new ConfigError(`config: colors must be ${POLICY.enums.colors.slice(0, -1).map((color) => JSON.stringify(color)).join(", ")} or ${JSON.stringify(POLICY.enums.colors.at(-1))}`);
 	if (!POLICY.enums.themes.includes(config.theme)) throw new ConfigError(`config: theme must be ${POLICY.enums.themes.slice(0, -1).map((theme) => JSON.stringify(theme)).join(", ")} or ${JSON.stringify(POLICY.enums.themes.at(-1))}`);

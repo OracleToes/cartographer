@@ -96,8 +96,8 @@ const shelfIdLine = (text, item) => {
 	return `${clean} [shelf id ${item.id}]${rest.length > 0 ? `\n${rest.join("\n")}` : ""}`;
 };
 
-/** A compact line diff for the state block; very large changes are clipped without hiding that fact. */
-function shelfDiff(before, after) {
+/** The line delta of a shelf change, as +added −removed lines; for the one-line notices in the state block. */
+function shelfDelta(before, after) {
 	const oldLines = String(before ?? "").split("\n");
 	const newLines = String(after ?? "").split("\n");
 	let start = 0;
@@ -105,12 +105,7 @@ function shelfDiff(before, after) {
 	let oldEnd = oldLines.length;
 	let newEnd = newLines.length;
 	while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) { oldEnd--; newEnd--; }
-	const changed = [
-		...oldLines.slice(start, oldEnd).map((line) => `- ${line}`),
-		...newLines.slice(start, newEnd).map((line) => `+ ${line}`),
-	];
-	const limit = POLICY.limits.context.shelfDiffLines;
-	return changed.length > limit ? [...changed.slice(0, limit), `… ${changed.length - limit} more diff lines omitted`].join("\n") : changed.join("\n");
+	return { added: newEnd - start, removed: oldEnd - start };
 }
 export const textOf = (message) =>
 	typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("") : "";
@@ -929,9 +924,11 @@ export function contextLines(brainDir, root, { used, window }) {
 		return [{ item, current }];
 	});
 	if (changes.length > 0) {
-		lines.push("Changes since the saved shelf snapshots (the snapshots stay as they were until collapse):");
+		// One line per changed file (O3): the diff is a tool call away — re-shelve the file or read it — not prompt cargo.
+		lines.push("Shelved files changed since their snapshots (the snapshots stay as they were until collapse; read the file or re-shelve it for the difference):");
 		for (const { item, current } of changes) {
-			lines.push(`== ${shelfLabel(item)} [${item.id}] ==\n${shelfDiff(item.snapshot, current)}`);
+			const { added, removed } = shelfDelta(item.snapshot, current);
+			lines.push(`  ${shelfLabel(item)} [${item.id}] changed (+${added} −${removed} lines)`);
 		}
 	}
 	return lines.length === 0 ? "" : `Context\n${lines.join("\n")}\n\n`;
