@@ -33,7 +33,7 @@
 // front of its brief is the main agent's and stays as it is (see `dressTask`).
 import { POLICY } from "./config.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileIdentityForPath, readReferenceVersion } from "./catalog.mjs";
 import { TASK_HEADER } from "./prompt.mjs";
@@ -73,7 +73,31 @@ const oneLine = (text, max) => {
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
 const hashOf = (text) => createHash("sha1").update(text).digest("hex").slice(0, 16);
-const newShelfId = () => `sh-${randomUUID()}`;
+/** Shelf placement ids count up within the brain, which is per project: sh1, sh2, ….
+ *  The number is derived from every placement on disk — the main shelf, the front set and every task's —
+ *  and from the snapshot files, so the numbering cannot collide across scopes or across calls.
+ *  Placements written before 2026-11-15 hold `sh-<uuid>` ids; they stay valid. */
+const nextShelfId = (brainDir, existing = []) => {
+	let highest = 0;
+	const scan = (item) => {
+		const match = /^sh(\d+)$/.exec(typeof item?.id === "string" ? item.id : "");
+		if (match) highest = Math.max(highest, Number(match[1]));
+	};
+	for (const item of existing) scan(item);
+	try {
+		const store = loadContext(brainDir);
+		for (const item of store.shelf ?? []) scan(item);
+		if (Array.isArray(store.front?.shelf)) for (const item of store.front.shelf) scan(item);
+		for (const task of Object.values(store.tasks ?? {})) for (const item of task?.shelf ?? []) scan(item);
+	} catch { /* an unreadable store mints from the in-flight list alone */ }
+	try {
+		for (const file of readdirSync(join(brainDir, "shelf"))) {
+			const match = /^sh(\d+)\.txt$/.exec(file);
+			if (match) highest = Math.max(highest, Number(match[1]));
+		}
+	} catch { /* no snapshot directory yet */ }
+	return `sh${highest + 1}`;
+};
 const legacyShelfId = (item, index, scope = "main") => `sh-legacy-${hashOf(`${scope}:${index}:${JSON.stringify(item?.ref ?? item?.path ?? item)}`)}`;
 const shelfSnapshotPath = (brainDir, item) => join(brainDir, "shelf", `${item.id}.txt`);
 function safeShelfSnapshotPath(brainDir, item, { create = false } = {}) {
@@ -94,7 +118,7 @@ export function cleanupShelfSnapshots(brainDir, removed, retainedStore) {
 }
 const shelfIdLine = (text, item) => {
 	const [first, ...rest] = String(text).split("\n");
-	const clean = first.replace(/ \[shelf id sh-[A-Za-z0-9-]+\]$/, "");
+	const clean = first.replace(/ \[shelf id sh(\d+|-[A-Za-z0-9-]+)\]$/, "");
 	return `${clean} [shelf id ${item.id}]${rest.length > 0 ? `\n${rest.join("\n")}` : ""}`;
 };
 
@@ -225,13 +249,13 @@ export function loadContext(brainDir) {
 		const typeShelfItem = (item, index, scope) => ({
 			...item,
 			type: item?.ref !== undefined ? "reference" : "file",
-			id: typeof item?.id === "string" && /^sh-[A-Za-z0-9-]+$/.test(item.id) ? item.id : legacyShelfId(item, index, scope),
+			id: typeof item?.id === "string" && /^sh(\d+|-[A-Za-z0-9-]+)$/.test(item.id) ? item.id : legacyShelfId(item, index, scope),
 		});
 		store.shelf = store.shelf.map((item, index) => typeShelfItem(item, index, "main"));
 		if (store.front && Array.isArray(store.front.shelf)) {
 			store.front.shelf = store.front.shelf.map((item, index) => ({
 				...item,
-				id: typeof item?.id === "string" && /^sh-[A-Za-z0-9-]+$/.test(item.id)
+				id: typeof item?.id === "string" && /^sh(\d+|-[A-Za-z0-9-]+)$/.test(item.id)
 					? item.id
 					: store.shelf.find((entry) => sameShelfItem(entry, item))?.id ?? legacyShelfId(item, index, "main"),
 			}));
@@ -671,7 +695,7 @@ export function shelfItem(root, given, lines, brainDir, existing = []) {
 	const ref = referenceOf(given);
 	if (ref !== undefined && SHELF_RESOLVERS[ref.type] !== undefined) {
 		if (ref.type === "schema" && (typeof ref.namespace !== "string" || typeof ref.version !== "string")) throw new ShelfError("A schema shelf placement needs a version-pinned schema reference.");
-		const item = { type: "reference", ref, id: existing.find((entry) => sameShelfItem(entry, { ref }))?.id ?? newShelfId() };
+		const item = { type: "reference", ref, id: existing.find((entry) => sameShelfItem(entry, { ref }))?.id ?? nextShelfId(brainDir, existing) };
 		const text = resolveShelfText(root, item, brainDir);
 		if (/\nNot found\. /.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" "));
 		return { item: { ...item, snapshot: shelfIdLine(text, item) }, tokens: estimate(shelfIdLine(text, item)), backing: text };
@@ -694,7 +718,7 @@ export function shelfItem(root, given, lines, brainDir, existing = []) {
 			if (prior === undefined) throw new ShelfError(`${path.rel} cannot be read: ${error.message}`);
 		}
 	}
-	const item = { ...selected, id: prior?.id ?? newShelfId() };
+	const item = { ...selected, id: prior?.id ?? nextShelfId(brainDir, existing) };
 	// Preserve the shelf placement ID separately from the stable target identity. `.cartoignore` only affects
 	// ambient discovery; an explicit shelf operation is allowed to catalog this confined project file.
 	if (existsSync(path.abs)) {
@@ -714,10 +738,10 @@ export function shelfItem(root, given, lines, brainDir, existing = []) {
 }
 
 /** Build a reference shelf placement from content already verified at add time (the render path has no Durable access). */
-export function shelfReferenceItem(ref, content, existing = []) {
+export function shelfReferenceItem(ref, content, brainDir, existing = []) {
 	const normalized = { type: ref.kind ?? ref.type, id: ref.id, ...(ref.namespace ? { namespace: ref.namespace } : {}), ...(ref.version ? { version: ref.version } : {}) };
 	if (typeof normalized.type !== "string" || typeof normalized.id !== "string") throw new ShelfError("A { kind, id, namespace?, version? } reference is required.");
-	const item = { type: "reference", ref: normalized, id: existing.find((entry) => sameShelfItem(entry, { ref: normalized }))?.id ?? newShelfId() };
+	const item = { type: "reference", ref: normalized, id: existing.find((entry) => sameShelfItem(entry, { ref: normalized }))?.id ?? nextShelfId(brainDir, existing) };
 	const text = `== ${normalized.type}:${normalized.id} ==\n${content}`;
 	const snapshot = shelfIdLine(text, item);
 	return { item: { ...item, snapshot }, tokens: estimate(snapshot), backing: content };

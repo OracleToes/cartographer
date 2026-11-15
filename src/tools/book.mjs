@@ -643,7 +643,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		const mine = currentShelf(brainDir, api.conversationId, main);
 		let picked;
 		if (pinnedDurable !== undefined) {
-			picked = shelfReferenceItem(pinnedDurable.ref, JSON.stringify(pinnedDurable.record.value, null, 2), mine);
+			picked = shelfReferenceItem(pinnedDurable.ref, JSON.stringify(pinnedDurable.record.value, null, 2), brainDir, mine);
 		} else {
 			try { picked = shelfItem(root, ref?.kind === "schema" ? ref : path, args.range, brainDir, mine); }
 			catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }

@@ -16,6 +16,8 @@ import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate } f
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
+import { shelfItem, updateContext, loadContext } from "../src/context.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
@@ -246,6 +248,46 @@ test("shell: a run with a cross-action argument still runs, and says so", async 
 test("shell: TOOLS.shell and the charter both say the lane survives the sandbox being off while bubblewrap works", () => {
 	assert.match(TOOLS.shell, /With the sandbox switched off the main context still runs commands in a read-only window when bubblewrap works, and none at all when it does not\./);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
+});
+
+// ─── Reference ids count up per project ─────────────────────────────────────
+
+const scratchProject = () => {
+	const root = mkdtempSync(join(tmpdir(), "carto-ids-"));
+	const brainDir = join(root, ".atlas");
+	mkdirSync(brainDir, { recursive: true });
+	return { root, brainDir };
+};
+
+test("catalog: file ids count up within a brain — f1, f2", () => {
+	const { root, brainDir } = scratchProject();
+	writeFileSync(join(root, "a.txt"), "a\n");
+	writeFileSync(join(root, "b.txt"), "b\n");
+	const first = observeFile(root, brainDir, "a.txt");
+	const second = observeFile(root, brainDir, "b.txt");
+	assert.equal(first.ref.id, "f1");
+	assert.equal(second.ref.id, "f2");
+	// A catalog that already holds ids to count past (the f-<uuid> era, and numbered ones) does so.
+	const catalog = loadCatalog(brainDir);
+	catalog.files.push({ id: "f-90000000-0000-0000-0000-000000000000", path: "legacy.txt", createdAt: 1, updatedAt: 1 });
+	catalog.files.push({ id: "f7", path: "picked-up.txt", createdAt: 1, updatedAt: 1 });
+	saveCatalog(brainDir, catalog);
+	writeFileSync(join(root, "c.txt"), "c\n");
+	assert.equal(observeFile(root, brainDir, "c.txt").ref.id, "f8", "mints above the highest numbered id, ignoring the uuid era");
+});
+
+test("shelf: placement ids count up within a brain — sh1, sh2 — across store and snapshots", () => {
+	const { root, brainDir } = scratchProject();
+	writeFileSync(join(root, "a.txt"), "a\n");
+	writeFileSync(join(root, "b.txt"), "b\n");
+	const first = shelfItem(root, "a.txt", undefined, brainDir, []);
+	assert.equal(first.item.id, "sh1");
+	// Persist it the way the shelf-add path does, so the next mint sees it on disk.
+	updateContext(brainDir, (next) => { next.shelf.push(first.item); });
+	const second = shelfItem(root, "b.txt", undefined, brainDir, []);
+	assert.equal(second.item.id, "sh2", "the number comes from the store as well, not just the in-flight list");
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf[0].id, "sh1");
 });
 
 // ─── The read-only lane ─────────────────────────────────────────────────────

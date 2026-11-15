@@ -10,7 +10,7 @@ import { BRAIN } from "./project.mjs";
 import { confine } from "./tools/look.mjs";
 
 const VERSION = 1;
-const ID = /^f-[0-9a-f]{8}-[0-9a-f-]{27,}$/i;
+const ID = /^(f\d+|f-[0-9a-f]{8}-[0-9a-f-]{27,})$/i;
 const DIGEST = /^[0-9a-f]{64}$/;
 const catalogPath = (brainDir) => join(brainDir, "catalog.json");
 const forkJournalPath = (brainDir) => join(brainDir, "catalog-fork.pending.json");
@@ -207,8 +207,14 @@ function fileAt(catalog, path) {
 	return catalog.files.find((file) => file.path === path && file.deleted !== true);
 }
 
-function nextId() {
-	return `f-${randomUUID()}`;
+/** File ids count up within the catalog, which is per brain (per project): f1, f2, ….
+ *  A catalog written before 2026-11-15 holds `f-<uuid>` ids; they stay valid — they just never match `f\d+`. */
+function nextId(catalog) {
+	const highest = catalog.files.reduce((max, file) => {
+		const match = /^f(\d+)$/.exec(typeof file?.id === "string" ? file.id : "");
+		return match ? Math.max(max, Number(match[1])) : max;
+	}, 0);
+	return `f${highest + 1}`;
 }
 
 function refFor(catalog, file, version = file.version) {
@@ -250,7 +256,7 @@ export function observeFile(root, brainDir, given, { create = false } = {}) {
 	}
 	// A new path is a new identity. A move preserves identity only through the explicit rebind operation;
 	// matching inodes is not enough to decide whether a move was observed or a copied file was substituted.
-	const id = nextId();
+	const id = nextId(catalog);
 	const digest = bytes === undefined ? undefined : storeVersion(brainDir, id, bytes);
 	const record = {
 		id,
