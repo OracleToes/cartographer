@@ -76,7 +76,7 @@ export function withoutAdditions(text) {
  *   conversationId: whose request it is; note: for a task, a note for this one request; used: the server's count
  *   of tokens for the last reply
  *   main: the main agent's request; windows: the session's shell windows (src/windows.mjs); wakes: its wake
- *   triggers (src/wakes.mjs); gate: whether the user has switched approval off
+ *   triggers (src/wakes.mjs); gate: whether approval is off in this session
  */
 export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used }) {
 	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike (src/wake.mjs).

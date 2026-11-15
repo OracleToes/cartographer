@@ -11,9 +11,10 @@ import { POLICY } from "./config.mjs";
 // the model is sent (src/request.mjs), so that watching over something for hours does
 // not fill the context with "nothing happened".
 import { took } from "./time.mjs";
+import { RECORD } from "./voice.mjs";
 
 const OPEN = POLICY.markup.note.open;
-const HEAD = "Written by Cartographer, not by the user.";
+const HEAD = RECORD;
 const CLOSE = POLICY.markup.note.close;
 
 const textOf = (message) => (typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.map((part) => part.text ?? "").join("") : "");
@@ -29,8 +30,8 @@ const first = (command) => {
 /** One line on what happened, for the note and for the screen. */
 export function eventLine(event) {
 	if (event.type === "wake") {
-		const often = event.count > 1 ? `, the last of ${event.count} times since you were told` : "";
-		return `Wake ${event.id} (${event.about}): ${event.what}${often}.${event.last ? " That was its last time, so it is removed." : ""} Your note: ${event.note}`;
+		const often = event.count > 1 ? `, the last of ${event.count} times since I was told` : "";
+		return `Wake ${event.id} (${event.about}): ${event.what}${often}.${event.last ? " That was its last time, so it is removed." : ""} My note: ${event.note}`;
 	}
 	if (event.type === "ended") return `Window ${event.name}: \`${first(event.command)}\` ended with exit ${event.exit} after ${took(event.ms)}.`;
 	if (event.type === "closed") return `Window ${event.name} closed: its shell ended, and with it \`${first(event.command)}\` after ${took(event.ms)}.`;
@@ -46,11 +47,11 @@ export function eventLine(event) {
 export function wakeNote(events) {
 	return [
 		OPEN,
-		`${HEAD} Nobody typed this. It tells you what happened while you were not working.`,
+		`${HEAD} Nobody typed this. It tells me what happened while I was not working.`,
 		"",
 		...events.map(eventLine),
 		"",
-		"Decide what this means for the goal and act on it. When nothing needs doing, call `sleep` and write nothing: a turn in which you did nothing else is forgotten when the next such note comes.",
+		"I decide what this means for the goal and act on it. When nothing needs doing, I call `sleep` and write nothing: a turn in which I did nothing else is forgotten when the next such note comes.",
 		CLOSE,
 	].join("\n");
 }
@@ -61,14 +62,14 @@ export function wakeNote(events) {
 export function startNote() {
 	return [
 		OPEN,
-		`${HEAD} Nobody typed this. The session has started, and nothing is waiting on you: this turn is yours.`,
+		`${HEAD} Nobody typed this. The session has started, and nothing is waiting on me: this turn is mine.`,
 		"",
-		"The standing duty. Look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what you learn in the books and the atlas. Form hypotheses and record them; verify what you can, with the commands you may run; carry out what stands approved in the plan. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved open item, no question waiting for the user — call `sleep`.",
+		"The standing duty. I look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what I learn in the books and the atlas. I form hypotheses and record them; I verify what I can, with the commands I may run; I carry out what stands approved in the plan. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved open item, no question waiting for the user — I call `sleep`.",
 		CLOSE,
 	].join("\n");
 }
 
-const NO_CHAT_HEAD = `${OPEN}\n${HEAD} Your last message had no tool call.`;
+const NO_CHAT_HEAD = `${OPEN}\n${HEAD} My last message had no tool call.`;
 
 /**
  * What follows a reply that had no tool call. Such a reply is a note the agent wrote to itself (src/request.mjs
@@ -83,8 +84,8 @@ export const noted = ({ main, first, extra }) =>
 			? [
 					"",
 					main
-						? "So it is kept as a note to yourself, and nobody else read it. If it was meant for the user, say it with `chat`. If work is left, go on with it. If nothing is left to do, call `sleep`."
-						: "So it is kept as a note to yourself, and nobody else read it. Go on with the brief. When the work is finished, call `return` with your report.",
+						? "So it is kept as a note to myself, and nobody else read it. If it was meant for the user, I say it with `chat`. If work is left, I go on with it. If nothing is left to do, I call `sleep`."
+						: "So it is kept as a note to myself, and nobody else read it. I go on with the brief. When the work is finished, I call `return` with my report.",
 				]
 			: []),
 		...(extra ? ["", extra] : []),
@@ -95,9 +96,9 @@ export const noted = ({ main, first, extra }) =>
 export const REPEAT_NOTE = (what, task) =>
 	[
 		OPEN,
-		`${HEAD} Nobody typed this. ${task ? "The reply of the task that was running" : "Your last reply"} was cut off, because it was writing the same text over and over (${what}). What it held is lost${task ? ", and the task was stopped with it" : ""}.`,
+		`${HEAD} Nobody typed this. ${task ? "The reply of the focused context that was running" : "My last reply"} was cut off, because it was writing the same text over and over (${what}). What it held is lost${task ? ", and the task was stopped with it" : ""}.`,
 		"",
-		task ? "If the task's work is still needed, start it again with a narrower brief. Otherwise go on from where you were." : "Go on from where you were, with a short reply: one call, or a few sentences.",
+		task ? "If the task's work is still needed, it is started again with a narrower brief. Otherwise I go on from where I was." : "I go on from where I was, with a short reply: one call, or a few sentences.",
 		CLOSE,
 	].join("\n");
 

@@ -138,7 +138,7 @@ export function readOne(root, given, offset, limit) {
 	if (!existsSync(path.abs)) return `== ${path.rel}\nNot found. Use \`list\` or \`search\` to find the right path.`;
 	const stat = statSync(path.abs);
 	if (stat.isDirectory()) return `== ${path.rel}\nThis is a directory. Use \`list\` to see what is in it.`;
-	if (stat.size > FILE_MAX_BYTES) return `== ${path.rel}\nToo large to read (${sizeOf(stat.size)}). Use \`search\` to find the part you need.`;
+	if (stat.size > FILE_MAX_BYTES) return `== ${path.rel}\nToo large to read (${sizeOf(stat.size)}). \`search\` finds the part I need.`;
 	const buffer = readFileSync(path.abs);
 	if (isBinary(buffer)) return `== ${path.rel}\nA binary file (${sizeOf(stat.size)}); it has no text to read.`;
 	const lines = buffer.toString("utf8").split("\n");
@@ -271,7 +271,7 @@ export function lookTools(root) {
 	return [
 		defineTool({
 			name: "read",
-			description: `Read text files of the project exactly as they are, with no line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless you set \`limit\`.`,
+			description: `Read text files of the project exactly as they are, with no line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless I set \`limit\`.`,
 			parameters: obj({
 				paths: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { minItems: POLICY.validation.nonEmptyArrayMinItems, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
 				offset: opt(int({ minimum: POLICY.validation.positiveIntegerMin, description: `First line to read, counting from ${POLICY.validation.positiveIntegerMin}. Default ${POLICY.validation.positiveIntegerMin}.` })),

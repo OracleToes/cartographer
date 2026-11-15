@@ -15,8 +15,8 @@ export function chatTool({ brainDir } = {}) {
 	return defineTool({
 		name: "chat",
 		description: [
-			"Say something to the user. This is the only way they read anything from you: plain text outside this call is a note to yourself.",
-			"It does not wait for an answer and never ends the turn. Keep working after sending a message; only `sleep` rests the main agent. Use `ask` when you need the user's answer before you can continue. A task that calls it carries on too.",
+			"Say something to the user. This is the only way they read anything from me: plain text outside this call is a note to myself.",
+			"It does not wait for an answer and never ends the turn. I keep working after sending a message; only `sleep` rests the main agent. I use `ask` when I need the user's answer before I can continue. A task that calls it carries on too.",
 		].join(" "),
 		parameters: obj({ text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "What the user reads. Plain sentences; no program text, which belongs in files." }) }),
 		executionMode: "sequential",
@@ -25,9 +25,9 @@ export function chatTool({ brainDir } = {}) {
 			if (String(args.text ?? "").trim() === "") return { isError: true, output: [{ type: "text", text: "`text` is empty, so nothing was shown to the user." }] };
 			if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), args.text);
 			// A task goes on working: it ends with `return` and nothing else.
-			if (api.conversationId !== ROOT_CONVERSATION_ID) return { output: [{ type: "text", text: "Shown to the user. You are still the task: carry on." }], details: { chat: true, task: true } };
+			if (api.conversationId !== ROOT_CONVERSATION_ID) return { output: [{ type: "text", text: "Shown to the user. I am still the task: I carry on." }], details: { chat: true, task: true } };
 			return {
-				output: [{ type: "text", text: "Shown to the user. Continue working; call `sleep` only when you are ready to end your turn." }],
+				output: [{ type: "text", text: "Shown to the user. I continue working; I call `sleep` only when I am ready to end my turn." }],
 				details: { chat: true },
 			};
 		},

@@ -37,7 +37,7 @@ const BOOK_SPEC = {
 	prefix: PREFIX,
 	textMax: BOOK_TEXT_MAX,
 	addTextLabel: "`text`",
-	textRequired: () => "`text` is required and was left out or empty: one short entry, in your words.",
+	textRequired: () => "`text` is required and was left out or empty: one short entry, in my words.",
 	textTooLong: (_, length) => `\`text\` is ${length} characters; an entry may hold ${BOOK_TEXT_MAX}. Keep one thought per entry.`,
 	itemsMax: BOOK_ITEMS_MAX,
 	limitCount: (book) => book.items.filter((item) => item.status === POLICY.enums.entryStatus.open).length,

@@ -13,10 +13,10 @@ export function wakeTool({ wakes, config }) {
 	const Parameters = obj(
 		{
 			action: oneOf(POLICY.enums.wakeActions, { description: "set: set a wake, with `note` and exactly one trigger. remove: take one back, with `id`." }),
-			note: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: NOTE_MAX, pattern: "\\S", description: `For set, required: what to look at or do when it fires, written for yourself. One line, at most ${NOTE_MAX} characters.` })),
+			note: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: NOTE_MAX, pattern: "\\S", description: `For set, required: what to look at or do when it fires, written for myself. One line, at most ${NOTE_MAX} characters.` })),
 			every: opt(int({ minimum: config.wakeMin, maximum: EVERY_MAX, description: `For set: a number of seconds, ${config.wakeMin} or more. Alone: wake after this long, and again each time it passes. With path or window: the least time between two wakes, default ${config.wakeMin}.` })),
-			times: opt(int({ minimum: POLICY.limits.wake.timesMin, description: `For set: how often it fires before it is removed. Default ${POLICY.limits.wake.timesDefault}. ${POLICY.limits.wake.timesMin}: until you remove it.` })),
-			path: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes you when it appears." })),
+			times: opt(int({ minimum: POLICY.limits.wake.timesMin, description: `For set: how often it fires before it is removed. Default ${POLICY.limits.wake.timesDefault}. ${POLICY.limits.wake.timesMin}: until I remove it.` })),
+			path: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes me when it appears." })),
 			window: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set: wake when this shell window prints something." })),
 			match: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set, with window: only a line that contains this text counts, such as ERROR." })),
 			id: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: POLICY.patterns.wakeIdOrAll, description: "For remove, required: the wake (w2), or all." })),
@@ -49,11 +49,11 @@ export function wakeTool({ wakes, config }) {
 	return defineTool({
 		name: "wake",
 		description: [
-			"Have yourself woken later: after a time, when a file changes, or when a shell window prints something.",
-			'For example {"action":"set","note":"see whether the build is through","every":300} wakes you once in five minutes, and with "times":0 every five minutes.',
-			"A wake does not make you wait. Set it and go on working, or end your turn: when it fires while you rest, Cartographer starts a turn for you with your note; when it fires while you work, the state block shows it.",
-			`Your wakes are listed in the state block. Each firing costs a whole turn, so choose long intervals: ${least} is the least. Several wakes can be set at once, ${config.wakesMax} at most.`,
-			"With `times` 0 a wake repeats until you remove it, which is how you watch over something that keeps running. When a wake finds nothing to do, call `sleep`.",
+			"Be woken later: after a time, when a file changes, or when a shell window prints something.",
+			'For example {"action":"set","note":"see whether the build is through","every":300} wakes me once in five minutes, and with "times":0 every five minutes.',
+			"A wake does not make me wait. I set it and go on working, or end my turn: when it fires while I rest, a turn starts for me with my note; when it fires while I work, the state block shows it.",
+			`My wakes are listed in the state block. Each firing costs a whole turn, so long intervals are better: ${least} is the least. Several wakes can be set at once, ${config.wakesMax} at most.`,
+			"With `times` 0 a wake repeats until I remove it, which is how I watch over something that keeps running. When a wake finds nothing to do, I call `sleep`.",
 		].join(" "),
 		parameters: Parameters,
 		executionMode: "sequential",
@@ -67,7 +67,7 @@ export function wakeTool({ wakes, config }) {
 					const about = `${wakeAbout(wake)}, ${wakeRepeats(wake)}`;
 					const first = wake.kind === POLICY.enums.wakeKinds.time ? ` It first fires in ${took(wake.every * 1000)}.` : "";
 					return {
-						output: [{ type: "text", text: `${wake.id} set: ${about}.${first} You are not waiting for it: go on with other work, or end your turn. \`wake\` with remove and ${wake.id} takes it back.` }],
+						output: [{ type: "text", text: `${wake.id} set: ${about}.${first} I am not waiting for it: I go on with other work, or end my turn. \`wake\` with remove and ${wake.id} takes it back.` }],
 						details: { shown: [`+ ${wake.id} ${about} · ${wake.note}`] },
 					};
 				}
@@ -94,9 +94,9 @@ export function sleepTool({ wakes }) {
 	return defineTool({
 		name: "sleep",
 		description: [
-			"End your turn and rest. You are woken by the user's next message, by a wake you set, and when a command ends or asks for input in a shell window.",
-			"Call it alone, with no text, when a wake found nothing that needs you. A turn in which you called nothing but `sleep` is taken out of your context when the next wake comes, so a hundred quiet wakes cost no context.",
-			"So when such a turn found something worth keeping, record it in the ledger before you sleep: a turn in which you used another tool stays.",
+			"End my turn and rest. I am woken by the user's next message, by a wake I set, and when a command ends or asks for input in a shell window.",
+			"Call it alone, with no text, when a wake found nothing that needs me. A turn in which I called nothing but `sleep` is taken out of my context when the next wake comes, so a hundred quiet wakes cost no context.",
+			"So when such a turn found something worth keeping, I record it in the ledger before I sleep: a turn in which I used another tool stays.",
 		].join(" "),
 		parameters: obj({}),
 		executionMode: "sequential",

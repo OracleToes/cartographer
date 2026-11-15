@@ -26,11 +26,15 @@ import { loadAssessment, textHash } from "./assessment.mjs";
 import { loadAtlas, nodeChanges, nodeHashes, renderOutline } from "./atlas.mjs";
 import { practiceText } from "./books.mjs";
 import { stamp } from "./time.mjs";
+import { RECORD } from "./voice.mjs";
+
+/** The stable anchor every block written by me starts with; the regex below is built from it so the marker cannot drift. */
+const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const OPEN = POLICY.markup.project.open;
 const CLOSE = POLICY.markup.project.close;
-const TOP_BLOCK = new RegExp(`${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
-const HEAD = "Written by Cartographer from your own records of this project";
+const TOP_BLOCK = new RegExp(`${OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
+const HEAD = `${RECORD} My own records of this project`;
 
 export const topPath = (brainDir) => join(brainDir, "carto-top.json");
 
@@ -69,11 +73,11 @@ export function pin(brainDir, { now = Date.now(), reason }) {
 		OPEN,
 		`${HEAD}, as they stood on ${stamp(now)} (${reason}). What was written since is listed in the state block at the end of the request.`,
 		"",
-		"Your assessment",
+		"My assessment",
 		assessment === "" ? "None written yet." : assessment,
 	];
-	if (practice !== "") parts.push("", "Your practice", practice);
-	parts.push("", `Your graph (${atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`})`, renderOutline(atlas), CLOSE);
+	if (practice !== "") parts.push("", "My practice", practice);
+	parts.push("", `My graph (${atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`})`, renderOutline(atlas), CLOSE);
 	const text = parts.join("\n");
 	const path = topPath(brainDir);
 	const temp = `${path}.${process.pid}.tmp`;

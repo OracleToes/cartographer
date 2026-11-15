@@ -301,9 +301,9 @@ export function createEngine({ root, brainDir, config }) {
 			const visible = messages.slice(steps.start + hidden).reduce((sum, message) => sum + messageTokens(message), 0);
 			const nearlyFull = Number.isFinite(state.used) && state.used >= full() && visible >= FLOOR;
 			let why;
-			if (mine.pending === "now" || mine.pending === "told") why = mine.reason ?? "You asked for it";
+			if (mine.pending === "now" || mine.pending === "told") why = mine.reason ?? "I asked for it";
 			else if (nearlyFull) {
-				why = `Your context held about ${Math.round((state.used / config.contextWindow) * 100)}% of what fits`;
+				why = `My context held about ${Math.round((state.used / config.contextWindow) * 100)}% of what fits`;
 				// O1: opt-in (config handoffQuestion). Off: the task's steps are cut with the mechanical carry, no ask.
 				if (config.handoffQuestion === true) {
 					const results = messages.slice(messages.findLastIndex((message) => message.role === "assistant") + 1).filter((message) => message.role === "toolResult");

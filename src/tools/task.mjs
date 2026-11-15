@@ -46,7 +46,7 @@ function atlasRecord(root, brainDir, before) {
 	if (written.length > 0) lines.push(`Nodes this task wrote: ${listed(written)}.`);
 	if (removed.length > 0) lines.push(`Nodes this task removed: ${listed(removed)}.`);
 	if (stale.length > 0) lines.push(`Nodes that may be out of date after this task: ${stale.slice(0, POLICY.limits.taskDisplay.staleNodes).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > POLICY.limits.taskDisplay.staleNodes ? `; and ${stale.length - POLICY.limits.taskDisplay.staleNodes} more` : ""}.`);
-	return { text: `\n\nCartographer's record of the atlas:\n${lines.join("\n")}`, atlas: { written, removed, stale: stale.map((node) => node.name) } };
+	return { text: `\n\nMy record of the atlas:\n${lines.join("\n")}`, atlas: { written, removed, stale: stale.map((node) => node.name) } };
 }
 
 /** The project's files as the main agent sees them now, for the start of a task. */
@@ -107,8 +107,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			// What the task shelved for the main agent goes onto its shelf, and the task's own context state ends.
 			const handed = endTaskContext(root, brainDir, config, child);
 			let text = textOf({ content: result.output });
-			if (handed.added.length > 0) text += `\n\nThe task put on your shelf; these snapshots are in view now and will stand at the next collapse: ${handed.added.join(", ")}.\n\n${handed.snapshots.join("\n\n")}`;
-			if (handed.refused.length > 0) text += `\n\nThe task wanted on your shelf, but it would not fit: ${handed.refused.join(", ")}.`;
+			if (handed.added.length > 0) text += `\n\nThe task put on my shelf; these snapshots are in view now and will stand at the next collapse: ${handed.added.join(", ")}.\n\n${handed.snapshots.join("\n\n")}`;
+			if (handed.refused.length > 0) text += `\n\nThe task wanted on my shelf, but it would not fit: ${handed.refused.join(", ")}.`;
 			text += "\n\nInternal checkpoint for the orchestrating context: yes or no—should this outcome add or change anything in the shared atlas, ledger, or assessment? If yes, perform only those brain-scoped book operations now; if no, continue with the outcome. This does not bypass user approval or project safety gates.";
 			// The report is kept under an id, and one line of it goes into the record a collapse keeps
 			// (src/context.mjs). The id is taken once, also when this call runs again after a restart.
@@ -263,19 +263,19 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					windows?.takeActive();
 					record +=
 						details.changes.length === 0
-							? `\n\nCartographer's record: no file ${run.direct ? "of the project " : ""}was changed during this task.`
-							: `\n\nCartographer's record of the files changed during this task:\n${changeRecord(details.changes).join("\n")}`;
+							? `\n\nMy record: no file ${run.direct ? "of the project " : ""}was changed during this task.`
+							: `\n\nMy record of the files changed during this task:\n${changeRecord(details.changes).join("\n")}`;
 					// Without the sandbox a command can change what the checkpoints do not hold.
 					if (run.direct) record += "\nThe sandbox was off for this task. The record covers the project directory only: what a command changed outside it is not listed here and cannot be undone.";
 				} catch (error) {
 					if (!(error instanceof CheckpointError)) throw error;
-					record += `\n\nCartographer could not record what this task changed: ${error.message}.`;
+					record += `\n\nMy record could not keep what this task changed: ${error.message}.`;
 				}
 			}
 
 			if (outside !== undefined) {
 				details.outside = { names: outside.names, changes: outside.changes };
-				record += `\n\nBefore this task started, Cartographer recorded what changed while ${outside.names.length === 1 ? `window ${outside.names[0]}` : `windows ${outside.names.join(", ")}`} ran with no task around, as a step of its own:\n${changeRecord(outside.changes).join("\n")}`;
+				record += `\n\nBefore this task started, my record kept what changed while ${outside.names.length === 1 ? `window ${outside.names[0]}` : `windows ${outside.names.join(", ")}`} ran with no task around, as a step of its own:\n${changeRecord(outside.changes).join("\n")}`;
 			}
 			// The windows that are still at work: they outlive the task.
 			const busy = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
@@ -304,17 +304,17 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			}
 			if (returned === undefined && ended?.why === "limit") {
 				details.limit = ended.replies;
-				return fail(`Cartographer ended the task: it used all ${config.taskTurns} of its replies without calling \`return\`, so there is no report and nothing says the work is done.\n${wrote}\nGive a narrower brief, or split the work.${record}`, details);
+				return fail(`I ended the task: it used all ${config.taskTurns} of its replies without calling \`return\`, so there is no report and nothing says the work is done.\n${wrote}\nGive a narrower brief, or split the work.${record}`, details);
 			}
 			if (returned === undefined && ended?.why === "same-note") {
 				details.looped = true;
-				return fail(`Cartographer ended the task: it wrote ${ended.empty ? `nothing and called nothing, ${ended.times} times in a row` : `the same note ${ended.times} times in a row and called nothing`}, so there is no report.\n${wrote}\nIf the work is still needed, start another task with a brief that says what to do first.${record}`, details);
+				return fail(`I ended the task: it wrote ${ended.empty ? `nothing and called nothing, ${ended.times} times in a row` : `the same note ${ended.times} times in a row and called nothing`}, so there is no report.\n${wrote}\nIf the work is still needed, start another task with a brief that says what to do first.${record}`, details);
 			}
 			if (returned === undefined && round) {
 				const loop = loops?.get(child);
 				details.looped = loop ?? true;
 				const what = loop === undefined ? "it sent the same failing call again and again." : `it sent the same call ${loop.total} times and it failed each time: \`${loop.call}\`\nThe error was:\n${loop.error}`;
-				return fail(`Cartographer ended the task: ${what}\n${wrote}\nIf the work is still needed, start another task whose brief says how to avoid this.${record}`, details);
+				return fail(`I ended the task: ${what}\n${wrote}\nIf the work is still needed, start another task whose brief says how to avoid this.${record}`, details);
 			}
 			if (returned === undefined) return fail(`The task ended without calling \`return\`, so there is no report.\n${wrote}\nRun it again with a brief that says what the report must contain.${record}`, details);
 			// A plan item's task says itself whether the item is done.
@@ -324,18 +324,18 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					try {
 						const { plan } = loadPlan(brainDir);
 						const item = plan?.items.find((entry) => entry.id === run.item);
-						if (item !== undefined && item.standing === true) marked = `\n\n[Cartographer: ${run.item} is a standing item, so it stays open.]`;
+						if (item !== undefined && item.standing === true) marked = `\n\n[My record: ${run.item} is a standing item, so it stays open.]`;
 						else if (item !== undefined && item.status !== POLICY.enums.entryStatus.done) {
 							applyPlanOp(plan, { action: POLICY.enums.actions.done, id: run.item }, api.now(), { yolo: gate?.yolo === true });
 							savePlan(brainDir, plan);
 							details.marked = run.item;
-							marked = `\n\n[Cartographer: the task returned done, so ${run.item} is marked done in the plan. If the report or the record below shows that something is missing, add an item for it.]`;
+							marked = `\n\n[My record: the task returned done, so ${run.item} is marked done in the plan. If the report or the record below shows that something is missing, add an item for it.]`;
 						}
 					} catch (error) {
-						marked = `\n\n[Cartographer: ${run.item} could not be marked done (${error.message}); mark it with \`plan\`.]`;
+						marked = `\n\n[My record: ${run.item} could not be marked done (${error.message}); mark it with \`plan\`.]`;
 					}
-				} else marked = `\n\n[Cartographer: the task returned not done, so ${run.item} stays open in the plan.]`;
-			} else if (!returned.done) marked = "\n\n[Cartographer: the task returned not done.]";
+				} else marked = `\n\n[My record: the task returned not done, so ${run.item} stays open in the plan.]`;
+			} else if (!returned.done) marked = "\n\n[My record: the task returned not done.]";
 			return { output: [{ type: "text", text: `${said}${marked}${record}` }], details };
 		}
 	}

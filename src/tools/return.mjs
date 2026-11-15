@@ -28,7 +28,7 @@ function prepareHandoff(root, brainDir, config, conversationId, wanted) {
 	}
 	const combined = [...current.filter((item) => !chosen.some((picked) => sameShelfItem(item, picked))), ...chosen];
 	const total = combined.reduce((sum, item) => sum + estimate(shelfText(root, item, brainDir)), 0);
-	if (total > config.shelfTokens) throw new ShelfError(`The requested shelf handoff would put about ${total} of at most ${config.shelfTokens} rendered tokens into your context. Choose fewer items or smaller file ranges.`);
+	if (total > config.shelfTokens) throw new ShelfError(`The requested shelf handoff would put about ${total} of at most ${config.shelfTokens} rendered tokens into my context. I choose fewer items or smaller file ranges.`);
 	for (const item of chosen) {
 		const backing = backingById.get(item.id);
 		if (backing !== undefined) persistShelfSnapshot(brainDir, item, backing);
@@ -42,20 +42,20 @@ export function returnTool({ root, brainDir, config }) {
 		name: "return",
 		description: [
 			"End this focused context and continue the orchestrating conversation. Keep durable findings in shared books before returning; the report carries the outcome and anything not already kept.",
-			"Items named in `shelf` are added to your shelf if needed, then handed to the shared context when this focus returns.",
+			"Items named in `shelf` are added to my shelf if needed, then handed to the shared context when this focus returns.",
 		].join(" "),
 		parameters: obj({
-			report: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Everything the main agent needs: what you found or changed, with file paths and line numbers, and what you could not find or do." }),
+			report: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Everything the orchestrating context needs: what I found or changed, with file paths and line numbers, and what I could not find or do." }),
 			done: bool({ description: "true when the brief is carried out. false when something is left; say what in the report. For a plan item, true marks the item done." }),
 			summary: opt(str({ description: "One or two lines the main agent keeps of this task after its context is collapsed. Leave out, and the start of the report is used." })),
-			shelf: opt(str({ description: "Paths or typed references to add to your shelf if not present, then hand to the shared context on return; separate multiple entries with commas." })),
+			shelf: opt(str({ description: "Paths or typed references to add to my shelf if not present, then hand to the shared context on return; separate multiple entries with commas." })),
 		}),
 		executionMode: "sequential",
 		// Not run again after a crash: what was returned is in the file by then.
 		replay: POLICY.enums.toolReplay.never,
 		execute: async (args, api) => {
 			const report = String(args.report ?? "").trim();
-			if (report === "") return fail("`report` is empty, so the task has not ended. Call `return` again with the report: what you found or changed, and what is left.");
+			if (report === "") return fail("`report` is empty, so the task has not ended. I call `return` again with the report: what I found or changed, and what is left.");
 			const wanted = String(args.shelf ?? "").split(",").map((path) => path.trim().replace(/^\.\//, "")).filter((path) => path !== "");
 			let handoff;
 			try {

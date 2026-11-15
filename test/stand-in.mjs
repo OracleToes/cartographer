@@ -52,6 +52,10 @@
 //
 // Every request is kept in `requests`, so a test can check what the server was sent.
 import { createServer } from "node:http";
+import { RECORD } from "../src/voice.mjs";
+
+/** The first line of every block the harness writes to the model; the anchor the strip patterns match. */
+const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * A message's text as it was written, without what Cartographer adds to a request (src/request.mjs): the state block
@@ -61,12 +65,12 @@ const rawOf = (message) => (typeof message.content === "string" ? message.conten
 const textOf = (message) => {
 	const text = rawOf(message);
 	return text
-		.replace(/<context>\nWritten by Cartographer[\s\S]*?\n<\/context>\n*/g, "")
+		.replace(new RegExp(`<context>\n${ESC}[\\s\\S]*?\n</context>\n*`, "g"), "")
 		.replace(/\n\n\[s\d+ · about [\d,]+ tokens\]$/g, "")
 		.replace(/\n\nThis report is kept as t\d+\./g, "")
-		.replace(/\n*<windows>\nWritten by Cartographer[\s\S]*?\n<\/windows>/g, "")
-		.replace(/\n*<state>\nWritten by Cartographer[\s\S]*?\n<\/state>/g, "")
-		.replace(/<project>\nWritten by Cartographer[\s\S]*?\n<\/project>\n*/g, "")
+		.replace(new RegExp(`\n*<windows>\n${ESC}[\\s\\S]*?\n</windows>`, "g"), "")
+		.replace(new RegExp(`\n*<state>\n${ESC}[\\s\\S]*?\n</state>`, "g"), "")
+		.replace(new RegExp(`<project>\n${ESC}[\\s\\S]*?\n</project>\n*`, "g"), "")
 		.replace(/\n\n\[(sent|noted|task ended) [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}[^\]\n]*\]/g, "");
 };
 
@@ -151,7 +155,7 @@ function mainCalls(text) {
 }
 
 /** How the line begins that follows a reply without a tool call (src/wake.mjs). */
-const NOTED = "<cartographer>\nWritten by Cartographer, not by the user. Your last message had no tool call.";
+const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
 export function decide(messages) {
@@ -201,7 +205,7 @@ export function decide(messages) {
 			const chat = (said) => ({ calls: [{ name: "chat", args: { text: said } }] });
 			const results = later.filter((entry) => entry.role === "tool");
 			// A collapse in the middle of the turn: the context begins with the front block and nothing follows it yet.
-			if (raw.includes("<context>\nWritten by Cartographer") && text.trim() === "" && results.length === 0) {
+			if (raw.includes(`<context>\n${RECORD}`) && text.trim() === "" && results.length === 0) {
 				const [, after] = /AFTER COLLAPSE: (.*?)(?:\s+ON COLLAPSE:|$)/m.exec(raw) ?? [];
 				if (after?.startsWith("chat:")) return chat(after.slice(5).trim());
 				const calls = after === undefined ? [] : mainCalls(after);

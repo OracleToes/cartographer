@@ -647,8 +647,8 @@ export async function runTerminal(session, options) {
 	}
 	/** A reason as the front block words it for the agent ("you asked for it"), worded for the user. */
 	const ofAgent = (reason) => reason.replace(/^you asked/, "the agent asked").replace(/ while you rested$/, " while it rested");
-	/** A reason as the engine words it for a task ("Your context held …"), worded for the user. */
-	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^Your context/, "its context").replace(/^You asked/, "it asked");
+	/** A reason as the engine words it for a task ("My context held …"), worded for the user. */
+	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^My context/, "its context").replace(/^I asked/, "it asked");
 	/** The question before a collapse and what came back. */
 	let saidFallback = false;
 	const askedLine = (event) => {

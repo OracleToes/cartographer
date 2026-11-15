@@ -33,6 +33,10 @@ import { isNote, wakeNote, withoutQuietWakes } from "../src/wake.mjs";
 import { createWakes, NOTE_MAX, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
 import { createWindows, findScript, KEEP_LINES, WindowError } from "../src/windows.mjs";
 import { startStandIn } from "./stand-in.mjs";
+import { RECORD } from "../src/voice.mjs";
+
+/** The first line of every block the harness writes; the anchor the strip patterns match. */
+const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const CORE = dirname(dirname(fileURLToPath(import.meta.url)));
 const CARTO = join(CORE, "bin", "carto");
@@ -155,15 +159,15 @@ const rawText = (message) => (typeof message.content === "string" ? message.cont
 /** A message's text as it is stored in the conversation: without what Cartographer adds to a request on its way out. */
 const messageText = (message) => withoutAdditions(rawText(message));
 /** The state block a request carried, or undefined. */
-const stateOf = (request) => /<state>\nWritten by Cartographer[\s\S]*\n<\/state>/.exec(rawText(request.messages.at(-1)))?.[0];
+const stateOf = (request) => new RegExp(`<state>\n${ESC}[\\s\\S]*\n</state>`).exec(rawText(request.messages.at(-1)))?.[0];
 /** The windows block a request carried at its very end, or undefined. */
-const windowsIn = (request) => /<windows>\nWritten by Cartographer[\s\S]*\n<\/windows>$/.exec(rawText(request.messages.at(-1)))?.[0];
+const windowsIn = (request) => new RegExp(`<windows>\n${ESC}[\\s\\S]*\n</windows>$`).exec(rawText(request.messages.at(-1)))?.[0];
 /** How many windows blocks a request holds in all its messages. */
-const windowsCount = (request) => request.messages.map(rawText).join("\n").split("<windows>\nWritten by Cartographer").length - 1;
+const windowsCount = (request) => request.messages.map(rawText).join("\n").split(`<windows>\n${RECORD}`).length - 1;
 /** The state block without its "Commands" paragraph, which is there only when commands do not run in the sandbox. */
 const ledgerState = (request) => stateOf(request)?.replace(/\nCommands\n[^\n]*\n\n/, "\n");
 /** How many state blocks a request holds in all its messages. */
-const stateCount = (request) => request.messages.map(rawText).join("\n").split("<state>\nWritten by Cartographer").length - 1;
+const stateCount = (request) => request.messages.map(rawText).join("\n").split(`<state>\n${RECORD}`).length - 1;
 /**
  * A request's messages as every later request sends them again: without the state block and the windows block, which
  * only the last message of a request carries. What is added in front and the times stay, since they must be the same every time.
@@ -273,7 +277,7 @@ test("state: the block is added to the last message of a request only, and the i
 	saveLedger(dir, { version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Which port?", status: "open" }] });
 	assert.equal(
 		stateBlock(dir, undefined, { now: new Date(2026, 0, 1, 9, 5).getTime() }),
-		"<state>\nWritten by Cartographer, not by the user. This is the current state; it replaces any state you saw before.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for the user:\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. Find out what the user wants to achieve. When you and the user agree on it, record it as a goal with a done-when line. You need not sit idle meanwhile: in the same reply you may start a look task that maps a part of the project the graph says nothing about, and has what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is yours to decide.\n</state>",
+		"<state>\nWritten by me, from my own records, not by the user's hand. This is the current state; it supersedes any earlier copy I carry.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for the user:\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. I find out what the user wants to achieve. When we agree on it, I record it as a goal with a done-when line. I need not sit idle meanwhile: in the same reply I may start a look task that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.\n</state>",
 	);
 });
 
@@ -613,7 +617,7 @@ test("windows: what the windows block says about them", () => {
 		text,
 		[
 			"<windows>",
-			"Written by Cartographer, not by the user. The shell windows as they are at this moment:",
+			"Written by me, from my own records, not by the user's hand. The shell windows as they are at this moment:",
 			"  main · free, in src/ · last: `npm test` ended with exit 1, 2 m ago",
 			"    | 2 failed",
 			"    | done",
@@ -628,7 +632,7 @@ test("windows: what the windows block says about them", () => {
 			"    | >>> ",
 			"  old · gone: it ended when Cartographer last exited, and `make watch` ended with it. `window` close clears this line.",
 			"  fresh · free · nothing was run in it yet",
-			"A window keeps running what was started in it until it is stopped or closed. Close the ones nobody needs any more.",
+			"A window keeps running what was started in it until it is stopped or closed. I close the ones nobody needs any more.",
 			"</windows>",
 		].join("\n"),
 	);
@@ -648,12 +652,12 @@ test("windows: what the windows block says about them", () => {
 		note,
 		[
 			"<cartographer>",
-			"Written by Cartographer, not by the user. Nobody typed this. It tells you what happened while you were not working.",
+			"Written by me, from my own records, not by the user's hand. Nobody typed this. It tells me what happened while I was not working.",
 			"",
 			"Window build: `make all` ended with exit 2 after 1 m 15 s.",
 			"Window repl: `python` has printed nothing for a while and its last line has no line end, so it may be waiting for input. The line: >>> ",
 			"",
-			"Decide what this means for the goal and act on it. When nothing needs doing, call `sleep` and write nothing: a turn in which you did nothing else is forgotten when the next such note comes.",
+			"I decide what this means for the goal and act on it. When nothing needs doing, I call `sleep` and write nothing: a turn in which I did nothing else is forgotten when the next such note comes.",
 			"</cartographer>",
 		].join("\n"),
 	);
@@ -760,7 +764,7 @@ test("tree: levels, folders with counts, the anchor, the marks of nodes, and a d
 	const whole = treeSection(root).text;
 	has(whole, "From the project root, 3 levels deep: 5 files in all.\nsrc/\n  deep/\n    er/  (1 file)\n  main.js\n  math.js\nREADME.md\nlong.txt", "the whole project");
 	hasNot(whole, ".atlas", "the brain is not part of the project");
-	has(treeSection(root, { anchor: "src/", depth: 1 }).text, 'From src/ (the anchor you set), 1 level deep: 3 of the project\'s 5 files are under it. `atlas` with a tree operation and anchor "." returns to the project root.\nsrc/\n  deep/  (1 file)\n  main.js\n  math.js', "anchored");
+	has(treeSection(root, { anchor: "src/", depth: 1 }).text, 'From src/ (the anchor I set), 1 level deep: 3 of the project\'s 5 files are under it. `atlas` with a tree operation and anchor "." returns to the project root.\nsrc/\n  deep/  (1 file)\n  main.js\n  math.js', "anchored");
 	const lost = treeSection(root, { anchor: "gone" });
 	has(lost.text, "The anchor was gone, which is no longer a folder with files in it.", "a folder that is gone is said");
 	has(lost.text, "From the project root", "and the tree falls back to the root");
@@ -775,7 +779,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 	const text = loadTop(dir).text;
 	assert.equal(
 		text,
-		"<project>\nWritten by Cartographer from your own records of this project, as they stood on Tue 10 Nov 2026, 14:05 (the first start). What was written since is listed in the state block at the end of the request.\n\nYour assessment\nNone written yet.\n\nYour graph (0 nodes)\nThe graph has no nodes yet.\n</project>",
+		"<project>\nWritten by me, from my own records, not by the user's hand. My own records of this project, as they stood on Tue 10 Nov 2026, 14:05 (the first start). What was written since is listed in the state block at the end of the request.\n\nMy assessment\nNone written yet.\n\nMy graph (0 nodes)\nThe graph has no nodes yet.\n</project>",
 	);
 	const file = readFileSync(topPath(dir), "utf8");
 	assert.deepEqual(pin(dir, { now: at + 60_000, reason: "goal g1 was closed" }), { changed: false }, "nothing changed, nothing is written");
@@ -788,7 +792,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: ["one"], removed: [], assessment: true, at: new Date(at).toISOString() }, "what was written since the copy");
 	assert.deepEqual(pin(dir, { now: at + 120_000, reason: "goal g1 was closed" }), { changed: true });
 	has(loadTop(dir).text, "as they stood on Tue 10 Nov 2026, 14:07 (goal g1 was closed).", "when and why");
-	has(loadTop(dir).text, "Your assessment\nA demo.\n\nYour graph (1 node)\nOther nodes:\n  one  the first node\n</project>", "the assessment and the outline");
+	has(loadTop(dir).text, "My assessment\nA demo.\n\nMy graph (1 node)\nOther nodes:\n  one  the first node\n</project>", "the assessment and the outline");
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: [], removed: [], assessment: false, at: new Date(at + 120_000).toISOString() }, "nothing is newer than a fresh copy");
 	writeFileSync(join(dir, "carto-atlas.json"), "{ not json");
 	const kept = readFileSync(topPath(dir), "utf8");
@@ -908,7 +912,7 @@ test("wakes: what cannot be set", () => {
 	const wakes = open();
 	refusedWake(wakes, { note: " ", every: 60 }, "A wake needs a `note`");
 	refusedWake(wakes, { note: "x".repeat(NOTE_MAX + 1), every: 60 }, `${NOTE_MAX} is the limit`);
-	refusedWake(wakes, { note: "n" }, "Say what wakes you: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
+	refusedWake(wakes, { note: "n" }, "Say what wakes me: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
 	refusedWake(wakes, { note: "n", every: 59 }, "`every` is 59; it is a whole number of seconds from 60 to 604800. A wake costs a whole turn, so 1 m is the least.");
 	refusedWake(wakes, { note: "n", every: 90.5 }, "`every` is 90.5");
 	refusedWake(wakes, { note: "n", every: 8 * 24 * 3600 }, "from 60 to 604800");
@@ -1052,7 +1056,7 @@ test("wakes: they outlast a restart; what the agent was not told yet is one firi
 	}
 	const folded = wakes.takeNews();
 	assert.deepEqual(folded.map((event) => [event.id, event.count]), [["w1", 4]]);
-	assert.equal(wakeNote(folded).split("\n")[3], "Wake w1 (every 1 h): its time came, the last of 4 times since you were told. Your note: every hour");
+	assert.equal(wakeNote(folded).split("\n")[3], "Wake w1 (every 1 h): its time came, the last of 4 times since I was told. My note: every hour");
 
 	// Told in the state block while the agent works: it stays there for the rest of the turn, and no turn is started for it.
 	pass(3600);
@@ -1065,16 +1069,16 @@ test("wakes: they outlast a restart; what the agent was not told yet is one firi
 
 	// Whether the agent did something in a turn the wake started.
 	wakes.begin(["w1"]);
-	assert.doesNotMatch(wakes.lines()[0], /you last acted/);
+	assert.doesNotMatch(wakes.lines()[0], /last acted/);
 	pass(120);
 	wakes.acted();
 	pass(600);
-	assert.equal(wakes.lines()[0], "w1 · every 1 h, until removed · every hour · fired 7 times, last 12 m ago · you last acted on it 10 m ago · next in 48 m");
+	assert.equal(wakes.lines()[0], "w1 · every 1 h, until removed · every hour · fired 7 times, last 12 m ago · last acted on 10 m ago · next in 48 m");
 	wakes.begin(["w1"]);
 	wakes.begin([]);
 	pass(60);
 	wakes.acted();
-	assert.match(wakes.lines()[0], /you last acted on it 11 m ago/, "a turn the user started is not the wake's");
+	assert.match(wakes.lines()[0], /last acted on 11 m ago/, "a turn the user started is not the wake's");
 });
 
 test("wakes: a quiet turn is left out of the request once the next wake has come", () => {
@@ -1120,7 +1124,7 @@ test("yolo: the prompt shows it for as long as it is on", async () => {
 
 // ─── Talking to the user, thinking, and calls that fail again and again ─────
 
-const REMINDER = "<cartographer>\nWritten by Cartographer, not by the user. Your last message had no tool call.\n\nSo it is kept as a note to yourself, and nobody else read it. If it was meant for the user, say it with `chat`. If work is left, go on with it. If nothing is left to do, call `sleep`.\n</cartographer>";
+const REMINDER = "<cartographer>\nWritten by me, from my own records, not by the user's hand. My last message had no tool call.\n\nSo it is kept as a note to myself, and nobody else read it. If it was meant for the user, I say it with `chat`. If work is left, I go on with it. If nothing is left to do, I call `sleep`.\n</cartographer>";
 const REMINDED = "◆ That reply had no tool call: it is a note the agent wrote to itself, not an answer to you. The agent goes on.\n";
 /** The requests whose newest message is the reminder. */
 const reminders = (server) => server.requests.filter((request) => messageText(request.messages.at(-1)).startsWith(REMINDER));
@@ -1166,10 +1170,10 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(droppable([call("chat", { text: "y".repeat(4000) })]) < 50, true, "what was said with chat is talk");
 	assert.equal(droppable([text("toolResult", "z".repeat(4000), { toolName: "task" })]) >= 1000, true, "a report goes");
 	assert.equal(droppable([text("assistant", "n".repeat(4000))]) >= 1000, true, "the agent's own notes go");
-	assert.equal(droppable([text("user", "<context>\nWritten by Cartographer, not by the user. Your context was collapsed" + "k".repeat(4000) + "\n</context>")]), 0, "the front block is what was kept already");
+	assert.equal(droppable([text("user", "<context>\n" + RECORD + " My context was collapsed" + "k".repeat(4000) + "\n</context>")]), 0, "the front block is what was kept already");
 
 	// What Cartographer adds to a request is not part of the stored message.
-	assert.equal(withoutAdditions("<context>\nWritten by Cartographer, not by the user. x\n</context>\n\nhello"), "hello");
+	assert.equal(withoutAdditions("<context>\n" + RECORD + " x\n</context>\n\nhello"), "hello");
 	assert.equal(withoutAdditions("a result\n\n[s3 · about 2,100 tokens]"), "a result");
 	assert.equal(withoutTags("a result\n\n[s12 · about 900 tokens]"), "a result");
 	assert.equal(withoutTags("a result [s3 · about 2,100 tokens] in the middle"), "a result [s3 · about 2,100 tokens] in the middle", "only the mark at the end");
@@ -1203,8 +1207,8 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.match(dressed[4].content[0].text, /\n\n\[s1 · about [\d,]+ tokens\]$/);
 	assert.equal(dressed[6].content[0].text, "== b.js (lines 1-2 of 2)\n1  x\n2  y", "a small result carries no mark");
 	assert.deepEqual(dressed.slice(0, 3), messages.slice(0, 3), "nothing before the brief is touched, nor the brief");
-	const dropped = dressTask(messages, { dropped: { s1: "You dropped this result." } });
-	assert.match(dropped[4].content[0].text, /^\[s1: You dropped this result\. It was: read a\.js, about [\d,]+ tokens\. Call again if you need it\.\]$/);
+	const dropped = dressTask(messages, { dropped: { s1: "I dropped this result." } });
+	assert.match(dropped[4].content[0].text, /^\[s1: I dropped this result\. It was: read a\.js, about [\d,]+ tokens\. Call again if I need it\.\]$/);
 	assert.equal(messages[4].content[0].text, big, "the stored messages are not changed");
 });
 
@@ -1500,9 +1504,9 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 		tools: [{ type: "function", function: { name: "read", description: "Read files.", parameters: { type: "object", properties: { paths: { type: "array" } } } } }],
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
-			{ role: "user", content: `<project>\nWritten by Cartographer from your own records.\nYour assessment\nA demo.\n</project>\n\n<context>\nWritten by Cartographer, not by the user. Kept.\nt1 · look · asked: x → y\n</context>\n\nWhere is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
+			{ role: "user", content: `<project>\nWritten by me, from my own records, not by the user's hand. My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\nWritten by me, from my own records, not by the user's hand. Kept.\nt1 · look · asked: x → y\n</context>\n\nWhere is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
 			{ role: "assistant", content: "I should look.", tool_calls: [{ id: "c1", type: "function", function: { name: "task", arguments: JSON.stringify({ brief: "Find the config\nand say where" }) } }] },
-			{ role: "tool", tool_call_id: "c1", content: `${big}\n\n<state>\nWritten by Cartographer, not by the user.\nNow: Thu 12 Nov 2026, 14:03\n</state>\n\n<windows>\nWritten by Cartographer as this request is sent.\n  main · free\n</windows>` },
+			{ role: "tool", tool_call_id: "c1", content: `${big}\n\n<state>\nWritten by me, from my own records, not by the user's hand. This is the current state.\nNow: Thu 12 Nov 2026, 14:03\n</state>\n\n<windows>\nWritten by me, from my own records, not by the user's hand. The shell windows as they are at this moment:\n  main · free\n</windows>` },
 		],
 	};
 	const reply = { role: "assistant", content: [{ type: "thinking", thinking: "Say it." }, { type: "toolCall", id: "c2", name: "chat", arguments: { text: "It is in src/config.js." } }] };

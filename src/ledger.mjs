@@ -124,7 +124,7 @@ const LEDGER_SPEC = {
 	kinds: KINDS,
 	prefix: PREFIX,
 	textMax: TEXT_MAX,
-	addTextLabel: "`text` (the entry itself, one line in your words)",
+	addTextLabel: "`text` (the entry itself, one line in my words)",
 	textRequired: (what) => `${what} is required and was left out or empty.`,
 	textTooLong: (what, length) => `${what} is ${length} characters; the limit is ${TEXT_MAX}. Say it in one line, or split it into two entries.`,
 	itemsMax: OPEN_MAX,
@@ -141,7 +141,7 @@ const LEDGER_SPEC = {
 	doneFollow: (item) =>
 		item.kind === POLICY.enums.ledgerKind.goal ? " Tell the user what was achieved against its done-when line, and ask whether that is what they wanted." : "",
 	addFields: (op, kind, checked) => {
-		const fields = kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, "`done_when` (how you and the user will know the goal is reached)") } : {};
+		const fields = kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, "`done_when` (how the user and I will know the goal is reached)") } : {};
 		const salient = salientOf(op.salient, kind);
 		if (salient !== undefined) fields.salient = true;
 		return fields;

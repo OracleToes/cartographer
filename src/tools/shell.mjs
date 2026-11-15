@@ -63,7 +63,7 @@ export function statusLine(result, { noNetwork = false } = {}) {
 		case POLICY.enums.windowWaitReasons.done:
 			return `exit ${result.exit} · ${after} · window ${name}${place}${result.exit !== 0 && noNetwork ? " · this window has no network" : ""}`;
 		case POLICY.enums.windowWaitReasons.time:
-			return `still running after ${after} in window ${name}: the command keeps going there, and you can go on with other work. The windows block at the end of each request shows how it is doing. The same tool's actions wait for it, send it input, stop it or close it. A run with another window name runs something beside it.`;
+			return `still running after ${after} in window ${name}: the command keeps going there, and I go on with other work. The windows block at the end of each request shows how it is doing. The same tool's actions wait for it, send it input, stop it or close it. A run with another window name runs something beside it.`;
 		case POLICY.enums.windowWaitReasons.asks:
 			return `still running after ${after} in window ${name}. Its last line has no line end, so the program may be waiting for input: action send types a line into it.`;
 		case POLICY.enums.windowWaitReasons.quiet:
@@ -115,7 +115,7 @@ export function shellTool({ config, runner, windows, runOf }) {
 						"run (the default): type `command` into the window. read: more of its output. wait: return when its command ends, prints `until`, or after `seconds`. send: type `text` as a line into the program that runs there. stop: press Ctrl-C. close: end the window and everything in it.",
 				}),
 			),
-			command: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "run: the command line, as you would type it in bash" })),
+			command: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "run: the command line, as I would type it in bash" })),
 			window: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: `Name of the window, a short word such as server or tests. A name that is not open yet opens a new window. Default: ${MAIN_WINDOW}.` })),
 			text: opt(str({ description: "send: the line to type. The line end is added." })),
 			seconds: opt(int({ minimum: POLICY.validation.nonNegativeMin, maximum: WAIT_MAX, description: `run: seconds to wait before returning. wait: the longest to wait. send: how long to wait for the program's answer. Default ${config.shellWait}, at most ${WAIT_MAX}. ${POLICY.validation.nonNegativeMin} returns at once.` })),

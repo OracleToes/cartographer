@@ -224,7 +224,7 @@ export function settleRow(brainDir, id, root) {
 			saveLedger(brainDir, ledger);
 			// A goal that closes is a moment to bring the copy at the top of the context up to date, as the agent's own done does.
 			if (isGoal && ledger.items.find((item) => item.id === id)?.status === POLICY.enums.entryStatus.done && pin(brainDir, { reason: `goal ${id} was closed` }).changed) {
-				return `${result.line} The copy of your assessment and graph at the top of the context was rewritten to what they are now.`;
+				return `${result.line} The copy of my assessment and graph at the top of the context was rewritten to what they are now.`;
 			}
 			return result.line;
 		}

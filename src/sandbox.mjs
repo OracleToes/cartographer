@@ -254,7 +254,7 @@ export class Output {
 			this.#pending = "";
 		}
 		if (this.omittedLines === 0) return [...this.#head, ...this.#tail].join("\n");
-		const gap = `[${this.omittedLines} lines left out here: the output was ${this.lines} lines. To see them, run the command again through grep, head or tail, or send its output to a file and read the part you need.]`;
+		const gap = `[${this.omittedLines} lines left out here: the output was ${this.lines} lines. To see them, run the command again through grep, head or tail, or send its output to a file and read the part I need.]`;
 		return [...this.#head, gap, ...this.#tail].join("\n");
 	}
 }

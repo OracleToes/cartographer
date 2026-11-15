@@ -391,7 +391,7 @@ export function applyAtlasOp(atlas, op, who) {
 		}
 		case POLICY.enums.atlasActions.confirm: {
 			const given = Array.isArray(op.names) ? op.names : op.name !== undefined ? [op.name] : [];
-			if (given.length === 0) throw new AtlasError("`names` is required: the nodes you checked and found still true.");
+			if (given.length === 0) throw new AtlasError("`names` is required: the nodes I checked and found still true.");
 			const lines = [];
 			const done = [];
 			for (const each of given) {
@@ -482,7 +482,7 @@ const HEADINGS = [
 export function renderOutline(atlas, max = OUTLINE_MAX) {
 	if (atlas.nodes.length === 0) return "The graph has no nodes yet.";
 	const shown = atlas.nodes.filter((node) => node.archived !== true);
-	if (shown.length === 0) return `Every node is archived by you; \`atlas\` look shows one, and nothing of them stands in the outline.`;
+	if (shown.length === 0) return `Every node is archived; \`book\` (target=atlas, action=look) shows one, and nothing of them stands in the outline.`;
 	const short = new Set();
 	const oldestFirst = [...shown].sort((a, b) => String(a.written ?? "").localeCompare(String(b.written ?? "")));
 	const render = () => {

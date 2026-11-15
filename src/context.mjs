@@ -37,6 +37,10 @@ import { existsSync, readdirSync, lstatSync, mkdirSync, readFileSync, renameSync
 import { dirname, join } from "node:path";
 import { fileIdentityForPath, readReferenceVersion } from "./catalog.mjs";
 import { TASK_HEADER } from "./prompt.mjs";
+import { RECORD } from "./voice.mjs";
+
+/** The stable anchor every block written by me starts with; the regex below is built from it so the marker cannot drift. */
+const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 import { stamp } from "./time.mjs";
 import { entryLine, loadLedger, salientNotes, saveLedger } from "./ledger.mjs";
 import { confine, LookError } from "./tools/look.mjs";
@@ -44,12 +48,12 @@ import { fileReference } from "./catalog.mjs";
 
 const OPEN = POLICY.markup.context.open;
 const CLOSE = POLICY.markup.context.close;
-const HEAD = "Written by Cartographer, not by the user.";
+const HEAD = RECORD;
 const NOTE_OPEN = POLICY.markup.note.open;
 const NOTE_CLOSE = POLICY.markup.note.close;
 const REPORT_ID = new RegExp(POLICY.patterns.reportId);
 const RECALLED_REPORT = new RegExp(POLICY.patterns.recalledReport);
-const FRONT_BLOCK = new RegExp(`${OPEN}\\nWritten by Cartographer[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
+const FRONT_BLOCK = new RegExp(`${OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
 
 /** Tokens of record lines a front block holds at most; older tasks are counted, not listed. */
 const RECORD_MAX_TOKENS = POLICY.limits.context.recordTokens;
@@ -360,7 +364,7 @@ export function loadReport(brainDir, id) {
 export const KEPT_AS = (id) => `This report is kept as ${id}.`;
 const KEPT_ALL = new RegExp(POLICY.patterns.keptReport, "g");
 /** What follows a report that `context` brought back. */
-export const RECALLED = "[Recalled. It is in view until your context is next collapsed.]";
+export const RECALLED = "[Recalled. It is in view until my context is next collapsed.]";
 /** The id of the report a stored tool result holds in full: as the task returned it, or as it was recalled. */
 function reportIdOf(message) {
 	if (message.role !== "toolResult") return undefined;
@@ -495,7 +499,7 @@ export function noteUserMessages(brainDir, messages) {
 }
 
 const isNoteText = (text) => text.startsWith(`${NOTE_OPEN}\n${HEAD}`);
-const chatLine = (entry) => `[${entry.who === "user" ? "user" : "you"} · ${stamp(entry.at)}] ${entry.text}`;
+const chatLine = (entry) => `[${entry.who === "user" ? "user" : "me"} · ${stamp(entry.at)}] ${entry.text}`;
 
 /** The newest sayings that fit into `max` tokens; the newest one is kept whatever its size. */
 function chatWindow(chat, max) {
@@ -838,32 +842,32 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 		const talk = store.chat.map(chatLine).join("\n");
 		const parts = [
 			OPEN,
-			`${HEAD} Your context was collapsed on ${stamp(now)} (${reason}). What you had in view before is gone except for what stands here: one line for each finished task, ${salient.length > 0 ? "your salient notes, " : ""}your shelf, and the last of your talk with the user. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them.`,
+			`${HEAD} My context was collapsed on ${stamp(now)} (${reason}). What I had in view before is gone except for what stands here: one line for each finished task, ${salient.length > 0 ? "my salient notes, " : ""}my shelf, and the last of my talk with the user. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.`,
 			"",
 			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
 			record.text,
 			...(salient.length > 0 ? ["", SALIENT_HEADING, ...salient.map((item) => entryLine(item))] : []),
 			"",
-			shelf.shown.length === 0 ? "Your shelf is empty." : `Your shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`,
+			shelf.shown.length === 0 ? "My shelf is empty." : `My shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`,
 			...shelf.shown.map((entry) => entry.text),
 			...shelf.left.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] remains on the shelf but is not shown: ${entry.why}.)`),
 			...shelf.stale.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] is stale: ${entry.why}.)`),
 			"",
-			store.chat.length === 0 ? "You and the user have not talked yet." : "Your talk with the user, word for word; what was said before it is gone",
+			store.chat.length === 0 ? "The user and I have not talked yet." : "My talk with the user, word for word; what was said before it is gone",
 			...(talk === "" ? [] : [talk]),
 		];
 		let nowText = "";
 		if (midTurn !== undefined) {
-			const lines = ["", "This collapse came in the middle of your turn, so the turn goes on."];
-			if (midTurn.by === "note" && midTurn.note) lines.push(`The turn began with this note from Cartographer, not with a message of the user:\n${midTurn.note}`);
+			const lines = ["", "This collapse came in the middle of my turn, so the turn goes on."];
+			if (midTurn.by === "note" && midTurn.note) lines.push(`The turn began with a note I wrote, not with a message of the user:\n${midTurn.note}`);
 			if (midTurn.calls.length > 0) {
-				lines.push("The calls of your last reply, all carried out, and what each returned:");
+				lines.push("The calls of my last reply, all carried out, and what each returned:");
 				for (const call of midTurn.calls) {
 					const result = call.result.length > NOW_MAX_CHARS ? `${call.result.slice(0, NOW_MAX_CHARS)}\n…[cut here; a report can be recalled in full by its id]` : call.result;
 					lines.push(`▸ ${call.text}\n${result}`);
 				}
 			}
-			lines.push("Go on from here: do what is left of the turn, or end it.");
+			lines.push("I go on from here: do what is left of the turn, or end it.");
 			nowText = lines.join("\n");
 			parts.push(nowText);
 		}
@@ -923,12 +927,12 @@ export function droppable(messages) {
 export function contextLines(brainDir, root, { used, window }) {
 	const store = loadContext(brainDir);
 	const lines = [];
-	if (Number.isFinite(used) && used > 0) lines.push(`Your context holds about ${count(used)} of ${count(window)} tokens.`);
+	if (Number.isFinite(used) && used > 0) lines.push(`My context holds about ${count(used)} of ${count(window)} tokens.`);
 	// Folding by the agent: it sees exactly which reports stand in view in full, with their size, so it can
 	// decide when each has had its bookkeeping done and fold it to its one-line record (recallable by id).
 	const visibleRows = store.front?.rows ?? composedRows(store).filter((record) => record.archived !== true);
 	const full = visibleRows.filter((record) => record.species === ROW_SPECIES.composed && !store.dropped.includes(record.id));
-	if (full.length > 0) lines.push(`In view in full: ${full.map((record) => `${record.id} (about ${count(estimate(loadReport(brainDir, record.id) ?? ""))} tokens)`).join(", ")}. Fold one with \`book\` once you have done its bookkeeping.`);
+	if (full.length > 0) lines.push(`In view in full: ${full.map((record) => `${record.id} (about ${count(estimate(loadReport(brainDir, record.id) ?? ""))} tokens)`).join(", ")}. I fold one with \`book\` once I have done its bookkeeping.`);
 	if (store.front && Array.isArray(store.front.rows)) {
 		const before = new Map(store.front.rows.map((row) => [row.id, row]));
 		const after = new Map(activeRows(store.rows).map((row) => [row.id, row]));
@@ -953,7 +957,7 @@ export function contextLines(brainDir, root, { used, window }) {
 		lines.push("New or updated shelf snapshots, in view now and carried into the next collapse:");
 		for (const item of [...waiting, ...updated]) lines.push(shelfIdLine(shelfText(root, item, brainDir), item));
 	}
-	if (leaving.length > 0) lines.push(`Taken off your shelf, gone from view at the next collapse: ${leaving.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
+	if (leaving.length > 0) lines.push(`Taken off my shelf, gone from view at the next collapse: ${leaving.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	if (store.shelf.length > 0) lines.push(`Shelf items (stable ID; unshelve by ID or path): ${store.shelf.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	if (stillDeferred.length > 0) lines.push(`Shelved items not shown because they did not fit the context shelf budget remain available by ID: ${stillDeferred.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	const missingSources = store.shelf.filter((item) => item.ref === undefined && liveShelfSource(root, item)?.content === undefined);
@@ -969,7 +973,7 @@ export function contextLines(brainDir, root, { used, window }) {
 	});
 	if (changes.length > 0) {
 		// One line per changed file (O3): the diff is a tool call away — re-shelve the file or read it — not prompt cargo.
-		lines.push("Shelved files changed since their snapshots (the snapshots stay as they were until collapse; read the file or re-shelve it for the difference):");
+		lines.push("Shelved files changed since their snapshots (the snapshots stay as they were until collapse; I read the file or re-shelve it for the difference):");
 		for (const { item, current } of changes) {
 			// The stored snapshot is the rendered view, whose header line (`(lines a-b of N)`) changes on every line-count edit: diff the raw file text instead when it is available, and fall back to the rendered view otherwise.
 			const raw = rawShelf(root, item, brainDir);
@@ -1000,18 +1004,18 @@ function dressFrontRows(message, store, salient) {
 	const currentRows = store.front?.rows ?? [];
 	const reportHeading = "Finished tasks (`book` with book context, action recall and the id brings a report back in full)";
 	const reportStart = text.indexOf(`${reportHeading}\n`);
-	const shelfStart = text.indexOf("\n\nYour shelf", reportStart);
+	const shelfStart = text.indexOf("\n\nMy shelf", reportStart);
 	if (reportStart >= 0 && shelfStart >= 0) {
 		const start = reportStart + reportHeading.length + 1;
 		const record = recordText(currentRows.filter((row) => row.species === ROW_SPECIES.composed)).text;
 		text = `${text.slice(0, start)}${record}${text.slice(shelfStart)}`;
 	}
 	const sectionStart = text.indexOf(`\n\n${SALIENT_HEADING}`);
-	const sectionEnd = sectionStart < 0 ? -1 : text.indexOf("\n\nYour shelf", sectionStart);
+	const sectionEnd = sectionStart < 0 ? -1 : text.indexOf("\n\nMy shelf", sectionStart);
 	if (salient.length > 0) {
 		const section = `\n\n${SALIENT_HEADING}\n${salient.map((item) => entryLine(item)).join("\n")}`;
 		if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${section}${text.slice(sectionEnd)}`;
-		else text = text.replace("\n\nYour shelf", `${section}\n\nYour shelf`);
+		else text = text.replace("\n\nMy shelf", `${section}\n\nMy shelf`);
 	} else if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${text.slice(sectionEnd)}`;
 	return text === textOf(message) ? message : withText(message, text);
 }
@@ -1029,7 +1033,7 @@ export function dressMain(messages, brainDir) {
 		if (active && !store.dropped.includes(id)) return message;
 		if (record?.archived === true) return withText(message, `[Report ${id} is archived. Its record: ${recordLine(record)}.]`);
 		if (record !== undefined && !active) return withText(message, `[Report ${id} is queued to enter context at the next boundary: ${recordLine(record)}.]`);
-		if (store.dropped.includes(id)) return withText(message, `[You dropped report ${id} from view. Its record: ${record ? recordLine(record) : "(no line kept)"}. \`book\` with context recall and ${id} brings it back.]`);
+		if (store.dropped.includes(id)) return withText(message, `[I dropped report ${id} from view. Its record: ${record ? recordLine(record) : "(no line kept)"}. \`book\` with target=context, action=recall and ${id} brings it back.]`);
 		if (record === undefined) return withText(message, `[Report ${id} was deleted from the brain and is no longer in context.]`);
 		return message;
 	});
@@ -1133,26 +1137,26 @@ export function taskBlock(root, brainDir, config, steps, state, { reason }) {
 	state.shelf = shelf.items;
 	return [
 		NOTE_OPEN,
-		`${HEAD} ${reason}, so your steps up to here (${steps.replies === 1 ? "1 reply" : `${steps.replies} replies`}, ${steps.results.length === 1 ? "1 call" : `${steps.results.length} calls`}) were collapsed: their results are no longer in view. You are still the task, and the brief above still holds. What you kept:`,
+		`${HEAD} ${reason}, so my steps up to here (${steps.replies === 1 ? "1 reply" : `${steps.replies} replies`}, ${steps.results.length === 1 ? "1 call" : `${steps.results.length} calls`}) were collapsed: their results are no longer in view. I am still the task, and the brief above still holds. What I kept:`,
 		"",
-		"Your notes",
+		"My notes",
 		keptNotes.length === 0 ? "(none)" : keptNotes.join("\n"),
 		"",
-		`Your calls so far${steps.results.length > done.length ? `, the last ${done.length} of ${steps.results.length}` : ""} (call again for a result you need)`,
+		`My calls so far${steps.results.length > done.length ? `, the last ${done.length} of ${steps.results.length}` : ""} (call again for a result I need)`,
 		done.length === 0 ? "(none)" : done.join("\n"),
 		"",
-		shelf.shown.length === 0 ? "Your shelf is empty." : `Your shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files are now`,
+		shelf.shown.length === 0 ? "My shelf is empty." : `My shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files are now`,
 		...shelf.shown.map((entry) => entry.text),
 		...shelf.left.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] remains on the shelf but is not shown: ${entry.why}.)`),
 		...shelf.stale.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] is stale: ${entry.why}.)`),
 		"",
-		"Go on with the brief from here. Your final message is still the report.",
+		"I go on with the brief from here. My final reply is still the report.",
 		NOTE_CLOSE,
 	].join("\n");
 }
 
 /** What a task is shown in place of a result it no longer needs. */
-const marker = (result, why) => `[${result.id}: ${why} It was: ${callWords(result.call)}, about ${count(result.tokens)} tokens. Call again if you need it.]`;
+const marker = (result, why) => `[${result.id}: ${why} It was: ${callWords(result.call)}, about ${count(result.tokens)} tokens. Call again if I need it.]`;
 
 /**
  * A task's messages as they are sent: collapsed steps replaced by their block, dropped results by one line, and

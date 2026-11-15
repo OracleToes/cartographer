@@ -102,7 +102,7 @@ export function itemLine(item) {
 const WITHDRAWN = "This changed what the plan may change, so the user's authorization no longer holds. Tell the user what changed and why, and ask them to type /approve.";
 const marks = (target, wanted) => {
 	if (wanted.network === true && target !== POLICY.enums.planMode.change) throw new PlanError("`network` goes with a change item: only a change task runs commands.");
-	if (wanted.standing === true && target !== POLICY.enums.planMode.change) throw new PlanError("`standing` goes with a change item: a look item needs no authorization and can be carried out as often as you like.");
+	if (wanted.standing === true && target !== POLICY.enums.planMode.change) throw new PlanError("`standing` goes with a change item: a look item needs no authorization and may be carried out as often as it needs to be.");
 };
 const planSpec = (plan) => ({
 	Error: PlanError,
@@ -227,7 +227,7 @@ export const YOLO_LINE = "approval: OFF (yolo) · the agent's change items run w
 
 /** The first line of the plan as text: whether change items may run. */
 export function authorizationLine(plan, { yolo = false } = {}) {
-	if (yolo && openItems(plan, POLICY.enums.planMode.change).length > 0) return "The user has switched approval off: change items may run without /approve.";
+	if (yolo && openItems(plan, POLICY.enums.planMode.change).length > 0) return "Change items may run without /approve.";
 	if (isAuthorized(plan)) return "Authorized by the user: change items may run.";
 	if (waiting(plan).length > 0) return "Not approved: change items wait for the user. Look items may run.";
 	if (openItems(plan, POLICY.enums.planMode.change).length > 0) return "Authorized by the user: change items may run.";
@@ -237,7 +237,7 @@ export function authorizationLine(plan, { yolo = false } = {}) {
 /**
  * The plan as text.
  * @param {{ done?: boolean, yolo?: boolean }} options  done: also list finished items in full (for the user);
- *   yolo: the user has switched approval off
+ *   yolo: approval is off in this session (the present state of how it runs, not an exception to it)
  */
 export function renderPlan(plan, options = {}) {
 	if (plan.items.length === 0) return "There is no plan.";

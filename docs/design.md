@@ -1,6 +1,6 @@
 # Cartographer — the pair-programmer design
 
-**Status:** fresh design, drafted 2026-11-15 from a direct alignment conversation with the user. It supersedes `docs/working-design/context-and-shelf.md` (a record of an earlier design, written by a weaker model from partial understanding — useful for what was *tried*, not for what is *wanted*) and the phase plan in `docs/working-design/book-and-schema-review.md`. The old documents are deleted when this one is signed off, by the user, not before. The README rewrite follows the implementation; it documents the harness as it is, not as it was.
+**Status:** source of Intent, 2026-11-15. The direction was settled in a direct alignment conversation with the user; it supersedes the working-design documents (deleted) and the phase plans, which lived there. Planning and staging for the implementation of any given intent lives in separate planning documents (the prompt rewrite: `docs/prompt-rewrite.md`) and in git history — not here. The README documents the harness as it is.
 
 Rules of evidence, same as everywhere in this project: no live claims until a live run exists; measurements are bytes or tokens stated as such; anything not yet verified is marked open.
 
@@ -52,7 +52,7 @@ In **default mode**, the user's silence means "not authorized yet," not "don't l
 
 ## 6. The dispatch contract — reads are free, changes go through the gate
 
-**Settled in direction** (user-confirmed; implementation to follow):
+**Settled** (user-confirmed 2026-11-15; shipped):
 
 - **Read-only is inline, for every context.** Project-file `inspect`/`read`/`search`/`list`, durable `list`/`inspect`/`read`, report reads, `shelf` operations — no nested conversation, no report journaled, no permanent composed row, no second-guessing. The bounds that already exist stay (file size cap, line clip, range cap).
 - **Changes go through the one gate.** File create/edit and all command execution require an authorized change plan item carried by a change focus — checkpoints, sandbox, network policy, undo. Only the orchestrating context edits the plan. Default mode: items wait for the user. Yolo: items run.
@@ -61,7 +61,7 @@ In **default mode**, the user's silence means "not authorized yet," not "don't l
 - The return-time yes/no brain-review checkpoint rides with real tasks only, not with every book operation.
 - `wake`/`sleep` remain orchestrator-only. No nesting of foci. No `task` from within a focus.
 
-Deleting the automatic out-of-brain focus dispatch (`externalWork`) and the `mainLooks` refusal is the core code change; everything else in this section is consequence of it.
+The automatic out-of-brain focus dispatch (`externalWork`) and the `mainLooks` refusal are deleted; the rest of this section is consequence of that.
 
 ## 7. Memory — a cache, a brain, and a breath
 
@@ -83,30 +83,20 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 ## 9. What the harness guarantees, always
 
 - The plan is the only way project files change; approval is per item and async; checkpoints bracket every change task; `/undo` reverts one task's work; `.git/` and `.atlas/` are never written by change tasks; project-root confinement including symlinks; sandboxed commands by default with per-item network control.
-- The agent cannot brick anything it does not own: it cannot touch the user's `.git`, cannot edit the plan of *its own* program directory without a project there (and it has no standing duty to edit its own harness at all — see §12), cannot erase the transcript.
+- The agent cannot brick anything it does not own: it cannot touch the user's `.git`, cannot edit the plan of *its own* program directory without a project there (and it has no standing duty to edit its own harness at all — see §10), cannot erase the transcript.
 - Every failure is actionable: local validators fail closed with a message naming the exact field at fault; unresolved references report their status (`live | stale | deleted | …`); unsupported operations list what *is* supported. If the 27B fails, it fails in one round trip with the fix in hand — never a silent swallow.
 - Nothing is lost silently: soft-forget never claims erasure; the checkpoint journal contradicts any task that claims a change it did not make.
 
 ## 10. What this design deletes or parks
 
 - **Stage 6 clusters** (recency-reordered user-area memory summaries): consciously deferred. Mechanically organized memory, kept simple, first — then only with live evidence that the agent needs more.
-- **The handoff ask** before non-user-initiated collapse (proposed — see Open): the 0.6B-era metacognition gate. If kept, it is opt-in, never the default.
+- **The handoff ask** before non-user-initiated collapse: the 0.6B-era metacognition gate. **DECIDED 2026-11-15 (O1): opt-in (`handoffQuestion`), never the default.**
 - **Stage 4A focus-dispatch for out-of-brain operations** (items 6–7): superseded by §6. Brain records ran direct already; the rest now runs inline too. The `externalWork` auto-dispatch and `mainLooks` refusal die.
 - **The 17-to-13 tool era artifacts**: the standalone `atlas` tool (already folded, `7571490`), the schema-replay lifecycle (already deleted), and any future temptation to reach back for them.
 - **Recursive self-improvement as a standing duty**: cut (user-confirmed). The agent maps and maintains *the project it is aimed at*. Its own harness is fixed furniture unless the user aims it at the install directory deliberately, in which case changes still go through the same plan gate.
-- **Plugins**: not built, not designed here. **Retention/prune lifecycle** for old transcript (separate, unresolved; explicit user conversation before any design). **Stage 8-scale verification**: deferred until the charter exists (§11, Slice 5).
+- **Plugins**: not built, not designed here. **Retention/prune lifecycle** for old transcript (separate, unresolved; explicit user conversation before any design). **Stage 8-scale verification**: deferred; to be reconsidered only with live evidence from a real session.
 
-## 11. The slices — staged, each coherent
-
-0. **This document.** Signed off by the user. Old docs deleted only then.
-1. **Dispatch unification.** Reads inline everywhere; writers gated; `task` only via brief; reports journal at task return only; `mainLooks` dies; prompt lines and refusals reworm; offline probes; commit.
-2. **The charter.** Prompt rewrite: modes, initiation on start/wake, standing duties, the sleep checklist (§5), chat-as-steering, the dyad. Docs of the prompt sections updated; offline probes of the assembled prompt; commit.
-3. **Collapse slimming (only per Open decisions).** Handoff ask opt-in via `handoffQuestion` (boolean, default off; the collapse carries the last reply mechanically) — done. One-line shelf-change notices (file name + `+added −removed` lines; the diff a call away) — done. Salient ledger notes in place of the context-row species (O2) — done. "Quieter state block" — no decision backs this phrase; treated as folded into the one-line notices, and raised with the user rather than invented. Each independently committable; each revert-safe.
-4. **The shared brain UI.** One engine, two doors: the screen/Views dispatch to the same operation implementations; parity of verbs for ledger/plan/atlas/books/reports/shelf/context on screen; Hands view becomes a real brain editor. No new mechanisms — parity, not invention.
-5. **Live measurement.** One real session with the 27B on a throwaway project: does it map unprompted? does it default to queueing changes (default mode) / proceed (yolo)? does it re-verify instead of trusting notes? does it sleep only at genuine stasis? first-try rates, window economics, collapse behavior. Findings feed the prompt, not adjectives.
-6. **README replacement.** Written against the shipped behavior; install, dyad, modes, brain, safety, settings, tests — with honest unknowns. The false story ends.
-
-## 12. Decisions (small, explicit)
+## 11. Decisions (small, explicit)
 
 Decided items are marked **DECIDED** with their date; the rest stay open.
 
@@ -114,14 +104,14 @@ O1. **Handoff ask — DECIDED 2026-11-15: opt-in, default off.** It stays availa
 O2. **Curated context rows vs ledger notes — DECIDED 2026-11-15: merged; shipped 2026-11-15.** The row species is gone (`context add/edit/done/remove/before` and the Hands section with `/row` are retired). A note that must stay in view carries `"salient": true` (only notes); a salient note is marked ● and stands in the state block and in the block a collapse keeps, re-read from the ledger at the boundary. Legacy curated rows fold into salient notes on first read after the update (dedupe by text; interrupted folds resume; reports nothing on an unreadable ledger). (Overrode my recommendation to keep both.)
 O3. **Shelf-change notices in the state block — DECIDED 2026-11-15: one line per changed file** (file name + line delta). The diff is available on demand; it is not in the notice.
 O4. **Stage 6 clusters.** Confirm: deferred, not promised.
-O5. **A read-only command lane for the orchestrator — DECIDED 2026-11-15: yes.** The orchestrator may run read-only commands inline, like any other read: tests, lints, git status and the like, on its own authority, without a plan item or approval. It is enforced by the sandbox, not by discipline: the window mounts the project, the brain and .git read-only and never reaches the network (src/sandbox.mjs readOnly profile), so a command that must write or reach the network is still a change item for a task. Opens before Slice 2 prompt work so the charter can promise what the gate allows.
-O6. **Measurement gate.** May Slice 5 use a live 27B session as acceptance evidence, or is it observational only (observation + manual review; no pass/fail claims)?
+O5. **A read-only command lane for the orchestrator — DECIDED 2026-11-15: yes.** The orchestrator may run read-only commands inline, like any other read: tests, lints, git status and the like, on its own authority, without a plan item or approval. It is enforced by the sandbox, not by discipline: the window mounts the project, the brain and .git read-only and never reaches the network (src/sandbox.mjs readOnly profile), so a command that must write or reach the network is still a change item for a task.
+O6. **Measurement gate.** May a live 27B session be used as acceptance evidence, or is it observational only (observation + manual review; no pass/fail claims)?
 I1. **Initiation — DECIDED 2026-11-15.** A config setting and a `/command` toggle govern whether the agent self-initiates on start and after wakes with nothing owed; it self-initiates by **default**. (Not prompt-only, and not a forced startup note.)
 
-## 13. What does not change
+## 12. What does not change
 
 The identity catalog and `{ namespace, kind, id, version }` envelope; expected-version semantics and stale-write refusal; idempotent replay; the namespace/fork policy; `.cartoignore` discovery semantics; soft-forget's transcript-preserving contract; checkpoints/undo; plan exclusivity for the orchestrator; wake/sleep exclusivity; the Requests view and the approval flow; the ledger limits; chat as a tool of both contexts. None of this is relitigated here; all of it is the substrate the charter stands on.
 
-## 14. Honesty policy for this refactor
+## 13. Honesty policy
 
-Every slice verifies offline first (`node --check`, module imports, stub probes, no live model claims). Live evidence is gathered once, deliberately, in Slice 5, on a throwaway project, and reported as what it is: one session, one model, one project. Nothing in this design is verified by assertion. Where the design is wrong, Slice 5 is how we find out.
+Every change verifies offline first (`node --check`, module imports, stub probes, no live model claims). Live evidence is gathered once, deliberately, on a throwaway project, and reported as what it is: one session, one model, one project. Nothing in this design is verified by assertion. Where the design is wrong, a live session is how we find out.

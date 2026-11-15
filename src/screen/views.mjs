@@ -24,11 +24,13 @@ import { listRequests } from "../requests.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
 import { short, width } from "./text.mjs";
+import { RECORD } from "../voice.mjs";
 
 const PROJECT_BLOCK = new RegExp(`^${POLICY.markup.project.open}\\n[\\s\\S]*?\\n${POLICY.markup.project.close}\\n*`);
-const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.context.close}\\n*`);
-const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.state.close}`);
-const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\nWritten by Cartographer[\\s\\S]*?\\n${POLICY.markup.windows.close}\\s*$`);
+const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.context.close}\\n*`);
+const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.state.close}`);
+const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.windows.close}\\s*$`);
 
 const heading = (text) => ({ key: `heading:${text}`, plain: true, head: [[text, "heading"]] });
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });

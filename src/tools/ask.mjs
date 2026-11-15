@@ -21,7 +21,7 @@ export function askTool({ brainDir, asks }) {
 	return defineTool({
 		name: "ask",
 		description: [
-			"Put a question to the user and wait for their answer, which comes back as the result. Use it when you cannot go on without it; to tell the user something, use `chat`, which does not wait.",
+			"Put a question to the user and wait for their answer, which comes back as the result. I use it when I cannot go on without it; to tell the user something, I use `chat`, which does not wait.",
 			"With `choices`, the user can pick one by its number; they can also type an answer of their own.",
 		].join(" "),
 		parameters: obj({
@@ -48,7 +48,7 @@ export function askTool({ brainDir, asks }) {
 			if (outcome.kind === "answer") return { output: [{ type: "text", text: `The user answered: ${outcome.text}` }], details };
 			const why = outcome.kind === "timeout" ? `the user did not answer within ${spanOf(outcome.minutes)}` : "nobody is at the terminal: its input has ended";
 			return {
-				output: [{ type: "text", text: `No answer: ${why}. The question stays on their screen. Go on with what you can decide yourself and say what you assumed${task ? " in your report" : ""}, or leave the matter open.` }],
+				output: [{ type: "text", text: `No answer: ${why}. The question stays on their screen. I go on with what I can decide myself and say what I assumed${task ? " in my report" : ""}, or leave the matter open.` }],
 				details,
 			};
 		},

@@ -181,7 +181,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const active = { id: undefined, said: [], heard: [] };
 	const takeSaid = () => {
 		const lines = active.said.splice(0).map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`);
-		return lines.length === 0 ? undefined : ["Cartographer: the user wrote this while you work. Take it into account, and put into your report what you could not act on.", ...lines].join("\n");
+		return lines.length === 0 ? undefined : ["The user wrote this while I was working. I take it into account, and put into my report what I could not act on.", ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });
 	const textOfAnswer = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();

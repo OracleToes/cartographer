@@ -764,7 +764,7 @@ function runLedger({ brainDir, engine }, args, api) {
 	let pinned = false;
 	if (closed.length > 0) {
 		pinned = pin(brainDir, { now: api.now(), reason: `goal ${closed.join(", ")} was closed` }).changed;
-		if (pinned) lines.push("The copy of your assessment and graph at the top of your context was rewritten to what they are now.");
+		if (pinned) lines.push("The copy of my assessment and graph at the top of my context was rewritten to what they are now.");
 		// And the moment to collapse the context: the work for that goal is done (src/engine.mjs).
 		engine?.want(`goal ${closed.join(", ")} was closed`);
 	}
@@ -821,14 +821,14 @@ function runBooks({ brainDir }, args, api) {
 	if (!Array.isArray(args.ops) || args.ops.length === 0) {
 		const text = typeof args.text === "string" ? args.text.trim() : "";
 		if (text === "") return fail("`text` is empty and `ops` holds nothing. Write an entry with `ops`, or the whole assessment with `text`.");
-		if (text.length > ASSESSMENT_MAX) return fail(`The assessment is ${text.length} characters; the limit is ${ASSESSMENT_MAX}. Keep what you would need first with an empty context; details belong in nodes of the atlas.`);
+		if (text.length > ASSESSMENT_MAX) return fail(`The assessment is ${text.length} characters; the limit is ${ASSESSMENT_MAX}. Keep what I would need first with an empty context; details belong in nodes of the atlas.`);
 		saveAssessment(brainDir, text);
 		noteAssessed(brainDir, text);
 		return {
 			output: [
 				{
 					type: "text",
-					text: `Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of your context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`,
+					text: `Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`,
 				},
 			],
 			details: { shown: [`assessment written, ${text.length} characters`] },
@@ -869,7 +869,7 @@ function runBooks({ brainDir }, args, api) {
 	}
 	const practice = renderBook(book, POLICY.enums.bookKind.practice);
 	return {
-		output: [{ type: "text", text: `${lines.join("\n")}${practice === "" ? "" : `\n\nYour practice now reads:\n${practice}`}` }],
+		output: [{ type: "text", text: `${lines.join("\n")}${practice === "" ? "" : `\n\nMy practice now reads:\n${practice}`}` }],
 		details: { shown },
 	};
 }
@@ -899,7 +899,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				if (id === "") return fail(`recall needs \`id\`: the report to bring back.${composedRows(store).length > 0 ? ` Kept: ${composedRows(store).slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
 				const report = loadReport(brainDir, id);
 				if (report === undefined) return fail(`There is no report ${id}.${composedRows(store).length > 0 ? ` Kept: ${composedRows(store).slice(-POLICY.limits.bookTool.keptBookEntries).map((record) => record.id).join(", ")}.` : " No report is kept yet."}`);
-				if (reportsInView(messages).has(id) && !store.dropped.includes(id)) return fail(`Report ${id} is still in your context, further up: nothing was added.`);
+				if (reportsInView(messages).has(id) && !store.dropped.includes(id)) return fail(`Report ${id} is still in my context, further up: nothing was added.`);
 				// A report the main agent dropped comes back by this, too.
 				if (main && store.dropped.includes(id)) {
 					updateContext(brainDir, (next) => {
@@ -938,8 +938,8 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				shown.push(`shelved ${shelfLabel(item)} as ${item.id} · about ${count(tokens)} rendered tokens${handOn ? " · handed on to the main agent at the end" : ""}`);
 				lines.push(
 					main
-						? `${shelfLabel(item)} is on your shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .atlas; selected content is in view now and will stand at the start after the next collapse; every task begins with it read.\n\n${item.snapshot}`
-						: `${shelfLabel(item)} is on your shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .atlas; selected content is in view now and stays when your steps are collapsed.${handOn ? " When you return, it goes onto the main agent's shelf as well." : ""}\n\n${item.snapshot}`,
+						? `${shelfLabel(item)} is on my shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .atlas; selected content is in view now and will stand at the start after the next collapse; every task begins with it read.\n\n${item.snapshot}`
+						: `${shelfLabel(item)} is on my shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .atlas; selected content is in view now and stays when my steps are collapsed.${handOn ? " When I return, it goes onto the orchestrating context's shelf as well." : ""}\n\n${item.snapshot}`,
 				);
 				continue;
 			}
@@ -949,14 +949,14 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				if (given === "") return fail("unshelve needs `path`: a file or shelf item ID to take off the shelf, or all.");
 				const mine = main ? store.shelf : (store.tasks[api.conversationId]?.shelf ?? []);
 				const gone = given === "all" ? mine : mine.filter((entry) => entry.id === given || shelfLabel(entry) === given || entry.path === given || entry.path === given.replace(/^\.\//, ""));
-				if (gone.length === 0) return fail(`${given} is not on your shelf.${mine.length > 0 ? ` On it: ${mine.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.` : " The shelf is empty."}`);
+				if (gone.length === 0) return fail(`${given} is not on my shelf.${mine.length > 0 ? ` On it: ${mine.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.` : " The shelf is empty."}`);
 				updateContext(brainDir, (next) => {
 					if (main) next.shelf = next.shelf.filter((entry) => !gone.some((other) => sameItem(other, entry)));
 					else taskState(next, api.conversationId).shelf = mine.filter((entry) => !gone.some((other) => sameItem(other, entry)));
 				});
 				cleanupShelfSnapshots(brainDir, gone);
 				shown.push(`unshelved ${gone.map((item) => `${shelfLabel(item)} as ${item.id}`).join(", ")}`);
-				lines.push(`Taken off your shelf: ${gone.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.${main ? " A copy that stands in your context stays there until the next collapse." : ""}`);
+				lines.push(`Taken off my shelf: ${gone.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.${main ? " A copy that stands in my context stays there until the next collapse." : ""}`);
 				continue;
 			}
 
@@ -970,7 +970,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 					const unknown = ids.filter((id) => !inView.has(id) || store.dropped.includes(id));
 					if (unknown.length > 0) {
 						const open = [...inView.keys()].filter((id) => !store.dropped.includes(id));
-						return fail(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not in your context in full, so there is nothing to drop.${open.length > 0 ? ` In full: ${open.join(", ")}.` : " No report is."}`);
+						return fail(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not in my context in full, so there is nothing to drop.${open.length > 0 ? ` In full: ${open.join(", ")}.` : " No report is."}`);
 					}
 					updateContext(brainDir, (next) => {
 						next.dropped = [...new Set([...next.dropped, ...ids])];
@@ -991,13 +991,13 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				const unknown = ids.filter((id) => !inView.some((result) => result.id === id));
 				if (unknown.length > 0) {
 					const large = inView.filter((result) => result.tokens >= POLICY.limits.context.largeResultTokens);
-					return fail(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not a result in your view.${large.length > 0 ? ` Your larger results: ${large.map((result) => `${result.id} (${engine.callWords(result.call)}, about ${count(result.tokens)} tokens)`).join("; ")}.` : " You have no large result in view."}`);
+					return fail(`${unknown.join(", ")} ${unknown.length === 1 ? "is" : "are"} not a result in my view.${large.length > 0 ? ` My larger results: ${large.map((result) => `${result.id} (${engine.callWords(result.call)}, about ${count(result.tokens)} tokens)`).join("; ")}.` : " I have no large result in view."}`);
 				}
 				const picked = inView.filter((result) => ids.includes(result.id));
 				updateContext(brainDir, (next) => {
 					const task = taskState(next, api.conversationId);
 					task.dropped ??= {};
-					for (const id of ids) task.dropped[id] = "You dropped this result.";
+					for (const id of ids) task.dropped[id] = "I dropped this result.";
 				});
 				const freed = picked.reduce((sum, result) => sum + result.tokens, 0);
 				const again = messages.slice(Math.min(...picked.map((result) => result.index)) + 1).reduce((sum, message) => sum + messageTokens(message), 0);
@@ -1014,24 +1014,24 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 					(taskState(next, api.conversationId).notes ??= []).push(text);
 				});
 				shown.push(`noted · ${count(text.length)} characters`);
-				lines.push("Noted. It stays when your steps are collapsed.");
+				lines.push("Noted. It stays when my steps are collapsed.");
 				continue;
 			}
 
 			if (action === POLICY.enums.actions.collapse) {
 				const why = String(op.text ?? "").replace(/\s+/g, " ").trim().slice(0, POLICY.limits.bookTool.refusalChars);
 				if (main) {
-					engine.want(why === "" ? "you asked for it" : `you asked for it: ${why}`, { asked: true, byAgent: true });
+					engine.want(why === "" ? "I asked for it" : `I asked for it: ${why}`, { asked: true, byAgent: true });
 					shown.push("collapse asked for");
-					lines.push("Your context is collapsed when the calls of this reply are done. Your next request begins with what was kept.");
+					lines.push("My context is collapsed when the calls of this reply are done. My next request begins with what was kept.");
 					continue;
 				}
-				if (stepsOf(messages) === undefined) return fail("Your steps cannot be found, so nothing was collapsed.");
+				if (stepsOf(messages) === undefined) return fail("My steps cannot be found, so nothing was collapsed.");
 				updateContext(brainDir, (next) => {
-					Object.assign(taskState(next, api.conversationId), { pending: "now", reason: why === "" ? "You asked for it" : `You asked for it (${why})` });
+					Object.assign(taskState(next, api.conversationId), { pending: "now", reason: why === "" ? "I asked for it" : `I asked for it (${why})` });
 				});
 				shown.push("collapse of its steps asked for");
-				lines.push("Your steps so far are collapsed before your next reply. You keep the brief, your notes, your shelf and one line for each call.");
+				lines.push("My steps so far are collapsed before my next reply. I keep the brief, my notes, my shelf and one line for each call.");
 				continue;
 			}
 			return fail("`action` is one of archive, unarchive, delete, recall, shelve, unshelve, fold, note, collapse. To keep a note in view across collapses, use `target=ledger, action=add` with `kind=note` and `salient: true`.");

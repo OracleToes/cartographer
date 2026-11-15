@@ -13,7 +13,7 @@ import { approve, itemLine, loadPlan, savePlan, waiting } from "./plan.mjs";
 
 /**
  * @param {string} brainDir
- * @param {{ yolo?: boolean }} [more]  yolo: the user has switched approval off, so no change item waits
+ * @param {{ yolo?: boolean }} [more]  yolo: approval is off in this session, so no change item waits
  * @returns {{ id: string, kind: "approval" | "question", text: string }[]}
  */
 export function listRequests(brainDir, { yolo = false } = {}) {

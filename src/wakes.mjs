@@ -125,7 +125,7 @@ export function wakeLine(wake, now, see = {}) {
 	const parts = [`${wake.id} · ${wakeAbout(wake)}${gap}, ${wakeRepeats(wake)}`, wake.note];
 	if (wake.fired > 0) {
 		parts.push(`fired ${wake.fired === 1 ? "once" : `${wake.fired} times`}, last ${ago(now - wake.lastFired)}${wake.kind !== POLICY.enums.wakeKinds.time && wake.lastWhat ? `: ${wake.lastWhat}` : ""}`);
-		if (wake.lastActed !== undefined) parts.push(`you last acted on it ${ago(now - wake.lastActed)}`);
+		if (wake.lastActed !== undefined) parts.push(`last acted on ${ago(now - wake.lastActed)}`);
 	} else parts.push("not fired yet");
 	if (wake.kind === POLICY.enums.wakeKinds.time && Number.isFinite(wake.due)) parts.push(wake.due <= now ? "due now" : `next in ${took(wake.due - now)}`);
 	if (wake.kind === POLICY.enums.wakeKinds.window && see.windowOpen !== undefined && !see.windowOpen(wake.window)) parts.push(`window ${wake.window} is not open now`);
@@ -231,21 +231,21 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = POL
 		 */
 		set(wanted) {
 			const note = flat(wanted.note);
-			if (note === "") throw new WakeError("A wake needs a `note`: what you want to look at or do when it fires, written for yourself.");
+			if (note === "") throw new WakeError("A wake needs a `note`: what I want to look at or do when it fires, written for myself.");
 			if (note.length > NOTE_MAX) throw new WakeError(`\`note\` is ${note.length} characters; ${NOTE_MAX} is the limit.`);
 			if (wakes.length >= most) throw new WakeError(`${plural(most, "wake")} are set, which is the limit: ${wakes.map((wake) => wake.id).join(", ")}. Remove one first.`);
 			const hasPath = typeof wanted.path === "string" && wanted.path.trim() !== "";
 			const hasWindow = typeof wanted.window === "string" && wanted.window.trim() !== "";
 			if (hasPath && hasWindow) throw new WakeError("Give `path` or `window`, not both: one wake watches one thing. Set a second wake for the other.");
 			const kind = hasPath ? POLICY.enums.wakeKinds.file : hasWindow ? POLICY.enums.wakeKinds.window : POLICY.enums.wakeKinds.time;
-			if (kind === POLICY.enums.wakeKinds.time && wanted.every === undefined) throw new WakeError("Say what wakes you: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
+			if (kind === POLICY.enums.wakeKinds.time && wanted.every === undefined) throw new WakeError("Say what wakes me: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
 			if (wanted.match !== undefined && wanted.match !== "" && kind !== POLICY.enums.wakeKinds.window) throw new WakeError("`match` goes with `window`: it is the text a printed line must contain.");
 			const every = wanted.every === undefined ? least : wanted.every;
 			if (!Number.isInteger(every) || every < least || every > EVERY_MAX) {
 				throw new WakeError(`\`every\` is ${JSON.stringify(wanted.every)}; it is a whole number of seconds from ${least} to ${EVERY_MAX}. A wake costs a whole turn, so ${took(least * 1000)} is the least.`);
 			}
 			const times = wanted.times === undefined ? POLICY.limits.wake.timesDefault : wanted.times;
-			if (!Number.isInteger(times) || times < POLICY.limits.wake.timesMin) throw new WakeError(`\`times\` is ${JSON.stringify(wanted.times)}; it is how often the wake fires: 1, 2, 3, …, or 0 for until you remove it.`);
+			if (!Number.isInteger(times) || times < POLICY.limits.wake.timesMin) throw new WakeError(`\`times\` is ${JSON.stringify(wanted.times)}; it is how often the wake fires: 1, 2, 3, …, or 0 for until I remove it.`);
 			const now = clock();
 			const wake = { id: `${POLICY.idPrefixes.wake}${next}`, kind, every, times, ...(times > 0 ? { left: times } : {}), note, created: now, fired: 0 };
 			if (kind === POLICY.enums.wakeKinds.time) wake.due = now + every * 1000;

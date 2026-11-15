@@ -121,7 +121,7 @@ export function treeSection(root, view = {}, options = {}) {
 	const asked = Number.isInteger(view.depth) ? Math.min(DEPTH_MAX, Math.max(1, view.depth)) : Math.min(DEPTH_MAX, options.depth ?? DEPTH_DEFAULT);
 	if (files.length === 0) return { text: `The project directory holds no files yet.${lost}`, anchor, depth: asked, files };
 	const drawn = drawTree(files, { anchor, depth: asked, marks: options.marks, maxLines: options.maxLines });
-	const where = anchor === "." ? `From the project root, ${plural(asked, "level")} deep: ${plural(files.length, "file")} in all.` : `From ${anchor}/ (the anchor you set), ${plural(asked, "level")} deep: ${drawn.under} of the project's ${plural(files.length, "file")} are under it. \`atlas\` with a tree operation and anchor "." returns to the project root.`;
+	const where = anchor === "." ? `From the project root, ${plural(asked, "level")} deep: ${plural(files.length, "file")} in all.` : `From ${anchor}/ (the anchor I set), ${plural(asked, "level")} deep: ${drawn.under} of the project's ${plural(files.length, "file")} are under it. \`atlas\` with a tree operation and anchor "." returns to the project root.`;
 	const smaller = [];
 	if (drawn.depth < asked) smaller.push(`${plural(drawn.depth, "level")} deep`);
 	if (Number.isFinite(drawn.cap)) smaller.push(`at most ${drawn.cap} entries of a folder`);
