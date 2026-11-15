@@ -34,7 +34,7 @@ import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
 import { booksPath } from "../books.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
-import { isAuthorized, loadPlan, openItems, planPath } from "../plan.mjs";
+import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
@@ -397,7 +397,8 @@ export async function runScreen(session, options, runTerminal) {
 			const { plan } = loadPlan(brainDir);
 			if (plan !== undefined && plan.items.length > 0) {
 				const open = openItems(plan).length;
-				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${isAuthorized(plan) ? " · approved" : ""}`;
+				const awaiting = waiting(plan).length;
+				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${isAuthorized(plan) || awaiting === 0 ? " · approved" : ` · ${awaiting} awaiting`}`;
 			}
 			const { ledger } = loadLedger(brainDir);
 			if (ledger !== undefined) {

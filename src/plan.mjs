@@ -85,7 +85,7 @@ export const openItems = (plan, mode) => plan.items.filter((item) => item.status
 export const isAuthorized = (plan) => plan.authorized !== undefined;
 
 /** Whether the user's /approve is what the plan waits for. */
-export const awaitsApproval = (plan) => !isAuthorized(plan) && openItems(plan, POLICY.enums.planMode.change).length > 0;
+export const awaitsApproval = (plan) => !isAuthorized(plan) && waiting(plan).length > 0;
 /** Whether any request waits on the plan: an open change item that neither the whole-plan approval nor its own covers. */
 export const planWaits = (plan) => !isAuthorized(plan) && waiting(plan).length > 0;
 /** Open items that are finished by being carried out once; a standing item is a duty and stays open. */
@@ -217,7 +217,8 @@ export function planSummary(plan) {
 	const shown = plan.items.filter((item) => item.archived !== true);
 	const done = shown.length - openItems(plan).length;
 	const change = openItems(plan, POLICY.enums.planMode.change).length;
-	const state = change === 0 ? "" : isAuthorized(plan) ? " · authorized" : ` · ${plural(change, "change item")} not authorized`;
+	const waits = waiting(plan).length;
+	const state = change === 0 ? "" : isAuthorized(plan) || waits === 0 ? " · authorized" : ` · ${plural(waits, "change item")} not authorized`;
 	return `${plural(shown.length, "item")}${done > 0 ? `, ${done} done` : ""}${state}`;
 }
 
@@ -228,7 +229,8 @@ export const YOLO_LINE = "approval: OFF (yolo) · the agent's change items run w
 export function authorizationLine(plan, { yolo = false } = {}) {
 	if (yolo && openItems(plan, POLICY.enums.planMode.change).length > 0) return "The user has switched approval off: change items may run without /approve.";
 	if (isAuthorized(plan)) return "Authorized by the user: change items may run.";
-	if (openItems(plan, POLICY.enums.planMode.change).length > 0) return "Not approved: change items wait for the user. Look items may run.";
+	if (waiting(plan).length > 0) return "Not approved: change items wait for the user. Look items may run.";
+	if (openItems(plan, POLICY.enums.planMode.change).length > 0) return "Authorized by the user: change items may run.";
 	return "No change item is open, so nothing needs authorizing.";
 }
 

@@ -295,10 +295,10 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 	if (target === "file" && ["create", "edit"].includes(action)) {
 		if (main) return fail("Project-file create/edit must run in a focused change task for an authorized plan item.");
 		if (typeof args.planItem !== "string" || args.planItem.trim() === "") return fail("Project-file create/edit requires the authorized planItem carried by this focus.");
-		const task = await api.commit(async (tx) => {
-			const entries = await tx.scanEntries({ conversationId: api.conversationId, order: "ascending" }, POLICY.limits.taskHistory.contextEntries);
-			return entries.items.find((entry) => entry.conversationId === api.conversationId && entry.kind === "carto.brief")?.data;
-		}, callContext);
+		// What this focus carries, recorded when it was created (src/tools/task.mjs) in the durable context store:
+		// the plan item it carries out and that it is a change. Cheap to read, and right after a restart.
+		// (An entry scan was tried; it cannot see an entry that sits after the first forty of a long conversation.)
+		const task = loadContext(brainDir).tasks[api.conversationId];
 		if (task?.mode !== POLICY.enums.planMode.change || task.item !== args.planItem) return fail("File mutation refused: this focus is not carrying that authorized change plan item.");
 		let filePath = args.path;
 		let expectedVersion;

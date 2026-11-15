@@ -19,7 +19,7 @@ import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
 import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
-import { authorizationLine, itemLine, loadPlan, planPath } from "../plan.mjs";
+import { authorizationLine, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
@@ -160,7 +160,7 @@ export function planView({ brainDir, yolo }) {
 		copy: itemLine(item),
 		target: { file, line: jsonLine(file, "id", item.id) },
 	}));
-	const waits = !yolo && plan.authorized === undefined && plan.items.some((item) => item.status === POLICY.enums.entryStatus.open && item.mode === POLICY.enums.planMode.change);
+	const waits = !yolo && waiting(plan).length > 0;
 	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]], [[`  t marks done, n new item (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]], items };
 }
 

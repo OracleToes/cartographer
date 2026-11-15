@@ -17,7 +17,10 @@ import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
-import { shelfItem, updateContext, loadContext } from "../src/context.mjs";
+import { shelfItem, updateContext, loadContext, taskState } from "../src/context.mjs";
+import { approveRequests } from "../src/requests.mjs";
+import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
+import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
@@ -395,4 +398,55 @@ test("trace: one call to the model is one JSON line: the request as sent, the re
 	assert.match(record.response, /data: \[DONE\]/);
 	assert.equal(record.status, 200);
 	assert.equal(record.bytesSent, Buffer.byteLength(JSON.stringify(record.request)));
+});
+
+// ─── The approval gate, as the live run taught it ────────────────────────────
+
+test("plan: an item approved one by one is authorized everywhere the agent is told so", (t) => {
+	const { brainDir } = fresh(t);
+	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
+	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "And the tests for it." }), null);
+	let { plan } = loadPlan(brainDir);
+	assert.equal(awaitsApproval(plan), true, "two change items wait for the user");
+	assert.match(authorizationLine(plan), /^Not approved/);
+	assert.match(planSummary(plan), /2 change items not authorized/);
+	const done = approveRequests(brainDir, ["p1"]);
+	assert.deepEqual(done.items, ["p1"]);
+	({ plan } = loadPlan(brainDir));
+	assert.equal(awaitsApproval(plan), true, "p2 still waits");
+	assert.match(authorizationLine(plan), /^Not approved/);
+	assert.match(planSummary(plan), /1 change item not authorized/);
+	approveRequests(brainDir, ["p2"]);
+	({ plan } = loadPlan(brainDir));
+	assert.equal(awaitsApproval(plan), false);
+	assert.match(authorizationLine(plan), /^Authorized by the user/);
+	assert.match(planSummary(plan), /authorized$/);
+});
+
+test("change gate: a focus carries an approved item whatever the history's length; a stranger is refused", async (t) => {
+	const { root, brainDir } = fresh(t);
+	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
+	approveRequests(brainDir, ["p1"]);
+	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	/** A focus conversation id (7777), not the root: ROOT_CONVERSATION_ID is the main agent. Record it as the
+	 * context store does when the fork is created. */
+	const focus = 7777;
+	updateContext(brainDir, (store) => {
+		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
+	});
+	const writes = [];
+	const apis = {
+		carry: { conversationId: focus, executeTool: async (name, args) => { writes.push([name, args]); return { isError: false, structuredOutput: "Wrote src/new.txt: 1 line, a new file." } } },
+		stranger: { conversationId: 4242, executeTool: async () => { throw new Error("must not be reached"); } },
+	};
+	const ok = await tool.execute({ target: "file", action: "create", path: "src/new.txt", content: "hello\n", planItem: "p1" }, apis.carry, undefined);
+	assert.equal(writes.length, 1, "the authorized focus reached the nested write");
+	assert.equal(writes[0][0], "write");
+	assert.equal(ok.isError, false);
+	updateContext(brainDir, (store) => {
+		Object.assign(taskState(store, "4242"), { purpose: "nosy", item: "p2", mode: "look" });
+	});
+	const no = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n", planItem: "p1" }, apis.stranger, undefined);
+	assert.equal(no.isError, true);
+	assert.match(no.output[0].text, /not carrying/);
 });
