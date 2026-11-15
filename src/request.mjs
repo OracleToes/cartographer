@@ -81,7 +81,7 @@ export function withoutAdditions(text) {
 export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, schemaLifecycle }) {
 	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike (src/wake.mjs).
 	let kept = withoutQuietWakes(messages);
-	// Once an operation succeeds, its temporary schema-selection exchange leaves the live prompt; the actual call/result remain.
+	// Hide the internal target-routing exchange and inject its branch schema only while that operation is pending.
 	if (schemaLifecycle !== undefined && conversationId !== undefined) kept = schemaLifecycle.forRequest(kept, conversationId);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
