@@ -7,6 +7,8 @@
 //   the record   one line for each finished task: what was asked, how it ended, and
 //                an id under which the whole report can be brought back
 //   the shelf    files, or line ranges of files, the agent chose to keep in view
+//   the salient  the open ledger notes carrying salience (src/ledger.mjs), one
+//   notes        line each, re-read from the ledger when the block is dressed
 //   the talk     the last of what the user and the agent said to each other, word
 //                for word, up to `chatWindow` tokens
 //   now          when the collapse came in the middle of a turn: the calls of the
@@ -36,7 +38,7 @@ import { dirname, join } from "node:path";
 import { fileIdentityForPath, readReferenceVersion } from "./catalog.mjs";
 import { TASK_HEADER } from "./prompt.mjs";
 import { stamp } from "./time.mjs";
-import { applyEntryOp } from "./rows.mjs";
+import { entryLine, loadLedger, salientNotes, saveLedger } from "./ledger.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { fileReference } from "./catalog.mjs";
 
@@ -126,46 +128,63 @@ const markAppliedOperation = (store, operationId) => {
 	if (operationId === undefined) return;
 	store.appliedOperations = [...new Set([...(store.appliedOperations ?? []), String(operationId)])].slice(-POLICY.limits.context.operationReplay);
 };
-const empty = () => ({ version: 1, next: 1, curatedNext: 1, rows: [], chat: [], seenUser: 0, shelf: [], dropped: [], forgottenEntries: [], appliedOperations: [], tasks: {} });
+const empty = () => ({ version: 1, next: 1, rows: [], chat: [], seenUser: 0, shelf: [], dropped: [], forgottenEntries: [], appliedOperations: [], tasks: {} });
 const clone = (value) => JSON.parse(JSON.stringify(value));
 export const composedRows = (store) => store.rows.filter((row) => row.species === ROW_SPECIES.composed);
-export const curatedRows = (store) => store.rows.filter((row) => row.species === ROW_SPECIES.curated);
 const activeRows = (rows) => rows.filter((row) => row.archived !== true).map(clone);
 const reportNumber = (id) => Number(String(id).slice(POLICY.idPrefixes.report.length)) || 0;
-const contextRowNumber = (id) => Number(String(id).slice(POLICY.idPrefixes.contextRow.length)) || 0;
 const VISIBILITY = POLICY.enums.contextVisibility;
 export class ContextRowError extends Error {}
-export const curatedRowLine = (row) => `${row.id} ${row.status === POLICY.enums.entryStatus.done ? "✓ " : ""}${row.text}${row.outcome ? ` → ${row.outcome}` : ""}`;
-const CURATED_SPEC = {
-	Error: ContextRowError,
-	kinds: [ROW_SPECIES.curated],
-	kindField: "species",
-	prefix: { [ROW_SPECIES.curated]: POLICY.idPrefixes.contextRow },
-	accepts: (row) => row.species === ROW_SPECIES.curated,
-	textMax: POLICY.limits.context.curatedRowChars,
-	addTextLabel: "`text`",
-	textRequired: () => "`text` is required and was left out or empty: write one self-contained row.",
-	textTooLong: (_, length) => `\`text\` is ${length} characters; a curated row may hold ${POLICY.limits.context.curatedRowChars}.`,
-	itemsMax: POLICY.limits.context.curatedRows,
-	limitCount: (store) => store.items.filter((row) => row.species === ROW_SPECIES.curated).length,
-	limitText: () => `The context holds ${POLICY.limits.context.curatedRows} curated rows, its limit. Delete one before adding another.`,
-	findId: (id) => String(id ?? "").trim(),
-	findIds: (store) => store.items.filter((row) => row.species === ROW_SPECIES.curated).map((row) => row.id).join(", "),
-	findText: (id, ids) => `There is no curated row ${JSON.stringify(id)}.${ids === "" ? " The list is empty." : ` Curated rows: ${ids}.`}`,
-	show: curatedRowLine,
-	closedWord: "done",
-	alreadyText: (id) => `${id} was already done.`,
-	outcome: (op, checked) => (op.text !== undefined && String(op.text).trim() !== "" ? checked(op.text, "`text`") : undefined),
-	markClosed: false,
-	addBefore: true,
-	editTextRequired: true,
-	reorder: true,
-	unknownAction: (op) => `Unknown row action ${JSON.stringify(op?.action)}; the actions are add, done, edit, remove, before.`,
-};
+
+// ─── No context-row species any more ────────────────────────────────────────
+// An earlier version kept its own rows of notes in the context (species "curated"). They are gone:
+// a note that should stay in view is a ledger note carrying salience (src/ledger.mjs), which rides
+// in every request like the rest of the ledger and in the collapse block with a ● mark. What
+// remains here are the report rows of finished work (species "composed"). loadContext folds any
+// legacy curated rows into the ledger on first read after the update.
 
 const visibleNow = (when) => when === undefined || when === VISIBILITY.now;
 const rowSnapshot = (rows) => activeRows(rows).map(({ species, id, text, status, outcome, ref, at, mode, item, brief, failed, undone, changed }) => ({ species, id, text, status, outcome, ref, at, mode, item, brief, failed, undone, changed }));
-const rowContent = (row) => row.species === ROW_SPECIES.composed ? recordLine(row) : curatedRowLine(row);
+const rowContent = (row) => recordLine(row);
+
+/** Fold legacy curated rows into the ledger, once: an open row becomes a salient note, a closed one a closed note, an archived one an archived note. Deduped against what the ledger already holds, so an interrupted migration can be resumed safely. Reports nothing unless the ledger can be read; a ledger that cannot be read leaves the rows in the store untouched. */
+function migrateCuratedRows(brainDir, rows) {
+	try {
+		const { ledger } = loadLedger(brainDir);
+		if (ledger === undefined) return false;
+		const TEXT_MAX = POLICY.limits.ledger.textChars;
+		const norm = (value) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, TEXT_MAX);
+		let next = ledger.next;
+		for (const row of rows) {
+			const text = norm(row.text);
+			if (text === "") continue;
+			const wantSalient = row.status !== POLICY.enums.entryStatus.done && row.archived !== true;
+			const dupe = ledger.items.find((item) => item.kind === POLICY.enums.ledgerKind.note && norm(item.text) === text);
+			if (dupe !== undefined) {
+				if (wantSalient && dupe.status === POLICY.enums.entryStatus.open && dupe.archived !== true) dupe.salient = true;
+				continue;
+			}
+			const entry = { id: `n${next}`, kind: POLICY.enums.ledgerKind.note, text, added: row.added ?? new Date().toISOString() };
+			next++;
+			if (row.status === POLICY.enums.entryStatus.done) {
+				entry.status = POLICY.enums.entryStatus.done;
+				entry.closed = row.closed ?? entry.added;
+				const outcome = norm(row.outcome);
+				if (outcome !== "") entry.outcome = outcome;
+			} else {
+				entry.status = POLICY.enums.entryStatus.open;
+				if (wantSalient) entry.salient = true;
+			}
+			if (row.archived === true) entry.archived = true;
+			ledger.items.push(entry);
+		}
+		ledger.next = next;
+		saveLedger(brainDir, ledger);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /** What is kept for the next collapse. A file that cannot be read counts as an empty one. */
 export function loadContext(brainDir) {
@@ -183,6 +202,13 @@ export function loadContext(brainDir) {
 				species: ROW_SPECIES.composed,
 				ref: { type: "report", id: record.id },
 			}));
+		}
+		const legacyCurated = store.rows.filter((row) => row.species === "curated");
+		if (legacyCurated.length > 0 && migrateCuratedRows(brainDir, legacyCurated)) {
+			store.rows = store.rows.filter((row) => row.species !== "curated");
+			delete store.curatedNext;
+			// Persist the cleaned store, so the fold happens once and not on every later read.
+			saveContext(brainDir, store);
 		}
 		for (const row of store.rows) {
 			if (row.species === undefined) row.species = ROW_SPECIES.composed;
@@ -209,9 +235,7 @@ export function loadContext(brainDir) {
 			if (Array.isArray(task?.shelf)) task.shelf = task.shelf.map((item, index) => typeShelfItem(item, index, conversationId));
 		}
 		const highestReport = Math.max(0, ...composedRows(store).map((row) => reportNumber(row.id)));
-		const highestCurated = Math.max(0, ...curatedRows(store).map((row) => contextRowNumber(row.id)));
 		if (!Number.isInteger(store.next) || store.next <= highestReport) store.next = highestReport + 1;
-		if (!Number.isInteger(store.curatedNext) || store.curatedNext <= highestCurated) store.curatedNext = highestCurated + 1;
 		if (!Number.isFinite(store.seenUser)) store.seenUser = 0;
 		if (!Array.isArray(store.forgottenEntries)) store.forgottenEntries = [];
 		if (!Array.isArray(store.appliedOperations)) store.appliedOperations = [];
@@ -357,28 +381,6 @@ function reflectRows(store, when, ids, { beforeId, reposition = false, atEnd = f
 		visible.splice(at < 0 ? visible.length : at, 0, snapshot);
 	}
 	store.front.rows = visible;
-}
-
-/** Apply the shared entry verbs to the independently curated context rows. */
-export function applyCuratedRowOp(brainDir, op, now = Date.now(), operationId) {
-	const when = checkWhen(op?.when);
-	if (hasAppliedOperation(loadContext(brainDir), operationId)) return { line: "This durable operation was already applied.", shown: "(applied before a restart)" };
-	return updateContext(brainDir, (store) => {
-		const priorIds = new Set(store.rows.map((row) => row.id));
-		const entries = { items: store.rows, next: store.curatedNext };
-		const result = applyEntryOp(entries, { ...op, kind: ROW_SPECIES.curated }, CURATED_SPEC, new Date(now).toISOString());
-		store.rows = entries.items;
-		store.curatedNext = entries.next;
-		const id = op.action === POLICY.enums.actions.add ? store.rows.find((row) => !priorIds.has(row.id))?.id : String(op.id ?? "").trim();
-		const anchor = op.action === POLICY.enums.actions.add || op.action === POLICY.enums.actions.before ? String(op.before ?? "").trim() : "";
-		if (id !== undefined && id !== "") reflectRows(store, when, [id], {
-			beforeId: anchor === "" ? undefined : anchor,
-			reposition: op.action === POLICY.enums.actions.before,
-			atEnd: op.action === POLICY.enums.actions.before && anchor === "",
-		});
-		markAppliedOperation(store, operationId);
-		return result;
-	});
 }
 
 /** Apply a shared archive, unarchive, or delete to any context row. The report body remains a referenced file. */
@@ -769,6 +771,18 @@ function shelfBlock(root, items, max, brainDir) {
 
 // ─── The front block ─────────────────────────────────────────────────────────
 
+/** The heading of the salient-notes section in the collapse block; written and dressed identically. */
+const SALIENT_HEADING = "Salient notes (ledger notes marked salient; `book` with target=ledger, action=edit, salient: false drops the mark)";
+/** The salient open notes to show in the block, re-read from the ledger; a ledger that cannot be read shows none. */
+const salientFrom = (brainDir) => {
+	try {
+		const { ledger } = loadLedger(brainDir);
+		return ledger === undefined ? [] : salientNotes(ledger);
+	} catch {
+		return [];
+	}
+};
+
 /** Whether a stored message is a front block. */
 export const isFront = (message) => message?.role === "user" && textOf(message).startsWith(`${OPEN}\n${HEAD}`);
 
@@ -786,7 +800,7 @@ export const withoutFront = (text) => text.replace(FRONT_BLOCK, "");
 export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 	return updateContext(brainDir, (store) => {
 		const record = recordText(composedRows(store));
-		const curated = curatedRows(store).filter((row) => row.archived !== true);
+		const salient = salientFrom(brainDir);
 		const shelf = shelfBlock(root, store.shelf, config.shelfTokens, brainDir);
 		// Items that cannot be rendered right now remain shelved with their stable IDs and backing snapshots.
 		store.shelf = shelf.items;
@@ -794,11 +808,11 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 		const talk = store.chat.map(chatLine).join("\n");
 		const parts = [
 			OPEN,
-			`${HEAD} Your context was collapsed on ${stamp(now)} (${reason}). What you had in view before is gone except for what stands here: one line for each finished task, ${curated.length > 0 ? "your curated rows, " : ""}your shelf, and the last of your talk with the user. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them.`,
+			`${HEAD} Your context was collapsed on ${stamp(now)} (${reason}). What you had in view before is gone except for what stands here: one line for each finished task, ${salient.length > 0 ? "your salient notes, " : ""}your shelf, and the last of your talk with the user. Your ledger, plan, graph and assessment are as you left them; the state block at the end of the request shows them.`,
 			"",
 			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
 			record.text,
-			...(curated.length > 0 ? ["", "Curated rows (`book` with context add, edit, done and remove)", ...curated.map(curatedRowLine)] : []),
+			...(salient.length > 0 ? ["", SALIENT_HEADING, ...salient.map((item) => entryLine(item))] : []),
 			"",
 			shelf.shown.length === 0 ? "Your shelf is empty." : `Your shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`,
 			...shelf.shown.map((entry) => entry.text),
@@ -948,8 +962,8 @@ export function reportsInView(messages) {
 
 const withText = (message, text) => ({ ...message, content: [{ type: "text", text }] });
 
-/** Reconcile the front block's row sections with the active row snapshot. */
-function dressFrontRows(message, store) {
+/** Reconcile the front block's salient-notes section with the ledger, and its record section with the report rows. */
+function dressFrontRows(message, store, salient) {
 	let text = textOf(message);
 	const currentRows = store.front?.rows ?? [];
 	const reportHeading = "Finished tasks (`book` with book context, action recall and the id brings a report back in full)";
@@ -960,12 +974,10 @@ function dressFrontRows(message, store) {
 		const record = recordText(currentRows.filter((row) => row.species === ROW_SPECIES.composed)).text;
 		text = `${text.slice(0, start)}${record}${text.slice(shelfStart)}`;
 	}
-	const marker = "Curated rows (`book` with context add, edit, done and remove)";
-	const curated = currentRows.filter((row) => row.species === ROW_SPECIES.curated && row.archived !== true);
-	const sectionStart = text.indexOf(`\n\n${marker}`);
+	const sectionStart = text.indexOf(`\n\n${SALIENT_HEADING}`);
 	const sectionEnd = sectionStart < 0 ? -1 : text.indexOf("\n\nYour shelf", sectionStart);
-	if (curated.length > 0) {
-		const section = `\n\n${marker}\n${curated.map(curatedRowLine).join("\n")}`;
+	if (salient.length > 0) {
+		const section = `\n\n${SALIENT_HEADING}\n${salient.map((item) => entryLine(item)).join("\n")}`;
 		if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${section}${text.slice(sectionEnd)}`;
 		else text = text.replace("\n\nYour shelf", `${section}\n\nYour shelf`);
 	} else if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${text.slice(sectionEnd)}`;
@@ -975,8 +987,9 @@ function dressFrontRows(message, store) {
 /** The main agent's messages reconciled to the active row view; the input is not changed. */
 export function dressMain(messages, brainDir) {
 	const store = loadContext(brainDir);
+	const salient = salientFrom(brainDir);
 	return messages.map((message) => {
-		if (isFront(message)) return dressFrontRows(message, store);
+		if (isFront(message)) return dressFrontRows(message, store, salient);
 		const id = reportIdOf(message);
 		if (id === undefined) return message;
 		const record = composedRows(store).find((entry) => entry.id === id);

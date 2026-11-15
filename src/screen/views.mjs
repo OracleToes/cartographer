@@ -17,7 +17,7 @@ import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
 import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, curatedRows, curatedRowLine } from "../context.mjs";
+import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
@@ -99,13 +99,15 @@ export function ledgerView({ brainDir }) {
 		key: `entry:${item.id}`,
 		archived: item.archived === true,
 		head: [
-			[`${item.id}  `, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : "tool"],
+			[`${item.salient === true && item.status === POLICY.enums.entryStatus.open && item.kind === POLICY.enums.ledgerKind.note ? "● " : ""}${item.id}  `, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : "tool"],
 			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
 			[item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"],
+			[item.salient === true && item.status === POLICY.enums.entryStatus.open ? "  · salient" : "", "ok"],
 			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 		],
 		body: [
 			item.text,
+			item.salient === true && item.kind === POLICY.enums.ledgerKind.note ? "salient: stands in every request, including the block a collapse keeps (edit the entry to drop it)" : undefined,
 			item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
 			item.status === POLICY.enums.entryStatus.done && item.outcome ? `outcome: ${item.outcome}` : undefined,
 			`${item.by === "user" ? "written by you" : "written by the agent"}${when(item.added) ? ` · added ${when(item.added)}` : ""}${item.status === POLICY.enums.entryStatus.done && when(item.closed) ? ` · closed ${when(item.closed)}` : ""}`,
@@ -653,8 +655,8 @@ export const isFolder = (path) => {
 export function handsView({ root, brainDir }) {
 	const store = loadContext(brainDir);
 	const header = [
-		[["Your hands on what the agent keeps", "bold"], ["  ·  curated rows, the shelf, and reports of finished work", "muted"]],
-		[["On rows: v archives or restores, d deletes (d again); curated rows are edited with /row. On a report: f folds or recalls. On the shelf: x takes an item off.", "faint"]],
+		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and reports of finished work; salient notes live in the Ledger view", "muted"]],
+		[["On rows: v archives or restores, d deletes (d again). On a report: f folds or recalls. On the shelf: x takes an item off.", "faint"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
@@ -666,28 +668,6 @@ export function handsView({ root, brainDir }) {
 			head: [[`${shelfLabel(item)} · ${item.id}  `, ""], [`about ${short(estimate(shelfText(root, item, brainDir)))} rendered tokens`, "muted"]],
 			body: () => shelfText(root, item, brainDir),
 			...(item.path === undefined ? {} : { path: join(root, item.path) }),
-		});
-	}
-	const curated = curatedRows(store);
-	const livingCurated = curated.filter((row) => row.archived !== true);
-	const archivedCurated = curated.filter((row) => row.archived === true);
-	items.push(heading("  Curated rows · independent notes kept in the context (edit with /row)"));
-	if (livingCurated.length === 0 && archivedCurated.length === 0) items.push(note("  No curated rows yet. Use /row add TEXT to keep one."));
-	for (const row of livingCurated) items.push({
-		key: `curated:${row.id}`,
-		kind: "curated",
-		archived: false,
-		head: [[`${row.id}  `, "bold"], [curatedRowLine(row), ""]],
-		body: row.text,
-	});
-	if (archivedCurated.length > 0) {
-		items.push(heading("  Archived curated rows"));
-		for (const row of archivedCurated) items.push({
-			key: `curated:${row.id}`,
-			kind: "curated",
-			archived: true,
-			head: [[`${row.id}  `, "muted"], ["· archived  ", "muted"], [curatedRowLine(row), "faint"]],
-			body: row.text,
 		});
 	}
 	const standing = composedRows(store).filter((record) => record.archived !== true);

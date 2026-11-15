@@ -16,7 +16,7 @@ import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "../boo
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
-import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
+import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
 import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
 import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 
@@ -107,11 +107,6 @@ const CAPABILITIES = {
 		list: {},
 		inspect: { ref: "required" },
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", versionPrecondition: true, operation: "required" },
-		done: { ref: "required", versionPrecondition: true, operation: "required" },
-		remove: { ref: "required", versionPrecondition: true, operation: "required" },
-		before: { ref: "required", versionPrecondition: true, operation: "required" },
 		archive: { ref: "required", versionPrecondition: true },
 		restore: { ref: "required", versionPrecondition: true },
 		fold: { operation: "required", operationFields: ["id"], hint: "operation { id }: the report to drop from view, like t12, or the task-step result ids" },
@@ -171,8 +166,8 @@ const unsupported = (target, action) => fail(`Unsupported book operation: target
 // opaque to the declaration. Durable/report/file failures are already precise; the happy path never pays for this.
 const ACTION_GUIDE = {
 	ledger: {
-		add: "kind (goal | question | note) and text — a goal also needs done_when",
-		edit: "id, plus text and/or done_when (done_when only on a goal)",
+		add: "kind (goal | question | note) and text — a goal also needs done_when; a note may take salient: true",
+		edit: "id, plus text, done_when (done_when only on a goal), or salient: true/false (only on a note)",
 		done: "id, plus an optional text outcome",
 		remove: "id",
 	},
@@ -208,10 +203,6 @@ const ACTION_GUIDE = {
 		tree: "anchor and depth (folder of the project; anchor '.' is the root)",
 	},
 	context: {
-		add: "text",
-		edit: "id and text",
-		done: "id, plus an optional text outcome",
-		remove: "id",
 		archive: "id",
 		restore: "id",
 		fold: "{ id } (an id like t12)",
@@ -273,14 +264,14 @@ const BRAIN_MUTATIONS = {
 	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove"]),
 	assessment: new Set(["add", "edit", "done", "remove", "before"]),
 	practice: new Set(["add", "edit", "done", "remove", "before"]),
-	context: new Set(["add", "edit", "done", "remove", "before", "archive", "restore"]),
+	context: new Set(["archive", "restore"]),
 };
 function listBrainRecords(target, brainDir) {
 	if (target === "ledger") { const loaded = loadLedger(brainDir); if (!loaded.ledger) throw new Error(`The ledger cannot be read: ${loaded.error}`); return loaded.ledger.items; }
 	if (target === "plan") { const loaded = loadPlan(brainDir); if (!loaded.plan) throw new Error(`The plan cannot be read: ${loaded.error}`); return loaded.plan.items; }
 	if (target === "atlas") { const loaded = loadAtlas(brainDir); if (!loaded.atlas) throw new Error(`The atlas cannot be read: ${loaded.error}`); return loaded.atlas.nodes; }
 	if (target === "assessment" || target === "practice") return loadBooks(brainDir).items.filter((item) => item.kind === target);
-	if (target === "context") return curatedRows(loadContext(brainDir));
+	if (target === "context") return composedRows(loadContext(brainDir));
 	return [];
 }
 function brainRecord(target, brainDir, id) {
@@ -857,13 +848,6 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 	try {
 		for (const op of ops) {
 			const action = op?.action;
-			if ([POLICY.enums.actions.add, POLICY.enums.actions.done, POLICY.enums.actions.edit, POLICY.enums.actions.remove, POLICY.enums.actions.before].includes(action)) {
-				const result = applyCuratedRowOp(brainDir, op, api.now(), api.taskId);
-				store = loadContext(brainDir);
-				shown.push(result.shown);
-				lines.push(`${result.line}${op.when === POLICY.enums.contextVisibility.nextBoundary ? " This is saved now and enters context at the next boundary." : " It is saved and in context now."}`);
-				continue;
-			}
 			if ([POLICY.enums.actions.archive, POLICY.enums.actions.unarchive, POLICY.enums.actions.delete].includes(action)) {
 				const id = String(op.id ?? "").trim();
 				if (id === "") return fail(`${action} needs \`id\`: the context row to change.`);
@@ -1013,7 +997,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				lines.push("Your steps so far are collapsed before your next reply. You keep the brief, your notes, your shelf and one line for each call.");
 				continue;
 			}
-			return fail("`action` is one of add, edit, done, remove, before, archive, unarchive, delete, recall, shelve, unshelve, fold, note, collapse.");
+			return fail("`action` is one of archive, unarchive, delete, recall, shelve, unshelve, fold, note, collapse. To keep a note in view across collapses, use `target=ledger, action=add` with `kind=note` and `salient: true`.");
 		}
 	} catch (problem) {
 		if (!(problem instanceof ShelfError) && !(problem instanceof ContextRowError)) throw problem;

@@ -59,7 +59,7 @@ const SECTIONS = [
 	],
 	[
 		"context",
-		`Your context. It holds less than a long piece of work produces, so Cartographer collapses it at times. After a collapse a block between ${POLICY.markup.context.open} and ${POLICY.markup.context.close} holds what was kept: one line for each finished task with an id, your shelf, and the last of your talk with the user. Your notes, tool results and reports in full are gone from view; a report can be recalled by its id. The ledger, plan, atlas and books are not part of the context and stay. @@handoffAsk@@With \`book\` you act yourself: \`fold\` a report once you have done its bookkeeping — large ones, when you will work on for a while — keep a file you keep sending tasks to read on your shelf (\`target=shelf, action=add\`), or \`collapse\` this context now (\`target=context, action=collapse\`).`,
+		`Your context. It holds less than a long piece of work produces, so Cartographer collapses it at times. After a collapse a block between ${POLICY.markup.context.open} and ${POLICY.markup.context.close} holds what was kept: one line for each finished task with an id, your salient notes, your shelf, and the last of your talk with the user. Your notes, tool results and reports in full are gone from view; a report can be recalled by its id. The ledger, plan, atlas and books are not part of the context and stay. @@handoffAsk@@With \`book\` you act yourself: \`fold\` a report once you have done its bookkeeping — large ones, when you will work on for a while — keep a file you keep sending tasks to read on your shelf (\`target=shelf, action=add\`), or \`collapse\` this context now (\`target=context, action=collapse\`).`,
 	],
 	[
 		"goals",
@@ -67,7 +67,7 @@ const SECTIONS = [
 	],
 	[
 		"ledger",
-		"The ledger is your memory across collapses and sessions. When the user says something that should outlast the conversation — a preference, a decision, a constraint — write it as a note. Record an answer you cannot get now as a question. Close entries that are settled. The user can read and edit it, so it may change without your doing. An add takes `kind` (`goal`, `question` or `note`) and `text` — and `done_when` for a goal; `done` and `edit` name the entry by `id`. One op per call.",
+		"The ledger is your memory across collapses and sessions. When the user says something that should outlast the conversation — a preference, a decision, a constraint — write it as a note. Record an answer you cannot get now as a question. Close entries that are settled. The user can read and edit it, so it may change without your doing. An add takes `kind` (`goal`, `question` or `note`) and `text` — and `done_when` for a goal; `done` and `edit` name the entry by `id`. A note expected to matter at every step carries `salient: true`: a salient note stands in every request and in the block a collapse keeps, marked ●; `salient: false` clears the mark. Only a note carries salience. One op per call.",
 	],
 	[
 		"atlas",
@@ -216,7 +216,7 @@ export const ASK_MAIN = (reason) =>
 		POLICY.markup.note.open,
 		`Written by Cartographer, not by the user. Your context is about to be collapsed (${reason}).`,
 		"",
-		"You keep: one line for each finished task, your shelf, the last of your talk with the user, and your ledger, plan, graph and books as they are.",
+		"You keep: one line for each finished task, your salient notes, your shelf, the last of your talk with the user, and your ledger, plan, graph and books as they are.",
 		"You lose from view: your own notes and reasoning, every tool result, and reports in full (a report can be recalled by its id).",
 		"",
 		'Is there something in view that you will need and that is written in none of the things you keep? Answer {"handoff": true} to get one turn to write it down first. Answer {"handoff": false} to collapse now.',

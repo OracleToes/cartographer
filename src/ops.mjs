@@ -14,7 +14,7 @@ import { loadLedger, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan } from "./plan.mjs";
 
 /** The books an id might name, and the words for them in a line of refusal. */
-export const BOOKS = `a report is t1 or a curated context row c1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
+export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
 const contextAction = (brainDir, id, action) => {
 	try {
 		return applyContextRowAction(brainDir, id, action);
@@ -28,7 +28,7 @@ const contextAction = (brainDir, id, action) => {
 function row(brainDir, id) {
 	const contextRow = loadContext(brainDir).rows.find((entry) => entry.id === id);
 	if (contextRow !== undefined) return {
-		what: contextRow.species === POLICY.enums.contextRowSpecies.composed ? "report" : "curated context row",
+		what: "report",
 		archived: contextRow.archived === true,
 		kind: contextRow.species,
 		found: contextRow,
@@ -52,7 +52,7 @@ function row(brainDir, id) {
 export function archiveRow(brainDir, id) {
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
-	if (found.what === "report" || found.what === "curated context row") return contextAction(brainDir, id, POLICY.enums.actions.archive);
+	if (found.what === "report") return contextAction(brainDir, id, POLICY.enums.actions.archive);
 	if (found.archived) return `${id} is archived already.`;
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
@@ -79,7 +79,7 @@ export function archiveRow(brainDir, id) {
 export function unarchiveRow(brainDir, id) {
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
-	if (found.what === "report" || found.what === "curated context row") return contextAction(brainDir, id, POLICY.enums.actions.unarchive);
+	if (found.what === "report") return contextAction(brainDir, id, POLICY.enums.actions.unarchive);
 	if (!found.archived) return `${id} is not archived.`;
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
@@ -110,7 +110,7 @@ export function unarchiveRow(brainDir, id) {
 export function dropRow(brainDir, id) {
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
-	if (found.what === "report" || found.what === "curated context row") return contextAction(brainDir, id, POLICY.enums.actions.delete);
+	if (found.what === "report") return contextAction(brainDir, id, POLICY.enums.actions.delete);
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
 		ledger.items.splice(ledger.items.indexOf(found.found), 1);

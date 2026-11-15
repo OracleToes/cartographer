@@ -23,6 +23,15 @@ export const OPEN_MAX = POLICY.limits.ledger.openEntries;
 /** Closed entries kept; beyond this the oldest are dropped. Open entries are never dropped. */
 export const DONE_KEPT = POLICY.limits.ledger.closedEntriesKept;
 
+/** Salience is the flag that keeps a note in view: the state block and the collapse block both carry a salient note. Only a note carries it. */
+const salientOf = (value, kind) => {
+	if (value === undefined) return undefined;
+	if (typeof value !== "boolean") throw new LedgerError("`salient` is true or false.");
+	if (value === false) return undefined;
+	if (kind !== POLICY.enums.ledgerKind.note) throw new LedgerError("Only a note carries salience. A goal or a question is already in view; say what should stand out and why in the text.");
+	return true;
+};
+
 export class LedgerError extends Error {}
 
 const ledgerPath = (brainDir) => join(brainDir, "carto-ledger.json");
@@ -73,7 +82,7 @@ export function loadLedger(brainDir) {
 		if (seen.has(item.id)) return { error: `${where}: the id ${item.id} is used twice` };
 		if (typeof item.text !== "string" || item.text.trim() === "") return { error: `${where} (${item.id}): "text" is missing` };
 		seen.add(item.id);
-		items.push({ ...item, status: item.status === POLICY.enums.entryStatus.done ? POLICY.enums.entryStatus.done : POLICY.enums.entryStatus.open });
+		items.push({ ...item, status: item.status === POLICY.enums.entryStatus.done ? POLICY.enums.entryStatus.done : POLICY.enums.entryStatus.open, salient: item.salient === true ? true : undefined });
 	}
 	// Ids are never reused, also after entries were removed or added by hand.
 	const highest = Math.max(0, ...items.map((item) => Number(item.id.slice(POLICY.idPrefixes.ledger[item.kind].length))));
@@ -94,15 +103,20 @@ export const open = (ledger, kind) => ledger.items.filter((item) => item.status 
 const AGE_FROM = POLICY.timing.ledgerAgeMs;
 
 /**
- * One line for an entry, as the agent and the user see it.
+ * One line for an entry, as the agent and the user see it. A salient open note is marked ● and stands in the
+ * state block and in the collapse block; the mark is deterministic, so it is stable from one request to the next.
  * @param {number} [now]  given, an open entry that is an hour old or more says how old it is
  */
 export function entryLine(item, now) {
 	const doneWhen = item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? ` (done when: ${item.doneWhen})` : "";
 	const outcome = item.status === POLICY.enums.entryStatus.done && item.outcome ? ` → ${item.outcome}` : "";
 	const age = now === undefined || item.status === POLICY.enums.entryStatus.done ? undefined : since(item.added, now);
-	return `${item.id}  ${item.text}${doneWhen}${outcome}${age !== undefined && age >= AGE_FROM ? ` · added ${ago(age)}` : ""}`;
+	const mark = item.salient === true && item.status !== POLICY.enums.entryStatus.done ? "● " : "";
+	return `${mark}${item.id}  ${item.text}${doneWhen}${outcome}${age !== undefined && age >= AGE_FROM ? ` · added ${ago(age)}` : ""}`;
 }
+
+/** The salient open notes, in the order the ledger holds them. These stand in every request and survive a collapse. */
+export const salientNotes = (ledger) => open(ledger, POLICY.enums.ledgerKind.note).filter((item) => item.salient === true);
 
 /** How this book speaks: see src/rows.mjs. */
 const LEDGER_SPEC = {
@@ -126,14 +140,24 @@ const LEDGER_SPEC = {
 	markClosed: true,
 	doneFollow: (item) =>
 		item.kind === POLICY.enums.ledgerKind.goal ? " Tell the user what was achieved against its done-when line, and ask whether that is what they wanted." : "",
-	addFields: (op, kind, checked) =>
-		kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, "`done_when` (how you and the user will know the goal is reached)") } : {},
+	addFields: (op, kind, checked) => {
+		const fields = kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, "`done_when` (how you and the user will know the goal is reached)") } : {};
+		const salient = salientOf(op.salient, kind);
+		if (salient !== undefined) fields.salient = true;
+		return fields;
+	},
 	addBefore: false,
 	editFields: (item, op, hasText, checked) => {
 		const hasDoneWhen = op.done_when !== undefined && flat(op.done_when) !== "";
-		if (!hasText && !hasDoneWhen) throw new LedgerError("An edit needs `text`, `done_when`, or both: the new wording.");
+		const hasSalient = op.salient !== undefined;
+		if (!hasText && !hasDoneWhen && !hasSalient) throw new LedgerError("An edit needs `text`, `done_when` or `salient`: what changes.");
 		if (hasDoneWhen && item.kind !== POLICY.enums.ledgerKind.goal) throw new LedgerError(`${item.id} is a ${item.kind}; only a goal has a done-when line.`);
+		if (hasSalient) salientOf(op.salient, item.kind);
 		return hasDoneWhen ? { doneWhen: checked(op.done_when, "`done_when`") } : {};
+	},
+	afterEdit: (item, op) => {
+		if (op.salient === true) item.salient = true;
+		else if (op.salient === false) delete item.salient;
 	},
 	editTextRequired: false,
 	reorder: false,

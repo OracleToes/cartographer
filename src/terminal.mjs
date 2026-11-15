@@ -21,7 +21,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem } from "./context.mjs";
+import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem } from "./context.mjs";
 import { archiveRows, dropRows, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
@@ -1007,11 +1007,10 @@ export async function runTerminal(session, options) {
 						"  /stop     stop what the agent is doing (Ctrl-X does the same); shell windows keep running",
 						"  /model    the models the server serves; /model NAME (or a number) switches to one",
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
-						"  /row add TEXT, /row edit ID TEXT, /row done ID, /row remove ID  curate context rows (add --next after the action to defer visibility)",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
-					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a curated row (c1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a curated row, a ledger entry, a plan item, a node of the graph",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1554,41 +1553,6 @@ export async function runTerminal(session, options) {
 				line(`${bold("●")} model  ${current} → ${wanted}${busy ? " · the answer being written finishes on the old one" : ""}`);
 				return true;
 			}
-			case "row": {
-				const action = argument;
-				const words = args.slice(1);
-				if (action === undefined) {
-					line("  /row add TEXT, edit ID TEXT, done ID [OUTCOME], remove ID, before ID [OTHER], archive ID, unarchive ID, delete ID. Prefix an action's arguments with --next to defer context visibility until collapse.");
-					return true;
-				}
-				const when = words[0] === "--next" ? POLICY.enums.contextVisibility.nextBoundary : POLICY.enums.contextVisibility.now;
-				const rest = words[0] === "--next" ? words.slice(1) : words;
-				try {
-					let said;
-					if (["add", "edit", "done", "remove", "before"].includes(action)) {
-						let op;
-						if (action === "add") op = { action, text: rest.join(" "), when };
-						else if (action === "edit") op = { action, id: rest[0], text: rest.slice(1).join(" "), when };
-						else if (action === "done") op = { action, id: rest[0], text: rest.slice(1).join(" "), when };
-						else if (action === "before") op = { action, id: rest[0], before: rest[1], when };
-						else op = { action, id: rest[0], when };
-						if (action !== "add" && !op.id) throw new ContextRowError(`${action} needs a row id.`);
-						const result = applyCuratedRowOp(options.brainDir, op);
-						said = `${result.line}${when === POLICY.enums.contextVisibility.nextBoundary ? " Saved now; context visibility changes at the next collapse." : " Saved and visible now."}`;
-					} else if (["archive", "unarchive", "delete"].includes(action)) {
-						if (!rest[0]) throw new ContextRowError(`${action} needs a row id.`);
-						said = applyContextRowAction(options.brainDir, rest[0], action, when);
-					} else {
-						line("  The row actions are add, edit, done, remove, before, archive, unarchive and delete.");
-						return true;
-					}
-					line(`  ${said}${when === POLICY.enums.contextVisibility.nextBoundary ? " The state block shows any pending difference." : ""}`);
-				} catch (error) {
-					if (!(error instanceof ContextRowError)) throw error;
-					line(`! ${error.message}`);
-				}
-				return true;
-			}
 			case "fold": {
 				const ids = (argument ?? "").split(/[\s,]+/).filter((id) => id !== "");
 				if (ids.length === 0) {
@@ -1629,7 +1593,7 @@ export async function runTerminal(session, options) {
 			case "unarchive": {
 				const ids = args;
 				if (ids.length === 0) {
-					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a curated row (c1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
 				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);

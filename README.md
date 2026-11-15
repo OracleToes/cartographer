@@ -367,7 +367,7 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | Tool | Who | What |
 |---|---|---|
 | `task` | orchestrating context | Enter one bounded focus context. A change focus names an open plan item and runs only when authorized |
-| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. Resolves project files, reports, ledger/plan/atlas/books/curated rows, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
+| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. Resolves project files, reports, ledger/plan/atlas/books, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
 | `atlas` | orchestrating and focused contexts | Write, link, confirm, remove and read graph nodes. The orchestrating context also moves the tree with it |
 | `search` | any focus | A regular expression over project files; returns `path:line: text` |
 | `list` | any focus | Project files as a tree with sizes |
@@ -393,7 +393,7 @@ A focus begins with its one-line purpose in the state block, the current shared 
 
 - Text without a call is a note to itself and never ends the focus.
 - `chat` and `ask` reach you from inside a focus.
-- `book` can update the shared ledger, assessment/practice books, context rows, reports, and shelf. The only book operation reserved for the orchestrating context is changing the plan. `task`, `wake`, and `sleep` remain orchestration-only; a focus cannot nest another focus.
+- `book` can update the shared ledger (including salient notes), assessment/practice books, reports, and shelf. The only book operation reserved for the orchestrating context is changing the plan. `task`, `wake`, and `sleep` remain orchestration-only; a focus cannot nest another focus.
 - **`return` ends the focus**, and nothing else does. `report` carries the outcome not already represented in shared memory. `done` says whether the assigned work is carried out: for a plan item, `true` marks it done and `false` leaves it open. `summary` is the line kept for the focus after collapse; without it, the start of the report is used. `shelf` names files or references to add if needed, then hand to the shared context.
 - A focus has `taskTurns` replies, notes included. From three before the end, each result says how many remain and asks for return. If it uses them all, the orchestrating context receives the notes marked as not a report, and nothing is marked done.
 - What you type while a focus runs goes to it with its next result; the orchestrating context is told with the report.
@@ -412,11 +412,13 @@ The ledger is the agent's memory of the project across sessions. The conversatio
 | question | `q2` | Something of taste or design for you to answer; it waits in the Requests view while the agent carries on |
 | note | `n3` | Anything else worth keeping: a decision, a preference, a finding |
 
+A note the agent expects to need at every step carries `"salient": true`; a salient note is marked ● and stands in every request and in the block a collapse keeps, until the mark is cleared (`salient: false`) or the note is closed. Only a note carries salience.
+
 It is a notebook, not a gate. Nothing in it stops the agent from working, and the agent needs no permission to write to it. The agent is told to record a goal once you have agreed to its wording, to change that wording only when you ask, and to write down what you say that should outlast the conversation. Every change it makes is printed as a `● ledger` line, so you see what it understood.
 
 When there is no open goal, `carto` says so at the start, and the agent is told to answer what you ask and to find out what you want to achieve. When it closes a goal, it is told to say what was achieved against the done-when line and to ask whether that is what you wanted.
 
-**Editing it yourself.** The ledger is `<project>/.atlas/carto-ledger.json`. Change it in any editor, or tell the agent what to change. The file is read again at every step, so an edit takes effect at the agent's next request. An entry needs only `id` (like `g1`, `q2`, `n3`), `kind` and `text`; a goal also takes `doneWhen`, and `"status": "done"` closes an entry. If the file cannot be read after an edit, `carto` and the agent both say what is wrong, and nothing writes to the file until it is repaired.
+**Editing it yourself.** The ledger is `<project>/.atlas/carto-ledger.json`. Change it in any editor, or tell the agent what to change. The file is read again at every step, so an edit takes effect at the agent's next request. An entry needs only `id` (like `g1`, `q2`, `n3`), `kind` and `text`; a goal also takes `doneWhen`, a note may take `"salient": true`, and `"status": "done"` closes an entry. If the file cannot be read after an edit, `carto` and the agent both say what is wrong, and nothing writes to the file until it is repaired.
 
 Limits: 400 characters per entry, 40 open entries, and the newest 50 closed entries are kept.
 
@@ -820,7 +822,7 @@ A collapse writes no summary and asks the model for nothing but one word. What i
 - **The shelf**: files, or line ranges of files, that the agent chose to keep in view. See below.
 - **The talk**: what you wrote and what the agent said to you with `chat`, word for word, the newest `chatWindow` tokens of it (8,000 unless you change it). The agent's own notes and reasoning are not talk and are not kept, which is the reason `chat` is a tool of its own.
 
-The ledger, the plan, the graph and the assessment are not in the conversation at all, so a collapse cannot touch them. The agent is told this in its prompt: what it will need later belongs there.
+The ledger, the plan, the graph and the assessment are not in the conversation at all, so a collapse cannot touch them. (A salient note is shown in the kept block as a copy re-read from the ledger at the boundary; the ledger itself remains the only copy that counts.) The agent is told this in its prompt: what it will need later belongs there.
 
 After a collapse a request is laid out like this, from what changes least to what changes most:
 
@@ -842,6 +844,9 @@ Written by Cartographer, not by the user. Your context was collapsed on Tue 10 N
 Finished tasks (`context` with action recall and the id brings a report back in full; a report you archived leaves this list, its file stays, recall by id finds it)
 t1 · Tue 10 Nov 2026, 13:20 · look · asked: Map src/ and record what each file does → Three files; roll.py holds the roller …
 t2 · Tue 10 Nov 2026, 13:41 · change p1 · asked: Add a --sides option to cli.py → Added; 2 files changed, tests pass
+
+Salient notes (ledger notes marked salient; `book` with target=ledger, action=edit, salient: false drops the mark)
+● n3  roll.py's watch step must survive the rename
 
 Your shelf: 1 item, as the files were at the collapse
 == src/roll.py (lines 1-18 of 18)
@@ -943,7 +948,7 @@ Not tried, because it needs your machine:
   shells/             what the shell windows are started with, and the command each was last given. Kept out of git
   carto-windows.json  which windows are open, so that the next start can say which are gone. Kept out of git
   carto-wakes.json    the wakes the agent has set. Read at each start, written whenever one is set, fires or is removed. Kept out of git
-  carto-context.json  what a collapse keeps: the lines of finished tasks, the talk, the shelf. Written by Cartographer. Kept out of git
+  carto-context.json  what a collapse keeps: the lines of finished tasks, the salient notes shown at the collapse, the talk, the shelf. Written by Cartographer. Kept out of git
   reports/            every task's report in full, t1.md, t2.md, …, with its brief. Kept out of git
   export/             what you copied out of the full screen: messages, sessions, tabs. Kept out of git
   session.sqlite      the session: every message, task and report. Kept out of git
@@ -1069,7 +1074,7 @@ The stand-in is not a model. The tests show that the program does the right thin
 | `src/tree.mjs` | The file tree: anchor, depth, fitting it into 60 lines |
 | `src/assessment.mjs` | The assessment and its file |
 | `src/top.mjs` | The copy of the assessment and the graph at the front of the context, and when it is replaced |
-| `src/context.mjs` | What a collapse keeps and how it is written: the task lines, the talk, the shelf, the block; a task's steps and their marks |
+| `src/context.mjs` | What a collapse keeps and how it is written: the task lines, the salient-notes section, the talk, the shelf, the block; a task's steps and their marks |
 | `src/engine.mjs` | When the context is collapsed, the question before it, the read-ahead after it |
 | `src/time.mjs` | How times, durations and ages are written |
 | `src/request.mjs` | What is added to a request as it is sent: the copy at the front, the times, the state block, the windows block |
