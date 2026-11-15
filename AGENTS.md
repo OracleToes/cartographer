@@ -29,3 +29,13 @@ The former integration suite as it was (the full `test/run.mjs` with every case 
 asserted an earlier specification and was several minutes long. The fast, spec-current subset has been ported and
 rewritten where the spec moved; the rest was dropped deliberately. Anything from it that is re-added must pass the
 same audit and the same 10-second budget.
+
+## Git
+
+- **Always push.** The user verifies and tests the work from the pushed branch, not from this workspace: a change
+  that is not pushed does not exist for them. Every change lands on the current branch and is pushed to
+  `origin/<current branch>` as part of finishing it — do not end a piece of work with commits only in the local
+  repository.
+- Push plain `git push origin <current branch>`; never force-push, never push to another branch, never rewrite
+  pushed history.
+- Commit in small, named units with messages that say what changed and why, as before.
