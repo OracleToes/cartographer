@@ -954,6 +954,7 @@ Not tried, because it needs your machine:
   export/             what you copied out of the full screen: messages, sessions, tabs. Kept out of git
   session.sqlite      the session: every message, task and report. Kept out of git
   plugins/            empty for now; plugins the agent writes for this project will live here
+  PREPEND.md          optional: your own markdown, read by the model before its prompt. Yours to write
   config.json         optional: settings for this project only
   .gitignore          keeps what belongs to this machine out of git: the lines above that say so
 ```
@@ -967,6 +968,8 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 ## Settings
 
 `~/cartographer/config.json` applies to every project. `<project>/.brain/config.json` overrides it for one project, the environment variables `CARTO_SERVER` and `CARTO_MODEL` override both, and `--url` and `--model` override everything. The `user` setting names the person Cartographer works with, and follows the same order with `CARTO_USER` as the environment override; it defaults to the OS user who started `carto`.
+
+`PREPEND.md` puts your own markdown in front of the model's prompt. It is read from `<installation>/PREPEND.md` (every project) and from `<project>/.brain/PREPEND.md` (this project only); when both exist, both are read, the installation first. It stands before everything the system prompt says, is re-read on every request, and editing it takes effect on the next one. Cartographer never writes it. Because it stands before the prompt, changing it makes the server read the prompt again from the top.
 
 | Key | Default | |
 |---|---|---|

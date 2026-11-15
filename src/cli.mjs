@@ -1,5 +1,5 @@
 // `carto`, run from a project folder.
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
@@ -176,6 +176,15 @@ export async function main(argv) {
 		// carto runs (/initiate) is never remembered.
 		const initiation = { on: config.initiate !== false };
 		if (!initiation.on) say("the agent waits for you (/initiate on lets it start on its own)");
+		// A PREPEND.md in the installation or in this brain: the user's own markdown, read before the prompt.
+		const prependFiles = [join(CORE_DIR, "PREPEND.md"), join(brainDir, "PREPEND.md")].filter((path) => {
+			try {
+				return existsSync(path) && readFileSync(path, "utf8").trim() !== "";
+			} catch {
+				return false;
+			}
+		});
+		if (prependFiles.length > 0) say(`prepend  ${prependFiles.map((path) => path.replace(`${project.root}/`, "")).join(" + ")} — read before the prompt`);
 		if (trace !== undefined) say(`trace  ${trace} (CARTO_TRACE)`);
 		if (adopted) say("The ledger file ledger.json is now carto-ledger.json; its entries are unchanged.");
 		if (forked) say(`Independent brain namespace created (${forked.previous} → ${forked.namespace}); internal references were rebound.`);

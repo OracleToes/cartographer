@@ -17,6 +17,7 @@ import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
+import { loadPrepend } from "../src/prepend.mjs";
 import { shelfItem, updateContext, loadContext, taskState } from "../src/context.mjs";
 import { approveRequests } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
@@ -542,4 +543,35 @@ test("book: prepareArguments repairs the (deeply frozen) harness arguments witho
 	assert.equal(preparedRef.ref.id, "f1");
 	assert.ok(typeof preparedRef.ref.namespace === "string" && preparedRef.ref.namespace.length >= 16, "the namespace is inferred");
 	assert.equal(preparedRef.ref.kind, "file", "the kind is inferred from the target");
+});
+
+test("prepend: the user's own markdown is read before the prompt — core first, brain second; nothing when absent", (t) => {
+	const { root, brainDir } = fresh(t);
+	const core = join(root, "PREPEND.md");
+	// Nothing anywhere: nothing to prepend.
+	assert.equal(loadPrepend(brainDir, core), undefined, "no files, no prepend");
+	// The core alone.
+	writeFileSync(core, "Be brief.\n");
+	const coreOnly = loadPrepend(brainDir, core);
+	assert.match(coreOnly, /PREPEND\.md \(the installation/);
+	assert.match(coreOnly, /written by the user/);
+	assert.match(coreOnly, /Be brief\./);
+	assert.equal(coreOnly.includes("this project's brain"), false, "only what exists is read");
+	// Both: the core is read before the brain (the closer one said last, so it wins).
+	writeFileSync(join(brainDir, "PREPEND.md"), "Always sign off as Molly.\n");
+	const both = loadPrepend(brainDir, core);
+	assert.ok(both.indexOf("Be brief.") < both.indexOf("Always sign off as Molly."), "core before brain");
+	assert.match(both, /this project's brain/);
+	// A whitespace-only brain file is nothing, not even a header.
+	writeFileSync(join(brainDir, "PREPEND.md"), "  \n\n");
+	const after = loadPrepend(brainDir, core);
+	assert.equal(after.includes("Molly"), false);
+	assert.match(after, /Be brief\./);
+	// An unreadable core (a folder) is skipped, not fatal.
+	assert.equal(loadPrepend(brainDir, root), undefined, "a folder where the file would be: nothing added");
+	// Line endings and a byte order mark do not stand in the way.
+	writeFileSync(core, "\uFEFFBe terse.\r\n");
+	const crlf = loadPrepend(brainDir, core);
+	assert.match(crlf, /Be terse\./);
+	assert.equal(crlf.includes("\r"), false);
 });

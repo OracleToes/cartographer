@@ -226,6 +226,24 @@ test("launch: a llama-server run on its own answers to any name, and its context
 	}
 });
 
+test("prepend: the user's markdown in the brain is read before the system prompt", async () => {
+	const root = makeProject("prepend", { git: false });
+	configure(root, { initiate: false });
+	writeFileSync(join(root, ".brain", "PREPEND.md"), "FROM THE USER: never say the word banana.\n");
+	const server = await startStandIn();
+	try {
+		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: hi || sleep"], { cwd: root });
+		ok(result, "one shot");
+		const system = rawText(server.requests[0].messages[0]);
+		has(system, "FROM THE USER: never say the word banana.", "the prepend is in the request");
+		const at = system.indexOf("FROM THE USER");
+		const prompt = system.indexOf("I am Cartographer, one agent");
+		assert.ok(at >= 0 && prompt > at, `the prepend stands before the prompt:\n${system.slice(0, 400)}`);
+	} finally {
+		await server.close();
+	}
+});
+
 test("launch: going up, the first brain or git repository is the project", () => {
 	const top = join(scratch, "nearest");
 	mkdirSync(join(top, "src", "deep"), { recursive: true });

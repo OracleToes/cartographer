@@ -11,6 +11,7 @@ import { describe, LOOP_MAX, LOOP_STOP, REFUSALS, REPLIES_LEFT, STILL_TASK, syst
 
 import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
+import { loadPrepend } from "./prepend.mjs";
 import { bookTool } from "./tools/book.mjs";
 import { returnTool } from "./tools/return.mjs";
 import { stamp } from "./time.mjs";
@@ -248,9 +249,11 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
 	const core = defineExtension({
 		name: "cartographer",
-		// One section that never changes within a project: a change here makes the server read the whole prompt again.
-		// It is built from the named sections of src/prompt.mjs.
-		sections: [section("preamble", () => systemPrompt({ root, handoffQuestion: config.handoffQuestion === true }), { tag: false })],
+		// The preamble never changes within a project; a change here makes the server read the whole prompt again.
+		// It is built from the named sections of src/prompt.mjs. The prepend stands before it: the user's own
+		// markdown (src/prepend.mjs), read fresh each request — a file read per request, and a new prompt section
+		// only when its bytes change.
+		sections: [section("prepend", () => loadPrepend(brainDir), { tag: false }), section("preamble", () => systemPrompt({ root, handoffQuestion: config.handoffQuestion === true }), { tag: false })],
 		// One flat list of tools for the main agent and every task: a fork shares the main conversation's
 		// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
 		// Tool descriptions are built into the tool definitions.
