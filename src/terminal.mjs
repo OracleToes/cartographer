@@ -1058,7 +1058,7 @@ export async function runTerminal(session, options) {
 				const row = (name, n, what) => line(`    ${name.padEnd(8)}${tokens(n).padStart(7)}   ${what}`);
 				const known = [sizes.fixed, sizes.top, sizes.front?.total, sizes.work, sizes.state].reduce((sum, n) => sum + (n ?? 0), 0);
 				if (sizes.fixed === undefined) line(`  The agent's context: of ${tokens(options.contextWindow)} tokens, not measured yet (nothing has been sent in this run of carto yet; the parts below are estimates, without the prompt and the tools)`);
-				else line(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(options.contextWindow)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (the server's count for the last answer; the parts below are estimates)"}`);
+				else line(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(options.contextWindow)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (measured, as the server counted it; the parts below are estimates)"}`);
 				row("fixed", sizes.fixed, "the prompt and the tools; never changes");
 				row("top", sizes.top, "the assessment and the graph, as copied at the last collapse");
 				if (sizes.front === undefined) row("kept", 0, "nothing yet: the context has not been collapsed");

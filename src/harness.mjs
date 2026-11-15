@@ -31,7 +31,7 @@ import { traceFile, watchTrace } from "./trace.mjs";
 import { USER_HEAD } from "./user.mjs";
 
 const PROVIDER = "local";
-const CHANGE = new Set(["write", "edit"]);
+const CHANGE = new Set(["write", "edit", "rm"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
 const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run || call.arguments?.action === POLICY.enums.shellAction.send);
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */

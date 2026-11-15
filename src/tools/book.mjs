@@ -17,9 +17,11 @@ import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mj
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
+import { charsPerTokenNow } from "../calibrate.mjs";
 import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
 import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 import { USER_NAME } from "../user.mjs";
+import { takeWarnings, warn } from "../warnings.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
@@ -69,6 +71,7 @@ const CAPABILITIES = {
 		read: { pathOk: true },
 		create: { fields: ["path", "content"] },
 		edit: { ref: "required", fields: ["oldText", "newText"] },
+		remove: { ref: "required" },
 		rebind: { ref: "required", fields: ["expectedVersion", "path"] },
 	},
 	report: {
@@ -166,6 +169,12 @@ const REFERENCE_SCHEMA = obj({
 });
 
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
+/** Append any "this was clipped for you" notes raised while the call ran. Every tool call drains, once. */
+const withNotes = (result) => {
+	const notes = takeWarnings();
+	if (notes.length === 0) return result;
+	return { ...result, output: [...(result?.output ?? []), { type: "text", text: notes.map((note) => `note: ${note}`).join("\n") }] };
+};
 function renderReadSelection(bytes, path, range, id) {
 	let text;
 	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
@@ -184,10 +193,22 @@ function renderReadSelection(bytes, path, range, id) {
 		to = Math.min(to, lines.length);
 	}
 	const clip = POLICY.limits.look.lineChars;
+	// A read returns at most about READ_TOKEN_CEILING tokens: a huge file is read in window-sized reads, not in one.
+	const ceiling = POLICY.limits.look.readTokenCeiling;
+	let ceilingHit = false;
+	let taken = 0;
+	const body = [];
+	for (const line of lines.slice(Math.max(0, from - 1), to)) {
+		const shown = line.length > clip ? `${line.slice(0, clip)} …[line cut: ${line.length} characters]` : line;
+		const cost = Math.ceil(shown.length / charsPerTokenNow()) + 1;
+		if (body.length > 0 && taken + cost > ceiling) { ceilingHit = true; break; }
+		taken += cost;
+		body.push(shown);
+	}
+	const last = from + body.length - 1;
 	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
-	const body = lines.slice(Math.max(0, from - 1), to).map((line) => (line.length > clip ? `${line.slice(0, clip)} …[line cut: ${line.length} characters]` : line));
-	const more = to < lines.length ? `\n(${lines.length - to} more lines; ask for range ${to + 1}-${Math.min(lines.length, to + POLICY.limits.look.readDefaultLines)})` : "";
-	return `== ${path} (lines ${from}-${Math.max(from - 1, to)} of ${lines.length}) · file ${id}\n${body.join("\n")}${more}`;
+	const more = last < lines.length ? `\n${ceilingHit ? `(stopped at the ~${ceiling}-token read ceiling; ` : "("}${lines.length - last} more lines; ask for range ${last + 1}-${Math.min(lines.length, last + POLICY.limits.look.readDefaultLines)})` : "";
+	return `== ${path} (lines ${from}-${Math.max(from - 1, last)} of ${lines.length}) · file ${id}\n${body.join("\n")}${more}`;
 }
 const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
 
@@ -324,9 +345,9 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			return textResult(`Rebound the existing file identity to ${rebound.record.path}; content identity is preserved.`, { ref: rebound.ref, status: "live" });
 		} catch (error) { return fail(`File rebind refused: ${error.message}.`); }
 	}
-	if (target === "file" && ["create", "edit"].includes(action)) {
-		if (main) return fail("Project-file create/edit must run in a focused change task for an authorized plan item.");
-		if (typeof args.planItem !== "string" || args.planItem.trim() === "") return fail("Project-file create/edit requires the authorized planItem carried by this focus.");
+	if (target === "file" && ["create", "edit", "remove"].includes(action)) {
+		if (main) return fail("Project-file create/edit/remove must run in a focused change task for an authorized plan item.");
+		if (typeof args.planItem !== "string" || args.planItem.trim() === "") return fail("Project-file create/edit/remove requires the authorized planItem carried by this focus.");
 		// What this focus carries, recorded when it was created (src/tools/task.mjs) in the durable context store:
 		// the plan item it carries out and that it is a change. Cheap to read, and right after a restart.
 		// (An entry scan was tried; it cannot see an entry that sits after the first forty of a long conversation.)
@@ -340,15 +361,21 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			const output = nested.structuredOutput;
 			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, change: true } };
 		}
-		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file edit requires a stable file ref; paths alone are not mutation targets. An `id` alone is enough: { \"id\": \"f1\" }.");
+		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail(`file ${action} requires a stable file ref; paths alone are not mutation targets. An \`id\` alone is enough: { \"id\": \"f1\" }.`);
 		if (args.expectedVersion !== undefined && (typeof args.expectedVersion !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedVersion))) return fail("`expectedVersion` must be a 64-character SHA-256 digest, or be omitted: the file's ID always points at the live version.");
 		const resolved = resolveFile(root, brainDir, args.ref);
-		if (resolved.status !== "live") return fail(`File edit refused: resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`);
-		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file edit: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was changed.`);
+		if (resolved.status !== "live") return fail(`File ${action} refused: resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`);
+		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file ${action}: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was ${action === "remove" ? "removed" : "changed"}.`);
 		filePath = resolved.record.path;
-		if (typeof args.oldText !== "string" || args.oldText === "" || typeof args.newText !== "string") return fail("file edit needs exact oldText and newText.");
-		// The ID points at the live version; the version handed to the nested edit is resolved here, never asked of the agent.
+		// The ID points at the live version; the version handed to the nested call is resolved here, never asked of the agent.
 		expectedVersion = resolved.currentVersion;
+		if (action === "remove") {
+			// Deletion goes through the same gate as write and edit: confined, checkpoint-recorded, undoable.
+			const nested = await api.executeTool("rm", { path: filePath, expectedVersion }, callContext, { key: "book-file-remove" });
+			const output = nested.structuredOutput;
+			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
+		}
+		if (typeof args.oldText !== "string" || args.oldText === "" || typeof args.newText !== "string") return fail("file edit needs exact oldText and newText.");
 		const nested = await api.executeTool("edit", { path: filePath, old_text: args.oldText, new_text: args.newText, expectedVersion }, callContext, { key: "book-file-edit" });
 		const output = nested.structuredOutput;
 		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
@@ -365,7 +392,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		const result = resolveFile(root, brainDir, ref);
 		const readablePinned = action === "read" && ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
 		const record = result.record;
-		if (action === "inspect") return textResult(JSON.stringify({ ref: result.ref ?? ref, kind: "file", path: record?.path, status: result.status, requestedVersion: result.requestedVersion, currentVersion: result.currentVersion, bytes: result.bytes?.byteLength, error: result.error, actions: result.status === "live" ? ["inspect", "read", "edit", "rebind", "shelf.add"] : ["inspect"] }, null, 2), { ref: result.ref ?? ref, status: result.status });
+		if (action === "inspect") return textResult(JSON.stringify({ ref: result.ref ?? ref, kind: "file", path: record?.path, status: result.status, requestedVersion: result.requestedVersion, currentVersion: result.currentVersion, bytes: result.bytes?.byteLength, error: result.error, actions: result.status === "live" ? ["inspect", "read", "edit", "remove", "rebind", "shelf.add"] : ["inspect"] }, null, 2), { ref: result.ref ?? ref, status: result.status });
 		if (result.status !== "live" && !readablePinned) return fail(`File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`);
 		if (result.bytes.byteLength > POLICY.limits.look.fileBytes) return fail(`The file is ${count(result.bytes.byteLength)} bytes, over the ${count(POLICY.limits.look.fileBytes)}-byte read limit. Ask for a smaller range with shelf.add.`);
 		if (result.bytes.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0)) return fail("This file appears to be binary and cannot be returned as text.");
@@ -820,9 +847,12 @@ function runPlan({ brainDir, gate }, args, api) {
 function runBooks({ brainDir }, args, api) {
 	// The old whole-text call, kept for a hand-written assessment.md and older callers.
 	if (!Array.isArray(args.ops) || args.ops.length === 0) {
-		const text = typeof args.text === "string" ? args.text.trim() : "";
+		let text = typeof args.text === "string" ? args.text.trim() : "";
 		if (text === "") return fail("`text` is empty and `ops` holds nothing. Write an entry with `ops`, or the whole assessment with `text`.");
-		if (text.length > ASSESSMENT_MAX) return fail(`The assessment is ${text.length} characters; the limit is ${ASSESSMENT_MAX}. Keep what I would need first with an empty context; details belong in nodes of the atlas.`);
+		if (text.length > ASSESSMENT_MAX) {
+			warn(`The assessment was clipped from ${text.length} to ${ASSESSMENT_MAX} characters; the rest is dropped. Keep what I would need first with an empty context, and put the details in nodes of the atlas.`);
+			text = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
+		}
 		saveAssessment(brainDir, text);
 		noteAssessed(brainDir, text);
 		return {
@@ -1057,13 +1087,13 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
 		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
-		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit." })),
+		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit/remove." })),
 		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition; omit it — a ref's ID always points at the live version. Supplied, it is enforced as a precondition." })),
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
 		newText: opt(str({ description: "Replacement passage in file edit." })),
 		handOn: opt(bool({ description: "When adding from a focus, hand this placement to the shared shelf on return." })),
-		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
+		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. `done` names the item by its id — for `plan`, `ledger`, `assessment` and `practice`: operation {id} (plus an optional `text` outcome). `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
 	});
 	const validate = compile(validationSchema, { coerce: true });
 	const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";
@@ -1119,20 +1149,21 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		execute: async (args, api, callContext) => {
 			if (args.target !== undefined) {
 				const main = api.conversationId === ROOT_CONVERSATION_ID;
-				const mutation = args.target === "file" && ["create", "edit"].includes(args.action);
-				if (main && mutation && (typeof args.planItem !== "string" || args.planItem.trim() === "")) return fail("file create/edit needs an authorized change planItem; first get it approved in the plan.");
-				if (main && args.target === "file" && args.action === "rebind") {
+				const mutation = args.target === "file" && ["create", "edit", "remove"].includes(args.action);
+				if (main && mutation && (typeof args.planItem !== "string" || args.planItem.trim() === "")) return fail("file create/edit/remove needs an authorized change planItem; first get it approved in the plan.");
+				takeWarnings(); // drop any note raised before this call started, so a call reports only its own
+			if (main && args.target === "file" && args.action === "rebind") {
 					const taskArgs = {
 						brief: `Perform exactly one bounded book operation, then return immediately. Call book once with these exact arguments: ${JSON.stringify(args)}. Do not broaden scope, do not make project changes, and return its result.`,
 					};
 					const task = await api.executeTool("task", taskArgs, callContext, { key: "book-focus" });
 					const nested = task.structuredOutput;
 					const report = typeof nested === "string" ? nested : Array.isArray(nested) ? nested.flatMap((part) => part?.type === "text" ? [part.text] : []).join("\\n") : JSON.stringify(nested ?? task.diagnostics);
-					return { isError: task.isError, output: [{ type: "text", text: report }], details: { target: args.target, action: args.action, focus: true, ...(task.details ?? {}) } };
+					return withNotes({ isError: task.isError, output: [{ type: "text", text: report }], details: { target: args.target, action: args.action, focus: true, ...(task.details ?? {}) } });
 				}
-				return await runUniversal({ root, brainDir, config, engine, gate }, args, api, callContext);
+				return withNotes(await runUniversal({ root, brainDir, config, engine, gate }, args, api, callContext));
 			}
-			return fail('Validation failed for tool "book": target and action are both required.');
+			return withNotes(fail('Validation failed for tool "book": target and action are both required.'));
 		},
 	});
 }

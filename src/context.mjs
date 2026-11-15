@@ -32,6 +32,7 @@
 // A task has the same means for its own steps, and only for those: what stands in
 // front of its brief is the main agent's and stays as it is (see `dressTask`).
 import { POLICY } from "./config.mjs";
+import { charsPerTokenNow } from "./calibrate.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -70,8 +71,9 @@ const SHELF_MAX_LINES = POLICY.limits.context.shelfLines;
 export const contextPath = (brainDir) => join(brainDir, "carto-context.json");
 export const reportsDir = (brainDir) => join(brainDir, "reports");
 
-/** A rough count of tokens: four characters each. The server's own count is used wherever there is one. */
-export const estimate = (text) => Math.ceil(String(text ?? "").length / POLICY.estimation.charsPerToken);
+/** A rough count of tokens: the calibrated ratio (see src/calibrate.mjs). The server's own count is used wherever there is one. */
+export const estimate = (text) => Math.ceil(String(text ?? "").length / charsPerTokenNow());
+export { charsPerTokenNow };
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const oneLine = (text, max) => {
 	const flat = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -152,7 +154,7 @@ const callsOf = (message) => (Array.isArray(message?.content) ? message.content.
 export function messageTokens(message) {
 	let chars = textOf(message).length + 12;
 	for (const call of callsOf(message)) chars += call.name.length + JSON.stringify(call.arguments ?? {}).length + 24;
-	return Math.ceil(chars / POLICY.estimation.charsPerToken);
+	return Math.ceil(chars / charsPerTokenNow());
 }
 
 // ─── The store ───────────────────────────────────────────────────────────────

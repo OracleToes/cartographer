@@ -10,6 +10,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { defineTool } from "@earendil-works/pi-durable";
 import { arr, bool, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { BRAIN } from "../project.mjs";
+import { charsPerTokenNow } from "../calibrate.mjs";
 
 const READ_DEFAULT_LINES = POLICY.limits.look.readDefaultLines;
 const READ_MAX_LINES = POLICY.limits.look.readMaxLines;
@@ -20,6 +21,7 @@ const SEARCH_DEFAULT = POLICY.limits.look.searchDefault;
 const SEARCH_MAX = POLICY.limits.look.searchMax;
 const LIST_MAX_LINES = POLICY.limits.look.listLines;
 const WALK_MAX_FILES = POLICY.limits.look.walkFiles;
+const READ_TOKEN_CEILING = POLICY.limits.look.readTokenCeiling;
 const SKIP_DIRS = new Set([...POLICY.enums.lookSkipDirs, BRAIN]);
 
 export class LookError extends Error {}
@@ -147,10 +149,22 @@ export function readOne(root, given, offset, limit) {
 	const count = Math.max(1, Math.min(READ_MAX_LINES, Math.floor(limit ?? READ_DEFAULT_LINES)));
 	if (lines.length === 0) return `== ${path.rel}\n(empty file)`;
 	if (first > lines.length) return `== ${path.rel}\nThe file has ${lines.length} lines; line ${first} does not exist.`;
-	const last = Math.min(lines.length, first + count - 1);
+	const wanted = Math.min(lines.length, first + count - 1);
+	// A read returns at most about READ_TOKEN_CEILING tokens: a huge file is read in window-sized reads, not in one.
+	let ceilingHit = false;
+	let taken = 0;
+	const kept = [];
+	for (const line of lines.slice(first - 1, wanted)) {
+		const shown = clip(line);
+		const cost = Math.ceil(shown.length / charsPerTokenNow()) + 1;
+		if (kept.length > 0 && taken + cost > READ_TOKEN_CEILING) { ceilingHit = true; break; }
+		taken += cost;
+		kept.push(shown);
+	}
+	const last = first + kept.length - 1;
 	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
-	const body = lines.slice(first - 1, last).map((line) => clip(line));
-	const more = last < lines.length ? `\n(${lines.length - last} more lines; continue with offset ${last + 1})` : "";
+	const body = kept;
+	const more = last < lines.length ? `\n${ceilingHit ? `(stopped at the ~${READ_TOKEN_CEILING}-token read ceiling; ` : "("}${lines.length - last} more lines; continue with offset ${last + 1})` : "";
 	return `== ${path.rel} (lines ${first}-${last} of ${lines.length})\n${body.join("\n")}${more}`;
 }
 
@@ -271,7 +285,7 @@ export function lookTools(root) {
 	return [
 		defineTool({
 			name: "read",
-			description: `Read text files of the project exactly as they are, with no line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless I set \`limit\`.`,
+			description: `Read text files of the project exactly as they are, with no line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless I set \`limit\` (at most ${READ_MAX_LINES}). One call returns about ${READ_TOKEN_CEILING} tokens at most: a huge file is read in window-sized calls. A line longer than ${LINE_MAX_CHARS} characters is cut, and the cut says so.`,
 			parameters: obj({
 				paths: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { minItems: POLICY.validation.nonEmptyArrayMinItems, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
 				offset: opt(int({ minimum: POLICY.validation.positiveIntegerMin, description: `First line to read, counting from ${POLICY.validation.positiveIntegerMin}. Default ${POLICY.validation.positiveIntegerMin}.` })),

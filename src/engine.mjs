@@ -19,6 +19,7 @@ import { POLICY } from "./config.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { describeCall } from "./terminal.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
+import { calibrate } from "./calibrate.mjs";
 import { ASK_MAIN, ASK_TASK, HANDOFF_IN_TURN, TASK_HANDOFF } from "./prompt.mjs";
 import { withTimes } from "./request.mjs";
 import { loadTop, pin, withTop } from "./top.mjs";
@@ -192,6 +193,8 @@ export function createEngine({ root, brainDir, config }) {
 			state.results = new Map();
 			const used = (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.output ?? 0);
 			if (used > 0) state.used = used;
+			// Re-learn the chars-per-token ratio from what the server actually counted for this exact payload.
+			try { calibrate(JSON.stringify(state.payload ?? "").length, (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.cacheWrite ?? 0)); } catch { /* an unserializable payload teaches nothing */ }
 		},
 		/** What one call of that reply returned. */
 		returned(conversationId, call, result) {

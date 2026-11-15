@@ -16,7 +16,6 @@
 //   textMax        the most characters one entry may hold
 //   addTextLabel   what the add's `text` is called in its errors (the ledger says what a text is for)
 //   textRequired   the error for a missing or empty text
-//   textTooLong    the error for a text over `textMax`
 //   itemsMax       how many entries the book holds at most
 //   limitCount     how many entries the limit counts (the ledger counts its open, unarchived ones)
 //   limitText      what is said when that count has reached `itemsMax`
@@ -25,6 +24,7 @@
 //   findText       what is said when no entry carries that id; `where` says which field misspelled it
 //   show           one line for an entry, as the agent and the user see it, after the verb's sign
 import { POLICY } from "./config.mjs";
+import { warn } from "./warnings.mjs";
 //   closedWord     "closed" (ledger) or "settled" (books)
 //   alreadyText    what is said when `done` reaches an entry that is done already
 //   outcome        for `done`: the entry's outcome from `op.text`, or undefined to leave it out
@@ -54,7 +54,10 @@ export function applyEntryOp(store, op, spec, now) {
 	const checked = (value, what) => {
 		if (typeof value !== "string" || value.trim() === "") throw new BookError(spec.textRequired(what));
 		const text = flat(value);
-		if (text.length > spec.textMax) throw new BookError(spec.textTooLong(what, text.length));
+		if (text.length > spec.textMax) {
+			warn(`${what} was clipped from ${text.length} to ${spec.textMax} characters; the rest is dropped. Edit if the cut lost the point.`);
+			return `${text.slice(0, spec.textMax - 1).trimEnd()}…`;
+		}
 		return text;
 	};
 	const find = (id, where = "id") => {

@@ -542,8 +542,8 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 	const header = [
 		[
 			[`What ${who} sees`, "bold"],
-			[`  ·  about ${short(used)} of ${short(windowSize)} tokens (${Math.round((used / windowSize) * 100)}%)`, ""],
-			[sent.used !== undefined ? `  ·  the server counted ${short(sent.used)}` : "", "muted"],
+			[`  ·  about ${short(used)} of ${short(windowSize)} tokens (${Math.round((used / windowSize) * 100)}%) — estimated`, ""],
+			[sent.used !== undefined ? `  ·  the server counted ${short(sent.used)} (measured)` : "", "muted"],
 		],
 		[[`request ${sent.count} of this run, sent ${stamp(sent.at).split(", ").at(-1)} (${ago(Date.now() - sent.at)}), as the server got it · part sizes are estimates`, "muted"]],
 		contextBar(parts, windowSize, cols),

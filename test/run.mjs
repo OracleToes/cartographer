@@ -718,9 +718,11 @@ test("look: read gives the exact bytes, ranges, and says how to continue", () =>
 	const root = makeProject("read-unit", { git: false });
 	const whole = readOne(root, "src/math.js");
 	assert.equal(whole, "== src/math.js (lines 1-4 of 4)\nexport function add(a, b) {\n  // MARKER-ONLY-IN-FILE\n  return a + b;\n}");
-	const start = readOne(root, "long.txt");
-	has(start, "== long.txt (lines 1-300 of 700)", "the default is 300 lines");
-	has(start, "(400 more lines; continue with offset 301)", "it says how to go on");
+	// The default window is 1024 lines (2026-11-15): a fixture longer than the window exercises it.
+	writeFileSync(join(root, "long2.txt"), Array.from({ length: 1500 }, (_, index) => `line ${index + 1}`).join("\n") + "\n");
+	const start = readOne(root, "long2.txt");
+	has(start, "== long2.txt (lines 1-1024 of 1500)", "the default is 1024 lines");
+	has(start, "(476 more lines; continue with offset 1025)", "it says how to go on");
 	const middle = readOne(root, "long.txt", 698, 50);
 	assert.equal(middle, "== long.txt (lines 698-700 of 700)\nline 698\nline 699\nline 700");
 	has(readOne(root, "long.txt", 900), "The file has 700 lines; line 900 does not exist.", "past the end");
@@ -728,8 +730,8 @@ test("look: read gives the exact bytes, ranges, and says how to continue", () =>
 	has(readOne(root, "nope.js"), "Not found. Use `list` or `search`", "a missing file");
 	writeFileSync(join(root, "blob.bin"), Buffer.from([1, 2, 0, 3]));
 	has(readOne(root, "blob.bin"), "A binary file (4 B)", "a binary file");
-	writeFileSync(join(root, "wide.txt"), `${"x".repeat(1000)}\n`);
-	has(readOne(root, "wide.txt"), "…[line cut, 1000 characters]", "a very long line is cut and says so");
+	writeFileSync(join(root, "wide.txt"), `${"x".repeat(2500)}\n`);
+	has(readOne(root, "wide.txt"), "…[line cut, 2500 characters]", "a very long line is cut and says so");
 });
 
 test("look: search and list", () => {
@@ -1549,7 +1551,7 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 
 	// The top: whose window, the bar, the legend.
 	const top = view.header.map((line) => line.map(([part]) => part).join(""));
-	assert.match(top[0], /^What the main agent sees {2}· {2}about [\d.]+k of 20k tokens \(\d+%\) {2}· {2}the server counted 6\.1k$/);
+	assert.match(top[0], /^What the main agent sees {2}· {2}about [\d.]+k of 20k tokens \(\d+%\) — estimated {2}· {2}the server counted 6\.1k \(measured\)$/);
 	assert.match(top[1], /^request 7 of this run, sent \d\d:\d\d \(/);
 	assert.equal(top[2].length, 40, "the bar is as wide as the screen");
 	assert.match(top[2], /^■+□+$/, "used cells, then free ones");

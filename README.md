@@ -382,7 +382,7 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | `return` | focused context | End this focus and hand over its report and any shelf items; shared-book updates already persist |
 | `context` | orchestrating and focused contexts | Recall a kept report, keep a file on the shelf, fold a report after its bookkeeping, or collapse the current context |
 
-`book` project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches to an authorized change focus and retains the plan, approval, sandbox, network, and root protections. A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. Chat-message `edit` is soft-forget from future context/ordinary recall; the raw Durable transcript remains append-only. The old `read`, `write`, and `edit` executors are internal primitives and are not model-callable.
+`book` project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches to an authorized change focus and retains the plan, approval, sandbox, network, and root protections; `file remove` deletes a project file the same way (a checkpoint records the deletion, so `/undo` brings it back). A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. Chat-message `edit` is soft-forget from future context/ordinary recall; the raw Durable transcript remains append-only. The old `read`, `write`, `rm`, and `edit` executors are internal primitives and are not model-callable.
 
 **References.** New `book` calls pass `{ id, namespace?, kind?, version? }` — the ID alone is enough; the namespace and kind are inferred and the live version is used unless one is pinned. Paths are locators, not identities. File versions are SHA-256 digests and exact bytes are kept under `.brain/catalog/versions/`; retained non-file versions are under `.brain/catalog/entities/`. Durable-owned transcript/task IDs remain their native IDs. App-managed catalog file IDs and shelf placement IDs count up within the brain — `f1`, `f2`, … and `sh1`, `sh2`, … — because they only ever need to be unique per project directory; ids written before 2026-11-15 (`f-`/`sh-<uuid>`) stay valid. An explicit `carto --fork-brain` rotates the namespace, transactionally rebinds saved internal references, and records its source namespace; backups/restores keep their namespace. Tool schemas are static and flat in every request; there is no provider-side schema expansion to verify.
 
@@ -448,7 +448,7 @@ An approval covers the item as it stood when you gave it. When the agent rewords
 
 **A standing item** is a change item for a duty rather than a piece of work: "keep the server running", "restart the worker when it stops". The agent marks it `standing`, and it shows as `[change, standing]`. It needs your approval like any change item, and the line that asks says how many items are standing. Once it is approved, the agent may start a task for it as often as its text calls for it, until it marks the item done, which ends the duty. An ordinary item is for work that is done once. Together with a wake (see [Waking up](#waking-up)), a standing item is how the agent looks after something while you are away, without approval being switched off.
 
-**A change task** is a task started for a change item you approved (or while approval is switched off). It has `book` file create/edit and `shell` besides search/list and `book` inspect/read, and may type into a shell window with `window`. The implementation keeps checked file-write primitives behind `book`. Who may write is decided when the call is made, by the program:
+**A change task** is a task started for a change item you approved (or while approval is switched off). It has `book` file create/edit/remove and `shell` besides search/list and `book` inspect/read, and may type into a shell window with `window`. The implementation keeps checked file-write primitives behind `book`. Who may write is decided when the call is made, by the program:
 
 - The main agent never writes. Neither does a task without an item, or a task for a look item.
 - A path outside the project is refused, also through a symlinked folder, and so is a symlink itself.
@@ -473,7 +473,7 @@ The checkpoint history only grows, so every recorded state can be reached with g
 
 Limits of this version:
 
-- One `write` call must fit in one reply of the model (`maxTokens`, 8192 by default, thinking included). A task whose reply is cut off there ends, and the main agent is told the cause and to have the file written in parts. How the model handles this in practice is untested.
+- One `write` call must fit in one reply of the model (`maxTokens`, 32768 by default, thinking included). A task whose reply is cut off there ends, and the main agent is told the cause and to have the file written in parts. How the model handles this in practice is untested.
 - The first checkpoint copies every file that is not ignored. In a project with large files that are not ignored, it takes time and space.
 
 ### Without approval (yolo)
@@ -650,7 +650,7 @@ carto --no-bwrap        for the whole session
 Commands then run directly on the machine, as you, with your environment and the network. They can read, change and delete whatever you can, anywhere. What stays the same:
 
 - A plan still needs `/approve` before a task's command runs. With the sandbox off, tasks' commands run directly on your machine; the main agent's commands still run in a read-only window while bubblewrap works, and not at all when it does not.
-- `book` file create/edit/inspect/read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
+- `book` file create/edit/remove and `book` file inspect/read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
 - The windows work the same, with bounded output, and every process of a window ends with it: on `/kill`, when you leave, and within about a second of Cartographer being killed. A process that detaches itself into a session of its own escapes this.
 
 What you give up:
@@ -974,7 +974,7 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `model` | none | Model name as the server knows it |
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
 | `contextWindow` | 100000 | Context size the server was started with (`-c`) |
-| `maxTokens` | 8192 | Longest single reply, thinking included |
+| `maxTokens` | 32768 | Longest single reply, thinking included |
 | `writeLines` | 60 | Longest new file one `write` call creates, in lines. A file to grow beyond that is written and then edited |
 | `writeCreatesOnly` | true | Whether `write` refuses to replace an existing file whole, pointing at `edit` instead. false: the old create-or-replace |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Carrying out a plan takes about two per item |

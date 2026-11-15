@@ -17,6 +17,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAssessment } from "./assessment.mjs";
 import { applyEntryOp, flat } from "./rows.mjs";
+import { warn } from "./warnings.mjs";
 
 export const BOOK_KINDS = POLICY.enums.bookKinds;
 export const BOOK_ACTIONS = POLICY.enums.bookActions;
@@ -38,7 +39,6 @@ const BOOK_SPEC = {
 	textMax: BOOK_TEXT_MAX,
 	addTextLabel: "`text`",
 	textRequired: () => "`text` is required and was left out or empty: one short entry, in my words.",
-	textTooLong: (_, length) => `\`text\` is ${length} characters; an entry may hold ${BOOK_TEXT_MAX}. Keep one thought per entry.`,
 	itemsMax: BOOK_ITEMS_MAX,
 	limitCount: (book) => book.items.filter((item) => item.status === POLICY.enums.entryStatus.open).length,
 	limitText: () => `The books hold ${BOOK_ITEMS_MAX} open entries, their limit. Settle or remove some first.`,
@@ -51,7 +51,7 @@ const BOOK_SPEC = {
 	show: bookLine,
 	closedWord: "settled",
 	alreadyText: (id) => `${id} was already settled.`,
-	outcome: (op) => (op.text !== undefined && flat(op.text) !== "" ? flat(op.text).slice(0, POLICY.limits.books.outcomeChars) : undefined),
+	outcome: (op) => { if (op.text === undefined || flat(op.text) === "") return undefined; const text = flat(op.text); if (text.length <= POLICY.limits.books.outcomeChars) return text; warn(`\`text\` (how it ended) was clipped from ${text.length} to ${POLICY.limits.books.outcomeChars} characters; the rest is dropped. Edit if the cut lost the point.`); return `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…`; },
 	markClosed: false,
 	addBefore: true,
 	editTextRequired: true,

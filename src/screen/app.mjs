@@ -29,6 +29,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
+import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
@@ -383,7 +384,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (size < rateMark.size) rateMark = { at: now, size };
 		else if (now - rateMark.at >= POLICY.timing.screen.rateWindowMs) {
 			const grown = size - rateMark.size;
-			state.rate = grown > 0 ? grown / POLICY.estimation.charsPerToken / ((now - rateMark.at) / 1000) : undefined;
+			state.rate = grown > 0 ? grown / charsPerTokenNow() / ((now - rateMark.at) / 1000) : undefined;
 			rateMark = { at: now, size };
 		}
 	};

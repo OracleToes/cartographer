@@ -127,7 +127,6 @@ const LEDGER_SPEC = {
 	textMax: TEXT_MAX,
 	addTextLabel: "`text` (the entry itself, one line in my words)",
 	textRequired: (what) => `${what} is required and was left out or empty.`,
-	textTooLong: (what, length) => `${what} is ${length} characters; the limit is ${TEXT_MAX}. Say it in one line, or split it into two entries.`,
 	itemsMax: OPEN_MAX,
 	limitCount: (ledger) => open(ledger).length,
 	limitText: () => `The ledger has ${OPEN_MAX} open entries, which is its limit. Close or remove some before adding more.`,

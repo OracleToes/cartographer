@@ -114,7 +114,6 @@ const planSpec = (plan) => ({
 	textMax: ITEM_MAX,
 	addTextLabel: "`text`",
 	textRequired: () => "`text` is required and was left out or empty: say in one line what this item covers.",
-	textTooLong: (_, length) => `\`text\` is ${length} characters; the limit is ${ITEM_MAX}. One line that says what the item covers is enough: the detail goes into the task's brief.`,
 	itemsMax: ITEMS_MAX,
 	limitCount: (plan) => plan.items.length,
 	limitText: () => `The plan has ${ITEMS_MAX} items, which is its limit. Remove finished ones, or clear the plan.`,

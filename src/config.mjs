@@ -40,7 +40,7 @@ export const DEFAULTS = freezeTree({
 	contextWindow: 100000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
 	// how long a file one `write` call can hold.
-	maxTokens: 8192,
+	maxTokens: 32768,
 	// Tool rounds one run may take before it stops and says so. Carrying out a plan takes about two per item.
 	mainTurns: 40,
 	taskTurns: 30,
@@ -118,7 +118,7 @@ export const POLICY = freezeTree({
 		checkpoints: { changeRecordLines: 40, folderCollapseFiles: 3 },
 		engine: { serverErrorChars: 300, handoffErrorChars: 120, noteChars: 2000, askMaxTokens: 16 },
 
-		look: { readDefaultLines: 300, readMaxLines: 1000, readMaxFiles: 8, lineChars: 400, fileBytes: 2_000_000, binaryProbeChars: 8000, searchDefault: 60, searchMax: 200, searchHitChars: 240, listLines: 400, walkFiles: 20_000, maxBufferBytes: 64 * 1024 * 1024 },
+		look: { readDefaultLines: 1024, readMaxLines: 2048, readMaxFiles: 8, lineChars: 2000, readTokenCeiling: 8192, fileBytes: 2_000_000, binaryProbeChars: 8000, searchDefault: 60, searchMax: 200, searchHitChars: 240, listLines: 400, walkFiles: 20_000, maxBufferBytes: 64 * 1024 * 1024 },
 		taskDisplay: { listedNodes: 20, staleNodes: 12 },
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
 		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300 },
@@ -200,7 +200,7 @@ export const POLICY = freezeTree({
 		sandbox: { toolchainProbeMs: 10_000 },
 	},
 	protocol: { askTemperature: 0, askStream: false, askThinking: false, noToolChoice: "none" },
-	estimation: { charsPerToken: 4 },
+	estimation: { charsPerToken: 4, emaMin: 2.5, emaMax: 6, emaAlpha: 0.3 },
 	enums: {
 		actions: ACTION,
 		entryStatus: { open: "open", done: "done" },

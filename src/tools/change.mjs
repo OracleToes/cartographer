@@ -98,6 +98,22 @@ export function writeOne(root, brainDir, given, content, options = {}) {
 	return `Wrote ${path.rel}: ${plural(lines, "line")}, ${had === undefined ? "a new file" : `replacing a file of ${plural(had, "line")}`}.`;
 }
 
+/**
+ * Delete a file. The path goes through the same door as write and edit: inside the project, not the brain, not
+ * git's own files, not ignored, not through a symlink, not a folder. A checkpoint records the deletion, so
+ * `/undo` brings the file back. @returns {string} what happened, one line
+ */
+export function removeOne(root, brainDir, given, { expectedVersion } = {}) {
+	const path = confineWrite(root, brainDir, given);
+	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Nothing was removed`);
+	if (expectedVersion !== undefined) {
+		const actual = createHash("sha256").update(readFileSync(path.abs)).digest("hex");
+		if (actual !== expectedVersion) throw new ChangeError(`${path.rel} changed since version ${expectedVersion}; current version is ${actual}. Nothing was removed`);
+	}
+	unlinkSync(path.abs);
+	return `Removed ${path.rel}.`;
+}
+
 /** Replace one passage of a file. @returns {string} what happened, one line */
 export function editOne(root, brainDir, given, oldText, newText, { expectedVersion } = {}) {
 	if (typeof oldText !== "string" || oldText === "") throw new ChangeError("`old_text` is required: the passage to replace, copied exactly from the file");
@@ -170,6 +186,19 @@ export function changeTools({ root, brainDir, write = {} }) {
 			// Not run a second time after a crash: the passage may already be replaced, and the task reads the file again.
 			replay: POLICY.enums.toolReplay.unsafe,
 			execute: async (args) => run(() => editOne(root, brainDir, args.path, args.old_text, args.new_text, { expectedVersion: args.expectedVersion })),
+		}),
+		defineTool({
+			name: "rm",
+			description: "Delete one project file. Folders are not removed. A checkpoint records the deletion, so /undo brings the file back.",
+			parameters: obj({
+				path: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Path relative to the project directory" }),
+				expectedVersion: opt(str({ description: "Optional SHA-256 content precondition used by book file removes." })),
+			}),
+			callers: ["tools"], // Internal primitive for book; the model uses target=file, action=remove.
+			executionMode: "sequential",
+			// Not run a second time after a crash: the file may already be gone, and the task reads the folder again.
+			replay: POLICY.enums.toolReplay.unsafe,
+			execute: async (args) => run(() => removeOne(root, brainDir, args.path, { expectedVersion: args.expectedVersion })),
 		}),
 	];
 }
