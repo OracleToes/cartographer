@@ -577,6 +577,27 @@ test("windows: long output keeps its start and its end; what was running at the 
 	}
 });
 
+test("windows: a line reported before it had its newline is kept whole by the window", async () => {
+	const skip = NO_WINDOWS();
+	if (skip) return skip;
+	const root = makeProject("windows-partial-line");
+	const { brainDir } = setUpBrain(root);
+	const mode = findSandbox().ok ? "sandbox" : "direct";
+	const first = windowsOf(root, brainDir, { mode });
+	try {
+		const command = "printf 'aaaaa-bbbbb '; sleep 1; printf 'ccccc\\nnext\\n'";
+		const report = await first.run("partial", command, { waitMs: 300 });
+		assert.match(report.text, /aaaaa-bbbbb $/, "the call reported the unfinished line as far as it had come");
+		await new Promise((resolve) => setTimeout(resolve, 1500));
+		const stored = first.read("partial", 20);
+		assert.match(stored.text, /aaaaa-bbbbb ccccc/, "the window's own record keeps the whole line, not only the part that was not shown yet");
+		const second = await first.wait("partial", { waitMs: 5_000 });
+		assert.equal(second.text, "ccccc\nnext", "the follow-up report shows only what was not shown before");
+	} finally {
+		first.shutdown();
+	}
+});
+
 test("windows: what the windows block says about them", () => {
 	assert.equal(windowsBlock([]), "", "no window, no block");
 	assert.equal(windowsBlock(undefined), "", "nor without a session");
@@ -671,15 +692,15 @@ test("plan: the network mark belongs to change items, and giving it withdraws th
 
 // ─── Looking: only inside the project ───────────────────────────────────────
 
-test("look: read gives line numbers, ranges, and says how to continue", () => {
+test("look: read gives the exact bytes, ranges, and says how to continue", () => {
 	const root = makeProject("read-unit", { git: false });
 	const whole = readOne(root, "src/math.js");
-	assert.equal(whole, "== src/math.js (lines 1-4 of 4)\n1│export function add(a, b) {\n2│  // MARKER-ONLY-IN-FILE\n3│  return a + b;\n4│}");
+	assert.equal(whole, "== src/math.js (lines 1-4 of 4)\nexport function add(a, b) {\n  // MARKER-ONLY-IN-FILE\n  return a + b;\n}");
 	const start = readOne(root, "long.txt");
 	has(start, "== long.txt (lines 1-300 of 700)", "the default is 300 lines");
 	has(start, "(400 more lines; continue with offset 301)", "it says how to go on");
 	const middle = readOne(root, "long.txt", 698, 50);
-	assert.equal(middle, "== long.txt (lines 698-700 of 700)\n698│line 698\n699│line 699\n700│line 700");
+	assert.equal(middle, "== long.txt (lines 698-700 of 700)\nline 698\nline 699\nline 700");
 	has(readOne(root, "long.txt", 900), "The file has 700 lines; line 900 does not exist.", "past the end");
 	has(readOne(root, "src"), "This is a directory. Use `list`", "a directory");
 	has(readOne(root, "nope.js"), "Not found. Use `list` or `search`", "a missing file");
@@ -803,9 +824,9 @@ test("time: each of the user's messages and each task report says when it came, 
 });
 
 test("terminal: one line per call to the atlas and the assessment", () => {
-	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", operation: { name: "dice" } } }), "atlas add dice");
-	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: "a" } } }), "atlas confirm a");
-	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "add", operation: { text: "x".repeat(1200) } } }), `assessment add ${"x".repeat(69)}…`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", operation: { name: "dice" } } }), "book atlas add dice");
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: "a" } } }), "book atlas confirm a");
+	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "add", operation: { text: "x".repeat(1200) } } }), `book assessment add ${"x".repeat(69)}…`);
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "book", isError: false, details: { target: "atlas", ...details }, content: [{ type: "text", text }] });
 	assert.equal(result({ shown: ["+ node a  what a is", "✓ confirmed b"] }, "a written.\nb confirmed."), "+ node a what a is · ✓ confirmed b");
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");

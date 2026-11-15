@@ -737,7 +737,7 @@ export function shellsOutView({ session }, name) {
 	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 	const pick = all.find((win) => win.name === name) ?? all.at(-1);
 	if (pick === undefined) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const lines = (session.windows?.linesFrom(pick.name, 0) ?? []).slice(-POLICY.limits.screen.shellViewLines);
+	const lines = (session.windows?.linesFrom(pick.name, 0, { partial: true }) ?? []).slice(-POLICY.limits.screen.shellViewLines);
 	const what =
 		pick.state === POLICY.enums.windowStates.busy
 			? [["busy", "warn"], [`  $ ${pick.command ?? ""}`, "bold"], [pick.asks ? "  · may be waiting for input" : "", "warn"]]

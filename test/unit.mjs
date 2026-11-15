@@ -22,6 +22,8 @@ import { approveRequests } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
+import { describeCall } from "../src/terminal.mjs";
+import { changeTools } from "../src/tools/change.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -449,4 +451,73 @@ test("change gate: a focus carries an approved item whatever the history's lengt
 	const no = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n", planItem: "p1" }, apis.stranger, undefined);
 	assert.equal(no.isError, true);
 	assert.match(no.output[0].text, /not carrying/);
+});
+
+test("file edit: the ID alone is enough, and it always points at the live version", async (t) => {
+	const { root, brainDir } = fresh(t);
+	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the throw." }), null);
+	approveRequests(brainDir, ["p1"]);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "dice.js"), "const a = 1;\nconst b = 2;\n");
+	const { ref } = observeFile(root, brainDir, "src/dice.js");
+	const id = ref.id;
+	// The agent never sees a namespace, a kind or a 64-character hash: only the file's ID.
+	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const focus = 7777;
+	updateContext(brainDir, (store) => {
+		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
+	});
+	const [, edit] = changeTools({ root, brainDir });
+	const focusApi = { conversationId: focus, executeTool: async (name, args) => {
+		if (name !== "edit") throw new Error(`unexpected nested tool ${name}`);
+		const nested = await edit.execute(args);
+		// What the harness does with a nested call's result: flag + structured output.
+		return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
+	} };
+
+	// `file read` by the ID alone: the bytes as they are, no line numbers, and the ID to edit by.
+	const read = await tool.execute({ target: "file", action: "read", ref: { id } }, focusApi, undefined);
+	const readText = read.output[0].text;
+	assert.ok(readText.includes("const a = 1;\nconst b = 2;"), `the read shows the exact bytes:\n${readText}`);
+	assert.ok(!/\d+ │ /.test(readText) && !/│/.test(readText), "no line numbers in the read");
+	assert.ok(readText.includes(`file ${id}`), "and it says which file ID it is");
+
+	// `file edit` by the ID alone.
+	const firstEdit = await tool.execute({ target: "file", action: "edit", ref: { id }, oldText: "const b = 2;\n", newText: "const b = 3;\n", planItem: "p1" }, focusApi, undefined);
+	assert.equal(firstEdit.isError, false, `the edit by ID succeeded: ${firstEdit.output[0].text}`);
+	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 1;\nconst b = 3;\n");
+
+	// The ID points at the live version: a second edit with no version anywhere must succeed too.
+	const secondEdit = await tool.execute({ target: "file", action: "edit", ref: { id }, oldText: "const a = 1;\n", newText: "const a = 10;\n", planItem: "p1" }, focusApi, undefined);
+	assert.equal(secondEdit.isError, false, `the second edit by ID succeeded: ${secondEdit.output[0].text}`);
+	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 10;\nconst b = 3;\n");
+
+	// A pinned ref is still honored as an optimistic check, and fails only because it is stale by choice.
+	const stale = await tool.execute({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n", planItem: "p1" }, focusApi, undefined);
+	assert.equal(stale.isError, true);
+	assert.match(stale.output[0].text, /Stale|status/);
+
+	// The call label names the tool that carries it.
+	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", ref: { id }, oldText: "x", newText: "y" } }), `book file edit ${id}`);
+});
+
+test("shelf add: the ID alone is enough, and it finds the file behind it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\n");
+	const { ref } = observeFile(root, brainDir, "src/notes.txt");
+	const tool = bookTool({ root, brainDir, config: { shelfTokens: 2000 }, engine: {}, gate: { yolo: false } });
+	// Root conversation: the main shelf.
+	const focusApi = { conversationId: ROOT_CONVERSATION_ID, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
+
+	const added = await tool.execute({ target: "shelf", action: "add", ref: { id: ref.id } }, focusApi, undefined);
+	assert.ok(!added.isError, `shelf add by the ID alone succeeded: ${added.output[0].text}`);
+	const listed = await tool.execute({ target: "shelf", action: "list" }, focusApi, undefined);
+	assert.match(listed.output[0].text, /placement/, "and the shelf holds it");
+	assert.match(listed.output[0].text, new RegExp(`"id":\\s*"${ref.id}"`), "as the file the agent saw");
+
+	// An ID that is nothing at all is refused with a sentence, not a validation error.
+	const missing = await tool.execute({ target: "shelf", action: "add", ref: { id: "f999" } }, focusApi, undefined);
+	assert.equal(missing.isError, true);
+	assert.match(missing.output[0].text, /Nothing with the ID/);
 });

@@ -147,17 +147,44 @@ export function createWindows({ root, brainDir, config, runner }) {
 			win.dropped++;
 		}
 	};
-	/** The lines from position `from` on, the unfinished last line included. */
+	/**
+	 * The lines from position `from` on, the unfinished last line included.
+	 * The window's own record always holds whole lines; what an earlier report has already shown is taken off the
+	 * report here and only here, so that the Shells tab and `shell read` see the full lines as they are.
+	 */
 	const since = (win, from, { raw = false } = {}) => {
 		const lines = win.lines.slice(Math.max(0, from - win.dropped));
-		let partial = tidy(win.partial);
+		if (raw) return win.partial === "" ? lines : [...lines, tidy(win.partial)];
+		// The first line at `from` had a prefix shown by an earlier report: only what came after it is new.
+		// `seenSuffix` is tidied characters, measured on that line as it was pushed.
+		if ((win.seenSuffix ?? 0) > 0 && from === win.seen && from >= win.dropped && lines.length > 0) {
+			lines[0] = lines[0].slice(win.seenSuffix);
+			if (lines[0] === "") lines.shift();
+		}
+		if (from === win.seen) win.seenSuffix = 0;
 		// The unfinished line was shown, whole or in part, by an earlier report: only what came after it is new.
-		// A line that completed since then was trimmed of its shown prefix when it was pushed (see text()).
-		if (!raw && from === win.seen && (win.seenChars ?? 0) > 0 && partial.length >= win.seenChars) partial = partial.slice(win.seenChars);
+		// The count is in raw characters, so where the report happened inside an escape sequence makes no difference.
+		let partial = tidy(win.partial);
+		if (from === win.seen && (win.seenRaw ?? 0) > 0) partial = tidy(win.partial.slice(Math.min(win.partial.length, win.seenRaw)));
 		return partial === "" ? lines : [...lines, partial];
 	};
 	const settle = (win, reason) => {
 		for (const waiter of [...win.waiters]) waiter.done(reason);
+	};
+	/**
+	 * A line that ends, or a line that is stood down, is kept whole. If an earlier report already showed part of it,
+	 * the next report is told how much of its beginning was shown, so that it shows only the rest. If the tidied
+	 * prefix is not a prefix of the tidied line, nothing at all is held back: a line shown twice is better than a
+	 * line lost.
+	 */
+	const pushCompleted = (win, part) => {
+		const line = tidy(part);
+		push(win, line);
+		if ((win.seenRaw ?? 0) > 0) {
+			const prefix = tidy(part.slice(0, win.seenRaw));
+			win.seenSuffix = line.startsWith(prefix) ? prefix.length : 0;
+			win.seenRaw = 0;
+		}
 	};
 
 	const text = (win, data) => {
@@ -167,24 +194,21 @@ export function createWindows({ root, brainDir, config, runner }) {
 		const parts = (win.partial + data).split("\n");
 		win.partial = parts.pop();
 		for (const [index, part] of parts.entries()) {
-			if (index === 0 && (win.seenChars ?? 0) > 0) {
-				const line = tidy(part).slice(win.seenChars);
-				win.seenChars = 0;
-				if (line === "") continue;
-				push(win, line);
+			if (index === 0 && (win.seenRaw ?? 0) > 0) {
+				pushCompleted(win, part);
 				continue;
 			}
 			push(win, tidy(part));
 		}
 		if (win.partial.length > POLICY.limits.windows.partialChars) {
-			push(win, tidy(win.partial));
+			pushCompleted(win, win.partial);
 			win.partial = "";
 		}
 		for (const waiter of [...win.waiters]) waiter.output?.();
 	};
 	const prompt = (win, exit, cwd) => {
 		if (win.partial !== "") {
-			push(win, tidy(win.partial));
+			pushCompleted(win, win.partial);
 			win.partial = "";
 		}
 		win.cwd = cwd;
@@ -399,8 +423,8 @@ export function createWindows({ root, brainDir, config, runner }) {
 		// What a call has returned is not returned again. What is printed between two calls goes to the next one.
 		if (reason !== POLICY.enums.windowWaitReasons.read && reason !== POLICY.enums.windowWaitReasons.idle) {
 			win.seen = end(win);
-			const shown = tidy(win.partial);
-			win.seenChars = shown === "" ? 0 : shown.length;
+			// How much of the unfinished last line was shown, in raw characters.
+			win.seenRaw = win.partial.length;
 		}
 		return {
 			window: win.name,
@@ -583,10 +607,14 @@ export function createWindows({ root, brainDir, config, runner }) {
 		has: (name) => windows.has(name),
 		/** How many lines a window has printed in all; undefined when it is not open. For those who watch it (src/wakes.mjs). */
 		position: (name) => (windows.has(name) ? end(windows.get(name)) : undefined),
-		/** Its finished lines from position `from` on, as far as they are still kept. */
-		linesFrom(name, from) {
+		/** Its finished lines from position `from` on, as far as they are still kept; with `partial`, the unfinished line as it stands. */
+		linesFrom(name, from, { partial = false } = {}) {
 			const win = windows.get(name);
-			return win === undefined ? [] : win.lines.slice(Math.max(0, from - win.dropped));
+			if (win === undefined) return [];
+			const lines = win.lines.slice(Math.max(0, from - win.dropped));
+			if (!partial) return lines;
+			const last = tidy(win.partial);
+			return last === "" ? lines : [...lines, last];
 		},
 
 		/** Be told when a command ends, or a program asks for input, while no call waits for the window. */

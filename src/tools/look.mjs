@@ -148,8 +148,8 @@ export function readOne(root, given, offset, limit) {
 	if (lines.length === 0) return `== ${path.rel}\n(empty file)`;
 	if (first > lines.length) return `== ${path.rel}\nThe file has ${lines.length} lines; line ${first} does not exist.`;
 	const last = Math.min(lines.length, first + count - 1);
-	const width = String(last).length;
-	const body = lines.slice(first - 1, last).map((line, i) => `${String(first + i).padStart(width)}│${clip(line)}`);
+	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
+	const body = lines.slice(first - 1, last).map((line) => clip(line));
 	const more = last < lines.length ? `\n(${lines.length - last} more lines; continue with offset ${last + 1})` : "";
 	return `== ${path.rel} (lines ${first}-${last} of ${lines.length})\n${body.join("\n")}${more}`;
 }
@@ -271,7 +271,7 @@ export function lookTools(root) {
 	return [
 		defineTool({
 			name: "read",
-			description: `Read text files of the project, with line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless you set \`limit\`.`,
+			description: `Read text files of the project exactly as they are, with no line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless you set \`limit\`.`,
 			parameters: obj({
 				paths: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { minItems: POLICY.validation.nonEmptyArrayMinItems, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
 				offset: opt(int({ minimum: POLICY.validation.positiveIntegerMin, description: `First line to read, counting from ${POLICY.validation.positiveIntegerMin}. Default ${POLICY.validation.positiveIntegerMin}.` })),

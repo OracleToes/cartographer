@@ -112,7 +112,7 @@ export function editOne(root, brainDir, given, oldText, newText, { expectedVersi
 	const text = buffer.toString("utf8");
 	const first = text.indexOf(oldText);
 	if (first === -1) {
-		throw new ChangeError(`\`old_text\` was not found in ${path.rel}. It must match the file exactly, spaces and line breaks included. In \`read\` output, strip each line number and the \`│\` separator; copy only the bytes after it. If indentation is unclear, inspect the exact source with \`sed -n 'A,Bp' ${path.rel} | cat -A\` and retry without guessing`);
+		throw new ChangeError(`\`old_text\` was not found in ${path.rel}. It must match the file exactly, spaces and line breaks included. If indentation is unclear, inspect the exact source with \`sed -n 'A,Bp' ${path.rel} | cat -A\` and retry without guessing`);
 	}
 	const places = text.split(oldText).length - 1;
 	if (places > 1) throw new ChangeError(`\`old_text\` is found ${places} times in ${path.rel}. Add the lines around the passage until it matches one place only`);
@@ -157,7 +157,7 @@ export function changeTools({ root, brainDir, write = {} }) {
 		}),
 		defineTool({
 			name: "edit",
-			description: "Replace one exact passage. In `read` output, copy only source bytes after the `│` separator and preserve whitespace. If an exact match fails, inspect bytes with `sed -n 'A,Bp' path | cat -A`; do not guess.",
+			description: "Replace one exact passage. Copy the passage exactly as it stands in `read` output, whitespace included. If an exact match fails, inspect bytes with `sed -n 'A,Bp' path | cat -A`; do not guess.",
 			parameters: obj({
 				path: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Path relative to the project directory" }),
 				old_text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "The passage to replace, exactly as it is in the file" }),

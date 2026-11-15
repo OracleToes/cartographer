@@ -23,13 +23,41 @@ import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 const sameItem = sameShelfItem;
+/** Fill a ref from what the brain already knows, so that an ID alone is enough: the kind from the target, the namespace from the catalog. The live version is used unless the caller pins one. */
+const normalizeRef = (brainDir, ref, target) => {
+	if (ref === null || ref === undefined || typeof ref !== "object") return ref;
+	const out = { ...ref };
+	if (out.namespace === undefined) {
+		try { out.namespace = ensureCatalog(brainDir).namespace; } catch { /* left out; validation says what is missing */ }
+	}
+	if (out.kind === undefined && target !== "shelf") out.kind = target;
+	return out;
+};
+/**
+ * A shelf ref given an ID alone: find what kind of thing it is. Files and reports are cheap to check; the tool
+ * registry and the durable index are tried after, and the durable index is the slow path, so it is tried last.
+ * Returns the ref with its kind filled in, or undefined when nothing by that ID exists.
+ */
+const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
+	let namespace;
+	try { namespace = ensureCatalog(brainDir).namespace; } catch { return undefined; }
+	const filled = { ...ref, namespace };
+	if (resolveFile(root, brainDir, { ...filled, kind: "file" }).status === "live") return { ...filled, kind: "file" };
+	if (loadReport(brainDir, ref.id) !== undefined) return { ...filled, kind: "report" };
+	for (const kind of ["schema", "message", "toolResult", "toolCall"]) {
+		try {
+			const found = await durableRecordFor(kind, ref.id, brainDir, api, callContext);
+			if (found !== undefined) return { ...filled, kind };
+		} catch { /* not this kind */ }
+	}
+	return undefined;
+};
 /**
  * One source of truth for what exists: target → action → validation spec. The provider declaration (enums), the
  * local validator and the executor's dispatch all derive from this table; the tool description's capability
  * matrix is written to match it. Spec fields:
- *   ref: "required" → needs a {namespace,kind,id[,version]} ref; refAlternative overrides the "ref or path" wording
+ *   ref: "required" → needs a ref with an `id`; the namespace and kind are inferred, the live version is used
  *   pathOk: a ref OR an explicit project-relative path locates the thing (file inspect/read; shelf add)
- *   versionPrecondition: needs expectedVersion or a version-pinned ref
  *   operation: "required" → needs the target-specific payload object; operationFields lists required non-empty
  *             string fields inside it; hint overrides the "an operation payload" wording
  *   fields: required non-empty string arguments on the call itself
@@ -39,7 +67,7 @@ const CAPABILITIES = {
 		inspect: { pathOk: true },
 		read: { pathOk: true },
 		create: { fields: ["path", "content"] },
-		edit: { ref: "required", fields: ["expectedVersion", "oldText", "newText"] },
+		edit: { ref: "required", fields: ["oldText", "newText"] },
 		rebind: { ref: "required", fields: ["expectedVersion", "path"] },
 	},
 	report: {
@@ -47,39 +75,39 @@ const CAPABILITIES = {
 		inspect: { ref: "required" },
 		read: { ref: "required" },
 		recall: { ref: "required" },
-		archive: { ref: "required", versionPrecondition: true },
-		restore: { ref: "required", versionPrecondition: true },
-		remove: { ref: "required", versionPrecondition: true },
+		archive: { ref: "required" },
+		restore: { ref: "required" },
+		remove: { ref: "required" },
 	},
 	ledger: {
 		list: {},
 		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
-		edit: { ref: "required", versionPrecondition: true, operation: "required" },
-		done: { ref: "required", versionPrecondition: true, operation: "required" },
-		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		edit: { ref: "required", operation: "required" },
+		done: { ref: "required", operation: "required" },
+		remove: { ref: "required", operation: "required" },
 	},
 	plan: {
 		list: {},
 		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
-		edit: { ref: "required", versionPrecondition: true, operation: "required" },
-		done: { ref: "required", versionPrecondition: true, operation: "required" },
-		remove: { ref: "required", versionPrecondition: true, operation: "required" },
-		before: { ref: "required", versionPrecondition: true, operation: "required" },
+		edit: { ref: "required", operation: "required" },
+		done: { ref: "required", operation: "required" },
+		remove: { ref: "required", operation: "required" },
+		before: { ref: "required", operation: "required" },
 	},
 	atlas: {
 		list: {},
 		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
-		edit: { ref: "required", versionPrecondition: true, operation: "required" },
-		link: { ref: "required", versionPrecondition: true, operation: "required" },
-		unlink: { ref: "required", versionPrecondition: true, operation: "required" },
-		confirm: { ref: "required", versionPrecondition: true, operation: "required" },
-		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		edit: { ref: "required", operation: "required" },
+		link: { ref: "required", operation: "required" },
+		unlink: { ref: "required", operation: "required" },
+		confirm: { ref: "required", operation: "required" },
+		remove: { ref: "required", operation: "required" },
 		look: { operation: "required", operationFields: ["name"] },
 		tree: {},
 	},
@@ -88,33 +116,33 @@ const CAPABILITIES = {
 		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
-		edit: { ref: "required", versionPrecondition: true, operation: "required" },
-		done: { ref: "required", versionPrecondition: true, operation: "required" },
-		remove: { ref: "required", versionPrecondition: true, operation: "required" },
-		before: { ref: "required", versionPrecondition: true, operation: "required" },
+		edit: { ref: "required", operation: "required" },
+		done: { ref: "required", operation: "required" },
+		remove: { ref: "required", operation: "required" },
+		before: { ref: "required", operation: "required" },
 	},
 	practice: {
 		list: {},
 		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
-		edit: { ref: "required", versionPrecondition: true, operation: "required" },
-		done: { ref: "required", versionPrecondition: true, operation: "required" },
-		remove: { ref: "required", versionPrecondition: true, operation: "required" },
-		before: { ref: "required", versionPrecondition: true, operation: "required" },
+		edit: { ref: "required", operation: "required" },
+		done: { ref: "required", operation: "required" },
+		remove: { ref: "required", operation: "required" },
+		before: { ref: "required", operation: "required" },
 	},
 	context: {
 		list: {},
 		inspect: { ref: "required" },
 		read: { ref: "required" },
-		archive: { ref: "required", versionPrecondition: true },
-		restore: { ref: "required", versionPrecondition: true },
+		archive: { ref: "required" },
+		restore: { ref: "required" },
 		fold: { operation: "required", operationFields: ["id"], hint: "operation { id }: the report to drop from view, like t12, or the task-step result ids" },
 		note: { operation: "required", operationFields: ["text"], hint: "operation { text }: what to keep, with file paths and line numbers" },
 		collapse: {},
 	},
 	conversation: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
-	message: { list: {}, inspect: { ref: "required" }, read: { ref: "required" }, edit: { ref: "required", versionPrecondition: true } },
+	message: { list: {}, inspect: { ref: "required" }, read: { ref: "required" }, edit: { ref: "required" } },
 	toolCall: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
 	toolResult: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
 	prompt: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
@@ -130,14 +158,14 @@ const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
 const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
 const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
-	namespace: str({ minLength: 16, description: "Persistent brain-store namespace." }),
-	kind: str({ minLength: 1, description: "Reference kind; must match target." }),
-	id: str({ minLength: 1, description: "Stable native or catalog ID, never a path or label." }),
-	version: opt(str({ description: "Exact immutable content version; omit to resolve current." })),
+	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`/`inspect`; a record's ID from any `list`." }),
+	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
+	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred when omitted: from the target, or for target=shelf from what the ID is." })),
+	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
-function renderReadSelection(bytes, path, range) {
+function renderReadSelection(bytes, path, range, id) {
 	let text;
 	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
 	catch { throw new Error("file is not valid UTF-8 text"); }
@@ -155,9 +183,10 @@ function renderReadSelection(bytes, path, range) {
 		to = Math.min(to, lines.length);
 	}
 	const clip = POLICY.limits.look.lineChars;
-	const body = lines.slice(Math.max(0, from - 1), to).map((line, index) => `${String(from + index).padStart(String(to).length)} │ ${line.length > clip ? `${line.slice(0, clip)} …[line cut]` : line}`);
-	const more = to < lines.length ? `\n(${lines.length - to} more lines; ask for range ${to + 1}-${Math.min(lines.length, to + POLICY.limits.look.readDefaultLines)}.)` : "";
-	return `== ${path} (lines ${from}-${Math.max(from - 1, to)} of ${lines.length})\n${body.join("\n")}${more}`;
+	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
+	const body = lines.slice(Math.max(0, from - 1), to).map((line) => (line.length > clip ? `${line.slice(0, clip)} …[line cut: ${line.length} characters]` : line));
+	const more = to < lines.length ? `\n(${lines.length - to} more lines; ask for range ${to + 1}-${Math.min(lines.length, to + POLICY.limits.look.readDefaultLines)})` : "";
+	return `== ${path} (lines ${from}-${Math.max(from - 1, to)} of ${lines.length}) · file ${id}\n${body.join("\n")}${more}`;
 }
 const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
 
@@ -280,8 +309,10 @@ function brainRecord(target, brainDir, id) {
 	return record === undefined ? undefined : { record, version: contentVersion(record) };
 }
 
-async function runUniversal({ root, brainDir, config, engine, gate }, args, api, callContext) {
+async function runUniversal({ root, brainDir, config, engine, gate }, given, api, callContext) {
 	const main = api.conversationId === ROOT_CONVERSATION_ID;
+	// Tool callers may reach here without prepareArguments: normalizing again is harmless.
+	const args = { ...given, ref: normalizeRef(brainDir, given.ref, given.target) };
 	const target = args.target;
 	const action = args.action;
 	if (target === "file" && action === "rebind") {
@@ -308,14 +339,15 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			const output = nested.structuredOutput;
 			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, change: true } };
 		}
-		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file edit requires a stable file ref; paths alone are not mutation targets.");
-		if (typeof args.expectedVersion !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedVersion)) return fail("file edit requires the current SHA-256 expectedVersion.");
+		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file edit requires a stable file ref; paths alone are not mutation targets. An `id` alone is enough: { \"id\": \"f1\" }.");
+		if (args.expectedVersion !== undefined && (typeof args.expectedVersion !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedVersion))) return fail("`expectedVersion` must be a 64-character SHA-256 digest, or be omitted: the file's ID always points at the live version.");
 		const resolved = resolveFile(root, brainDir, args.ref);
 		if (resolved.status !== "live") return fail(`File edit refused: resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`);
-		if (resolved.currentVersion !== args.expectedVersion) return fail(`Stale file edit: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was changed.`);
+		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file edit: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was changed.`);
 		filePath = resolved.record.path;
 		if (typeof args.oldText !== "string" || args.oldText === "" || typeof args.newText !== "string") return fail("file edit needs exact oldText and newText.");
-		expectedVersion = args.expectedVersion;
+		// The ID points at the live version; the version handed to the nested edit is resolved here, never asked of the agent.
+		expectedVersion = resolved.currentVersion;
 		const nested = await api.executeTool("edit", { path: filePath, old_text: args.oldText, new_text: args.newText, expectedVersion }, callContext, { key: "book-file-edit" });
 		const output = nested.structuredOutput;
 		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
@@ -328,7 +360,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 				ref = fileReference(root, brainDir, args.path);
 			}
 		} catch (error) { return fail(`Could not resolve the file reference: ${error.message}.`); }
-		if (!validateReference(ref) || ref.kind !== "file") return fail("Invalid file reference; expected { namespace, kind: \"file\", id, version? }.");
+		if (!validateReference(ref) || ref.kind !== "file") return fail("Invalid file reference; expected at least an `id`.");
 		const result = resolveFile(root, brainDir, ref);
 		const readablePinned = action === "read" && ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
 		const record = result.record;
@@ -337,9 +369,9 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		if (result.bytes.byteLength > POLICY.limits.look.fileBytes) return fail(`The file is ${count(result.bytes.byteLength)} bytes, over the ${count(POLICY.limits.look.fileBytes)}-byte read limit. Ask for a smaller range with shelf.add.`);
 		if (result.bytes.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0)) return fail("This file appears to be binary and cannot be returned as text.");
 		let selected;
-		try { selected = renderReadSelection(result.bytes, record.path, args.range); }
+		try { selected = renderReadSelection(result.bytes, record.path, args.range, ref.id); }
 		catch (error) { return fail(`Cannot read the requested selection: ${error.message}.`); }
-		return textResult(`${selected} [${result.resolvedVersion ?? result.currentVersion}]${readablePinned ? ` · pinned historical version; current is ${result.currentVersion}` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
+		return textResult(`${selected}${readablePinned ? `\n(a pinned historical version; the current content differs)` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
 	}
 	if (DURABLE_TARGETS.has(target)) {
 		if (target === "schema" && ["inspect", "read"].includes(action) && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
@@ -397,8 +429,8 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 				}
 				return fail("Message is unavailable or already removed from ordinary recall.");
 			}
-			const expected = args.expectedVersion ?? args.ref.version;
-			if (typeof expected !== "string" || expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
+			const expected = args.expectedVersion ?? args.ref.version ?? item.version;
+			if (expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
 			const owner = item.provenance.conversationId;
 			const entryId = item.provenance.entryId;
 			const timestamp = item.value.message.timestamp;
@@ -532,8 +564,8 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			try { current = brainRecord(target, brainDir, args.ref.id); }
 			catch (error) { return fail(error.message); }
 			if (current === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
-			const expected = args.expectedVersion ?? args.ref.version;
-			if (typeof expected !== "string" || expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
+			const expected = args.expectedVersion ?? args.ref.version ?? current.version;
+			if (expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
 		}
 		if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`${target} ${action} needs an operation object with the target-specific fields.`);
 		const operation = { ...(args.operation ?? {}), action };
@@ -577,7 +609,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 	}
 	if (target === "report" && ["inspect", "read", "recall", "archive", "restore", "remove"].includes(action)) {
 		const ref = args.ref;
-		if (!validateReference(ref) || ref.kind !== "report") return fail("Invalid report reference; expected { namespace, kind: \"report\", id, version? }.");
+		if (!validateReference(ref) || ref.kind !== "report") return fail("Invalid report reference; expected at least an `id`.");
 		let current;
 		try {
 			current = nativeReference(brainDir, "report", ref.id);
@@ -592,7 +624,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		if (action === "inspect") return textResult(JSON.stringify({ ref: { ...current, version }, kind: "report", status: "live", archived: row.archived === true, actions: ["inspect", "read", "recall", "archive", "restore", "remove", "shelf.add"] }, null, 2), { status: "live", ref: { ...current, version } });
 		if (action === "read") return textResult(body, { status: "live", ref: { ...current, version } });
 		if (action === "recall") return runContext({ root, brainDir, config, engine }, { ops: [{ action: POLICY.enums.actions.recall, id: ref.id }] }, api);
-		const expected = args.expectedVersion ?? ref.version;
+		const expected = args.expectedVersion ?? ref.version ?? version;
 		if (expected !== version) return fail(`Stale report mutation: expectedVersion must match current version ${version}. Nothing was changed.`);
 		try {
 			const rowAction = action === "archive" ? POLICY.enums.actions.archive : action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.delete;
@@ -608,6 +640,11 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		let path = args.path;
 		let pinnedDurable;
 		if (ref !== undefined) {
+			if (ref.kind === undefined) {
+				const inferred = await inferShelfRef(ref, root, brainDir, api, callContext);
+				if (inferred === undefined) return fail(`Nothing with the ID "${ref.id}" is a file, a report, a schema or a durable record; nothing was added. Give the ref a kind to say what it is.`);
+				ref = inferred;
+			}
 			if (!validateReference(ref)) return fail("Invalid shelf target reference.");
 			if (ref.kind === "file") {
 				const resolved = resolveFile(root, brainDir, ref);
@@ -1020,7 +1057,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
 		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit." })),
-		expectedVersion: opt(str({ description: "Required SHA-256 content version for file edit and version-checked mutations; stale versions are rejected." })),
+		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition; omit it — a ref's ID always points at the live version. Supplied, it is enforced as a precondition." })),
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
 		newText: opt(str({ description: "Replacement passage in file edit." })),
@@ -1035,11 +1072,10 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		const spec = capabilityFor(target, action);
 		if (spec === undefined) return { unsupported: true };
 		const problems = [];
-		if (args.ref !== undefined && !validateReference(args.ref)) return { problems: ["a ref of { namespace, kind, id, version? }"] };
+		if (args.ref !== undefined && !validateReference(args.ref)) return { problems: ["a ref with an `id`"] };
 		const kind = spec.refKind ?? target;
-		if (spec.ref === "required" && args.ref === undefined) problems.push(`a ${kind} reference`);
+		if (spec.ref === "required" && args.ref === undefined) problems.push(`a ${kind} reference ({ \"id\": … } is enough)`);
 		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "ref or path");
-		if (spec.versionPrecondition && !nonEmpty(args.expectedVersion) && !nonEmpty(args.ref?.version)) problems.push("expectedVersion (or a version-pinned ref)");
 		for (const field of spec.fields ?? []) if (!nonEmpty(args[field])) problems.push(field);
 		if (spec.operation === "required") {
 			if (args.operation === undefined) problems.push(spec.hint ?? "an operation payload");
@@ -1061,6 +1097,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			}
 			const value = result.value;
 			if (value.target === undefined || value.action === undefined) throw new Error('Validation failed for tool "book": target and action are both required.');
+			value.ref = normalizeRef(brainDir, value.ref, value.target);
 			const { unsupported, problems } = checkCall(value.target, value.action, value);
 			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.${CAPABILITIES[value.target] === undefined ? "" : ` Supported actions for ${value.target}: ${Object.keys(CAPABILITIES[value.target]).join(", ")}.`}`);
 			if (problems.length > 0) {

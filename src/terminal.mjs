@@ -89,10 +89,10 @@ export function describeCall(call) {
 		case "edit":
 			return `edit ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
 		case "book": {
-			const target = typeof args.target === "string" && args.target !== "" ? args.target : "book";
+			const target = typeof args.target === "string" && args.target !== "" ? args.target : "";
 			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
 			const what = args.ref?.id ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
-			return `${target} ${action}${what === "" ? "" : ` ${oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)}`}`.trim();
+			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
 		}
 		case "read": {
 			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
