@@ -3,15 +3,23 @@ import { defineTool } from "@earendil-works/pi-durable";
 import { POLICY } from "./config.mjs";
 import { nativeReference, readReferenceVersion, retainReferenceVersion } from "./catalog.mjs";
 import { BOOK_BRANCH_ACTIONS, bookTargetParameters } from "./tools/book.mjs";
-import { oneOf, obj } from "@earendil-works/pi-schema";
 
 const BOOK_BRANCHES = Object.keys(BOOK_BRANCH_ACTIONS);
+const BOOK_ACTIONS = [...new Set(Object.values(BOOK_BRANCH_ACTIONS).flat())];
+const BOOK_COMPACT_PARAMETERS = {
+	type: "object",
+	properties: {
+		target: { type: "string", enum: BOOK_BRANCHES, description: "The book target for this operation." },
+		action: { type: "string", enum: BOOK_ACTIONS, description: "The action to perform on that target." },
+	},
+	required: ["target"],
+	additionalProperties: true,
+};
 const STRICT_KEYWORDS = new Set([
 	"type", "properties", "required", "additionalProperties", "items", "enum", "const", "anyOf",
 	"description", "title", "default", "minLength", "maxLength", "pattern", "minimum", "maximum",
 	"exclusiveMinimum", "exclusiveMaximum", "minItems", "maxItems", "uniqueItems", "format",
 ]);
-const bookBranchRequest = obj({ target: oneOf(BOOK_BRANCHES, { description: "Route this book request to one target branch." }) });
 const allowsNull = (schema) => schema?.type === "null" || (Array.isArray(schema?.type) && schema.type.includes("null")) || schema?.const === null || schema?.enum?.includes?.(null) || schema?.anyOf?.some(allowsNull);
 
 /** Convert optional object properties to the provider's strict-required/nullable form, refusing unsupported schemas. */
@@ -97,7 +105,7 @@ function isBookBranchRequest(args) {
 
 function bookReplayContext(selection, originalCall) {
 	const schema = JSON.stringify(selection.parameters, null, 2);
-	return `Available parameters for the book tool (target: ${selection.branch}):\n${schema}\n\nCurrent requested book call: ${JSON.stringify(originalCall)}. Complete this call with the appropriate action and required arguments, then issue it.`;
+	return `Available parameters for the book tool (target: ${selection.branch}):\n${schema}\n\nCurrent requested book call: ${JSON.stringify(originalCall)}. Reissue this call using the schema above, preserving its intent and including all required arguments.`;
 }
 
 function providerTool(payload, name) {
@@ -147,32 +155,35 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 		};
 	}
 
-	async function interceptBranchRequest(message, api) {
-		const probe = (message.content ?? []).find((part) => part.type === "toolCall" && part.name === "book" && isBookBranchRequest(part.arguments));
-		if (probe === undefined) return false;
+	async function interceptBookRouting(message, api) {
+		const candidate = (message.content ?? []).find((part) => part.type === "toolCall" && part.name === "book"
+			&& BOOK_BRANCHES.includes(part.arguments?.target));
+		if (candidate === undefined) return false;
 		const conversationId = api.conversationId;
+		let selection = pending.get(conversationId);
+		const mustRoute = selection === undefined || selection.branch !== candidate.arguments.target || isBookBranchRequest(candidate.arguments);
+		if (!mustRoute) return false;
 		const attempts = replayAttempts.get(conversationId) ?? 0;
 		if (attempts >= 3) {
 			pending.delete(conversationId);
 			replays.delete(conversationId);
 			replayAttempts.delete(conversationId);
-			message.content = [{ type: "text", text: `I couldn't complete the book.${probe.arguments.target} operation from its schema. Please clarify the action you want.` }];
+			message.content = [{ type: "text", text: `I couldn't complete the book.${candidate.arguments.target} operation from its schema. Please clarify the action you want.` }];
 			message.stopReason = "stop";
 			return true;
 		}
-		let selection = pending.get(conversationId);
-		if (selection?.branch !== probe.arguments.target) {
-			const result = await loadBookBranch(probe.arguments, api);
+		if (selection?.branch !== candidate.arguments.target) {
+			const result = await loadBookBranch({ target: candidate.arguments.target }, api);
 			if (result.isError === true) {
 				pending.delete(conversationId);
 				replayAttempts.delete(conversationId);
-				message.content = [{ type: "text", text: result.output?.map((part) => part.text ?? "").join("\n") || `Could not prepare the book.${probe.arguments.target} operation.` }];
+				message.content = [{ type: "text", text: result.output?.map((part) => part.text ?? "").join("\n") || `Could not prepare the book.${candidate.arguments.target} operation.` }];
 				message.stopReason = "stop";
 				return true;
 			}
 			selection = pending.get(conversationId);
 		}
-		selection.originalCall = structuredClone(probe.arguments);
+		selection.originalCall = structuredClone(candidate.arguments);
 		selection.contextText = bookReplayContext(selection, selection.originalCall);
 		const route = {
 			branch: selection.branch,
@@ -211,19 +222,13 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 				} } : {}),
 			};
 		},
-		/** Keep every top-level call available; only swap the `book` schema between target selection and branch use. */
-		beforeProviderRequest: ({ payload, model }, api) => {
-			if (model.api !== "openai-completions") throw new Error(`Strict on-demand book schemas require the OpenAI-compatible adapter; ${model.api} cannot be verified.`);
-			const selection = pending.get(api.conversationId);
-			const parameters = selection === undefined
-				? strictSchema(structuredClone(bookBranchRequest))
-				: strictSchema(structuredClone(selection.parameters));
+		/** Keep the provider tool list static and compact; branch detail lives only in conversation context. */
+		beforeProviderRequest: ({ payload, model }) => {
+			if (model.api !== "openai-completions") throw new Error(`Compact on-demand book routing requires the OpenAI-compatible adapter; ${model.api} cannot be verified.`);
 			const declared = providerTool(payload, "book");
-			const description = selection === undefined
-				? "Route a book request to the target branch that handles the requested content."
-				: selection.description;
+			const { strict: _strict, ...functionDefinition } = declared.function;
 			const tools = payload.tools.map((entry) => entry === declared
-				? { ...entry, function: { ...entry.function, description, parameters, strict: true } }
+				? { ...entry, function: { ...functionDefinition, description: book.description, parameters: structuredClone(BOOK_COMPACT_PARAMETERS) } }
 				: entry);
 			return { payload: { ...payload, tools } };
 		},
@@ -236,7 +241,7 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 			return { arguments: cleanNullableArgs(call.arguments, selection.parameters) };
 		},
 		afterResponse: async (message, api) => {
-			if (await interceptBranchRequest(message, api)) return;
+			if (await interceptBookRouting(message, api)) return;
 			const calls = (message.content ?? []).filter((part) => part.type === "toolCall");
 			const selection = pending.get(api.conversationId);
 			if (selection === undefined) return;
