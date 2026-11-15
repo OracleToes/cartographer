@@ -11,6 +11,7 @@ const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 import { loadLedger, saveLedger } from "./ledger.mjs";
 import { approve, itemLine, loadPlan, savePlan, waiting } from "./plan.mjs";
 import { USER_HEAD } from "./user.mjs";
+import { warn } from "./warnings.mjs";
 
 /**
  * @param {string} brainDir
@@ -75,7 +76,13 @@ export function answerQuestion(brainDir, id, answer, now = Date.now()) {
 	if (item === undefined) return undefined;
 	item.status = POLICY.enums.entryStatus.done;
 	item.closed = now;
-	item.outcome = String(answer).replace(/\s+/g, " ").trim().slice(0, POLICY.limits.requests.outcomeChars);
+	const flat = String(answer).replace(/\s+/g, " ").trim();
+	if (flat.length <= POLICY.limits.requests.outcomeChars) item.outcome = flat;
+	else {
+		// Nothing is lost silently: the user's words are clipped only with a note, and the record shows the cut.
+		warn(`The answer was clipped from ${flat.length} to ${POLICY.limits.requests.outcomeChars} characters; the rest is dropped. The record shows the cut; the full answer was sent to the agent when it was typed.`);
+		item.outcome = `${flat.slice(0, POLICY.limits.requests.outcomeChars - 1).trimEnd()}…`;
+	}
 	saveLedger(brainDir, ledger);
 	return { kind: POLICY.enums.ledgerKind.question, text: item.text };
 }
