@@ -428,7 +428,7 @@ There is no schema material in requests anymore, so:
 
 ## 8. Decisions I need from you
 
-1. **`atlas` tool:** fold entirely into `book` (recommended; delete the separate tool), or keep a minimal `atlas` alias for `look|tree` for one release?
+1. **`atlas` tool:**~~ — RESOLVED 2026-11-15: clean fold, no alias; verb enumeration ported into the book description; `tree` stays in book's atlas target (Appendix G). (Was: fold entirely into `book`, or keep a minimal `look|tree` alias for one release?)
 2. **Orchestrator file inspection:** keep "the orchestrating context does not read project files directly" (my default), or allow inline `file inspect/read` for the orchestrator (it would make the report/durable read inline policy consistent)?
 3. **Error-attached guidance fallback** (Phase 3): pre-authorized if the live server flounders, or not?
 4. **Tests:** restore `test/` from `cea8468` as the migration base and adapt (my recommendation, per §9), or write fresh acceptance tests from the Stage 4/5 exit criteria and keep the old suite only as reference? Either way, nothing runs until you say so.
@@ -606,3 +606,15 @@ Unsupported `target`/`action` pairs now list the target's supported actions, rea
 `stateBlock` on a fresh brain ≈ **828 B** (~207 est. tokens); the standing per-request payload is dominated by Table A, not by state.
 
 **What Phase 3 did not establish** — for Stage 8/live only: first-try success rates of the 27B with the prompt lines (`d2a1666`) and the Q3 guidance; provider-specific serialization; real tokenizer counts; adapter parity. The Stage-5 column of Table A/B is not re-measurable in isolation without the deleted lifecycle, and was not re-measured end-to-end — it is the review-time measurement, reproduced here for the on-wire declaration and the branch injections.
+
+## Appendix G — Q1 decision and atlas fold (2026-11-15, `7571490`)
+
+**Decision (user):** clean fold — the standalone `atlas` tool is deleted; `book target=atlas` is the only door; the verb enumeration is ported into the book description; `tree` stays in the book atlas target for the main agent.
+
+**Accounting correction to Appendix F, Table A:** the atlas tool's declaration (parameters 4,665 B + wrapper keys ≈ 5,043 B, present in all three trees) was omitted from every fixed-total row. Including it, the true fixed payloads were: Stage-5 `0e566c0` ≈ **19,231 B**; Phase 1 `3b3f23a` ≈ **20,630 B**; HEAD at `18d3ee1` ≈ **21,471 B**; after the fold (`7571490`): prompt 8,249 + descriptions 5,606 + book declaration 2,380 = **≈ 16,235 B** — the lowest fixed per-request payload measured, ~3,000 B below the Stage-5 baseline including its atlas declaration. The fold deleted 160 lines (`src/tools/atlas.mjs`) with no engine duplication.
+
+**Implementation notes:** `look` and `tree` verbs were added to book's atlas capability set (`look` takes `operation.name`, a node name or a project path; `tree` takes free-form `anchor`/`depth` and persists its view without marking replay state — main-agent only, as before). The mutation branch's file listing is wired to `projectFiles(root)` so `tree`'s folder check and `link`'s validation work — the first port passed `() => []`, which silently refused every `tree` call and mis-validated `link` files; caught by the offline fold probe. `book` atlas results render through the existing book result chain (`● atlas <change>` lines, routed to the Carto tab); the standalone tool's terminal case and task-call rendering were deleted. `TOOLS.atlas` is gone; the "one call" rewording reaches the collapse/handoff notes as well (`assess`, itself a deleted tool, was named there too).
+
+**Observation, not changed:** crash-replay via `atlas.lastCall === api.taskId` is shared with the ledger/books/plan — a second changing atlas call within the same tool task is reported as "already applied before a restart." That is the designed replay semantics; whether `taskId` is stable per user turn in the live runtime is unverifiable offline and was not altered.
+
+**Not done:** README still describes the Stage-5-era surface in full (tools table, "What has been tried"); Phase 5 will make it honest. The test suite at `cea8468` exercises `atlasTool` directly and needs Phase 4 adaptation. Appendix D's "not yet done" list is superseded by Appendices E–G for items it records.
