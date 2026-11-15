@@ -221,17 +221,20 @@ test("atlas: the ref system takes the node, end to end through the book tool", a
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "app.mjs"), "console.log(1)\n");
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "t", now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source.", kind: "component" } }), api, undefined);
+	// Each call carries its own taskId in production; reusing one would mean "the same call runs again",
+	// which the replay guard swallows on purpose.
+	let serial = 0;
+	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `t${++serial}`, now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
+	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source.", kind: "component" } }), api(), undefined);
 	assert.ok(!added.isError, added.output[0].text);
 	const id = loadAtlas(brainDir).atlas.nodes[0].id;
 	assert.match(id, /^c\d+$/, "the node came back with a c-id");
-	const listed = await tool.execute({ target: "atlas", action: "list" }, api, undefined);
+	const listed = await tool.execute({ target: "atlas", action: "list" }, api(), undefined);
 	assert.match(listed.output[0].text, new RegExp(`"id": "${id}"`), "and `list` returns a ref to it");
-	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", ref: { id }, operation: {} }), api, undefined);
+	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", ref: { id }, operation: {} }), api(), undefined);
 	assert.ok(!confirmed.isError, confirmed.output[0].text);
 	assert.match(confirmed.output[0].text, new RegExp(`${id} src confirmed\.`), "confirming by the id alone reaches the node");
-	const renamed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "rename", ref: { id }, operation: { to: "source" } }), api, undefined);
+	const renamed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "rename", ref: { id }, operation: { to: "source" } }), api(), undefined);
 	assert.ok(!renamed.isError, renamed.output[0].text);
 	assert.equal(loadAtlas(brainDir).atlas.nodes[0].name, "source", "and the rename moves the name, not the id");
 	assert.equal(loadAtlas(brainDir).atlas.nodes[0].id, id);
@@ -254,7 +257,7 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "app.mjs"), "console.log(1)\n");
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "t", now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
+	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "t1", now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
 	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source.", kind: "component" } }), api, undefined);
 	const node = loadAtlas(brainDir).atlas.nodes[0];
 	const describeRef = createRefDescriber({ brainDir });

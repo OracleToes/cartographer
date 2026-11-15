@@ -831,7 +831,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: ["one"], removed: [], assessment: true, at: new Date(at).toISOString() }, "what was written since the copy");
 	assert.deepEqual(pin(dir, { now: at + 120_000, reason: "goal g1 was closed" }), { changed: true });
 	has(loadTop(dir).text, "as they stood on Tue 10 Nov 2026, 14:07 (goal g1 was closed).", "when and why");
-	has(loadTop(dir).text, "My assessment\nA demo.\n\nMy graph (1 node)\nOther nodes:\n  one  the first node\n</project>", "the assessment and the outline");
+	has(loadTop(dir).text, "My assessment\nA demo.\n\nMy graph (1 node)\nOther nodes:\n  c1  one  the first node\n</project>", "the assessment and the outline");
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: [], removed: [], assessment: false, at: new Date(at + 120_000).toISOString() }, "nothing is newer than a fresh copy");
 	writeFileSync(join(dir, "carto-atlas.json"), "{ not json");
 	const kept = readFileSync(topPath(dir), "utf8");
