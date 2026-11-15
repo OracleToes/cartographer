@@ -5,7 +5,7 @@
 // (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
 import { createHash } from "node:crypto";
-import { defineTool, NestedCallDoc, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { bool, compile, obj, opt, str, unknown } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
@@ -15,8 +15,9 @@ import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "../boo
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
-import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots } from "../context.mjs";
-import { fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference } from "../catalog.mjs";
+import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
+import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
+import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
@@ -167,8 +168,31 @@ function currentShelf(brainDir, conversationId, main) {
 	return main ? store.shelf : (store.tasks[conversationId]?.shelf ?? []);
 }
 
-const digestJson = (value) => createHash("sha256").update(JSON.stringify(value ?? null)).digest("hex");
+const reportVersion = (body) => createHash("sha256").update(body).digest("hex");
+const DURABLE_REF_KINDS = new Set(["message", "toolCall", "toolResult"]);
 const DURABLE_TARGETS = new Set(["conversation", "message", "toolCall", "toolResult", "prompt", "tool", "schema"]);
+// Lists are hard-capped and paged with an opaque cursor; the cap is policy, the cursor is base64url JSON.
+const LIST_CURSOR_MAX_BYTES = POLICY.limits.book.listCursorTokens * 4;
+const encodeCursor = (offset, kind) => Buffer.from(JSON.stringify({ o: offset, k: kind })).toString("base64url");
+const decodeCursor = (raw, kind) => {
+	const text = String(raw ?? "");
+	if (text.length === 0 || text.length > LIST_CURSOR_MAX_BYTES) throw new Error("the cursor is not valid for this target");
+	let value;
+	try { value = JSON.parse(Buffer.from(text, "base64url").toString("utf8")); } catch { throw new Error("the cursor is not valid for this target"); }
+	if (value === null || typeof value !== "object" || !Number.isInteger(value.o) || value.o < 0 || value.k !== kind) throw new Error("the cursor is not valid for this target");
+	return value.o;
+};
+const listPage = (items, args, kind) => {
+	const offset = args.cursor === undefined ? 0 : decodeCursor(args.cursor, kind);
+	const cap = POLICY.limits.book.listCap;
+	const page = items.slice(offset, offset + cap);
+	const next = offset + page.length < items.length ? encodeCursor(offset + page.length, kind) : undefined;
+	return { page, next, total: items.length, shown: page.length };
+};
+const listFooter = ({ page, next, total }) => (next === undefined ? "" : `\n(${page.length} of ${total} shown; pass cursor "${next}" for the next page.)`);
+const summaryLine = (record) => String(record.summary ?? record.id ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
+/** Namespace-qualified reference without touching the registry/catalog again. */
+const listRef = (namespace, kind, id, version) => ({ namespace, kind, id, ...(version ? { version } : {}) });
 const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "assessment", "practice", "context"]);
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
@@ -189,120 +213,7 @@ function listBrainRecords(target, brainDir) {
 function brainRecord(target, brainDir, id) {
 	const items = listBrainRecords(target, brainDir);
 	const record = target === "atlas" ? items.find((item) => item.name === id) : items.find((item) => item.id === id);
-	return record === undefined ? undefined : { record, version: digestJson(record) };
-}
-
-async function durableConversations(api, callContext) {
-	return api.commit(async (tx) => {
-		const records = [];
-		let cursor;
-		do {
-			const page = await tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, cursor);
-			records.push(...page.items);
-			cursor = page.next;
-		} while (cursor !== undefined);
-		return records;
-	}, callContext);
-}
-
-async function durableEntries(api, conversationId, callContext) {
-	return api.commit(async (tx) => {
-		const conversations = conversationId === undefined ? await tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries) : { items: [{ id: conversationId }] };
-		const owners = [...conversations.items];
-		let conversationCursor = conversations.next;
-		while (conversationCursor !== undefined) {
-			const page = await tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, conversationCursor);
-			owners.push(...page.items);
-			conversationCursor = page.next;
-		}
-		const records = [];
-		for (const owner of owners) {
-			let cursor;
-			do {
-				const page = await tx.scanEntries({ conversationId: owner.id, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor);
-				records.push(...page.items);
-				cursor = page.next;
-			} while (cursor !== undefined);
-		}
-		return records;
-	}, callContext);
-}
-
-async function durableTasks(api, callContext) {
-	return api.commit(async (tx) => {
-		const records = [];
-		let cursor;
-		do {
-			const page = await tx.scanTasks({ kind: "pi.tool", order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor);
-			records.push(...page.items);
-			cursor = page.next;
-		} while (cursor !== undefined);
-		return records;
-	}, callContext);
-}
-
-async function durableRecords(target, brainDir, api, callContext) {
-	if (target === "tool" || target === "schema") {
-		return api.registry.tools().map(({ extension, tool }) => {
-			const id = `${extension.name}:${tool.name}`;
-			const schema = tool.parameters ?? {};
-			const value = target === "schema" ? schema : { extension: extension.name, name: tool.name, description: tool.description, schema };
-			return { id, value, version: digestJson(value), provenance: { extension: extension.name, tool: tool.name } };
-		});
-	}
-	if (target === "conversation") {
-		const conversations = await durableConversations(api, callContext);
-		return conversations.map((record) => ({ id: String(record.id), value: record, version: digestJson(record) }));
-	}
-	const entries = await durableEntries(api, undefined, callContext);
-	const tasks = ["toolCall", "toolResult"].includes(target) ? await durableTasks(api, callContext) : [];
-	const records = [];
-	for (const entry of entries) {
-		const messages = Array.isArray(entry.model) ? entry.model : [];
-		if (target === "message") {
-			for (const message of messages) if (["user", "assistant"].includes(message.role) && !(Array.isArray(message.content) && message.content.some((part) => part?.type === "toolCall"))) {
-				const value = { role: message.role, message, entryId: entry.id, conversationId: entry.conversationId };
-				records.push({ id: String(entry.id), value, version: digestJson(message), provenance: { entryId: entry.id, conversationId: entry.conversationId } });
-				break;
-			}
-		} else if (target === "toolCall") {
-			for (const message of messages) for (const part of Array.isArray(message.content) ? message.content : []) if (part?.type === "toolCall") {
-				const id = JSON.stringify([entry.conversationId, entry.id, part.id]);
-				const task = tasks.find((record) => record.input?.kind === "model" && record.input.assistant === entry.id && record.input.callId === part.id);
-				const resultEntryId = task?.state?.outcome?.result?.kind === "model" ? task.state.outcome.result.entryId : undefined;
-				const provenance = { conversationId: entry.conversationId, assistantEntryId: entry.id, providerCallId: part.id, ...(task ? { toolTaskId: task.id } : {}), ...(resultEntryId !== undefined ? { resultEntryId } : {}) };
-				const value = { ...provenance, call: part };
-				records.push({ id, value, version: digestJson(part), provenance });
-			}
-		} else if (target === "toolResult" && entry.kind === "pi.tool-result") {
-			const task = tasks.find((record) => record.id === entry.byTaskId);
-			const input = task?.input;
-			const call = input?.kind === "model" ? { assistantEntryId: input.assistant, providerCallId: input.callId } : undefined;
-			const value = { entry: entry.model?.[0], diagnostics: entry.data, entryId: entry.id, taskId: entry.byTaskId, ...(call ? { call } : {}) };
-			records.push({ id: String(entry.id), value, version: digestJson(value), provenance: { resultEntryId: entry.id, taskId: entry.byTaskId, ...(call ?? {}) } });
-		} else if (target === "prompt" && entry.kind === "pi.system") {
-			const value = { entryId: entry.id, messages };
-			records.push({ id: String(entry.id), value, version: digestJson(value), provenance: { entryId: entry.id } });
-		}
-	}
-	if (target === "toolCall" || target === "toolResult") {
-		for (const task of tasks) {
-			const input = task.input;
-			if (input?.kind !== "nested") continue;
-			const id = JSON.stringify([task.conversationId, input.parent, input.parentCallId, input.key]);
-			const provenance = { conversationId: task.conversationId, parentTaskId: input.parent, parentCallId: input.parentCallId, nestedKey: input.key, toolTaskId: task.id };
-			let nestedResult;
-			try { nestedResult = await api.snapshot(NestedCallDoc, input.parent, input.key, callContext); } catch { nestedResult = undefined; }
-			const value = { ...provenance, call: input.call, ...(nestedResult?.result ? { result: nestedResult.result } : {}) };
-			if (target === "toolCall") records.push({ id, value, version: digestJson(input.call), provenance });
-			else if (nestedResult?.result !== undefined) records.push({ id: `nested:${id}`, value: nestedResult.result, version: digestJson(nestedResult.result), provenance: { ...provenance, resultFor: id } });
-		}
-	}
-	if (target === "message") {
-		const forgotten = new Set(loadContext(brainDir).forgottenEntries ?? []);
-		return records.filter((record) => !forgotten.has(record.id));
-	}
-	return records;
+	return record === undefined ? undefined : { record, version: contentVersion(record) };
 }
 
 async function runUniversal({ root, brainDir, config, engine, gate }, args, api, callContext) {
@@ -375,27 +286,59 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			const retained = readReferenceVersion(brainDir, args.ref);
 			if (retained !== undefined) return textResult(action === "inspect" ? JSON.stringify({ ref: args.ref, kind: "schema", status: "live", retained: true }, null, 2) : JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
 		}
-		let records;
-		try { records = await durableRecords(target, brainDir, api, callContext); }
-		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
 		if (action === "list") {
-			const items = records.map((record) => {
-				const ref = nativeReference(brainDir, target, record.id, record.version);
-				if (target !== "message" && target !== "toolCall" && target !== "toolResult") retainReferenceVersion(brainDir, ref, record.value);
-				return { ref, summary: String(record.value?.message?.role ?? record.value?.name ?? record.value?.call?.name ?? record.value?.entry?.content ?? record.value?.id ?? record.id).replace(/\s+/g, " ").slice(0, 240), provenance: record.provenance };
-			});
-			return textResult(items.length ? JSON.stringify(items, null, 2) : `${target} is empty in this conversation.`, { target, count: items.length });
+			let records;
+			try { records = await durableSummaries(target, brainDir, api, callContext); }
+			catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+			if (records.length === 0) return textResult(`${target} is empty in this conversation.`, { target, count: 0 });
+			let namespace;
+			try { namespace = ensureCatalog(brainDir).namespace; }
+			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
+			const items = records.map((record) => ({ ref: listRef(namespace, target, record.id, record.version), summary: summaryLine(record), provenance: record.provenance }));
+			let paged;
+			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
+			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 		}
 		if (action === "edit" && target === "message") {
 			if (!validateReference(args.ref) || args.ref.kind !== target) return fail("message edit needs a stable message ref.");
 			const currentNamespace = nativeReference(brainDir, target, args.ref.id);
 			if (args.ref.namespace !== currentNamespace.namespace) return fail("Message reference belongs to another brain-store namespace.");
-			const item = records.find((entry) => entry.id === args.ref.id);
-			if (item === undefined) return loadContext(brainDir).forgottenEntries?.includes(args.ref.id) ? textResult("Message updated.", { status: "soft_forgotten", replay: true }) : fail("Message is unavailable or already removed from ordinary recall.");
+			let item;
+			try { item = await durableRecordFor("message", args.ref.id, brainDir, api, callContext); }
+			catch (error) { return fail(`Could not resolve message records: ${error.message}.`); }
+			if (item === undefined) {
+				const forgotten = loadContext(brainDir).forgottenEntries ?? [];
+				if (forgotten.includes(args.ref.id)) return textResult("Message updated.", { status: "soft_forgotten", replay: true });
+				// Crash recovery: the forget marker may exist in the transcript even though this store lost the update.
+				let markerExists = false;
+				try {
+					markerExists = await api.commit(async (tx) => {
+						const conversations = await scanAll((cursor) => tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, cursor));
+						for (const conversation of conversations) {
+							const entries = await scanAll((cursor) => tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor));
+							if (entries.some((entry) => entry.kind === "carto.book.soft-forget" && String(entry.data?.target) === String(args.ref.id))) return true;
+						}
+						return false;
+					}, callContext);
+				} catch { markerExists = false; }
+				if (markerExists) {
+					updateContext(brainDir, (store) => {
+						store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(args.ref.id)])];
+						const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => !(placement?.target?.kind === "message" && placement.target.id === String(args.ref.id))) : shelf);
+						store.shelf = strip(store.shelf);
+						for (const task of Object.values(store.tasks ?? {})) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
+						if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
+					});
+					return textResult("Message updated.", { status: "soft_forgotten", replay: true });
+				}
+				return fail("Message is unavailable or already removed from ordinary recall.");
+			}
 			const expected = args.expectedVersion ?? args.ref.version;
 			if (typeof expected !== "string" || expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
 			const owner = item.provenance.conversationId;
 			const entryId = item.provenance.entryId;
+			const timestamp = item.value.message.timestamp;
+			const text = typeof item.value.message.content === "string" ? item.value.message.content : (item.value.message.content ?? []).flatMap((part) => part?.type === "text" ? [part.text] : []).join("");
 			try {
 				await api.commit(async (tx) => {
 					let cursor;
@@ -408,11 +351,10 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 					if (original === undefined || original.conversationId !== owner || !original.model?.some((message) => ["user", "assistant"].includes(message.role))) throw new Error("The selected message is no longer visible in its conversation.");
 					await tx.appendEntry(owner, { kind: "carto.book.soft-forget", edits: [{ target: entryId, action: "omit" }], data: { operationId: String(api.taskId), target: String(entryId) } });
 				}, callContext);
+				recordSoftForgetPending(brainDir, { operationId: String(api.taskId), entryId: String(entryId), timestamp, text });
 				const removedShelf = [];
 				updateContext(brainDir, (store) => {
 					store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(entryId)])];
-					const timestamp = item.value.message.timestamp;
-					const text = typeof item.value.message.content === "string" ? item.value.message.content : (item.value.message.content ?? []).flatMap((part) => part?.type === "text" ? [part.text] : []).join("");
 					store.chat = store.chat.filter((line) => !(line.at === timestamp && line.text === text));
 					const strip = (shelf) => shelf.filter((placement) => {
 						if (placement.target?.kind === "message" && placement.target.id === String(entryId)) { removedShelf.push(placement); return false; }
@@ -432,7 +374,9 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		try { currentNamespace = nativeReference(brainDir, target, args.ref.id); }
 		catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
 		if (args.ref.namespace !== currentNamespace.namespace) return fail(`${target} reference belongs to another brain-store namespace.`);
-		const found = records.find((entry) => entry.id === args.ref.id);
+		let found;
+		try { found = await durableRecordFor(target, args.ref.id, brainDir, api, callContext); }
+		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
 		if (found === undefined) {
 			if (target === "message" && loadContext(brainDir).forgottenEntries?.includes(args.ref.id)) return fail("Message is no longer available through ordinary recall.");
 			const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
@@ -445,7 +389,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			return textResult(action === "inspect" ? JSON.stringify({ ref: args.ref, kind: target, status: "stale", currentVersion: found.version, historical: true }, null, 2) : JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 		}
 		const ref = nativeReference(brainDir, target, found.id, found.version);
-		if (target !== "message" && target !== "toolCall" && target !== "toolResult") retainReferenceVersion(brainDir, ref, found.value);
 		return textResult(action === "inspect" ? JSON.stringify({ ref, kind: target, status: "live", provenance: found.provenance, summary: found.value?.name ?? found.value?.message?.role ?? found.value?.call?.name }, null, 2) : JSON.stringify(found.value, null, 2), { ref, status: "live" });
 	}
 	if (BRAIN_TARGETS.has(target)) {
@@ -453,13 +396,17 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 			let records;
 			try { records = listBrainRecords(target, brainDir); }
 			catch (error) { return fail(error.message); }
+			if (records.length === 0) return textResult(`${target} is empty.`, { target, count: 0 });
+			let namespace;
+			try { namespace = ensureCatalog(brainDir).namespace; }
+			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
 			const items = records.map((record) => {
 				const id = target === "atlas" ? record.name : record.id;
-				const ref = nativeReference(brainDir, target, id, digestJson(record));
-				retainReferenceVersion(brainDir, ref, record);
-				return { ref, summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
+				return { ref: listRef(namespace, target, id, contentVersion(record)), summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
 			});
-			return textResult(items.length ? JSON.stringify(items, null, 2) : `${target} is empty.`, { target, count: items.length });
+			let paged;
+			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
+			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 		}
 		if (["inspect", "read"].includes(action)) {
 			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
@@ -485,7 +432,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 					: textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 			}
 			const ref = nativeReference(brainDir, target, args.ref.id, found.version);
-			retainReferenceVersion(brainDir, ref, found.record);
 			if (action === "inspect") {
 				const { text, gist, detail, outcome, doneWhen, ...metadata } = found.record;
 				return textResult(JSON.stringify({ ref, target, status: "live", metadata, actions: ["inspect", "read", ...(BRAIN_MUTATIONS[target] ?? [])] }, null, 2), { ref, status: "live" });
@@ -542,26 +488,31 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		}
 	}
 	if (target === "report" && action === "list") {
+		let reportNamespace;
+		try { reportNamespace = ensureCatalog(brainDir).namespace; } catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
 		const reports = composedRows(loadContext(brainDir)).map((row) => {
 			const body = loadReport(brainDir, row.id);
 			if (body === undefined) return undefined;
-			const version = createHash("sha256").update(body).digest("hex");
-			return { ref: nativeReference(brainDir, "report", row.id, version), archived: row.archived === true, summary: row.brief ?? row.outcome ?? "" };
+			return { ref: listRef(reportNamespace, "report", row.id, reportVersion(body)), archived: row.archived === true, summary: row.brief ?? row.outcome ?? "" };
 		}).filter(Boolean);
-		return textResult(reports.length ? JSON.stringify(reports, null, 2) : "No reports are available.", { target, count: reports.length });
+		if (reports.length === 0) return textResult("No reports are available.", { target, count: 0 });
+		let paged;
+		try { paged = listPage(reports, args, "report"); } catch (error) { return fail(`Could not list reports: ${error.message}.`); }
+		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 	}
 	if (target === "report" && ["inspect", "read", "recall", "archive", "restore", "remove"].includes(action)) {
 		const ref = args.ref;
 		if (!validateReference(ref) || ref.kind !== "report") return fail("Invalid report reference; expected { namespace, kind: \"report\", id, version? }.");
+		let current;
 		try {
-			const current = nativeReference(brainDir, "report", ref.id);
+			current = nativeReference(brainDir, "report", ref.id);
 			if (ref.namespace !== current.namespace) return fail("Report reference belongs to another brain-store namespace.");
 		} catch (error) { return fail(`Could not resolve report reference: ${error.message}.`); }
 		const store = loadContext(brainDir);
 		const row = composedRows(store).find((entry) => entry.id === ref.id);
 		const body = row === undefined ? undefined : loadReport(brainDir, ref.id);
 		if (body === undefined) return fail(`Report ${ref.id} is deleted or unavailable.`);
-		const version = createHash("sha256").update(body).digest("hex");
+		const version = reportVersion(body);
 		if (ref.version !== undefined && ref.version !== version) return fail(`Report version is stale: requested ${ref.version}, current ${version}.`);
 		if (action === "inspect") return textResult(JSON.stringify({ ref: { ...current, version }, kind: "report", status: "live", archived: row.archived === true, actions: ["inspect", "read", "recall", "archive", "restore", "remove", "shelf.add"] }, null, 2), { status: "live", ref: { ...current, version } });
 		if (action === "read") return textResult(body, { status: "live", ref: { ...current, version } });
@@ -580,6 +531,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 	if (target === "shelf" && action === "add") {
 		let ref = args.ref;
 		let path = args.path;
+		let pinnedDurable;
 		if (ref !== undefined) {
 			if (!validateReference(ref)) return fail("Invalid shelf target reference.");
 			if (ref.kind === "file") {
@@ -593,14 +545,34 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		} else if (ref.kind === "schema") {
 			if (typeof ref.version !== "string") return fail("A schema shelf placement needs an exact version-pinned schema reference.");
 			const retained = readReferenceVersion(brainDir, ref);
-			if (retained === undefined) return fail("The pinned schema version is unavailable; no shelf placement was added.");
+			if (retained === undefined) {
+				// Explicit pin: retaining the current registry version here makes the pin self-sufficient.
+				let current;
+				try { current = await durableRecordFor("schema", ref.id, brainDir, api, callContext); }
+				catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
+				const currentNamespace = nativeReference(brainDir, "schema", ref.id).namespace;
+				if (ref.namespace !== currentNamespace) return fail("Schema reference belongs to another brain-store namespace.");
+				if (current === undefined || current.version !== ref.version) return fail("The pinned schema version is unavailable and is not the current one; no shelf placement was added.");
+				try { retainReferenceVersion(brainDir, ref, current.value); }
+				catch (error) { return fail(`The schema version could not be retained: ${error.message}.`); }
+			}
+		} else if (DURABLE_REF_KINDS.has(ref.kind)) {
+			// The render path cannot reach the Durable store, so the placement is backed by the verified content at add time.
+			const durable = await durableRecordFor(ref.kind, ref.id, brainDir, api, callContext);
+			if (durable === undefined) return fail(`${ref.kind} ${ref.id} is unavailable (missing or soft-forgotten); nothing was shelved.`);
+			if (ref.version !== undefined && ref.version !== durable.version) return fail(`Stale ${ref.kind} reference: requested ${ref.version}, current ${durable.version}. Re-list and pin the current version.`);
+			pinnedDurable = { record: durable, ref: { namespace: ref.namespace, kind: ref.kind, id: ref.id, version: ref.version ?? durable.version } };
 		} else return unsupported("shelf", "add for this reference kind");
 		}
-		if (ref?.kind !== "schema" && (typeof path !== "string" || path.trim() === "")) return fail("shelf add needs a file reference or explicit project-relative path.");
+		if (ref?.kind !== "schema" && !DURABLE_REF_KINDS.has(ref?.kind ?? "") && (typeof path !== "string" || path.trim() === "")) return fail("shelf add needs a file reference or explicit project-relative path.");
 		const mine = currentShelf(brainDir, api.conversationId, main);
 		let picked;
-		try { picked = shelfItem(root, ref?.kind === "schema" ? ref : path, args.range, brainDir, mine); }
-		catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }
+		if (pinnedDurable !== undefined) {
+			picked = shelfReferenceItem(pinnedDurable.ref, JSON.stringify(pinnedDurable.record.value, null, 2), mine);
+		} else {
+			try { picked = shelfItem(root, ref?.kind === "schema" ? ref : path, args.range, brainDir, mine); }
+			catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }
+		}
 		const item = { ...picked.item, ...(ref ? { target: ref } : {}) };
 		const others = mine.filter((entry) => !sameItem(entry, item));
 		const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0) + picked.tokens;
@@ -978,6 +950,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		path: opt(str({ description: "Explicit project-relative locator, accepted only for file resolution and shelf add." })),
 		range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
 		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
+		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
 		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit." })),
 		expectedVersion: opt(str({ description: "Required SHA-256 content version for file edit and version-checked mutations; stale versions are rejected." })),
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
