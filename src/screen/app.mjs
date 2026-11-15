@@ -30,10 +30,10 @@ import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
-import { addTemplate, applyAdd, archiveRow, dropRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
-import { atlasPath } from "../atlas.mjs";
-import { booksPath } from "../books.mjs";
+import { atlasPath, loadAtlas } from "../atlas.mjs";
+import { booksPath, loadBooks } from "../books.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
@@ -42,7 +42,7 @@ import { createChat, homeOf } from "./chat.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
-import { Air, AIRY_ROWS, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
+import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { atlasView, booksView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
@@ -138,7 +138,7 @@ const COMMANDS = [
 // sheet that shows this (src/screen/parts.mjs) breaks a long entry and keeps its second column.
 export const KEYS_HELP = [
 	"Two modes",
-	"  Esc goes from one to the other, and the bottom of the screen shows which you are in.",
+	"  Esc goes from one to the other. The strip at the bottom shows the keys the tab that shows takes; this sheet and F1 show all of them.",
 	"",
 	"Typing",
 	"  Enter            send. Alt-Enter, Shift-Enter or Ctrl-J breaks the line; so does a backslash before Enter",
@@ -157,9 +157,10 @@ export const KEYS_HELP = [
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	`  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
+	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Context), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
 	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a plan item done, a book entry settled, a node confirmed); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
-	"  n                a new ledger entry, plan item, book entry or node: an editor opens on a template, and what you save goes in through the same operations the agent uses",
+	"  n                a new ledger entry, plan item, book entry or node: the small box on a template, and what you save goes in through the same operations the agent uses (E opens the template in $EDITOR instead)",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
@@ -175,6 +176,7 @@ export const KEYS_HELP = [
 	"  Ctrl-C           clear what you have typed; with the line empty, again (soon after) leaves, the way /quit does",
 	"  Ctrl-X           stop the agent; Ctrl-V pauses it: it finishes what it is doing and gets nothing new",
 	"  Ctrl-L           draw the screen again",
+	"  Ctrl-O           the $EDITOR door, in every tab and mode, including while typing",
 	"  F1               this sheet",
 	"",
 	"The mouse",
@@ -464,9 +466,33 @@ export async function runScreen(session, options, runTerminal) {
 		if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 		if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
 		if (!core.thinking()) second.push([" · notes hidden", "muted"]);
-		return [first, second];
+		return [first, second, [[` ${legend()}`, "faint"]]];
 	};
 
+	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
+	const LEGEND = {
+		chat: "j k move · Enter open · e edit · d forget · y copy",
+		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
+		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
+		"carto.plan": "t done · n new · v archive · d delete · e edit",
+		"carto.requests": "a approve · n deny · d forget · e edit",
+		"carto.tree": "Enter fold · y copy · e edit",
+		"carto.books": "t settle · n new · v archive · d delete · e edit",
+		"diff.last": "Enter open · y copy · e edit",
+		"diff.session": "Enter open · y copy · e edit",
+		"diff.git": "Enter open · y copy · e edit",
+		"shells.list": "Enter output · y copy",
+		"shells.out": "Enter back",
+		"context.window": "Enter open · d delete · e edit · y copy",
+		"context.main": "Enter open · d delete · e edit · y copy",
+		"context.parts": "Enter open · + all · e edit",
+		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
+	};
+	const legend = () => {
+		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
+		const id = state.tab === "chat" ? "chat" : viewId();
+		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
+	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = (tab = state.tab) => (VIEWS[tab] !== undefined ? `${tab}.${state.view[tab]}` : tab);
 	/** The file a view comes from, for `e` when no item names one. */
@@ -806,9 +832,150 @@ export async function runScreen(session, options, runTerminal) {
 			}
 		}
 	};
-	const edit = () => {
-		if (state.tab === "chat") return editChat();
-		if (state.tab === "context") return editContext();
+	// ─── The fields the small box edits ───────────────────────────────────────
+	// The book views open one of these on e; E keeps the editor on the entry's own JSON. The limits are the books'
+	// own, so the box never holds more than the book would; the counter shows how much of the field is used.
+	const ROW_KEY = /^(?:entry|item|node):/;
+	const boxWidth = (fields, cols) => {
+		const longest = Math.max(...fields.map((field) => Math.min(field.limit, 80)));
+		const single = !fields.some((field) => field.multiline);
+		return Math.max(46, Math.min(cols - 4, single ? longest + 14 : 78));
+	};
+	/** The fields of the row the list has selected, with their current values; undefined when the row is not an entry. */
+	const editFieldsFor = (viewId_, rowKey) => {
+		const id = rowKey.slice(rowKey.indexOf(":") + 1);
+		if (viewId_ === "carto.ledger") {
+			const { ledger } = loadLedger(brainDir);
+			const item = ledger?.items.find((entry) => entry.id === id);
+			if (item === undefined) return undefined;
+			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.ledger.textChars, value: item.text }];
+			if (item.kind === POLICY.enums.ledgerKind.goal) fields.push({ id: "doneWhen", label: "Done when", limit: POLICY.limits.ledger.textChars, multiline: true, value: item.doneWhen ?? "" });
+			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.ledger.textChars, value: item.outcome ?? "" });
+			return { id, fields };
+		}
+		if (viewId_ === "carto.plan") {
+			const { plan } = loadPlan(brainDir);
+			const item = plan?.items.find((entry) => entry.id === id);
+			if (item === undefined) return undefined;
+			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: item.text }];
+			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
+			return { id, fields };
+		}
+		if (viewId_ === "carto.books") {
+			const book = loadBooks(brainDir);
+			const item = book.items.find((entry) => entry.id === id);
+			if (item === undefined) return undefined;
+			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.books.textChars, value: item.text }];
+			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.books.outcomeChars, value: item.outcome ?? "" });
+			return { id, fields };
+		}
+		if (viewId_ === "carto.atlas") {
+			const { atlas } = loadAtlas(brainDir);
+			const node = atlas?.nodes.find((entry) => entry.name === id);
+			if (node === undefined) return undefined;
+			return {
+				id,
+				fields: [
+					{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: node.gist },
+					{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: node.detail ?? "" },
+					{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: node.name },
+				],
+			};
+		}
+		return undefined;
+	};
+	// Snapshot of what the box opens with, so a save knows which fields were edited.
+	const openFieldBox = (viewId_, rowKey) => {
+		const found = editFieldsFor(viewId_, rowKey);
+		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
+		const { id, fields } = found;
+		const handle = tui.showOverlay(new Box({
+			title: id,
+			fields,
+			keyOf,
+			flash,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				/** @type {Record<string, string>} */
+				const changes = {};
+				for (const field of fields) if (drafts.get(field.id) !== field.value) changes[field.id] = drafts.get(field.id);
+				if (Object.keys(changes).length === 0) {
+					flash("nothing was changed");
+					return true;
+				}
+				const said = editRow(brainDir, id, changes, root);
+				flash(said.replace(/\n+/g, " "));
+				if (said.startsWith("! ")) return false;
+				brain.at = 0;
+				refresh(viewId(), true);
+				return true;
+			},
+		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
+	};
+	/** The fields of a new entry of `book`, from the same template n used to open in the editor. */
+	const ADD_FIELDS = {
+		ledger: () => [
+			{ id: "kind", label: "Kind", limit: 8, value: "note" },
+			{ id: "text", label: "Text", limit: POLICY.limits.ledger.textChars, value: "" },
+			{ id: "doneWhen", label: "Done when", limit: POLICY.limits.ledger.textChars, multiline: true, value: "" },
+			{ id: "salient", label: "Salient", limit: 5, value: "false" },
+		],
+		plan: () => [
+			{ id: "mode", label: "Mode", limit: 6, value: "look" },
+			{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "network", label: "Network", limit: 5, value: "false" },
+			{ id: "standing", label: "Standing", limit: 5, value: "false" },
+		],
+		books: () => [
+			{ id: "kind", label: "Kind", limit: 10, value: "assessment" },
+			{ id: "text", label: "Text", limit: POLICY.limits.books.textChars, value: "" },
+		],
+		atlas: () => [
+			{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: "" },
+			{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: "" },
+			{ id: "kind", label: "Kind", limit: 9, value: "" },
+			{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: "" },
+		],
+	};
+	/** true/false as a boolean; anything else goes to the book as it was said, and the book refuses it in its own words. */
+	const boolOf = (raw) => {
+		const word = raw.trim().toLowerCase();
+		return word === "true" ? true : word === "false" ? false : raw.trim();
+	};
+	const addOpOf = (book, drafts) => {
+		const said = (key) => drafts.get(key) ?? "";
+		const bool = (key) => (said(key).trim() === "" ? undefined : boolOf(said(key)));
+		if (book === "ledger") {
+			return { kind: said("kind").trim(), text: said("text"), ...(said("doneWhen").trim() !== "" ? { done_when: said("doneWhen") } : {}), ...(bool("salient") !== undefined ? { salient: bool("salient") } : {}) };
+		}
+		if (book === "plan") {
+			return { mode: said("mode").trim(), text: said("text"), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
+		}
+		if (book === "books") return { kind: said("kind").trim(), text: said("text") };
+		return { name: said("name"), gist: said("gist"), ...(said("kind").trim() !== "" ? { kind: said("kind").trim() } : {}), ...(said("detail").trim() !== "" ? { detail: said("detail") } : {}) };
+	};
+	const openAddBox = (book) => {
+		const template = ADD_FIELDS[book];
+		if (template === undefined) return flash("this view has no add");
+		const fields = template();
+		const handle = tui.showOverlay(new Box({
+			title: `new ${book}`,
+			fields,
+			keyOf,
+			flash,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				const said = applyAdd(brainDir, book, JSON.stringify(addOpOf(book, drafts)), root);
+				flash(said.replace(/\n+/g, " "));
+				if (said.startsWith("! ")) return false;
+				brain.at = 0;
+				refresh(viewId(), true);
+				return true;
+			},
+		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
+	};
+	/** The $EDITOR on the file of the row, or on the whole book by the row's line: the door Ctrl-O keeps open everywhere. */
+	const editTarget = () => {
 		const item = pageOf().list.selected();
 		const target = item?.target ?? (fileOf(viewId()) !== undefined ? { file: fileOf(viewId()) } : undefined);
 		if (target === undefined) return flash("this line has no file to open");
@@ -817,6 +984,30 @@ export async function runScreen(session, options, runTerminal) {
 		if (!runEditor(target.file, target.line)) return;
 		brain.at = 0;
 		refresh(viewId(), true);
+	};
+	const edit = () => {
+		if (state.tab === "chat") return editChat();
+		if (state.tab === "context") return editContext();
+		if (BOOK_VIEWS[viewId()] !== undefined) {
+			const item = pageOf().list.selected();
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			if (rowKey !== undefined && ROW_KEY.test(rowKey)) return void openFieldBox(viewId(), rowKey);
+			// Not an entry (the book could not be read, or it is empty): the editor door is what is left.
+			return void editTarget();
+		}
+		editTarget();
+	};
+	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
+	const editInEditor = () => {
+		if (state.tab === "chat") return editChat();
+		if (state.tab === "context") return editContext();
+		const book = BOOK_VIEWS[viewId()];
+		if (book !== undefined) {
+			const item = pageOf().list.selected();
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			if (rowKey === undefined || !ROW_KEY.test(rowKey)) return newEntry(book);
+		}
+		editTarget();
 	};
 
 	// ─── Selecting in Chat ───────────────────────────────────────────────────
@@ -971,8 +1162,8 @@ export async function runScreen(session, options, runTerminal) {
 					return void submit(`/deny ${bookId}`);
 				}
 			}
-			// In a book view, n opens an editor on a template for a new entry.
-			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void newEntry(BOOK_VIEWS[viewId()]);
+			// In a book view, n opens the box on a template for a new entry; E keeps the editor.
+			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void openAddBox(BOOK_VIEWS[viewId()]);
 			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
 			if (key === "a" && viewId() === "context.hands") {
 				setMode("type");
@@ -995,6 +1186,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "y") return void copySelected();
 		if (key === "Y") return void copyTab();
 		if (key === "e") return void edit();
+		if (key === "E") return void editInEditor();
 		if (key === "r") {
 			brain.at = 0;
 			refresh(viewId(), true);
@@ -1106,11 +1298,16 @@ export async function runScreen(session, options, runTerminal) {
 		status,
 		views: () => VIEWS[state.tab] ?? [],
 		view: () => state.view[state.tab],
-		hint: () => (state.mode === "type" ? "Esc: commands · F1: keys" : state.tab === "chat" ? "j k move · Enter open · y copy · ? keys" : "j k · Enter open · + all · e edit · ? keys"),
 		fileHint() {
 			if (state.tab === "context") return undefined;
-			const file = pageOf()?.list.selected()?.target?.file ?? fileOf(viewId());
-			return file === undefined ? undefined : relative(root, file) || ".";
+			const item = pageOf()?.list.selected();
+			const file = item?.target?.file ?? fileOf(viewId());
+			if (file === undefined) return undefined;
+			const rel = relative(root, file) || ".";
+			// Where e opens the small box on the row's fields (said in the strip below), the editor is E; anywhere else, e is the editor.
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			const smallBox = BOOK_VIEWS[viewId()] !== undefined && rowKey !== undefined && ROW_KEY.test(rowKey);
+			return smallBox ? `E opens ${rel}` : `e opens ${rel}`;
 		},
 		/** A click on a row of Chat: select it, and open or fold it. */
 		clickChat(row) {
@@ -1236,6 +1433,7 @@ export async function runScreen(session, options, runTerminal) {
 		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
+		else if (key === "ctrl+o") editInEditor();
 		else if (key === "f1") showKeys();
 		else if (key === "shift+tab") stepTab(-1);
 		// While something is typed, Tab completes it; otherwise it goes to the next tab.

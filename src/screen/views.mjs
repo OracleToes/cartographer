@@ -20,6 +20,7 @@ import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoi
 import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
+import { flat } from "../rows.mjs";
 import { listRequests } from "../requests.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
@@ -63,6 +64,7 @@ export function atlasView({ root, brainDir }) {
 	const items = atlas.nodes.map((node) => {
 		const old = stale.get(node.name);
 		const body = [
+			`gist: ${node.gist}`,
 			node.detail,
 			node.files.length > 0 ? `files: ${node.files.join(", ")}` : undefined,
 			node.links.length > 0 ? `links: ${node.links.join(", ")}` : undefined,
@@ -85,7 +87,7 @@ export function atlasView({ root, brainDir }) {
 			target: { file, line: jsonLine(file, "name", node.name) },
 		};
 	});
-	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [stale.size > 0 ? ` · ${stale.size} may be out of date` : "", "warn"]], [[`  t confirms a node, n new node (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]];
+	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [stale.size > 0 ? ` · ${stale.size} may be out of date` : "", "warn"]]];
 	if (items.length === 0) items.push(note("  No nodes yet. The agent and its tasks write them as they learn the project."));
 	return { header, items };
 }
@@ -131,7 +133,7 @@ export function ledgerView({ brainDir }) {
 		items.push(...done.map(entry));
 	}
 	if (items.length === 0) items.push(note("  The ledger is empty: no goal yet. Say what you want to achieve."));
-	const header = [[[`  t settles, n new entry (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]];
+	const header = [];
 	return { header, items };
 }
 
@@ -163,29 +165,35 @@ export function planView({ brainDir, yolo }) {
 		target: { file, line: jsonLine(file, "id", item.id) },
 	}));
 	const waits = !yolo && waiting(plan).length > 0;
-	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]], [[`  t marks done, n new item (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]], items };
+	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]]], items };
 }
 
 /** What waits for the user: change items and questions of taste. */
 export function requestsView({ brainDir, yolo }) {
 	const all = listRequests(brainDir, { yolo });
 	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
-	const items = all.map((request) => ({
-		key: `request:${request.id}`,
-		head: [
-			[request.kind === "approval" ? "● " : "? ", request.kind === "approval" ? "warn" : "tool"],
-			[`${request.id}  `, "tool"],
-			[`[${request.kind}] `, "muted"],
-			[request.text, ""],
-		],
-		body: [
-			...(request.detail ?? []),
-			request.kind === POLICY.enums.ledgerKind.question
-				? `answer with /answer ${request.id} words · d forgets the question`
-				: `a approves it · n turns it down · d forgets it, and the agent is not told`,
-		].join("\n"),
-		copy: `${request.id} [${request.kind}] ${request.text}`,
-	}));
+	const items = all.map((request) => {
+		// The head row holds one line; the whole request stands in the body, and `e` opens the book where it lives.
+		const home = request.kind === POLICY.enums.ledgerKind.question ? join(brainDir, "carto-ledger.json") : planPath(brainDir);
+		return {
+			key: `request:${request.id}`,
+			head: [
+				[request.kind === "approval" ? "● " : "? ", request.kind === "approval" ? "warn" : "tool"],
+				[`${request.id}  `, "tool"],
+				[`[${request.kind}] `, "muted"],
+				[request.text, ""],
+			],
+			body: [
+				flat(request.text),
+				...(request.detail ?? []),
+				request.kind === POLICY.enums.ledgerKind.question
+					? `answer with /answer ${request.id} words · d forgets the question`
+					: `a approves it · n turns it down · d forgets it, and the agent is not told`,
+			].join("\n"),
+			copy: `${request.id} [${request.kind}] ${request.text}`,
+			target: { file: home, line: jsonLine(home, "id", request.id) },
+		};
+	});
 	const approvals = all.some((request) => request.kind === "approval");
 	return {
 		header: [
@@ -275,9 +283,9 @@ export function booksView({ brainDir }) {
 		items.push(...mine.filter((item) => item.status === POLICY.enums.entryStatus.open).map(entry), ...mine.filter((item) => item.status === POLICY.enums.entryStatus.done).map(entry));
 	}
 	if (items.length === 0) {
-		return { header: [[[`The agent's books · ${store}`, "bold"]], [["  t settles, n new entry (an editor opens), v archive, d delete · /practice prints the practice book", "faint"]]], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works. n starts a new entry.")] };
+		return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice prints the practice book", "faint"]]], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works. n starts a new entry.")] };
 	}
-	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  t settles, n new entry (an editor opens), v archive, d delete · /practice prints the practice book", "faint"]]], items };
+	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice prints the practice book", "faint"]]], items };
 }
 
 // ─── Diff ───────────────────────────────────────────────────────────────────
@@ -361,17 +369,22 @@ export function shellsView({ session }) {
 	const one = (text) => (text.length > POLICY.limits.screen.viewSummaryChars ? `${text.slice(0, POLICY.limits.screen.viewSummaryChars)}…` : text).replace(/\s+/g, " ");
 	const items = all.map((win) => {
 		const marks = win.sandbox === false ? " · no sandbox" : win.network ? " · network" : "";
+		// When the head cuts the command short, the whole command stands in the body: a cut is never silent.
+		const shown = win.state === POLICY.enums.windowStates.busy ? win.command ?? "" : win.last?.command ?? "";
+		const whole = shown !== "" && one(shown) !== shown ? `$ ${flat(shown)}` : undefined;
 		const state =
 			win.state === POLICY.enums.windowStates.gone
 				? [["gone", "err"], [`  ${win.why}`, "muted"]]
 				: win.state === POLICY.enums.windowStates.busy
-					? [["busy", "warn"], [` ${took(win.running)}`, ""], [`  $ ${one(win.command ?? "")}`, "bold"], [win.asks ? "  may be waiting for input" : "", "warn"]]
-					: [["free", "ok"], [win.last ? `  last: $ ${one(win.last.command)} → exit ${win.last.exit}, ${ago(win.last.ago)}` : "  nothing was run in it yet", "muted"]];
+					? [["busy", "warn"], [` ${took(win.running)}`, ""], [`  $ ${one(shown)}`, "bold"], [win.asks ? "  may be waiting for input" : "", "warn"]]
+					: [["free", "ok"], [win.last ? `  last: $ ${one(shown)} → exit ${win.last.exit}, ${ago(win.last.ago)}` : "  nothing was run in it yet", "muted"]];
+		const body = [whole, ...win.tail].filter((line) => line !== undefined).join("\n");
+		const wholeCommand = shown === "" ? undefined : `$ ${flat(shown)}`;
 		return {
 			key: `window:${win.name}`,
 			head: [[`${win.name}  `, "bold"], ...state, [`${win.cwd && win.cwd !== "." ? `  in ${win.cwd}/` : ""}${marks}`, "muted"]],
-			...(win.tail.length > 0 ? { body: win.tail.join("\n"), bodyStyle: (line) => (line.startsWith("$ ") ? "bold" : "") } : {}),
-			copy: () => win.tail.join("\n"),
+			...(body !== "" ? { body, bodyStyle: (line) => (line.startsWith("$ ") ? "bold" : "") } : {}),
+			copy: () => [wholeCommand, ...win.tail].filter((line) => line !== undefined).join("\n"),
 		};
 	});
 	return { header: [[[`${all.length === 1 ? "1 shell window" : `${all.length} shell windows`}`, "bold"], ["  · opened, a window shows its newest lines, live · /kill NAME ends one", "muted"]]], items };
@@ -563,7 +576,7 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 		header.push(row);
 	}
 	if (sent.collapsedSince) header.push([["! The context was collapsed after this request was sent: the next request starts from what the collapse kept, not from this.", "warn"]]);
-	header.push([], [["Every part, in the order the model reads it. Enter opens one, + all of them.", "faint"]]);
+	header.push([], [["Every part, in the order the model reads it.", "faint"]]);
 
 	/** What e does on a part: the kinds of thing it can open, or the reason it refuses. */
 	const editOf = (part) => {
@@ -661,7 +674,6 @@ export function handsView({ root, brainDir }) {
 	const store = loadContext(brainDir);
 	const header = [
 		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and reports of finished work; salient notes live in the Ledger view", "muted"]],
-		[["On rows: v archives or restores, d deletes (d again). On a report: f folds or recalls. On the shelf: x takes an item off.", "faint"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
@@ -749,7 +761,7 @@ export function shellsOutView({ session }, name) {
 	const header = [
 		[["Output of ", "bold"], [pick.name, "bold"], ["  ·  ", "muted"], ...what, [`${pick.cwd && pick.cwd !== "." ? `  in ${pick.cwd}/` : ""}${pick.sandbox === false ? "  · no sandbox" : pick.network ? "  · network" : ""}`, "muted"]],
 		[["The newest lines, as the window keeps them; the view follows on its own.", "faint"]],
-		[["Enter goes back to the list; /send " + pick.name + " line types into it.", "faint"]],
+		[["/send " + pick.name + " line types into it from the prompt.", "faint"]],
 	];
 	const items = [
 		{ key: "term", plain: true, head: lines.length === 0 ? [["  (nothing has been printed yet)", "muted"]] : lines.map((line) => [line || " ", ""]) },

@@ -18,6 +18,7 @@ import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo }
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
 import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, loadAtlas, nodeChanges, nodeHashes, NODES_MAX, renderOutline, saveAtlas, staleNodes } from "../src/atlas.mjs";
 import { applyOp, LedgerError, loadLedger, OPEN_MAX, renderLedger, saveLedger, TEXT_MAX } from "../src/ledger.mjs";
+import { applyBookOp, BookError, loadBooks, saveBooks } from "../src/books.mjs";
 import { applyPlanOp, authorize, ITEM_MAX, loadPlan, openOnce, PlanError, planSummary, renderPlan, savePlan, YOLO_LINE } from "../src/plan.mjs";
 import { withoutAdditions, withTimes } from "../src/request.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "../src/state.mjs";
@@ -1242,7 +1243,7 @@ test("screen: text is measured in cells, wrapped and painted to the width; a rep
 	assert.deepEqual(wrap("  indented text that is long", 14), ["  indented", "  text that is", "  long"], "keeps the indent");
 	assert.deepEqual(wrap("abcdefghijkl", 5), ["abcde", "fghij", "kl"], "a word longer than a row is cut");
 	assert.deepEqual(wrap("a\n\nb", 10), ["a", "", "b"], "line breaks stay");
-	assert.equal(paint([["ab", "bold"], ["cdef", ""]], 4), "\x1b[1mab\x1b[0mcd", "a line is cut to the width");
+	assert.equal(paint([["ab", "bold"], ["cdef", ""]], 4), "\x1b[1mab\x1b[0mc\x1b[2m…\x1b[0m", "a cut line ends with a mark, never in silence");
 	assert.equal(paint([["ab", ""]], 5), "ab   ", "and padded to it");
 	assert.equal(paint([["a\x1b[31mb\tc\n", ""]], 8), "ab    c ", "what a terminal would act on is taken out");
 	assert.deepEqual([short(950), short(1234), short(27_300)], ["950", "1.2k", "27k"]);
@@ -1569,6 +1570,163 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "The context was collapsed after this request was sent", "a collapse since then is said");
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
 });
+
+// ─── The books' outcomes, the atlas rename, the audit of cuts, and the small box ───────────────
+
+test("books: an outcome of a settled entry is editable; the books refuse what makes no sense", () => {
+	const root = makeProject("outcome-edits");
+	const brainDir = join(root, ".brain");
+	mkdirSync(brainDir, { recursive: true });
+	const now = "2026-11-15T00:00:00.000Z";
+	// The books: settle, then reword the outcome; the engine keeps it to the outcome's limit.
+	saveBooks(brainDir, { version: 1, next: 2, items: [{ id: "a1", kind: "assessment", text: "The deploy takes an hour.", status: "open" }] });
+	let book = loadBooks(brainDir);
+	applyBookOp(book, { action: "done", id: "a1", text: "It takes an hour, mostly the database migration." }, now);
+	const done = applyBookOp(book, { action: "edit", id: "a1", outcome: "Mostly the migration; the rest is fast." }, now);
+	assert.equal(done.line.includes("reworded") || done.line.includes("settled") || done.line.includes("changed"), true);
+	assert.equal(book.items[0].outcome, "Mostly the migration; the rest is fast.", "the outcome is rewritten through the same operations");
+	assert.throws(() => applyBookOp(book, { action: "edit", id: "a1" }, now), BookError, "an edit of nothing is refused");
+	saveBooks(brainDir, { version: 1, next: 3, items: [{ id: "a2", kind: "assessment", text: "Open entry.", status: "open" }] });
+	book = loadBooks(brainDir);
+	assert.throws(() => applyBookOp(book, { action: "edit", id: "a2", outcome: "not settled yet" }, now), BookError, "an outcome on an open entry is refused");
+	// The ledger: the same rule, on a goal with a done-when line.
+	saveLedger(brainDir, { version: 1, next: 2, items: [{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: "It is live", status: "done", outcome: "shipped", closed: 1 }] });
+	const ledger = loadLedger(brainDir).ledger;
+	const edited = applyOp(ledger, { action: "edit", id: "g1", outcome: "shipped and documented", done_when: "It is live and documented" }, now);
+	assert.equal(edited.line.includes("reworded"), true);
+	assert.equal(ledger.items[0].outcome, "shipped and documented");
+	assert.equal(ledger.items[0].doneWhen, "It is live and documented");
+	applyOp(ledger, { action: "edit", id: "g1", text: "Ship the thing, documented" }, now);
+	assert.equal(ledger.items[0].text, "Ship the thing, documented", "a closed entry's text is still editable");
+	saveLedger(brainDir, { version: 1, next: 3, items: [{ id: "g2", kind: "goal", text: "Open goal", doneWhen: "It is done", status: "open" }] });
+	const ledgerOpen = loadLedger(brainDir).ledger;
+	assert.throws(() => applyOp(ledgerOpen, { action: "edit", id: "g2", outcome: "not closed" }, now), LedgerError, "an outcome on an open goal is refused");
+	// The plan: the same again.
+	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: "Map the thing", status: "done", outcome: "mapped" }] });
+	const { plan } = loadPlan(brainDir);
+	const planEdited = applyPlanOp(plan, { action: "edit", id: "p1", outcome: "mapped, with a diagram" }, now);
+	assert.equal(planEdited.line.includes("changed"), true);
+	assert.equal(plan.items[0].outcome, "mapped, with a diagram");
+});
+
+test("atlas: a node can be renamed, and what links to it is rewritten", () => {
+	const root = makeProject("atlas-rename");
+	const brainDir = join(root, ".brain");
+	mkdirSync(brainDir, { recursive: true });
+	const now = "2026-11-15T00:00:00.000Z";
+	const who = { root, now, by: "main", main: true, files: () => [] };
+	const atlas = { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [
+		{ name: "dice_roll", gist: "How the die is rolled", links: [], files: [], seen: {}, written: 1, by: "main" },
+		{ name: "casino_floor", gist: "The floor the die lands on", links: ["dice_roll"], files: [], seen: {}, written: 1, by: "main" },
+	] };
+	saveAtlas(brainDir, atlas);
+	const renamed = applyAtlasOp(atlas, { action: "rename", name: "dice_roll", to: "die_roll" }, who);
+	assert.equal(renamed.line.includes("die_roll"), true);
+	assert.equal(atlas.nodes[0].name, "die_roll", "the node carries the new name");
+	assert.deepEqual(atlas.nodes[1].links, ["die_roll"], "what links to it points at the new name");
+	assert.equal(atlas.nodes[0].written, 1, "a rename is not a claim that the node is true now");
+	assert.throws(() => applyAtlasOp(atlas, { action: "rename", name: "die_roll", to: "casino_floor" }, who), AtlasError, "a name that is taken is refused");
+	assert.throws(() => applyAtlasOp(atlas, { action: "rename", name: "die_roll", to: "???" }, who), AtlasError, "a name with nothing in it is refused");
+	assert.equal(applyAtlasOp(atlas, { action: "rename", name: "die_roll", to: "die-roll" }, who).line.includes("die_roll"), true, "a name is normalized the way every name is");
+});
+
+test("screen: nothing that a head cuts off is unreachable — the full text is in the body or the copy", async () => {
+	const root = makeProject("cut-audit");
+	const brainDir = join(root, ".brain");
+	mkdirSync(brainDir, { recursive: true });
+	const { ledgerView, planView, booksView, atlasView, requestsView, shellsView } = await import("../src/screen/views.mjs");
+	const flatStr = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
+	const exposed = (item) => flatStr([item.body, typeof item.copy === "function" ? item.copy() : item.copy].filter((part) => part !== undefined).join("\n"));
+	const expectReachable = (name, view, needle) => {
+		const flatNeedle = flatStr(needle);
+		for (const item of view.items) {
+			if (item.plain === true) continue;
+			exposed(item); // eslint: compute once per item below instead
+			if (flatStr(JSON.stringify(item.head)).includes(flatNeedle.slice(0, 40))) {
+				assert.ok(exposed(item).includes(flatNeedle), `${name}: ${JSON.stringify(needle).slice(0, 50)} is cut from the head and not reachable from the body or the copy`);
+				return;
+			}
+		}
+		assert.ok(view.items.some((item) => item.plain !== true && exposed(item).includes(flatNeedle)), `${name}: the text is nowhere to be found`);
+	};
+	const LONG = "word ".repeat(70).trim(); // about 350 characters, longer than any head row at a usual width
+	saveLedger(brainDir, { version: 1, next: 3, items: [
+		{ id: "q1", kind: "question", text: LONG, status: "open", added: 1 },
+		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },
+	] });
+	expectReachable("ledger question", ledgerView({ brainDir }), LONG);
+	expectReachable("ledger goal done-when", ledgerView({ brainDir }), LONG);
+	saveLedger(brainDir, { version: 1, next: 2, items: [] });
+	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: LONG, status: "open", added: 1 }] });
+	expectReachable("plan item", planView({ brainDir, yolo: false }), LONG);
+	saveBooks(brainDir, { version: 1, next: 2, items: [{ id: "a1", kind: "assessment", text: LONG, status: "open", added: 1 }] });
+	expectReachable("books entry", booksView({ brainDir }), LONG);
+	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
+	expectReachable("atlas gist", atlasView({ root, brainDir }), LONG.slice(0, 200));
+	expectReachable("atlas detail", atlasView({ root, brainDir }), LONG);
+	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p2", mode: "change", text: LONG, status: "open", added: 1 }] });
+	expectReachable("approval request", requestsView({ brainDir, yolo: false }), LONG);
+	savePlan(brainDir, { version: 1, next: 2, items: [] });
+	const session = { windows: { list: () => [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] } };
+	expectReachable("shell command", shellsView({ session }), LONG);
+});
+
+test("screen: the small box caps what goes in, counts it live, and saves through the operations", async () => {
+	const { Box } = await import("../src/screen/parts.mjs");
+	const caps = [];
+	const flashes = [];
+	const saved = [];
+	let closed = 0;
+	const fields = [
+		{ id: "text", label: "Text", limit: 5, value: "abc" },
+		{ id: "detail", label: "Detail", limit: 12, multiline: true, value: "" },
+	];
+	const box = new Box({
+		title: "x",
+		fields,
+		keyOf: (data) => data,
+		flash: (text) => flashes.push(text),
+		close: () => closed++,
+		save: (drafts) => {
+			saved.push(new Map(drafts));
+			return true;
+		},
+	});
+	const painted = () => box.render(50).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n");
+	assert.ok(painted().includes("3 / 5"), "the counter shows how much of the field is used");
+	box.handleInput("d");
+	box.handleInput("e");
+	assert.equal(box.text, "abcde");
+	box.handleInput("f");
+	assert.equal(box.text, "abcde", "nothing past the limit goes in");
+	assert.ok(flashes.some((text) => text.includes("limit")), "and the limit says so");
+	box.handleInput("backspace");
+	assert.equal(box.text, "abcd");
+	box.handleInput("tab");
+	assert.equal(box.field.id, "detail", "Tab moves to the next field of the row");
+	box.handleInput("\n");
+	assert.equal(box.text, "\n", "a bare newline is Enter, which in a long field ends a line");
+	box.handleInput("ctrl+enter");
+	assert.equal(saved.length, 1, "Ctrl-Enter saves the long field");
+	assert.equal(saved[0].get("detail"), "\n");
+	assert.equal(closed, 1);
+	// A paste is cut to what fits, and says so.
+	const box2 = new Box({
+		title: "y",
+		fields: [{ id: "text", label: "Text", limit: 6, value: "" }],
+		keyOf: (data) => data,
+		flash: (text) => flashes.push(text),
+		close: () => closed++,
+		save: () => true,
+	});
+	box2.handleInput("abcdefghij");
+	assert.equal(box2.text, "abcdef", "a paste is cut to the limit");
+	assert.ok(flashes.some((text) => text.includes("left out")), "and what was left out is said");
+	// Enter on a one-line field saves it.
+	box2.handleInput("enter");
+	assert.equal(closed, 2, "Enter saves a one-line field");
+});
+
 
 let passed = 0;
 let failed = 0;
