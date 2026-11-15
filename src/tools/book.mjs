@@ -247,8 +247,8 @@ const ACTION_GUIDE = {
 		add: "name and gist — kind, detail, files and links optional",
 		edit: "name and gist — kind, detail, files and links optional",
 		confirm: "name",
-		link: "name, plus files and/or links (lists)",
-		unlink: "name, plus files and/or links (lists)",
+		link: "for the node `ref` names: files (paths) and/or links (node names) — { files: [\"src/x.js\"], links: [\"other_node\"] }; the ref is the node, no `name` in the operation",
+		unlink: "for the node `ref` names: files (paths) and/or links (node names) to take off; the ref is the node, no `name` in the operation",
 		remove: "name",
 		look: "name (a node name or a project path)",
 		tree: "anchor and depth (folder of the project; anchor '.' is the root)",
@@ -1105,7 +1105,8 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		const problems = [];
 		if (args.ref !== undefined && !validateReference(args.ref)) return { problems: ["a ref with an `id`"] };
 		const kind = spec.refKind ?? target;
-		if (spec.ref === "required" && args.ref === undefined) problems.push(`a ${kind} reference ({ \"id\": … } is enough)`);
+		const article = /^[aeiou]/i.test(kind) ? "an" : "a";
+		if (spec.ref === "required" && args.ref === undefined) problems.push(`${article} ${kind} reference ({ \"id\": … } is enough)`);
 		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "ref or path");
 		for (const field of spec.fields ?? []) if (!nonEmpty(args[field])) problems.push(field);
 		if (spec.operation === "required") {
