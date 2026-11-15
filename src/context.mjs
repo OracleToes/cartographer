@@ -1001,6 +1001,93 @@ export function reportsInView(messages) {
 
 const withText = (message, text) => ({ ...message, content: [{ type: "text", text }] });
 
+// ─── Read results are ephemeral ───────────────────────────────────────────
+// Each new read takes the content of every earlier read out of view: what a read leaves in its place is one line
+// saying what was read, so it stays one read away. The newest read stands at the very end of the request instead of
+// where it was made, after everything else including the state and windows blocks. Keeping several files in view is
+// the shelf's job (`book target=shelf action=add`), not the conversation's. The stored messages are never touched:
+// this is dressing for the request, as for everything else in this file.
+
+/** The tag that opens the tail block of a request: the newest read, moved to the end. */
+const READ_TAIL = "<read-tail>";
+
+const flatWords = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+
+/** The one line a read leaves in its place, saying it is no longer in view. */
+const evictedReadLine = (call) => `[the result of this read is no longer in view — ${flatWords(callWords(call))}. Read it again to see it; keep it with \`book\` (target=shelf, action=add) if it must stay in view.]`;
+
+/** The one line a read leaves in its place, saying where its content stands instead. */
+const movedReadLine = (call) => `[the result of this read stands at the end of the request, after everything else — ${flatWords(callWords(call))}.]`;
+
+/** Text with the tail block split off: what stands before it, and the block as its own text. The block runs to the end of the text. */
+export function splitReadTail(text) {
+	const body = String(text ?? "");
+	const at = body.lastIndexOf(READ_TAIL);
+	if (at < 0) return { text: body, tail: undefined };
+	return { text: body.slice(0, at).replace(/\n+$/, ""), tail: body.slice(at).replace(/\n+$/, "") };
+}
+
+/** Text with any tail block removed. */
+export const withoutReadTail = (text) => splitReadTail(text).text;
+
+const appendText = (message, addition) => {
+	if (typeof message.content === "string") return { ...message, content: message.content + addition };
+	const tail = message.content.at(-1);
+	if (tail?.type !== "text") return { ...message, content: [...message.content, { type: "text", text: addition.trimStart() }] };
+	return { ...message, content: [...message.content.slice(0, -1), { ...tail, text: tail.text + addition }] };
+};
+
+/**
+ * The messages with the newest read's content moved to the very end, as a block opening with `<read-tail>`: after
+ * everything else, the state and windows blocks included. What cannot take more text (a message that is not the
+ * user's and not a tool result) gets a message of its own at the end. The input is not changed.
+ * @param {readonly any[]} messages
+ * @param {string} tail  the newest read's content, as it stood in its place
+ */
+export function withReadTail(messages, tail) {
+	const block = `\n\n${READ_TAIL}\n${tail}`;
+	const last = messages.at(-1);
+	if (last === undefined) return [{ role: "user", content: [{ type: "text", text: `${READ_TAIL}\n${tail}` }] }];
+	if (last.role === "user" || last.role === "toolResult") return [...messages.slice(0, -1), appendText(last, block)];
+	return [...messages, { role: "user", content: [{ type: "text", text: `${READ_TAIL}\n${tail}` }] }];
+}
+
+/**
+ * Read results, dressed for one request: every read but the newest becomes one line saying what was read (any
+ * target, any size; a result already folded keeps its id and is left alone), and the newest stands at the tail of
+ * the request instead of where it was made. A read is one whose result answers a call of `read`, or of `book` with
+ * action `read`. The stored messages are not changed.
+ * @param {readonly any[]} messages
+ * @returns {{ messages: any[], tail?: string }} the dressed messages, and the newest read's content to move to the end
+ */
+export function dressReads(messages) {
+	const calls = new Map();
+	for (const message of messages) {
+		if (message.role !== "assistant") continue;
+		for (const call of callsOf(message)) calls.set(call.id, call);
+	}
+	const readAt = [];
+	for (const [index, message] of messages.entries()) {
+		if (message.role !== "toolResult") continue;
+		const call = calls.get(message.toolCallId);
+		if (call === undefined) continue;
+		if (call.name === "read" || (call.name === "book" && call.arguments?.action === "read")) readAt.push(index);
+	}
+	if (readAt.length === 0) return { messages };
+	const newest = readAt.at(-1);
+	const reads = new Set(readAt);
+	// A result already folded by a task keeps the line it was folded under (that line carries its id).
+	const folded = (message) => /^\[s\d+: /.test(textOf(message));
+	const out = messages.map((message, index) => {
+		if (!reads.has(index)) return message;
+		if (folded(message)) return message;
+		return withText(message, index === newest ? movedReadLine(calls.get(message.toolCallId)) : evictedReadLine(calls.get(message.toolCallId)));
+	});
+	const newestMessage = messages[newest];
+	if (folded(newestMessage)) return { messages: out };
+	return { messages: out, tail: textOf(newestMessage) };
+}
+
 /** Reconcile the front block's salient-notes section with the ledger, and its record section with the report rows. */
 function dressFrontRows(message, store, salient) {
 	let text = textOf(message);

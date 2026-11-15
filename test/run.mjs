@@ -1234,6 +1234,53 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(messages[4].content[0].text, big, "the stored messages are not changed");
 });
 
+test("context: read results are ephemeral — all but the newest leave one line, and the newest stands at the end of the request", async () => {
+	const { dressReads, splitReadTail, withReadTail, withoutReadTail } = await import("../src/context.mjs");
+	const { withoutAdditions } = await import("../src/request.mjs");
+	const rawText = (message) => message.content[0].text;
+	const text = (role, words, more = {}) => ({ role, content: [{ type: "text", text: words }], ...more });
+	const convo = [
+		text("user", "read two files"),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "book", arguments: { target: "file", action: "read", path: "a.js" } }] },
+		text("toolResult", "== a.js (lines 1-2 of 2)\n1  alpha\n2  beta", { toolName: "book", toolCallId: "r1" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "book", arguments: { target: "ledger", action: "read" } }] },
+		text("toolResult", "{ \"entries\": [] }", { toolName: "book", toolCallId: "r2" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r3", name: "book", arguments: { target: "file", action: "read", ref: { id: "f9" }, range: "1-40" } }] },
+		text("toolResult", "== c.js (lines 1-40 of 300)\n1  gamma", { toolName: "book", toolCallId: "r3" }),
+	];
+	const { messages, tail } = dressReads(convo);
+	// The earlier reads of any target are one line each; the newest one leaves its content for the tail.
+	assert.match(rawText(messages[2]), /no longer in view — file read a\.js/);
+	assert.match(rawText(messages[4]), /no longer in view — ledger read/);
+	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*file read f9/);
+	assert.equal(tail, "== c.js (lines 1-40 of 300)\n1  gamma");
+	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2)\n1  alpha\n2  beta", "the stored messages are not changed");
+	// Deterministic: the same request is dressed the same way.
+	assert.equal(dressReads(convo).tail, tail);
+	// A non-read action is not a read.
+	const noReads = [text("assistant", "thinking", {}), text("toolResult", "done", { toolName: "book", toolCallId: "x" })];
+	assert.equal(dressReads(noReads).tail, undefined, "no reads, no tail");
+	// A result already folded keeps the line it was folded under (it carries the id).
+	const folded = [
+		{ role: "assistant", content: [{ type: "toolCall", id: "r9", name: "read", arguments: { paths: ["d.js"] } }] },
+		text("toolResult", "[s9: I dropped this result. It was: read d.js, about 40 tokens. Call again if I need it.]", { toolName: "read", toolCallId: "r9" }),
+	];
+	const dressedFolded = dressReads(folded);
+	assert.equal(dressedFolded.messages[1].content[0].text, folded[1].content[0].text, "a folded result is left alone");
+	assert.equal(dressedFolded.tail, undefined, "and there is nothing to move");
+	// The tail is glued at the very end of the request, after everything else.
+	const ended = withReadTail(messages, tail);
+	const lastText = ended.at(-1).content.at(-1).text;
+	assert.match(lastText, /<read-tail>\n== c\.js/);
+	assert.deepEqual(splitReadTail(lastText), { text: rawText(messages.at(-1)), tail: `<read-tail>\n${tail}` });
+	assert.equal(withoutReadTail(lastText), rawText(messages.at(-1)));
+	assert.equal(withoutAdditions(lastText), withoutAdditions(rawText(messages.at(-1))), "and it comes off again like the other additions");
+	// With an assistant at the end (no place to glue to), a message of its own carries the tail.
+	const endedAssistant = withReadTail([...messages, text("assistant", "a note to myself")], tail);
+	assert.equal(endedAssistant.at(-1).role, "user");
+	assert.match(endedAssistant.at(-1).content[0].text, /<read-tail>/);
+});
+
 test("screen: text is measured in cells, wrapped and painted to the width; a repeating tail is told from ordinary text", async () => {
 	const { cut, fit, paint, repeats, short, span, width, wrap } = await import("../src/screen/text.mjs");
 	assert.deepEqual([width("abc"), width("日本"), width("e\u0301"), width("│ ✓")], [3, 4, 1, 3], "wide characters take two cells, a combining mark none");
