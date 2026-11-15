@@ -89,7 +89,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | Ctrl-D, Ctrl-U | Scroll half a page. Ctrl-F and Ctrl-B a page, Ctrl-E and Ctrl-Y a row |
 | `/` | Search the tab that shows. Enter or Down goes to the next match, Up to the one before, Esc closes the search |
 | `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item, a node or an entry of the books at the line where it stands in its file. In Chat, a message of yours or of the agent (see [Saying a message anew](#saying-a-message-anew)); tool work cannot be edited, and neither can what Cartographer printed. In Context, whatever has a source to edit: the system prompt's wording in `src/prompt.mjs`, a tool of the unfolded Tools part where it is defined, the assessment file, the store of what the last collapse keeps, a shelved file, and the chat messages (see [Saying a message anew](#saying-a-message-anew)). The row under the tabs names the file, where there is one |
-| `f`, `v`, `d`, `x`, `a` | In the Hands view of Context, what the agent's `context` tool does and what only the user may: `f` folds the report out of view or brings it back, `v` archives it out of the record, `d` deletes it for good (`d` again says so), `x` takes a shelved file off the shelf, `a` puts `/shelve` in the place to type |
+| `f`, `v`, `d`, `x`, `t`, `n` | On a row of any view but Chat: `f` folds a report out of view or brings it back (in Hands), `v` archives it out of what the agent reads — a report's record line, a ledger entry, a plan item, an entry of the books, a node — or brings it back, `d` deletes it for good (`d` again says so), `x` takes a shelved file off the shelf (in Hands), `t` settles it the way the agent settles one (a ledger entry is closed, a plan item done, an entry of the books settled, a node confirmed). In Carto's book views (Atlas, Ledger, Plan, Books), `n` opens `$EDITOR` on a template for a new entry; what you save goes in through the same operations the agent uses. `a` puts `/shelve` in the place to type (in Hands) or approves the request (in Requests) |
 | `y`, `Y` | Copy what is selected; copy the whole tab |
 | `r` | Read the tab again |
 | `:` | Type a command |
@@ -282,7 +282,8 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
 | `/fold ID …` | What the agent does with `fold`: take a kept report out of view, leaving its one line |
 | `/recall ID …` | Bring a kept report back into view in full |
-| `/archive ID …`, `/unarchive ID …` | Take a report's record line out of the kept block for good, or bring it back; the report stays on disk and recall by id finds it either way |
+| `/archive ID …`, `/unarchive ID …` | Take a row out of what the agent reads for good, or bring it back: a report's record line, a ledger entry, a plan item, an entry of the books, a node of the graph. The row stays on disk either way |
+| `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a plan item is done, an entry of the books is settled, a node is confirmed |
 | `/delete ID …` | Remove a report for good: its record line and its file. Nothing recalls it again |
 | `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
 | `/model`, `/model NAME` | The models the server serves, and which is on; a name or a number from the list switches. A task forked after runs on it too |
@@ -1091,6 +1092,7 @@ The stand-in is not a model. The tests show that the program does the right thin
 | `src/tools/ask.mjs`, `src/asks.mjs` | The `ask` tool, and the question that waits for your answer |
 | `src/tools/return.mjs` | The `return` tool: the one way a task ends |
 | `src/tools/context.mjs` | The `context` tool: recall, shelf, drop, note, collapse |
+| `src/ops.mjs` | The operations the screen offers you over a row (archive, unarchive, delete, fold, settle, add), the same code the commands run and the same operations the agent uses |
 | `src/terminal.mjs` | The plain terminal: input, and printing what happens. It also runs the session behind the full screen |
 | `src/screen/app.mjs` | The full screen: pi-tui's terminal and layout, the tabs, the two modes and their keys, the strip |
 | `src/screen/parts.mjs` | The parts of the screen as pi-tui components: the row of tabs, the bodies of the tabs, the strip, the place to type, the sheet of keys |

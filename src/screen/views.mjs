@@ -83,7 +83,7 @@ export function atlasView({ root, brainDir }) {
 			target: { file, line: jsonLine(file, "name", node.name) },
 		};
 	});
-	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [stale.size > 0 ? ` · ${stale.size} may be out of date` : "", "warn"]]];
+	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [stale.size > 0 ? ` · ${stale.size} may be out of date` : "", "warn"]], [[`  t confirms a node, n new node (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]];
 	if (items.length === 0) items.push(note("  No nodes yet. The agent and its tasks write them as they learn the project."));
 	return { header, items };
 }
@@ -129,7 +129,8 @@ export function ledgerView({ brainDir }) {
 		items.push(...done.map(entry));
 	}
 	if (items.length === 0) items.push(note("  The ledger is empty: no goal yet. Say what you want to achieve."));
-	return { header: [], items };
+	const header = [[[`  t settles, n new entry (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]];
+	return { header, items };
 }
 
 /** The plan: whether it is authorized, then its items in order. */
@@ -160,7 +161,7 @@ export function planView({ brainDir, yolo }) {
 		target: { file, line: jsonLine(file, "id", item.id) },
 	}));
 	const waits = !yolo && plan.authorized === undefined && plan.items.some((item) => item.status === POLICY.enums.entryStatus.open && item.mode === POLICY.enums.planMode.change);
-	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]]], items };
+	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]], [[`  t marks done, n new item (an editor opens), v archive, d delete, e opens its JSON`, "faint"]]], items };
 }
 
 /** What waits for the user: change items and questions of taste. */
@@ -271,8 +272,10 @@ export function booksView({ brainDir }) {
 		items.push(heading(title));
 		items.push(...mine.filter((item) => item.status === POLICY.enums.entryStatus.open).map(entry), ...mine.filter((item) => item.status === POLICY.enums.entryStatus.done).map(entry));
 	}
-	if (items.length === 0) return { header: [], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works.")] };
-	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice shows the second book on the terminal", "muted"]]], items };
+	if (items.length === 0) {
+		return { header: [[[`The agent's books · ${store}`, "bold"]], [["  t settles, n new entry (an editor opens), v archive, d delete · /practice prints the practice book", "faint"]]], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works. n starts a new entry.")] };
+	}
+	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  t settles, n new entry (an editor opens), v archive, d delete · /practice prints the practice book", "faint"]]], items };
 }
 
 // ─── Diff ───────────────────────────────────────────────────────────────────

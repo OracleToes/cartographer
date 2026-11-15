@@ -22,7 +22,7 @@ import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem } from "./context.mjs";
-import { archiveRows, dropRows, unarchiveRows } from "./ops.mjs";
+import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -1009,8 +1009,9 @@ export async function runTerminal(session, options) {
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
-					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a node of the graph",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a books entry, a node of the graph; the row stays on disk either way",
+					"  /done ID …  settle a row the way the agent does: a ledger entry is closed, a plan item is done, a books entry is settled, a node is confirmed",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a books entry, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1593,10 +1594,18 @@ export async function runTerminal(session, options) {
 			case "unarchive": {
 				const ids = args;
 				if (ids.length === 0) {
-					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a books entry, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
 				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
+				return true;
+			}
+			case "done": {
+				if (argument === undefined || args.length === 0) {
+					line("  /done ID …  settles a row the way the agent does: a ledger entry is closed, a plan item is done, a books entry is settled, a node is confirmed.");
+					return true;
+				}
+				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);
 				return true;
 			}
 			case "delete": {

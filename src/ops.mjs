@@ -1,20 +1,23 @@
 // The operations the user has on a row of any view, in one place.
 //
 // The screen's views show rows of several books: Hands holds the kept reports and the shelf, Carto's tabs the
-// atlas, the ledger and the plan, Requests what waits for the user. The keys over those rows (f, v, d, x in
-// src/screen/app.mjs) and the commands that name a row by its id (/archive, /unarchive, /delete in
+// atlas, the ledger and the plan, Requests what waits for the user. The keys over those rows (f, v, d, x, t and
+// n in src/screen/app.mjs) and the commands that name a row by its id (/archive, /unarchive, /delete, /done in
 // src/terminal.mjs) do the same work, so the work lives here: an id names a row of one of the books, and each
 // function carries the operation out and returns the line to show.
 //
 // Resolve a row by searching the owning books; an id prefix is not a dispatch mechanism for context-row species.
 import { POLICY } from "./config.mjs";
 import { applyContextRowAction, ContextRowError, foldReports, loadContext, recallReport, unshelveForUser } from "./context.mjs";
-import { loadAtlas, saveAtlas } from "./atlas.mjs";
-import { loadLedger, saveLedger } from "./ledger.mjs";
-import { loadPlan, savePlan } from "./plan.mjs";
+import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "./atlas.mjs";
+import { applyOp, LedgerError, loadLedger, prune, saveLedger } from "./ledger.mjs";
+import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
+import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "./books.mjs";
+import { saveAssessment } from "./assessment.mjs";
+import { noteAssessed, pin } from "./top.mjs";
 
 /** The books an id might name, and the words for them in a line of refusal. */
-export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
+export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a books entry a1 or r1, a node of the graph its name`;
 const contextAction = (brainDir, id, action) => {
 	try {
 		return applyContextRowAction(brainDir, id, action);
@@ -41,7 +44,18 @@ function row(brainDir, id) {
 	if (item !== undefined) return { what: "plan item", archived: item.archived === true, kind: item.mode, found: item };
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas?.nodes.find((entry) => entry.name === id);
-	return node === undefined ? undefined : { what: "node", archived: node.archived === true, kind: node.kind ?? "node", found: node };
+	if (node !== undefined) return { what: "node", archived: node.archived === true, kind: node.kind ?? "node", found: node };
+	const book = loadBooks(brainDir);
+	const bookEntry = book?.items.find((item) => item.id === id);
+	return bookEntry === undefined ? undefined : { what: bookEntry.kind === POLICY.enums.bookKind.practice ? "practice entry" : "assessment entry", archived: bookEntry.archived === true, kind: bookEntry.kind, found: bookEntry };
+}
+
+/** Keep assessment.md in step with the assessment entries, as the agent's own book operations do. */
+function syncAssessment(brainDir, book) {
+	if (!book.items.some((item) => item.kind === POLICY.enums.bookKind.assessment)) return;
+	const assessment = renderBook(book, POLICY.enums.bookKind.assessment);
+	saveAssessment(brainDir, assessment);
+	noteAssessed(brainDir, assessment);
 }
 
 /**
@@ -67,6 +81,14 @@ export function archiveRow(brainDir, id) {
 		item.archived = true;
 		savePlan(brainDir, plan);
 		return `${id} archived: the item leaves the plan as the agent reads it, and waits in the file; /unarchive brings it back.`;
+	}
+	if (found.what === "assessment entry" || found.what === "practice entry") {
+		const book = loadBooks(brainDir);
+		const entry = book.items.find((item) => item.id === id);
+		entry.archived = true;
+		saveBooks(brainDir, book);
+		syncAssessment(brainDir, book);
+		return `${id} archived: the entry leaves the book as the agent reads it, and waits in the file; /unarchive brings it back.`;
 	}
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas.nodes.find((entry) => entry.name === id);
@@ -95,6 +117,14 @@ export function unarchiveRow(brainDir, id) {
 		savePlan(brainDir, plan);
 		return `${id} is back in the plan as the agent reads it.`;
 	}
+	if (found.what === "assessment entry" || found.what === "practice entry") {
+		const book = loadBooks(brainDir);
+		const entry = book.items.find((item) => item.id === id);
+		delete entry.archived;
+		saveBooks(brainDir, book);
+		syncAssessment(brainDir, book);
+		return `${id} is back in the book as the agent reads it.`;
+	}
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas.nodes.find((entry) => entry.name === id);
 	delete node.archived;
@@ -113,15 +143,27 @@ export function dropRow(brainDir, id) {
 	if (found.what === "report") return contextAction(brainDir, id, POLICY.enums.actions.delete);
 	if (found.what === "ledger entry") {
 		const { ledger } = loadLedger(brainDir);
-		ledger.items.splice(ledger.items.indexOf(found.found), 1);
+		const at = ledger.items.findIndex((item) => item.id === id);
+		if (at < 0) return `There is no ${id}. ${BOOKS}.`;
+		ledger.items.splice(at, 1);
 		saveLedger(brainDir, ledger);
 		return `${id} is gone for good: the ${found.found.kind} is out of the ledger, and nothing of it is said to the agent.`;
 	}
 	if (found.what === "plan item") {
 		const { plan } = loadPlan(brainDir);
-		plan.items.splice(plan.items.indexOf(found.found), 1);
+		const at = plan.items.findIndex((item) => item.id === id);
+		if (at < 0) return `There is no ${id}. ${BOOKS}.`;
+		plan.items.splice(at, 1);
 		savePlan(brainDir, plan);
 		return `${id} is gone for good: the item is out of the plan, and nothing of it is said to the agent.`;
+	}
+	if (found.what === "assessment entry" || found.what === "practice entry") {
+		const book = loadBooks(brainDir);
+		const at = book.items.findIndex((item) => item.id === id);
+		book.items.splice(at, 1);
+		saveBooks(brainDir, book);
+		syncAssessment(brainDir, book);
+		return `${id} is gone for good: the entry is out of the book, and nothing of it is said to the agent.`;
 	}
 	const { atlas, error } = loadAtlas(brainDir);
 	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
@@ -161,3 +203,115 @@ function rows(brainDir, ids, one) {
 export const archiveRows = (brainDir, ids) => rows(brainDir, ids, archiveRow);
 export const unarchiveRows = (brainDir, ids) => rows(brainDir, ids, unarchiveRow);
 export const dropRows = (brainDir, ids) => rows(brainDir, ids, dropRow);
+
+/**
+ * Mark a row of a view settled, with the same operations the agent uses: a ledger entry is closed (with the
+ * outcome line the agent would give), a plan item is done, a book entry is settled (and assessment.md is kept
+ * in step), a node of the graph is confirmed (the node's own "still true"). @returns the line to show
+ */
+export function settleRow(brainDir, id, root) {
+	const found = row(brainDir, id);
+	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
+	const now = new Date().toISOString();
+	try {
+		if (found.what === "report") return "A report has no settled: f folds it out of view.";
+		if (found.what === "ledger entry") {
+			const { ledger, error } = loadLedger(brainDir);
+			if (ledger === undefined) return `! The ledger cannot be read: ${error}`;
+			const isGoal = found.found.kind === POLICY.enums.ledgerKind.goal && found.found.status !== POLICY.enums.entryStatus.done;
+			const result = applyOp(ledger, { action: POLICY.enums.actions.done, id }, now);
+			prune(ledger);
+			saveLedger(brainDir, ledger);
+			// A goal that closes is a moment to bring the copy at the top of the context up to date, as the agent's own done does.
+			if (isGoal && ledger.items.find((item) => item.id === id)?.status === POLICY.enums.entryStatus.done && pin(brainDir, { reason: `goal ${id} was closed` }).changed) {
+				return `${result.line} The copy of your assessment and graph at the top of the context was rewritten to what they are now.`;
+			}
+			return result.line;
+		}
+		if (found.what === "plan item") {
+			const { plan, error } = loadPlan(brainDir);
+			if (plan === undefined) return `! The plan cannot be read: ${error}`;
+			const result = applyPlanOp(plan, { action: POLICY.enums.actions.done, id }, now);
+			savePlan(brainDir, plan);
+			return result.line;
+		}
+		if (found.what === "assessment entry" || found.what === "practice entry") {
+			const book = loadBooks(brainDir);
+			const result = applyBookOp(book, { action: POLICY.enums.actions.done, id }, now);
+			saveBooks(brainDir, book);
+			syncAssessment(brainDir, book);
+			return result.line;
+		}
+		const { atlas, error } = loadAtlas(brainDir);
+		if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+		if (root === undefined) return "A node is confirmed from somewhere the graph can re-read its files.";
+		const result = applyAtlasOp(atlas, { action: "confirm", names: [found.found.name] }, { root, now });
+		saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error) {
+		if (error instanceof LedgerError || error instanceof PlanError || error instanceof BookError || error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
+}
+
+/** The scaffold a new row of a book starts from, and how the book applies it. */
+const ADD_TEMPLATES = {
+	ledger: { label: "ledger entry", text: () => `${JSON.stringify({ kind: "note", text: "", salient: false, done_when: "" }, null, "\t")}\n` },
+	plan: { label: "plan item", text: () => `${JSON.stringify({ mode: "look", text: "", network: false, standing: false }, null, "\t")}\n` },
+	books: { label: "book entry", text: () => `${JSON.stringify({ kind: "assessment", text: "" }, null, "\t")}\n` },
+	atlas: { label: "node", text: () => `${JSON.stringify({ name: "", gist: "", kind: "", detail: "" }, null, "\t")}\n` },
+};
+
+export const ADD_BOOKS = Object.keys(ADD_TEMPLATES);
+
+/** The JSON a new row of `book` starts from; an editor opens on it. @returns undefined for a book with no add */
+export const addTemplate = (book) => ADD_TEMPLATES[book]?.text();
+
+/**
+ * Add a row to a book from the JSON its scaffold holds, with the same operations the agent uses. The file is
+ * parsed first; anything the book refuses is said plainly; nothing is half-applied. @returns the line to show
+ */
+export function applyAdd(brainDir, book, text, root) {
+	const scaffold = ADD_TEMPLATES[book];
+	if (scaffold === undefined) return `There is no add for ${book} here.`;
+	let op;
+	try {
+		op = JSON.parse(String(text));
+	} catch (error) {
+		return `! The new ${scaffold.label} does not parse: ${error.message}. Nothing was added.`;
+	}
+	if (op === null || typeof op !== "object" || Array.isArray(op)) return `! The new ${scaffold.label} has to be a single JSON object. Nothing was added.`;
+	const now = new Date().toISOString();
+	try {
+		if (book === "ledger") {
+			const { ledger, error } = loadLedger(brainDir);
+			if (ledger === undefined) return `! The ledger cannot be read: ${error}`;
+			const result = applyOp(ledger, { action: POLICY.enums.actions.add, ...op }, now);
+			saveLedger(brainDir, ledger);
+			return result.line;
+		}
+		if (book === "plan") {
+			const { plan, error } = loadPlan(brainDir);
+			if (plan === undefined) return `! The plan cannot be read: ${error}`;
+			const result = applyPlanOp(plan, { action: POLICY.enums.actions.add, ...op }, now);
+			savePlan(brainDir, plan);
+			return result.line;
+		}
+		if (book === "books") {
+			const b = loadBooks(brainDir);
+			const result = applyBookOp(b, { action: POLICY.enums.actions.add, ...op }, now);
+			saveBooks(brainDir, b);
+			syncAssessment(brainDir, b);
+			return result.line;
+		}
+		const { atlas, error } = loadAtlas(brainDir);
+		if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+		if (root === undefined) return "A node is added from somewhere the graph can check its files.";
+		const result = applyAtlasOp(atlas, { action: "add", ...op }, { root, now, mayCreate: false });
+		saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error) {
+		if (error instanceof LedgerError || error instanceof PlanError || error instanceof BookError || error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
+}

@@ -29,7 +29,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
-import { archiveRow, dropRow, foldRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { addTemplate, applyAdd, archiveRow, dropRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath } from "../atlas.mjs";
 import { booksPath } from "../books.mjs";
@@ -108,9 +108,10 @@ const COMMANDS = [
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
-	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, or node"],
+	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, book entry, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, or node"],
+	["done", "settle a row the way the agent does: a ledger entry, a plan item, a book entry, a node of the graph"],
+	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, book entry, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -155,7 +156,8 @@ export const KEYS_HELP = [
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file",
-	"  f, v, d, x       the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a plan item done, a book entry settled, a node confirmed); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	"  n                a new ledger entry, plan item, book entry or node: an editor opens on a template, and what you save goes in through the same operations the agent uses",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
@@ -729,6 +731,17 @@ export async function runScreen(session, options, runTerminal) {
 		refresh(viewId(), true);
 		flash("deleted from the talk the collapse keeps, and from view · what was sent stays stored, and the agent reads it until the next collapse");
 	};
+	/** n in a book view: an editor opens on a template; on save the entry goes in through the same operations the agent uses. */
+	const newEntry = (book) => {
+		const template = addTemplate(book);
+		if (template === undefined) return flash("this view has no add");
+		const file = scratch(`new-${book}.json`, template);
+		if (!runEditor(file)) return;
+		const said = applyAdd(brainDir, book, readFileSync(file, "utf8"), root);
+		flash(said);
+		refresh(viewId(), true);
+	};
+	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.books": "books", "carto.atlas": "atlas" };
 	const editContext = () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
@@ -894,7 +907,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		if (key === "z") return void (state.pending = "z");
 		// The rows of the views, in every tab but Chat: the same keys do everywhere what they do in Hands — f
-		// folds a report, v archives a row out of what the agent reads, d deletes it for good, x unshelves a file.
+		// folds a report, v archives a row out of what the agent reads, d deletes it for good, t settles it, x unshelves a file.
 		// They stand on whatever the view shows: a report or a shelved file in Hands, a node of the graph, a
 		// ledger entry, a plan item in Carto, a request in Requests, a message of the user or the agent in the
 		// Context window. The operations themselves are in src/ops.mjs, the same code the commands run.
@@ -911,6 +924,11 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
 				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+				flash(settleRow(brainDir, bookId, root));
 				refresh(viewId(), true);
 				return;
 			}
@@ -950,6 +968,8 @@ export async function runScreen(session, options, runTerminal) {
 					return void submit(`/deny ${bookId}`);
 				}
 			}
+			// In a book view, n opens an editor on a template for a new entry.
+			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void newEntry(BOOK_VIEWS[viewId()]);
 			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
 			if (key === "a" && viewId() === "context.hands") {
 				setMode("type");
