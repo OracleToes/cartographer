@@ -552,3 +552,57 @@ Deleting the routing ceremony does not weaken the confirmed Stage-4/5 intent: ev
 - ~~§6.6 afterTool/afterResponse hook~~ — RESOLVED 2026-11-15: the user chose lazy backfill; no write-path hook for now.
 - §8 Q5 (retained-version retention cap) and Q6 (default `--frozen-lockfile`-adjacent review flag); Q3 (Phase 3 error-attached guidance) awaits live-server evidence.
 - Phase 3 (error guidance), Phase 4 (test port), Phase 5 (docs) — not authorized.
+
+## Appendix F — Phase 3 measurement (offline, 2026-11-15)
+
+**Method.** Byte counts are UTF-8 lengths of `JSON.stringify`; token figures are bytes÷4 estimates (`charsPerToken: 4`); provider wrapper keys around each function declaration are identical across trees and were excluded. "On-wire at Stage-5" is the declaration the provider actually sent (the `BOOK_COMPACT_PARAMETERS` swap in the deleted `tool-schemas.mjs`); the branch figure is `strictSchema(bookTargetParameters(fullParameters, branch))` as injected mid-episode, measured on the `0e566c0` tree. Trees: Stage-5 = `0e566c0`, Phase-1 pre-memo = `3b3f23a`, HEAD = `18d3ee1`. The durable-read counts use a fake Durable world (226 entries: one system prompt, 110 user/assistant pairs, one model tool task + tool-result, one nested task; one watched task conversation, one observer conversation). **Nothing was run against a live server; nothing here is a claim about model behavior.** Measurement needed no network and no app launch; `node_modules` had to be restored with `npm ci --ignore-scripts` after the sandbox pruned it. Two scratch worktrees and all probes were removed afterwards.
+
+**Table A — fixed payload per request (bytes, tokens est.)**
+
+| Component | Stage-5 `0e566c0` | Phase 1 `3b3f23a` | HEAD `18d3ee1` |
+|---|---|---|---|
+| system prompt | 7,621 (~1,905) | 7,688 (~1,922) | 8,175 (~2,044) |
+| tool descriptions (14–15 tools) | 6,016 (~1,504) | 5,634 (~1,409) | 5,873 (~1,468) |
+| `book` parameters, as sent | **551** (compact projection) | 2,265 (flat) | 2,380 (flat + cursor) |
+| **fixed total** (prompt + descriptions + book decl) | **14,188** | **15,587** | **16,428** |
+| delta vs Stage-5 | — | +1,399 | **+2,240 (~560 est. tokens)** |
+
+The flat declaration costs ~470 est. tokens per request versus the compact projection, on every request, forever — and buys back the entire transient column:
+
+**Table B — transient cost per cold `book` episode (Stage-5 only; HEAD pays zero)**
+
+| Branch | Injected branch schema | est. tokens |
+|---|---|---|
+| ledger | 21,747 B | ~5,437 |
+| plan | 37,799 B | ~9,450 |
+| atlas | 38,492 B | ~9,623 |
+| context | 25,919 B | ~6,480 |
+
+Injection happened on the *first* book call of an episode and was re-read by the server until the operation succeeded (up to 3 replay attempts, then a canned failure). One cold `book plan` call at Stage-5 cost the plan branch alone ≈ 9.5k tokens plus ≥ 2 model turns (routing turn, then the reissued call) and 2 stored junk messages (the assistant marker and the `\u2063` continuation). At HEAD the same call costs its fixed bytes in Table A, one model turn, zero stored junk — the §6.9 "~11,000 tokens" worst case is re-measured here at 9.4–9.6k for plan/atlas on this exact tree.
+
+**Table C — Durable reads per `book … list` call** (fake world; `ok: true` on every call)
+
+| call | Phase 1 `3b3f23a` (every call) | HEAD cold (builds memo) | HEAD warm (memo probe) |
+|---|---|---|---|
+| `message list` | 1 scanConversations + 7 scanEntries | 1 + 7 + 1 scanTasks + 1 NestedCallDoc read | **1 + 2 scanEntries + 1 scanTasks, 0 NestedCallDoc reads** |
+| `toolCall list` | 1 + 7 + 1 scanTasks + 1 NestedCallDoc read | served by the just-built memo: 1 + 2 + 1 | **1 + 2 + 1, 0 NestedCallDoc reads** |
+| `toolResult list` | 1 + 7 + 1 scanTasks + 1 NestedCallDoc read | served by the just-built memo: 1 + 2 + 1 | **1 + 2 + 1, 0 NestedCallDoc reads** |
+
+Phase 1 re-derived the whole durable world from the transcript on *every* list call — including re-fetching the nested document once per call; HEAD derives once, then pays a constant watermark probe. Point reads (`inspect`/`read` on a known id) use the same memo with a single-entry re-derivation fast path.
+
+**Table D — error-attached guidance (Q3; authorized 2026-11-15 after the dice-roller live run)**
+
+The live 27B Qwen run on this branch failed 3 of its first book calls: an invented `items`-batch op aimed at ledger, the same aimed at plan (`type` instead of `mode`), and a goal add missing `done_when` — all three caught by the local validators (the fail-closed design held), each costing a round trip. `18d3ee1` appends one line to **local failures only**, only for brain targets with opaque `operation` payloads:
+
+```
+Op 1 (add) not applied: `mode` is undefined; it is look (the task only reads) or change (the task writes files).
+plan add takes: mode (look | change) and text — before, network and standing optional (network/standing only with change).
+```
+
+Unsupported `target`/`action` pairs now list the target's supported actions, read from the `CAPABILITIES` table (no hand-written list to drift). Happy-path bytes are unchanged. The `atlas` tool keeps its own world (out of scope for Q3).
+
+**Table E — context block baseline (fixture, fresh brain)**
+
+`stateBlock` on a fresh brain ≈ **828 B** (~207 est. tokens); the standing per-request payload is dominated by Table A, not by state.
+
+**What Phase 3 did not establish** — for Stage 8/live only: first-try success rates of the 27B with the prompt lines (`d2a1666`) and the Q3 guidance; provider-specific serialization; real tokenizer counts; adapter parity. The Stage-5 column of Table A/B is not re-measurable in isolation without the deleted lifecycle, and was not re-measured end-to-end — it is the review-time measurement, reproduced here for the on-wire declaration and the branch injections.
