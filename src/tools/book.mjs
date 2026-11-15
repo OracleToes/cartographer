@@ -1090,20 +1090,16 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
 		// and the rest of the books change nothing when the same words are written twice.
 		replay: POLICY.enums.toolReplay.safe,
+		// Read-only operations run inline for every context; project changes go through the one gate (§6 of
+		// docs/design.md). `file rebind` still dispatches to a short focus: it is a catalog identity write.
 		execute: async (args, api, callContext) => {
 			if (args.target !== undefined) {
 				const main = api.conversationId === ROOT_CONVERSATION_ID;
 				const mutation = args.target === "file" && ["create", "edit"].includes(args.action);
-				const externalWork = args.target === "file" && ["inspect", "read", "create", "edit", "rebind"].includes(args.action)
-					|| args.target === "report" && ["inspect", "read"].includes(args.action)
-					|| DURABLE_TARGETS.has(args.target) && ["list", "inspect", "read", "edit"].includes(args.action)
-					|| args.target === "shelf" && args.action === "add";
 				if (main && mutation && (typeof args.planItem !== "string" || args.planItem.trim() === "")) return fail("file create/edit needs an authorized change planItem; first get it approved in the plan.");
-				if (main && externalWork) {
-					const focusedArgs = args.target === "shelf" && args.action === "add" ? { ...args, handOn: true } : args;
+				if (main && args.target === "file" && args.action === "rebind") {
 					const taskArgs = {
-						brief: `Perform exactly one bounded book operation, then return immediately. Call book once with these exact arguments: ${JSON.stringify(focusedArgs)}. Do not broaden scope, do not make project changes except the explicitly requested authorized operation, and return its result.`,
-						...(mutation ? { item: args.planItem } : {}),
+						brief: `Perform exactly one bounded book operation, then return immediately. Call book once with these exact arguments: ${JSON.stringify(args)}. Do not broaden scope, do not make project changes, and return its result.`,
 					};
 					const task = await api.executeTool("task", taskArgs, callContext, { key: "book-focus" });
 					const nested = task.structuredOutput;

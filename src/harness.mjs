@@ -29,7 +29,6 @@ import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
 
 const PROVIDER = "local";
-const LOOK = new Set(["read", "search", "list"]);
 const CHANGE = new Set(["write", "edit"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
 const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run || call.arguments?.action === POLICY.enums.shellAction.send);
@@ -256,8 +255,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
-						if (LOOK.has(call.name)) return { block: REFUSALS.mainLooks };
-						if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
+					if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
 						if (types(call)) return { block: REFUSALS.mainRuns };
 						if (call.name === "return") return { block: REFUSALS.mainReturns };
 						// A turn that a wake started is quiet until the agent does something in it; `sleep` is not something.
