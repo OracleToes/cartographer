@@ -119,6 +119,7 @@ const COMMANDS = [
 	["new", "start a fresh context with nothing kept in view"],
 	["pin", "rewrite the copy of assessment and graph at the top of the context"],
 	["yolo", "let change items run without /approve while you watch", ["on", "off"]],
+	["initiate", "whether the agent starts working on its own when carto starts; default on", ["on", "off"]],
 	["bwrap", "how tasks' commands run: with the sandbox or without", ["on", "off"]],
 	["shells", "the shell windows: what runs in each, and its newest lines"],
 	["kill", "close a shell window and end what runs in it", ["all"]],

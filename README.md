@@ -297,6 +297,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
 | `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. The settings can hold the default (`yolo`); a switch while running is never remembered. See [Without approval](#without-approval-yolo) |
+| `/initiate`, `/initiate on`, `/initiate off` | Whether the agent starts working on its own when carto starts (it looks around, tends the books and works what is approved, or sleeps when there is nothing to do). The settings can hold the default (`initiate`); a switch while running is never remembered |
 | `/wakes`, `/wakes remove ID`, `/wakes remove all` | What the agent has set to wake itself, and taking one or all of them away |
 | `/diff` | What the last change task did to the files, as a patch; or a shell window, when that is the newest step. `/diff all` shows a long patch in full |
 | `/undo` | Take the last step back: a change task, or what a shell window changed with no task around. Again for the one before it |
@@ -485,7 +486,7 @@ What it changes:
 What it does not change:
 
 - Every change is still a plan item carried out by a task. So there is still a checkpoint before and after each one, `/diff` shows what it did, and `/undo` takes it back. After an undo the item is open again and the agent may carry it out again, so say what you want instead.
-- The main agent still cannot read, write or run anything itself.
+- The main agent still never writes. It may run commands itself, but only in a read-only window (see [The sandbox](#the-sandbox)); anything that must write is still a change item for a task.
 - The sandbox is a separate switch (`/bwrap`). With both off, commands run directly on your machine and nothing asks you first; `/yolo on` says so when that is the case.
 - No item is approved by it. When you type `/yolo off`, change items that you never approved wait for your approval again; a task that is running at that moment finishes.
 
@@ -493,7 +494,7 @@ Only you can switch it: no tool does, and it is not remembered. The next `carto`
 
 ## Running commands
 
-A change task runs commands with `shell`: to try what it wrote, to run tests, to install what a plan item calls for, to start a server, and to move or delete files.
+A change task runs commands with `shell`: to try what it wrote, to run tests, to install what a plan item calls for, to start a server, and to move or delete files. The main agent may run a command too, as a read: it opens a read-only window (the project, the brain and `.git` mounted read-only, no network), which is enough for the tests, the lints and `git status`, and for nothing that writes.
 
 ```
 ▸ task p2  Write roll.py and run it with 2d6 and with a wrong argument…
@@ -538,13 +539,17 @@ The block shows the state when a request is sent. The agent does not see a windo
 
 With piped input (`echo … | carto`) nobody is there to wait, and `carto` leaves after the last line, which ends the windows. A line `/wait 60` waits up to that many seconds for the windows' commands and for the wakes the agent has set, and lets the agent react to each.
 
-**Who may do what.** Typing into a window, a command or a line of input, is for a task that carries out a change item of the authorized plan, as before. Reading, waiting, stopping and closing are open to the main agent and to every task, because none of them starts anything: the main agent can wait for a build itself, and stop or close what it no longer needs.
+**Who may do what.** Typing into a window, a command or a line of input, is for a task that carries out a change item of the authorized plan, as before. Reading, waiting, stopping and closing are open to the main agent and to every task, because none of them starts anything: the main agent can wait for a build itself, and stop or close what it no longer needs. The main agent may also run a command itself, but such a command runs in a read-only window: the project, the brain and `.git` are mounted read-only and the window has no network, so it is for the tests, the lints, git status and other checks that change nothing — like any other read. A command that must write or reach the network is a change item for a task as before.
 
 **You and the windows.** `/shells` lists them with their newest lines. `/kill NAME` closes one and ends what runs there, `/kill all` every one; the agent finds a line in its windows block saying that you closed it. `/stop` and Ctrl-C stop the agent and interrupt the command it was waiting for at that moment; commands in other windows keep running, and a line names them. Windows do not outlive `carto`: they end when you leave and when it is killed, and at the next start the agent is told which windows were running something and are gone.
 
 **A window after its task.** A window that is still running when its task ends can go on changing files. Those changes belong to no task, so Cartographer records them as a step of their own, named after the window, when the command ends, before the next change task starts, and when you leave. `/diff` shows such a step and `/undo` takes it back like a task's, without touching the plan. Only windows that were running something count: what you edit yourself while every window stands free is never recorded as a window's doing. What you edit while a window is at work does land in that window's step, since Cartographer cannot tell who wrote a file. A process that a command left in the background of a free window (`… &`) is not noticed this way; its changes go unrecorded until the next task's checkpoint takes them as given.
 
 **Who may run a command.** The rule is the same as for writing: only a task that carries out a change item of the plan you authorized. That holds for a command that changes nothing too, so "run the tests and report" is a plan item, and it waits for `/approve` like any other.
+
+### Starting on its own
+
+When carto starts, the agent gets a turn of its own: nobody has to write first. In it the agent does what the situation calls for — reads the project and tends the books and the atlas, works what stands approved in the plan, or calls `sleep` when there is nothing to do. What it may do without you in the room follows the same gates as always: looking is free, changes wait for your approval (unless `/yolo`), and commands it runs itself are read-only (below). `/initiate off` keeps it waiting for you instead; `/initiate on` lets it start on its own again, and it starts at once if it is resting. The setting is `initiate` in the settings (default `true`); a `/initiate` switch while carto runs is never remembered. This first turn is what keeps an unattended `carto` moving: without it the agent sat in front of an unread project until someone wrote.
 
 ### Waking up
 
@@ -610,6 +615,8 @@ Every window is a [bubblewrap](https://github.com/containers/bubblewrap) sandbox
 
 If a program that works in your terminal is "not found" in the sandbox, it probably lives in a part of your home folder that is not in the list above. Name its folder in the `shellRead` setting.
 
+**A read-only window.** The main agent runs its own commands (the tests, the lints, `git status`) in a window that is read-only like any other read: the project folder and the brain are mounted read-only there too, and the network is unreachable, whatever the plan item marks say. The window is shown with `read-only` in the windows block. A command that must write or reach the network cannot run in one; it is a change item for a task, as before. Reading, waiting, stopping and closing work the same in it.
+
 **The network.** A plan item can be marked `network`, which the agent is told to do for steps such as installing packages:
 
 ```
@@ -639,7 +646,7 @@ carto --no-bwrap        for the whole session
 
 Commands then run directly on the machine, as you, with your environment and the network. They can read, change and delete whatever you can, anywhere. What stays the same:
 
-- A plan still needs `/approve` before any command runs, and only a change task runs one.
+- A plan still needs `/approve` before a task's command runs. With the sandbox off the main agent has no command lane either: its read-only window has nothing to hold it, so it runs no commands at all.
 - `book` file create/edit/inspect/read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
 - The windows work the same, with bounded output, and every process of a window ends with it: on `/kill`, when you leave, and within about a second of Cartographer being killed. A process that detaches itself into a session of its own escapes this.
 
@@ -960,6 +967,7 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `screen` | true | Whether `carto` on a terminal takes the whole screen. false: the plain terminal, as with `--plain` |
 | `yolo` | false | Whether change items run without `/approve` from the start. `--yolo` overrides it for one run; `/yolo` switches it while carto runs and is never remembered |
 | `bwrap` | true | Whether the tasks' commands run in the bubblewrap sandbox. `--no-bwrap` overrides it for one run; `/bwrap` switches it while carto runs and is never remembered |
+| `initiate` | true | Whether the agent starts working on its own when carto starts. `/initiate` switches it while carto runs and is never remembered |
 | `repeatCut` | true | Whether a reply that writes the same thing over and over is cut off |
 | `prefill` | true | Whether the server is asked how far it is with reading the prompt |
 | `prefillTokens` | 1000 | From how many tokens to read anew the reading is shown in the strip |

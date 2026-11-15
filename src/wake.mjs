@@ -55,6 +55,19 @@ export function wakeNote(events) {
 	].join("\n");
 }
 
+/**
+ * The message that gives the agent its first turn, at the start of a session, when nothing is waiting on it (src/cli.mjs passes the option through; /initiate switches it).
+ */
+export function startNote() {
+	return [
+		OPEN,
+		`${HEAD} Nobody typed this. The session has started, and nothing is waiting on you: this turn is yours.`,
+		"",
+		"The standing duty. Look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what you learn in the books and the atlas. Form hypotheses and record them; verify what you can, with the commands you may run; carry out what stands approved in the plan. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved open item, no question waiting for the user — call `sleep`.",
+		CLOSE,
+	].join("\n");
+}
+
 const NO_CHAT_HEAD = `${OPEN}\n${HEAD} Your last message had no tool call.`;
 
 /**

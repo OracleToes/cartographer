@@ -167,6 +167,10 @@ export async function main(argv) {
 		// run); switching it while carto runs (/yolo) is never remembered.
 		const gate = { yolo: flags.yolo === true || config.yolo === true };
 		if (gate.yolo) say(YOLO_LINE);
+		// Whether the agent starts working on its own at the start. The settings hold the default; switching it while
+		// carto runs (/initiate) is never remembered.
+		const initiation = { on: config.initiate !== false };
+		if (!initiation.on) say("the agent waits for you (/initiate on lets it start on its own)");
 		if (adopted) say("The ledger file ledger.json is now carto-ledger.json; its entries are unchanged.");
 		if (forked) say(`Independent brain namespace created (${forked.previous} → ${forked.namespace}); internal references were rebound.`);
 
@@ -186,6 +190,7 @@ export async function main(argv) {
 			servedModels: served?.models,
 			runner,
 			gate,
+			initiation,
 			wakeMin: config.wakeMin,
 			treeDepth: config.treeDepth,
 			thinking: config.thinking !== false,

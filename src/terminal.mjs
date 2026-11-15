@@ -33,7 +33,7 @@ import { stateBlock, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, pin, sinceTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
-import { eventLine, isNoChat, wakeNote, withoutQuietWakes } from "./wake.mjs";
+import { eventLine, isNoChat, startNote, wakeNote, withoutQuietWakes } from "./wake.mjs";
 import { questionText, spanOf } from "./tools/ask.mjs";
 import { repeats } from "./screen/text.mjs";
 import { REPEAT_NOTE } from "./wake.mjs";
@@ -152,7 +152,7 @@ export function describeResult(message) {
 
 /**
  * @param {{ harness: any, main: any, context: any, windows?: ReturnType<typeof import("./windows.mjs").createWindows>, wakes?: ReturnType<typeof import("./wakes.mjs").createWakes> }} session
- * @param {{ input: NodeJS.ReadableStream, output: NodeJS.WritableStream, interactive: boolean, contextWindow: number, root: string, brainDir: string, oneShot?: string, gate?: { yolo: boolean }, wakeMin?: number }} options
+ * @param {{ input: NodeJS.ReadableStream, output: NodeJS.WritableStream, interactive: boolean, contextWindow: number, root: string, brainDir: string, oneShot?: string, gate?: { yolo: boolean }, initiation?: { on: boolean }, wakeMin?: number }} options
  *   gate: whether change items run without /approve; /yolo changes it, and the tools read it (src/harness.mjs)
  * @returns {Promise<number>} exit code
  */
@@ -164,6 +164,8 @@ export async function runTerminal(session, options) {
 	const { harness, main, context, windows, wakes, engine, asks } = session;
 	const config = options.config ?? {};
 	const gate = options.gate ?? { yolo: false };
+	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
+	const initiation = options.initiation ?? { on: true };
 	// The full screen (src/screen/app.mjs), when carto runs in it. It is this terminal with another face: the same
 	// commands, wakes and rests, and the same words for what Cartographer itself has to say. What differs is where
 	// text goes. Everything printed is handed to the screen as text for its Chat tab, except what is printed about
@@ -994,6 +996,7 @@ export async function runTerminal(session, options) {
 						"  /pause    hold everything new back from the agent while it finishes what it is doing; /pause or Ctrl-V again lets it go on",
 						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
 						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
+						"  /initiate /initiate off keeps the agent waiting for you at the start; /initiate on lets it start on its own again",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
 						"  /diff     what the last change task did to the files (/diff all: the whole patch)",
 						"  /undo     take the last change task back; again for the one before it",
@@ -1233,6 +1236,35 @@ export async function runTerminal(session, options) {
 						if (!busy) approvalLine();
 					}
 				} else line("  /yolo shows the setting, /yolo on switches approval off, /yolo off switches it back on.");
+				return true;
+			}
+			case "initiate": {
+				if (argument === undefined) {
+					line(initiation.on ? "  the agent starts on its own when carto starts, and after a wake with nothing owed" : "  the agent waits for you; it does nothing until you write");
+					line(dim(`  /initiate ${initiation.on ? "off keeps it waiting" : "on lets it start on its own"} · the settings hold the default (\`initiate\`), a switch while running is never remembered`));
+					return true;
+				}
+				if (argument !== "on" && argument !== "off") {
+					line("  /initiate shows the setting, /initiate on lets the agent start on its own, /initiate off makes it wait for you.");
+					return true;
+				}
+				const to = argument === "on";
+				if (to === initiation.on) {
+					line(to ? "  The agent already starts on its own." : "  The agent already waits for you.");
+					return true;
+				}
+				initiation.on = to;
+				setPrompt();
+				line(`${bold("●")} ${to ? "the agent starts on its own again" : "the agent waits for you: it does nothing until you write"}`);
+				line(dim("  Not remembered: the next start follows the setting (\`initiate\` in the settings)."));
+				// Switched on while it rests: its start is now.
+				if (to && !busy && !paused && options.interactive) {
+					enqueue(async () => {
+						if (busy || closing) return;
+						line(dim("  it starts now"));
+						await submit(startNote());
+					});
+				}
 				return true;
 			}
 			case "wakes": {
@@ -1477,6 +1509,7 @@ export async function runTerminal(session, options) {
 				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === POLICY.enums.windowStates.busy).length} busy · /shells shows them`);
 				if (gate.yolo) line(`  ${YOLO_LINE}`);
+				line(initiation.on ? dim("  the agent starts on its own (/initiate off keeps it waiting)") : dim("  the agent waits for you (/initiate on lets it start on its own)"));
 				const set = wakes?.list() ?? [];
 				if (set.length > 0) {
 					const due = wakes.nextDue();
@@ -1758,7 +1791,7 @@ export async function runTerminal(session, options) {
 	}
 	// The prompt says what is switched off, so that it cannot be forgotten.
 	setPrompt = () => {
-		const marks = [gate.yolo ? "yolo" : "", paused ? "paused" : "", options.runner?.mode === "direct" ? "no sandbox" : ""].filter((mark) => mark !== "");
+		const marks = [gate.yolo ? "yolo" : "", paused ? "paused" : "", options.runner?.mode === "direct" ? "no sandbox" : "", initiation.on ? "" : "waits"].filter((mark) => mark !== "");
 		reader.setPrompt(marks.length > 0 ? `[${marks.join(", ")}] › ` : "› ");
 	};
 	setPrompt();
@@ -1911,10 +1944,15 @@ export async function runTerminal(session, options) {
 			});
 		});
 		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it; Ctrl-T hides and shows its thinking."));
-		// A context left large by the last session is collapsed before the first message has to carry it.
+		// A context left large by the last session is collapsed before the first message has to carry it. Then,
+		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.
 		enqueue(async () => {
 			await rest();
 			if (busy) return;
+			if (initiation.on) {
+				line(dim("the agent starts on its own · /initiate off keeps it waiting"));
+				if (await submit(startNote()) !== undefined) return; // its turn; the idle handler prints and prompts
+			}
 			reader.prompt();
 			armAway();
 		});

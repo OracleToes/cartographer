@@ -64,6 +64,10 @@ export const DEFAULTS = freezeTree({
 	// so a project is assembled one small, exact edit at a time. Adjustable per install/project.
 	writeLines: 60,
 	writeCreatesOnly: true,
+	// Whether the agent starts working on its own when carto starts, without waiting to be addressed: it looks
+	// around, keeps the books and works what is approved, or sleeps when there is nothing to do. /initiate switches
+	// it while carto runs, and that switch is never remembered.
+	initiate: true,
 	// Whether change items run without asking for approval. --yolo overrides for one run; /yolo switches it
 	// while carto runs, and that switch is never remembered.
 	yolo: false,
@@ -324,7 +328,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	if (config.chatWindow + config.shelfTokens > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow and shelfTokens together must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
-	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
+	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap", "initiate"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
 	if (!Number.isInteger(config.writeLines) || config.writeLines < POLICY.validation.writeLinesMin) throw new ConfigError(`config: writeLines must be a whole number of lines, ${POLICY.validation.writeLinesMin} or more`);
 	if (!POLICY.enums.colors.includes(config.colors)) throw new ConfigError(`config: colors must be ${POLICY.enums.colors.slice(0, -1).map((color) => JSON.stringify(color)).join(", ")} or ${JSON.stringify(POLICY.enums.colors.at(-1))}`);
 	if (!POLICY.enums.themes.includes(config.theme)) throw new ConfigError(`config: theme must be ${POLICY.enums.themes.slice(0, -1).map((theme) => JSON.stringify(theme)).join(", ")} or ${JSON.stringify(POLICY.enums.themes.at(-1))}`);
