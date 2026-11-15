@@ -148,9 +148,12 @@ export function createWindows({ root, brainDir, config, runner }) {
 		}
 	};
 	/** The lines from position `from` on, the unfinished last line included. */
-	const since = (win, from) => {
+	const since = (win, from, { raw = false } = {}) => {
 		const lines = win.lines.slice(Math.max(0, from - win.dropped));
-		const partial = tidy(win.partial);
+		let partial = tidy(win.partial);
+		// The unfinished line was shown, whole or in part, by an earlier report: only what came after it is new.
+		// A line that completed since then was trimmed of its shown prefix when it was pushed (see text()).
+		if (!raw && from === win.seen && (win.seenChars ?? 0) > 0 && partial.length >= win.seenChars) partial = partial.slice(win.seenChars);
 		return partial === "" ? lines : [...lines, partial];
 	};
 	const settle = (win, reason) => {
@@ -163,7 +166,16 @@ export function createWindows({ root, brainDir, config, runner }) {
 		win.outputs++;
 		const parts = (win.partial + data).split("\n");
 		win.partial = parts.pop();
-		for (const part of parts) push(win, tidy(part));
+		for (const [index, part] of parts.entries()) {
+			if (index === 0 && (win.seenChars ?? 0) > 0) {
+				const line = tidy(part).slice(win.seenChars);
+				win.seenChars = 0;
+				if (line === "") continue;
+				push(win, line);
+				continue;
+			}
+			push(win, tidy(part));
+		}
 		if (win.partial.length > POLICY.limits.windows.partialChars) {
 			push(win, tidy(win.partial));
 			win.partial = "";
@@ -233,7 +245,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		record();
 		const watched = win.waiters.size > 0;
 		settle(win, POLICY.enums.windowWaitReasons.closed);
-		win.fail?.(new SandboxError(`the window could not be opened: ${since(win, 0).slice(-POLICY.limits.windows.startupErrorLines).join(" ").trim() || why}`));
+		win.fail?.(new SandboxError(`the window could not be opened: ${since(win, 0, { raw: true }).slice(-POLICY.limits.windows.startupErrorLines).join(" ").trim() || why}`));
 		if (was === "busy" && !watched && why === "its shell ended") emit({ type: "closed", name: win.name, command: win.command, ms: Date.now() - win.since, at: Date.now() });
 	};
 
@@ -385,7 +397,11 @@ export function createWindows({ root, brainDir, config, runner }) {
 		for (const line of since(win, kept)) output.add(`${line}\n`);
 		const done = reason === POLICY.enums.windowWaitReasons.done && win.last !== undefined;
 		// What a call has returned is not returned again. What is printed between two calls goes to the next one.
-		if (reason !== POLICY.enums.windowWaitReasons.read && reason !== POLICY.enums.windowWaitReasons.idle) win.seen = end(win);
+		if (reason !== POLICY.enums.windowWaitReasons.read && reason !== POLICY.enums.windowWaitReasons.idle) {
+			win.seen = end(win);
+			const shown = tidy(win.partial);
+			win.seenChars = shown === "" ? 0 : shown.length;
+		}
 		return {
 			window: win.name,
 			reason,
@@ -501,7 +517,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		/** The newest `count` lines of a window. */
 		read(name, count = POLICY.limits.windows.outputReadDefaultLines) {
 			const win = find(name);
-			const lines = since(win, 0);
+			const lines = since(win, 0, { raw: true });
 			return { ...report(win, POLICY.enums.windowWaitReasons.read, end(win), Date.now()), text: lines.slice(-Math.max(1, Math.min(count, POLICY.limits.windows.outputReadMaxLines))).join("\n"), lines: lines.length, kept: end(win) };
 		},
 
@@ -546,7 +562,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		list(tail = DEFAULTS.windowTail) {
 			const now = Date.now();
 			const open = [...windows.values()].map((win) => {
-				const lines = since(win, 0);
+				const lines = since(win, 0, { raw: true });
 				const partial = tidy(win.partial);
 				return {
 					name: win.name,
