@@ -32,8 +32,8 @@
 import { POLICY } from "./config.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { readReferenceVersion } from "./catalog.mjs";
+import { dirname, join } from "node:path";
+import { fileIdentityForPath, readReferenceVersion } from "./catalog.mjs";
 import { TASK_HEADER } from "./prompt.mjs";
 import { stamp } from "./time.mjs";
 import { applyEntryOp } from "./rows.mjs";
@@ -82,11 +82,11 @@ function safeShelfSnapshotPath(brainDir, item, { create = false } = {}) {
 	if (existsSync(path) && !lstatSync(path).isFile()) throw new ShelfError(`The backing snapshot for ${item.id} is not a regular file.`);
 	return path;
 }
-export function cleanupShelfSnapshots(brainDir, removed) {
-	const current = loadContext(brainDir);
-	const retained = new Set([...current.shelf, ...Object.values(current.tasks).flatMap((task) => task?.shelf ?? [])].map((item) => item.id));
+export function cleanupShelfSnapshots(brainDir, removed, retainedStore) {
+	const current = retainedStore ?? loadContext(brainDir);
+	const retained = new Set([...current.shelf, ...Object.values(current.tasks).flatMap((task) => task?.shelf ?? []), ...(current.front?.shelf ?? [])].map((item) => item.id));
 	for (const item of removed) {
-		if (item.type !== "file" || !item.id || retained.has(item.id)) continue;
+		if (!item.id || retained.has(item.id)) continue;
 		try { unlinkSync(safeShelfSnapshotPath(brainDir, item)); } catch { /* The snapshot was absent or unsafe to remove. */ }
 	}
 }
@@ -220,6 +220,11 @@ export function loadContext(brainDir) {
 		if (!Number.isFinite(store.seenUser)) store.seenUser = 0;
 		if (!Array.isArray(store.forgottenEntries)) store.forgottenEntries = [];
 		if (!Array.isArray(store.appliedOperations)) store.appliedOperations = [];
+		const pendingForget = readSoftForgetPending(brainDir);
+		if (pendingForget.length > 0) {
+			const removed = applySoftForgetPending(store, pendingForget);
+			if (removed.length > 0) cleanupShelfSnapshots(brainDir, removed, store);
+		}
 		if (store.front && !Array.isArray(store.front.rows)) store.front.rows = rowSnapshot(store.rows);
 		if (store.front && !Array.isArray(store.front.left)) store.front.left = [];
 		return store;
@@ -240,6 +245,10 @@ export function updateContext(brainDir, change) {
 	const store = loadContext(brainDir);
 	const result = change(store);
 	saveContext(brainDir, store);
+	const pendingForget = readSoftForgetPending(brainDir);
+	if (pendingForget.length > 0 && pendingForget.every((entry) => store.forgottenEntries?.includes(entry.entryId))) {
+		try { unlinkSync(softForgetPath(brainDir)); } catch { /* best effort */ }
+	}
 	return result;
 }
 
@@ -489,16 +498,69 @@ export function parseLines(lines) {
 	return { from, to };
 }
 
+
+// ─── Soft-forget crash recovery ───────────────────────────────────────────────
+// `message edit` writes the durable soft-forget marker first, then updates this store. A crash between the two leaves the
+// message forgotten in the transcript and visible here. The pending sidecar carries everything the store needs to finish
+// the job by itself on the next load — no Durable access required, and no writes on read.
+const softForgetPath = (brainDir) => join(brainDir, "catalog", "soft-forget.pending.json");
+
+/** Record a pending soft-forget. Called after the durable marker commits, before the store update. */
+export function recordSoftForgetPending(brainDir, entry) {
+	const path = softForgetPath(brainDir);
+	mkdirSync(dirname(path), { recursive: true });
+	let pending = [];
+	try { const value = JSON.parse(readFileSync(path, "utf8")); if (Array.isArray(value?.entries)) pending = value.entries; } catch { /* a corrupt sidecar is replaced, never trusted */ }
+	pending = [...pending.filter((prior) => prior?.entryId !== entry.entryId), { ...entry, at: entry.at ?? Date.now() }];
+	const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+	writeFileSync(temp, `${JSON.stringify({ version: 1, entries: pending })}\n`, { mode: 0o600 });
+	renameSync(temp, path);
+}
+
+const readSoftForgetPending = (brainDir) => {
+	try {
+		const value = JSON.parse(readFileSync(softForgetPath(brainDir), "utf8"));
+		if (value?.version !== 1 || !Array.isArray(value.entries)) return [];
+		return value.entries.filter((entry) => entry && typeof entry.entryId === "string" && entry.entryId.length > 0);
+	} catch { return []; }
+};
+
+const applySoftForgetPending = (store, pending) => {
+	const ids = new Set(pending.map((entry) => entry.entryId));
+	store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), ...ids])];
+	const byAtText = new Set(pending.map((entry) => `${entry.timestamp}:${entry.text}`));
+	store.chat = (store.chat ?? []).filter((line) => !byAtText.has(`${line.at}:${line.text}`));
+	const removed = [];
+	const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => {
+		if (placement?.target?.kind === "message" && ids.has(String(placement.target.id))) { removed.push(placement); return false; }
+		return true;
+	}) : shelf);
+	store.shelf = strip(store.shelf);
+	if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
+	for (const task of Object.values(store.tasks ?? {})) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
+	return removed;
+};
+
 /** Resolve a typed reference to the full content the shelf should show. Add resolvers here, not kind-specific shelf flows. */
+// Live Durable content cannot be read synchronously on the render path, so Durable kinds render from the backing
+// snapshot taken when they were shelved (immutable content — for those, the snapshot is the live bytes), or from an
+// explicitly retained pinned version when one exists. `Not found.` below is the one unified wording for every ref kind.
+const pinnedText = (brainDir, ref) => {
+	if (ref.version === undefined) return undefined;
+	const value = readReferenceVersion(brainDir, { namespace: ref.namespace, kind: ref.type ?? ref.kind, id: ref.id, version: ref.version });
+	return value === undefined ? undefined : JSON.stringify(value, null, 2);
+};
+const snapshotText = (brainDir, item) => readShelfSnapshot(brainDir, item);
 const SHELF_RESOLVERS = {
-	report: (brainDir, ref) => {
+	report: (brainDir, ref, item) => {
 		const row = composedRows(loadContext(brainDir)).find((entry) => entry.id === ref.id);
-		return row === undefined ? undefined : loadReport(brainDir, ref.id);
+		if (row !== undefined) { const body = loadReport(brainDir, ref.id); if (body !== undefined) return body; }
+		return pinnedText(brainDir, ref) ?? snapshotText(brainDir, item);
 	},
-	schema: (brainDir, ref) => {
-		const schema = readReferenceVersion(brainDir, { namespace: ref.namespace, kind: "schema", id: ref.id, version: ref.version });
-		return schema === undefined ? undefined : JSON.stringify(schema, null, 2);
-	},
+	schema: (brainDir, ref, item) => pinnedText(brainDir, ref) ?? snapshotText(brainDir, item),
+	message: (brainDir, ref, item) => pinnedText(brainDir, ref) ?? snapshotText(brainDir, item),
+	toolCall: (brainDir, ref, item) => pinnedText(brainDir, ref) ?? snapshotText(brainDir, item),
+	toolResult: (brainDir, ref, item) => pinnedText(brainDir, ref) ?? snapshotText(brainDir, item),
 };
 const referenceOf = (given) => {
 	if (given !== null && typeof given === "object" && typeof given.kind === "string" && typeof given.id === "string") {
@@ -558,10 +620,13 @@ function readShelfSnapshot(brainDir, item) {
 	} catch { return undefined; }
 }
 
-/** Persist a full backing file atomically under .atlas/shelf; callers validate context budget first. */
+/** Persist a full backing snapshot atomically under .atlas/shelf; callers validate context budget first. Skips the write when the backing is unchanged. */
 export function persistShelfSnapshot(brainDir, item, content) {
-	if (item.type !== "file" || typeof content !== "string") return;
+	if ((item?.type !== "file" && item?.type !== "reference") || typeof content !== "string") return;
 	const path = safeShelfSnapshotPath(brainDir, item, { create: true });
+	if (existsSync(path)) {
+		try { if (readFileSync(path, "utf8") === content) return; } catch { /* an unreadable snapshot is overwritten */ }
+	}
 	const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
 	try {
 		writeFileSync(temp, content, { encoding: "utf8", flag: "wx" });
@@ -575,7 +640,7 @@ export function persistShelfSnapshot(brainDir, item, content) {
 /** Resolve the current selected content. A missing or unreadable source falls back to the full shelf snapshot. */
 function resolveShelfText(root, item, brainDir) {
 	if (item.ref !== undefined) {
-		const content = SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref);
+		const content = SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref, item);
 		return content === undefined ? `== ${shelfLabel(item)} ==\nNot found. The referenced item is no longer available.` : `== ${shelfLabel(item)} ==\n${content}`;
 	}
 	const live = liveShelfSource(root, item);
@@ -606,7 +671,7 @@ export function shelfItem(root, given, lines, brainDir, existing = []) {
 		const item = { type: "reference", ref, id: existing.find((entry) => sameShelfItem(entry, { ref }))?.id ?? newShelfId() };
 		const text = resolveShelfText(root, item, brainDir);
 		if (/\nNot found\. /.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" "));
-		return { item: { ...item, snapshot: shelfIdLine(text, item) }, tokens: estimate(shelfIdLine(text, item)) };
+		return { item: { ...item, snapshot: shelfIdLine(text, item) }, tokens: estimate(shelfIdLine(text, item)), backing: text };
 	}
 	let path;
 	try {
@@ -645,6 +710,16 @@ export function shelfItem(root, given, lines, brainDir, existing = []) {
 	return { item: { ...item, snapshot }, tokens: estimate(snapshot), backing };
 }
 
+/** Build a reference shelf placement from content already verified at add time (the render path has no Durable access). */
+export function shelfReferenceItem(ref, content, existing = []) {
+	const normalized = { type: ref.kind ?? ref.type, id: ref.id, ...(ref.namespace ? { namespace: ref.namespace } : {}), ...(ref.version ? { version: ref.version } : {}) };
+	if (typeof normalized.type !== "string" || typeof normalized.id !== "string") throw new ShelfError("A { kind, id, namespace?, version? } reference is required.");
+	const item = { type: "reference", ref: normalized, id: existing.find((entry) => sameShelfItem(entry, { ref: normalized }))?.id ?? newShelfId() };
+	const text = `== ${normalized.type}:${normalized.id} ==\n${content}`;
+	const snapshot = shelfIdLine(text, item);
+	return { item: { ...item, snapshot }, tokens: estimate(snapshot), backing: content };
+}
+
 /** Resolve, refresh and render shelf items without discarding entries that do not currently fit. */
 function shelfBlock(root, items, max, brainDir) {
 	const shown = [];
@@ -659,8 +734,9 @@ function shelfBlock(root, items, max, brainDir) {
 			const live = liveShelfSource(root, item);
 			if (live?.content !== undefined) {
 				if (item.target === undefined) {
-					try { item.target = fileReference(root, brainDir, item.path); }
-					catch (error) { stale.push({ item, why: `the shelf item could not be mapped to a stable file reference: ${error.message}` }); }
+					const mapped = fileIdentityForPath(brainDir, item.path);
+					if (mapped !== undefined) item.target = mapped;
+					// Never observe from a render path: identity is adopted for display and persists with the next store write.
 				}
 				try {
 					persistShelfSnapshot(brainDir, item, live.content);
