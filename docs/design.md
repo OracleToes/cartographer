@@ -106,14 +106,17 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 5. **Live measurement.** One real session with the 27B on a throwaway project: does it map unprompted? does it default to queueing changes (default mode) / proceed (yolo)? does it re-verify instead of trusting notes? does it sleep only at genuine stasis? first-try rates, window economics, collapse behavior. Findings feed the prompt, not adjectives.
 6. **README replacement.** Written against the shipped behavior; install, dyad, modes, brain, safety, settings, tests — with honest unknowns. The false story ends.
 
-## 12. Open decisions (small, explicit)
+## 12. Decisions (small, explicit)
 
-O1. **Handoff ask.** Drop entirely, keep as opt-in (`handoffQuestion: "auto" | "off"`, default `off`), or keep as-is? My recommendation: drop to opt-in, default off.
-O2. **Curated context rows vs ledger notes.** Two free-text keep-stores with overlapping meaning. Merge (rows become ledger notes with a salience field), or keep both with a sharper distinction in the prompt? My recommendation: keep the rows (they carry the visibility/next-boundary semantics the ledger lacks), sharpen the prompt.
-O3. **Shelf-change notices in the state block.** One-line "changed since snapshot" pointers instead of inline diffs (ceiling on the notice: file name + line delta). My recommendation: one-line.
+Decided items are marked **DECIDED** with their date; the rest stay open.
+
+O1. **Handoff ask — DECIDED 2026-11-15: opt-in, default off.** It stays available behind a config the user can turn on (`handoffQuestion`), never the default; collapse carries the last reply mechanically.
+O2. **Curated context rows vs ledger notes — DECIDED 2026-11-15: merged.** Rows become ledger notes carrying a salience flag; the row species and their UI are retired. (Overrode my recommendation to keep both.)
+O3. **Shelf-change notices in the state block — DECIDED 2026-11-15: one line per changed file** (file name + line delta). The diff is available on demand; it is not in the notice.
 O4. **Stage 6 clusters.** Confirm: deferred, not promised.
-O5. **A read-only command lane for the orchestrator** (e.g. running tests/lints that cannot write, verified by sandbox, no approval), or keep all commands inside change tasks as today? This one genuinely shapes Slice 2 (the charter says "test its hypotheses"); my recommendation: decide before Slice 2 prompt work, or the charter promises what the gate forbids.
+O5. **A read-only command lane for the orchestrator — DECIDED 2026-11-15: yes.** The orchestrator may run read-only commands inline, like any other read: tests, lints, git status and the like, on its own authority, without a plan item or approval. It is enforced by the sandbox, not by discipline: the window mounts the project, the brain and .git read-only and never reaches the network (src/sandbox.mjs readOnly profile), so a command that must write or reach the network is still a change item for a task. Opens before Slice 2 prompt work so the charter can promise what the gate allows.
 O6. **Measurement gate.** May Slice 5 use a live 27B session as acceptance evidence, or is it observational only (observation + manual review; no pass/fail claims)?
+I1. **Initiation — DECIDED 2026-11-15.** A config setting and a `/command` toggle govern whether the agent self-initiates on start and after wakes with nothing owed; it self-initiates by **default**. (Not prompt-only, and not a forced startup note.)
 
 ## 13. What does not change
 

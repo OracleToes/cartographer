@@ -190,7 +190,7 @@ export function withoutWindows(text) {
 export function windowLines(windows, tail = {}) {
 	const lines = [];
 	for (const win of windows) {
-		const marks = `${win.sandbox === false ? " · no sandbox" : win.network ? " · network" : ""}`;
+		const marks = `${win.readOnly ? " · read-only" : win.sandbox === false ? " · no sandbox" : win.network ? " · network" : ""}`;
 		if (win.state === POLICY.enums.windowStates.gone) {
 			lines.push(`  ${win.name} · gone: ${win.why}${win.command ? `, and \`${short(win.command)}\` ended with it` : ""}. \`window\` close clears this line.`);
 			continue;

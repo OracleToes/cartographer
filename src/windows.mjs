@@ -237,19 +237,21 @@ export function createWindows({ root, brainDir, config, runner }) {
 		if (was === "busy" && !watched && why === "its shell ended") emit({ type: "closed", name: win.name, command: win.command, ms: Date.now() - win.since, at: Date.now() });
 	};
 
-	const open = async (name, network) => {
+	const open = async (name, network, readOnly = false) => {
 		const mode = runner.mode;
 		if (mode === "none") throw new SandboxError(runner.available?.why ?? "no sandbox");
 		if (!findScript()) throw new SandboxError("the `script` program (part of util-linux) was not found, and a shell window needs it for its terminal");
 		if (mode === "sandbox" && runner.available?.shell !== undefined && runner.available.shell !== "bash") throw new SandboxError("bash was not found, and a shell window needs it");
+		const confined = readOnly && mode === "sandbox"; // read-only is a sandbox promise; without the sandbox nothing can hold it
 		mkdirSync(dir, { recursive: true });
 		const rc = join(dir, "rc");
 		writeFileSync(rc, RC);
 		const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(rc)} --noediting -i`, "/dev/null"];
 		const win = {
 			name,
-			network: mode === "direct" ? true : network,
+			network: mode === "direct" ? true : confined ? false : network,
 			sandbox: mode === "sandbox",
+			readOnly: confined,
 			state: POLICY.enums.windowStates.starting,
 			lines: [],
 			dropped: 0,
@@ -263,7 +265,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		};
 		let child;
 		if (mode === "sandbox") {
-			const { args, env } = sandboxArgs({ root, brainDir, network, read: config.shellRead });
+			const { args, env } = sandboxArgs({ root, brainDir, network: confined ? false : network, read: config.shellRead, readOnly: confined });
 			child = spawn("bwrap", [...args, "--", ...inner], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
 		} else {
 			child = spawn(inner[0], inner.slice(1), { cwd: root, env: { ...process.env, ...QUIET }, stdio: ["pipe", "pipe", "pipe"], detached: true });
@@ -394,6 +396,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			cwd: where(win.cwd),
 			network: win.network,
 			sandbox: win.sandbox,
+			readOnly: win.readOnly === true,
 			...(win.state === POLICY.enums.windowStates.busy ? { command: win.command, running: Date.now() - win.since } : {}),
 		};
 	};
@@ -412,24 +415,31 @@ export function createWindows({ root, brainDir, config, runner }) {
 	const busyLine = (win) => `\`${win.command.split("\n")[0].slice(0, POLICY.limits.windows.commandSummaryChars)}\` (running ${Math.max(0, Math.round((Date.now() - win.since) / 1000))} s)`;
 
 	const manager = {
-		/**
-		 * Type a command into a window, opening the window when it is not there, and wait for it at most `waitMs`.
-		 * @param {string} name
-		 * @param {string} command
-		 * @param {{ network?: boolean, waitMs: number, signal?: AbortSignal }} options
-		 */
-		async run(name, command, { network = false, waitMs, signal }) {
-			checkName(name);
-			let win = windows.get(name);
-			if (win === undefined) {
-				if (windows.size >= WINDOWS_MAX) throw new WindowError(`${WINDOWS_MAX} windows are open, which is the limit: ${[...windows.keys()].join(", ")}. Close one with \`window\` first, or run this in one of them.`);
-				win = await open(name, network === true);
-			} else {
-				if (win.state === POLICY.enums.windowStates.busy) {
-					throw new WindowError(`Window ${name} is busy with ${busyLine(win)}. To run this beside it, give \`shell\` another \`window\` name. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input.`);
-				}
-				// The terminal closes every window when the user switches the sandbox; this is for a switch it did not see.
-				if (win.sandbox !== (runner.mode === "sandbox")) {
+	/**
+	 * Type a command into a window, opening the window when it is not there, and wait for it at most `waitMs`.
+	 * @param {string} name
+	 * @param {string} command
+	 * @param {{ network?: boolean, waitMs: number, signal?: AbortSignal, readOnly?: boolean }} options
+	 */
+	async run(name, command, { network = false, waitMs, signal, readOnly = false }) {
+		checkName(name);
+		// "Read-only" is a promise the sandbox can keep; without the sandbox it is only a name.
+		const confined = readOnly === true && runner.mode === "sandbox";
+		let win = windows.get(name);
+		if (win === undefined) {
+			if (windows.size >= WINDOWS_MAX) throw new WindowError(`${WINDOWS_MAX} windows are open, which is the limit: ${[...windows.keys()].join(", ")}. Close one with \`window\` first, or run this in one of them.`);
+			win = await open(name, network === true, confined);
+		} else {
+			if (win.state === POLICY.enums.windowStates.busy) {
+				throw new WindowError(`Window ${name} is busy with ${busyLine(win)}. To run this beside it, give \`shell\` another \`window\` name. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input.`);
+			}
+			if ((win.readOnly === true) !== confined) {
+				throw new WindowError(win.readOnly
+					? `Window ${name} is a read-only window: commands there cannot write anything, and cannot reach the network. Close it with \`window\`, then run this in a window of another name.`
+					: `Window ${name} may change files. A read-only command runs in a window of another name.`);
+			}
+			// The terminal closes every window when the user switches the sandbox; this is for a switch it did not see.
+			if (win.sandbox !== (runner.mode === "sandbox")) {
 					throw new WindowError(`Window ${name} was opened ${win.sandbox ? "in the sandbox" : "with the sandbox off"}, and that has changed since. Close it with \`window\`, then run this again: the window opens anew.`);
 				}
 				if (win.sandbox && win.network !== (network === true)) {
@@ -538,6 +548,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 					cwd: where(win.cwd),
 					network: win.network,
 					sandbox: win.sandbox,
+					readOnly: win.readOnly === true,
 					...(win.state === POLICY.enums.windowStates.busy ? { command: win.command, running: now - win.since, quiet: win.lastOutputAt > 0 ? now - win.lastOutputAt : now - win.since, asks: partial.trim() !== "" && now - win.lastOutputAt >= ASKS_AFTER_MS } : {}),
 					...(win.last ? { last: { ...win.last, ago: now - win.last.endedAt } } : {}),
 					tail: lines.slice(-tail),

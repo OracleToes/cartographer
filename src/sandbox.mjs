@@ -121,11 +121,12 @@ const firstLine = (text) =>
 
 /**
  * The bubblewrap arguments and the environment for one command.
- * @param {{ root: string, brainDir: string, cwd?: string, network?: boolean, read?: string[], env?: NodeJS.ProcessEnv }} input
+ * @param {{ root: string, brainDir: string, cwd?: string, network?: boolean, read?: string[], env?: NodeJS.ProcessEnv, readOnly?: boolean }} input
  *   root: real path of the project; cwd: a folder inside it; read: more folders to show read-only (settings)
+ *   readOnly: the project and the brain are bound read-only and the network is never reachable (the orchestrating context's command lane)
  * @returns {{ args: string[], env: Record<string, string>, home: string }}
  */
-export function sandboxArgs({ root, brainDir, cwd = root, network = false, read = [], env = process.env }) {
+export function sandboxArgs({ root, brainDir, cwd = root, network = false, read = [], env = process.env, readOnly = false }) {
 	const home = real(homedir());
 	if (home === undefined) throw new SandboxError("the home folder cannot be found");
 	// The project is bound writable after the home folder is covered; a project that contains the home folder
@@ -158,13 +159,14 @@ export function sandboxArgs({ root, brainDir, cwd = root, network = false, read 
 	}
 	for (const path of keep) args.push("--ro-bind", path, path);
 
-	args.push("--bind", root, root);
+	// A read-only window sees the project, the brain and .git read-only; the sandbox home stays writable for scratch.
+	args.push(readOnly ? "--ro-bind" : "--bind", root, root);
 	args.push("--ro-bind", brainDir, brainDir);
 	// The sandbox home lies inside the brain, which was just made read-only there; at the home path it stays writable.
 	const dotGit = join(root, ".git");
 	if (existsSync(dotGit)) args.push("--ro-bind", dotGit, dotGit);
 	args.push("--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try");
-	if (!network) args.push("--unshare-net");
+	if (!network || readOnly) args.push("--unshare-net"); // a read-only window never reaches the network
 	args.push("--die-with-parent", "--new-session", "--chdir", cwd);
 
 	let user = "user";

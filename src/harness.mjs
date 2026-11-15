@@ -256,7 +256,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				beforeTool: async (call, api, hookContext) => {
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
 					if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
-						if (types(call)) return { block: REFUSALS.mainRuns };
+						// Running a command as a read is open to the main conversation (it executes in a read-only window); typing into a running program is not a read.
+						const mainRun = call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run);
+						if (types(call) && !mainRun) return { block: REFUSALS.mainRuns };
 						if (call.name === "return") return { block: REFUSALS.mainReturns };
 						// A turn that a wake started is quiet until the agent does something in it; `sleep` is not something.
 						if (call.name !== "sleep") wakes.acted();

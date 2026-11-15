@@ -6,9 +6,12 @@
 //
 // Typing into a window, a command or input, is for a task that carries out a change
 // item of the authorized plan; src/harness.mjs refuses everyone else before this code
-// runs. Reading, waiting, stopping and closing are open to the main agent and to every
-// task: none of them starts anything. Whether a window reaches the network is the
-// plan item's `network` mark at the moment the window is opened.
+// runs. The main conversation may run a command without a task, on its own authority,
+// but only in a read-only window (src/windows.mjs): the project, the brain and .git are
+// mounted read-only and the window never reaches the network — good for tests, lints,
+// typechecks and git status. Reading, waiting, stopping and closing are open to the main
+// agent and to every task: none of them starts anything. Whether a window reaches the
+// network is the plan item's `network` mark at the moment the window is opened.
 //
 // When the user has switched the sandbox off, a new window runs on the machine itself.
 import { POLICY } from "../config.mjs";
@@ -130,23 +133,28 @@ export function shellTool({ config, runner, windows, runOf }) {
 			const action = SHELL_ACTIONS.includes(args.action) ? args.action : POLICY.enums.shellAction.run;
 			if (action === POLICY.enums.shellAction.run) {
 				const run = runOf(api.conversationId);
-				if (run?.mode !== POLICY.enums.planMode.change) return refuse(REFUSALS.lookTaskRuns);
-				if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available.why));
+				// The main conversation may run a command on its own authority, as a read: the window is confined
+				// (the project, the brain and .git mounted read-only, no network). Typing into a running program is not a read.
+				const confined = api.conversationId === ROOT_CONVERSATION_ID && run?.mode !== POLICY.enums.planMode.change;
+				if (run?.mode !== POLICY.enums.planMode.change && !confined) return refuse(REFUSALS.lookTaskRuns);
+				if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available.why)); // no sandbox, no confinement, no read-only lane either
 				if (typeof args.command !== "string" || args.command.trim() === "") return refuse("`command` is empty: give the command line to run.");
 				const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
 				let result;
 				try {
-					result = await windows.run(name, args.command, { network: run.network === true, waitMs: waitOf(args.wait, config.shellWait) * 1000, signal: callContext.abortSignal });
+					result = await windows.run(name, args.command, { network: confined ? false : run.network === true, waitMs: waitOf(args.wait, config.shellWait) * 1000, signal: callContext.abortSignal, readOnly: confined });
 				} catch (error) {
 					if (error instanceof WindowError) return refuse(error.message);
 					if (error instanceof SandboxError) return refuse(REFUSALS.noSandbox(error.message));
 					throw error;
 				}
 				const failed = ((result.reason === POLICY.enums.windowWaitReasons.done || result.reason === POLICY.enums.windowWaitReasons.closed) && result.exit !== 0) || result.reason === POLICY.enums.windowWaitReasons.stopped;
+				// A read-only window mounts the project read-only, so a command that must write there ends with an error; say so.
+				const hint = confined && failed ? "\n[this window is read-only: the project and the brain are mounted read-only, and it has no network. A command that must write runs in a change task of the plan.]" : "";
 				return {
 					isError: failed,
-					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]` }],
-					details: details(result),
+					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]${hint}` }],
+					details: details(result, confined ? { readOnly: true } : {}),
 				};
 			}
 			const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : "";
