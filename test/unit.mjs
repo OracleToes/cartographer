@@ -15,6 +15,7 @@ import { loadAtlas } from "../src/atlas.mjs";
 import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate } from "../src/ops.mjs";
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
+import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { stateBlock } from "../src/state.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
@@ -242,9 +243,43 @@ test("shell: a run with a cross-action argument still runs, and says so", async 
 	assert.match(result.output[0].text, /Ignored as not for `run`: `text` \(send only\)\./);
 });
 
-test("shell: the sandbox-off line of TOOLS.shell and the charter both say the main agent cannot run commands at all", () => {
-	assert.match(TOOLS.shell, /If the user has switched the sandbox off, the main context cannot run commands at all\./);
+test("shell: TOOLS.shell and the charter both say the lane survives the sandbox being off while bubblewrap works", () => {
+	assert.match(TOOLS.shell, /With the sandbox switched off the main context still runs commands in a read-only window when bubblewrap works, and none at all when it does not\./);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
+});
+
+// ─── The read-only lane ─────────────────────────────────────────────────────
+
+const gatedRunnerOf = (off, available) => ({ off, available, get mode() { return this.off ? "direct" : this.available.ok ? "sandbox" : "none"; } });
+const laneTool = (runner, windows) => shellTool({ config: { shellWait: 1 }, runner, windows, runOf: () => undefined });
+const mainCall = (args) => ({ name: "shell", arguments: args });
+const mainApi = { conversationId: ROOT_CONVERSATION_ID, taskId: "t", now: () => 0 };
+
+test("lane: with the sandbox off and bubblewrap working, the main agent runs commands read-only", async (t) => {
+	let called;
+	const windows = { ...stubWindows(), async run(name, command, opts) { called = { name, command, opts }; return { text: "ok", ms: 1, reason: "done", exit: 0, window: name, cwd: ".", lines: 1, kept: 1, sandbox: true, network: false, state: "free", readOnly: true }; } };
+	const tool = laneTool(gatedRunnerOf(true, { ok: true, version: "0.13.1", shell: "bash" }), windows);
+	const result = await tool.execute({ action: "run", command: "git status" }, mainApi, {});
+	assert.equal(called?.opts?.readOnly, true);
+	assert.equal(result.isError, false);
+});
+
+test("lane: with the sandbox off and bubblewrap broken, the main agent cannot run commands at all", async (t) => {
+	let called = false;
+	const windows = { ...stubWindows(), async run() { called = true; throw new Error("must not be called"); } };
+	const tool = laneTool(gatedRunnerOf(true, { ok: false, why: "bubblewrap (the bwrap command) is not installed" }), windows);
+	const result = await tool.execute({ action: "run", command: "git status" }, mainApi, {});
+	assert.match(result.output[0].text, /^Refused: A read-only window needs bubblewrap/);
+	assert.equal(called, false);
+});
+
+test("lane: with no sandbox and the switch not taken, the main agent cannot run commands either", async (t) => {
+	let called = false;
+	const windows = { ...stubWindows(), async run() { called = true; throw new Error("must not be called"); } };
+	const tool = laneTool(gatedRunnerOf(false, { ok: false, why: "bubblewrap (the bwrap command) is not installed" }), windows);
+	const result = await tool.execute({ action: "run", command: "git status" }, mainApi, {});
+	assert.match(result.output[0].text, /^Refused: Commands cannot be run in this session/);
+	assert.equal(called, false);
 });
 
 // ─── The state block ────────────────────────────────────────────────────────
@@ -257,9 +292,9 @@ const blockOf = (t, runner) => {
 	return stateBlock(brainDir, runner, { root, messages: [] });
 };
 
-test("state: the sandbox-off line says the main agent cannot run commands at all", (t) => {
-	const block = blockOf(t, runnerOf(true, { ok: false, why: "not used" }));
-	assert.match(block, /You cannot run commands yourself in this session/);
+test("state: the sandbox-off line says the main agent keeps a read-only lane while bubblewrap works", (t) => {
+	const block = blockOf(t, runnerOf(true, { ok: true, version: "0.13.1", shell: "bash" }));
+	assert.match(block, /always in a read-only window, when bubblewrap works/);
 });
 
 test("state: the no-sandbox line says no command can be run at all", (t) => {
@@ -269,5 +304,5 @@ test("state: the no-sandbox line says no command can be run at all", (t) => {
 
 test("state: the sandboxed block does not claim the main agent is blocked", (t) => {
 	const block = blockOf(t, runnerOf(false, { ok: true, version: "0.9.0", shell: "bash" }));
-	assert.doesNotMatch(block, /You cannot run commands yourself in this session/);
+	assert.doesNotMatch(block, /You yourself may still run commands in this session/);
 });

@@ -295,7 +295,7 @@ export function createRunner({ off = false } = {}) {
 
 /** One line for the user on how commands run now. */
 export function sandboxLine(runner) {
-	if (runner.mode === "direct") return "sandbox: OFF · tasks run commands directly on this machine, as you: they reach whatever you can, and the network";
+	if (runner.mode === "direct") return "sandbox: OFF · tasks run commands directly on this machine, as you: they reach whatever you can, and the network; the main agent's commands still run in a read-only window when bubblewrap works";
 	if (runner.mode === "sandbox") return `sandbox: bubblewrap ${runner.available.version} · tasks run commands inside the project only, without network`;
 	return `no sandbox: ${runner.available.why} · tasks cannot run commands (carto --no-bwrap, or /bwrap off, runs them without one)`;
 }

@@ -497,7 +497,7 @@ Only you can switch it: no tool does, and it is not remembered. The next `carto`
 
 ## Running commands
 
-A change task runs commands with `shell`: to try what it wrote, to run tests, to install what a plan item calls for, to start a server, and to move or delete files. The main agent may run a command too, as a read: it opens a read-only window (the project, the brain and `.git` mounted read-only, no network), which is enough for the tests, the lints and `git status`, and for nothing that writes. With the sandbox off there is no lane at all: nothing can hold a window to read-only, so the main agent runs no commands.
+A change task runs commands with `shell`: to try what it wrote, to run tests, to install what a plan item calls for, to start a server, and to move or delete files. The main agent may run a command too, as a read: it opens a read-only window (the project, the brain and `.git` mounted read-only, no network), which is enough for the tests, the lints and `git status`, and for nothing that writes. With the sandbox off the main agent still runs commands in a read-only window when bubblewrap works; when bubblewrap does not work, nothing holds a window to read-only and the main agent runs none.
 
 ```
 ▸ task p2  Write roll.py and run it with 2d6 and with a wrong argument…
@@ -542,7 +542,7 @@ The block shows the state when a request is sent. The agent does not see a windo
 
 With piped input (`echo … | carto`) nobody is there to wait, and `carto` leaves after the last line, which ends the windows. A line `/wait 60` waits up to that many seconds for the windows' commands and for the wakes the agent has set, and lets the agent react to each.
 
-**Who may do what.** Typing into a window, a command or a line of input, is for a task that carries out a change item of the authorized plan, as before. Reading, waiting, stopping and closing are open to the main agent and to every task, because none of them starts anything: the main agent can wait for a build itself, and stop or close what it no longer needs. The main agent may also run a command itself, but such a command runs in a read-only window: the project, the brain and `.git` are mounted read-only and the window has no network, so it is for the tests, the lints, git status and other checks that change nothing — like any other read. With the sandbox off the main agent has no lane either: the command cannot be held to read-only, so it does not run. A command that must write or reach the network is a change item for a task as before.
+**Who may do what.** Typing into a window, a command or a line of input, is for a task that carries out a change item of the authorized plan, as before. Reading, waiting, stopping and closing are open to the main agent and to every task, because none of them starts anything: the main agent can wait for a build itself, and stop or close what it no longer needs. The main agent may also run a command itself, but such a command runs in a read-only window: the project, the brain and `.git` are mounted read-only and the window has no network, so it is for the tests, the lints, git status and other checks that change nothing — like any other read. With the sandbox off the command still runs in a read-only window when bubblewrap works — the off switch now governs only how change tasks run their commands; when bubblewrap does not work, nothing holds the window to read-only and the main agent runs none. A command that must write or reach the network is a change item for a task as before.
 
 **You and the windows.** `/shells` lists them with their newest lines. `/kill NAME` closes one and ends what runs there, `/kill all` every one; the agent finds a line in its windows block saying that you closed it. `/stop` and Ctrl-C stop the agent and interrupt the command it was waiting for at that moment; commands in other windows keep running, and a line names them. Windows do not outlive `carto`: they end when you leave and when it is killed, and at the next start the agent is told which windows were running something and are gone.
 
@@ -649,7 +649,7 @@ carto --no-bwrap        for the whole session
 
 Commands then run directly on the machine, as you, with your environment and the network. They can read, change and delete whatever you can, anywhere. What stays the same:
 
-- A plan still needs `/approve` before a task's command runs. With the sandbox off the main agent has no command lane either: its read-only window has nothing to hold it, so it runs no commands at all.
+- A plan still needs `/approve` before a task's command runs. With the sandbox off, tasks' commands run directly on your machine; the main agent's commands still run in a read-only window while bubblewrap works, and not at all when it does not.
 - `book` file create/edit/inspect/read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
 - The windows work the same, with bounded output, and every process of a window ends with it: on `/kill`, when you leave, and within about a second of Cartographer being killed. A process that detaches itself into a session of its own escapes this.
 

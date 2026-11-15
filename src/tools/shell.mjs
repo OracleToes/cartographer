@@ -8,13 +8,13 @@
 // item of the authorized plan; src/harness.mjs refuses everyone else before this code
 // runs. The main conversation may run a command without a task, on its own authority,
 // but only in a read-only window (src/windows.mjs): the project, the brain and .git are
-// mounted read-only and the window never reaches the network. A read-only window exists
-// only while the sandbox is on — with it off, nothing can hold a command to read-only,
-// so the main agent cannot run one at all (direct mode reaches the network). Good for
-// tests, lints, typechecks and git status. Reading, waiting, stopping and closing are
-// open to the main agent and to every task: none of them starts anything. Whether a
-// window reaches the network is the plan item's `network` mark at the moment the window
-// is opened.
+// mounted read-only and the window never reaches the network. A read-only window needs
+// bubblewrap — with the sandbox switched off it is still what the main agent's commands
+// run in, when bubblewrap works; when it does not, nothing holds a command to read-only,
+// and the main agent runs none. Good for tests, lints, typechecks and git status.
+// Reading, waiting, stopping and closing are open to the main agent and to every task:
+// none of them starts anything. Whether a window reaches the network is the plan item's
+// `network` mark at the moment the window is opened.
 //
 // When the user has switched the sandbox off, a new window runs on the machine itself.
 import { POLICY } from "../config.mjs";
@@ -155,8 +155,11 @@ export function shellTool({ config, runner, windows, runOf }) {
 				// (the project, the brain and .git mounted read-only, no network). Typing into a running program is not a read.
 				const confined = api.conversationId === ROOT_CONVERSATION_ID && run?.mode !== POLICY.enums.planMode.change;
 				if (run?.mode !== POLICY.enums.planMode.change && !confined) return refuse(REFUSALS.lookTaskRuns);
-				if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available.why)); // no sandbox, no confinement, no read-only lane either
-				if (runner.mode !== "sandbox") return refuse(REFUSALS.mainReadOnlyOff); // direct mode: nothing can hold the lane to read-only, and the network would be reachable
+				const canSandbox = runner.mode === "sandbox" || (runner.mode === "direct" && runner.available?.ok === true);
+				if (!canSandbox) {
+					if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available?.why ?? "no sandbox")); // no sandbox, no confinement, no read-only lane either
+					return refuse(REFUSALS.mainReadOnlyOff(runner.available?.why)); // the sandbox is off and bubblewrap is not working here: nothing can hold the lane to read-only
+				}
 				if (typeof args.command !== "string" || args.command.trim() === "") return refuse("`command` is empty: give the command line to run.");
 				const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
 				let result;

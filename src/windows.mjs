@@ -239,19 +239,21 @@ export function createWindows({ root, brainDir, config, runner }) {
 
 	const open = async (name, network, readOnly = false) => {
 		const mode = runner.mode;
+		// A read-only window is a promise the sandbox keeps; bwrap being present is what makes it possible, even with the sandbox switched off.
+		const canSandbox = mode === "sandbox" || (mode === "direct" && runner.available?.ok === true);
 		if (mode === "none") throw new SandboxError(runner.available?.why ?? "no sandbox");
+		if (readOnly === true && !canSandbox) throw new SandboxError(mode === "direct" ? "a read-only window needs bubblewrap, and it is not working here: without it nothing holds a command to read-only" : "a read-only window needs the sandbox: it mounts the project read-only and blocks the network, and without the sandbox nothing holds a command to either");
 		if (!findScript()) throw new SandboxError("the `script` program (part of util-linux) was not found, and a shell window needs it for its terminal");
-		if (mode === "sandbox" && runner.available?.shell !== undefined && runner.available.shell !== "bash") throw new SandboxError("bash was not found, and a shell window needs it");
-		if (readOnly === true && mode !== "sandbox") throw new SandboxError("a read-only window needs the sandbox: it mounts the project read-only and blocks the network, and without the sandbox nothing holds a command to either");
-		const confined = readOnly && mode === "sandbox"; // read-only is a sandbox promise; without the sandbox nothing can hold it
+		const confined = readOnly === true && canSandbox;
+		if ((mode === "sandbox" || confined) && runner.available?.shell !== undefined && runner.available.shell !== "bash") throw new SandboxError("bash was not found, and a shell window needs it");
 		mkdirSync(dir, { recursive: true });
 		const rc = join(dir, "rc");
 		writeFileSync(rc, RC);
 		const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(rc)} --noediting -i`, "/dev/null"];
 		const win = {
 			name,
-			network: mode === "direct" ? true : confined ? false : network,
-			sandbox: mode === "sandbox",
+			network: confined ? false : mode === "direct" ? true : network,
+			sandbox: mode === "sandbox" || confined,
 			readOnly: confined,
 			state: POLICY.enums.windowStates.starting,
 			lines: [],
@@ -265,7 +267,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			head: [],
 		};
 		let child;
-		if (mode === "sandbox") {
+		if (mode === "sandbox" || confined) {
 			const { args, env } = sandboxArgs({ root, brainDir, network: confined ? false : network, read: config.shellRead, readOnly: confined });
 			child = spawn("bwrap", [...args, "--", ...inner], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
 		} else {
@@ -295,7 +297,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			win.exitCode = code;
 			setTimeout(() => ended(code), POLICY.timing.windows.exitGraceMs).unref();
 		});
-		if (mode === "direct" && child.pid !== undefined) {
+		if (mode === "direct" && !confined && child.pid !== undefined) {
 			// Outside the sandbox nothing ends the window when Cartographer itself is killed. This does.
 			const reaper = spawn(process.execPath, [REAPER, String(process.pid), String(child.pid)], { stdio: "ignore", detached: true });
 			reaper.on("error", () => {});
@@ -424,8 +426,9 @@ export function createWindows({ root, brainDir, config, runner }) {
 	 */
 	async run(name, command, { network = false, waitMs, signal, readOnly = false }) {
 		checkName(name);
-		// "Read-only" is a promise the sandbox can keep; without the sandbox it is only a name.
-		const confined = readOnly === true && runner.mode === "sandbox";
+		// "Read-only" is a promise the sandbox keeps; bubblewrap being available is what makes it possible, even with the sandbox switched off.
+		const spawnsSandbox = runner.mode === "sandbox" || (runner.mode === "direct" && runner.available?.ok === true);
+		const confined = readOnly === true && spawnsSandbox;
 		let win = windows.get(name);
 		if (win === undefined) {
 			if (windows.size >= WINDOWS_MAX) throw new WindowError(`${WINDOWS_MAX} windows are open, which is the limit: ${[...windows.keys()].join(", ")}. Close one with \`window\` first, or run this in one of them.`);
@@ -440,7 +443,9 @@ export function createWindows({ root, brainDir, config, runner }) {
 					: `Window ${name} may change files. A read-only command runs in a window of another name.`);
 			}
 			// The terminal closes every window when the user switches the sandbox; this is for a switch it did not see.
-			if (win.sandbox !== (runner.mode === "sandbox")) {
+			// A window opened read-only rides bwrap either way, so its provenance survives the switch only that far.
+			const spawnedSandboxed = (runner.mode === "sandbox" || (runner.mode === "direct" && runner.available?.ok === true)) && (win.readOnly === true || runner.mode === "sandbox");
+			if (win.sandbox !== spawnedSandboxed) {
 					throw new WindowError(`Window ${name} was opened ${win.sandbox ? "in the sandbox" : "with the sandbox off"}, and that has changed since. Close it with \`window\`, then run this again: the window opens anew.`);
 				}
 				if (win.sandbox && win.network !== (network === true)) {
