@@ -16,6 +16,7 @@ import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots } from "../context.mjs";
 import { fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference } from "../catalog.mjs";
+import { atlasOperationSchema } from "./atlas.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
@@ -261,6 +262,14 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 		return textResult(`${selected} [${result.resolvedVersion ?? result.currentVersion}]${readablePinned ? ` · pinned historical version; current is ${result.currentVersion}` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
 	}
 	if (DURABLE_TARGETS.has(target)) {
+		if (target === "schema" && ["inspect", "read"].includes(action) && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
+			let current;
+			try { current = nativeReference(brainDir, "schema", args.ref.id); }
+			catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
+			if (args.ref.namespace !== current.namespace) return fail("Schema reference belongs to another brain-store namespace.");
+			const retained = readReferenceVersion(brainDir, args.ref);
+			if (retained !== undefined) return textResult(action === "inspect" ? JSON.stringify({ ref: args.ref, kind: "schema", status: "live", retained: true }, null, 2) : JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
+		}
 		let records;
 		try { records = await durableRecords(target, brainDir, api, callContext); }
 		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
@@ -466,16 +475,20 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 				const resolved = resolveFile(root, brainDir, ref);
 				if (resolved.status !== "live") return fail(`Cannot shelf file: resolver status ${resolved.status}. ${resolved.error ?? "The reference is not current."}`);
 				path = resolved.record.path;
-			} else if (ref.kind === "report") {
-				const verified = await runUniversal({ root, brainDir, config, engine, gate }, { target: "report", action: "read", ref }, api, callContext);
-				if (verified.isError) return verified;
-				path = `report:${ref.id}`;
-			} else return unsupported("shelf", "add for this reference kind");
+		} else if (ref.kind === "report") {
+			const verified = await runUniversal({ root, brainDir, config, engine, gate }, { target: "report", action: "read", ref }, api, callContext);
+			if (verified.isError) return verified;
+			path = `report:${ref.id}`;
+		} else if (ref.kind === "schema") {
+			if (typeof ref.version !== "string") return fail("A schema shelf placement needs an exact version-pinned schema reference.");
+			const retained = readReferenceVersion(brainDir, ref);
+			if (retained === undefined) return fail("The pinned schema version is unavailable; no shelf placement was added.");
+		} else return unsupported("shelf", "add for this reference kind");
 		}
-		if (typeof path !== "string" || path.trim() === "") return fail("shelf add needs a file reference or explicit project-relative path.");
+		if (ref?.kind !== "schema" && (typeof path !== "string" || path.trim() === "")) return fail("shelf add needs a file reference or explicit project-relative path.");
 		const mine = currentShelf(brainDir, api.conversationId, main);
 		let picked;
-		try { picked = shelfItem(root, path, args.range, brainDir, mine); }
+		try { picked = shelfItem(root, ref?.kind === "schema" ? ref : path, args.range, brainDir, mine); }
 		catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }
 		const item = { ...picked.item, ...(ref ? { target: ref } : {}) };
 		const others = mine.filter((entry) => !sameItem(entry, item));
@@ -874,6 +887,7 @@ const PLAN_OP = union([
 		{ allOf: [{ if: { properties: { mode: lit(POLICY.enums.planMode.look) }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], anyOf: [{ required: ["text"] }, { required: ["mode"] }, { required: ["network"] }, { required: ["standing"] }], description: "Edit a plan item; look items cannot have change-only flags." },
 	),
 	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The item (p1, p4).") }, { description: "Remove a plan item." }),
+	obj({ action: lit(POLICY.enums.actions.before), id: entryId("The plan item to move (p1, p4)."), before: opt(entryId("The item to stand in front of; omit to move it to the end.")) }, { description: "Reorder an open or finished plan item." }),
 	obj({ action: lit(POLICY.enums.actions.clear) }, { description: "Clear the plan." }),
 ]);
 
@@ -921,6 +935,159 @@ const BOOK_CONDITIONS = [
 		},
 	},
 ];
+
+export const BOOK_BRANCH_ACTIONS = {
+	file: ["inspect", "read", "create", "edit", "rebind"],
+	report: ["list", "inspect", "read", "recall", "archive", "restore", "remove"],
+	ledger: ["list", "inspect", "read", "add", "edit", "done", "remove"],
+	plan: ["list", "inspect", "read", "add", "edit", "done", "remove", "before"],
+	atlas: ["list", "inspect", "read", "add", "edit", "link", "unlink", "confirm", "remove"],
+	assessment: ["list", "inspect", "read", "add", "edit", "done", "remove", "before"],
+	practice: ["list", "inspect", "read", "add", "edit", "done", "remove", "before"],
+	context: ["list", "inspect", "read", "add", "edit", "done", "remove", "before", "archive", "restore"],
+	conversation: ["list", "inspect", "read"],
+	message: ["list", "inspect", "read", "edit"],
+	toolCall: ["list", "inspect", "read"],
+	toolResult: ["list", "inspect", "read"],
+	prompt: ["list", "inspect", "read"],
+	tool: ["list", "inspect", "read"],
+	schema: ["list", "inspect", "read"],
+	shelf: ["list", "add", "remove"],
+};
+
+const operationBranch = (schema, action) => (schema?.anyOf ?? []).find((branch) => branch.properties?.action?.const === action);
+
+export function bookBranchVariants(target, action) {
+	if (target === "file" && ["inspect", "read"].includes(action)) return ["ref", "path"];
+	if (target === "shelf" && action === "add") return ["file-ref", "report-ref", "schema-ref", "path"];
+	if (target === "ledger" && action === "add") return [...KINDS];
+	if (target === "plan" && action === "add") return [...MODES];
+	if (target === "plan" && action === "edit") return [...MODES, "text", "network", "standing"];
+	return [];
+}
+
+/** The exact target/action projection used by both the provider and the persistent schema reference. */
+export function bookBranchParameters(source, target, action, variant) {
+	if (!BOOK_BRANCH_ACTIONS[target]?.includes(action)) throw new Error(`The book target ${target} does not support ${action}.`);
+	const schema = structuredClone(source);
+	for (const condition of schema.allOf ?? []) {
+		const keys = Object.keys(condition?.if?.properties ?? {});
+		if (keys.length !== 1 || keys[0] !== "book") throw new Error("The book schema contains a conditional outside the legacy interface; it cannot be safely specialized.");
+	}
+	const props = schema.properties;
+	const keep = new Set(["target", "action"]);
+	let required = ["target", "action"];
+	const include = (...keys) => keys.forEach((key) => keep.add(key));
+	const require = (...keys) => { include(...keys); required.push(...keys); };
+	let operationSchema;
+	let refKind;
+	let refVersionRequired = false;
+
+	if (target === "file") {
+		if (action === "inspect" || action === "read") {
+			if (!["ref", "path"].includes(variant)) throw new Error(`file.${action} needs a locator choice: ref or path.`);
+			if (variant === "ref") { require("ref"); refKind = "file"; } else require("path");
+			if (action === "read") include("range");
+		}
+		if (action === "create") require("path", "content", "planItem");
+		if (action === "edit") { require("ref", "planItem", "expectedVersion", "oldText", "newText"); refKind = "file"; }
+		if (action === "rebind") { require("ref", "expectedVersion", "path"); refKind = "file"; }
+	} else if (target === "report") {
+		if (action !== "list") { require("ref"); refKind = "report"; }
+		if (["archive", "restore", "remove"].includes(action)) include("expectedVersion");
+	} else if (DURABLE_TARGETS.has(target)) {
+		if (["inspect", "read"].includes(action)) { require("ref"); refKind = target; }
+		if (target === "message" && action === "edit") { require("ref"); refKind = target; include("expectedVersion"); }
+	} else if (BRAIN_TARGETS.has(target)) {
+		if (["inspect", "read"].includes(action)) { require("ref"); refKind = target; }
+		if (BRAIN_MUTATIONS[target]?.has(action)) {
+			if (action !== "add") { require("ref"); refKind = target; include("expectedVersion"); }
+			if (target === "context" && ["archive", "restore"].includes(action)) {
+				require("operation");
+				operationSchema = obj({ when: opt(oneOf(CONTEXT_WHEN)) });
+			} else {
+				require("operation");
+				const operations = target === "ledger" ? LEDGER_OP : target === "plan" ? PLAN_OP : target === "atlas" ? undefined : ["assessment", "practice"].includes(target) ? BOOKS_OP : CONTEXT_OP;
+				operationSchema = target === "atlas" ? atlasOperationSchema(action) : operationBranch(operations, action);
+				if (target === "atlas" && action !== "add" && operationSchema?.properties?.name !== undefined) {
+					delete operationSchema.properties.name;
+					operationSchema.required = (operationSchema.required ?? []).filter((key) => key !== "name");
+				}
+				if (operationSchema === undefined && target === "plan" && action === "before") {
+					const add = operationBranch(PLAN_OP, "add");
+					operationSchema = obj({ action: lit(action), id: add.properties.before, before: opt(add.properties.before) });
+				}
+				if (operationSchema === undefined) throw new Error(`No exact ${target} operation schema exists for ${action}.`);
+				operationSchema = specializeOperation(target, action, operationSchema, variant);
+			}
+		}
+	} else if (target === "shelf") {
+		if (action === "add") {
+			if (!["file-ref", "report-ref", "schema-ref", "path"].includes(variant)) throw new Error("shelf.add needs a locator choice: file-ref, report-ref, schema-ref, or path.");
+			if (variant === "path") { require("path"); include("range"); }
+			else {
+				require("ref");
+				refKind = variant === "file-ref" ? "file" : variant === "report-ref" ? "report" : "schema";
+				refVersionRequired = variant === "schema-ref";
+				if (variant === "file-ref") include("range");
+			}
+			include("handOn");
+		}
+		if (action === "remove") require("placementId");
+	}
+	if (operationSchema !== undefined) props.operation = operationSchema;
+	for (const key of Object.keys(props)) if (!keep.has(key)) delete props[key];
+	if (refKind !== undefined && props.ref !== undefined) {
+		props.ref = structuredClone(props.ref);
+		props.ref.properties.kind = { type: "string", const: refKind, description: `Reference kind must be ${refKind}.` };
+		if (refVersionRequired) props.ref.required = [...new Set([...(props.ref.required ?? []), "version"])];
+	}
+	props.target = { type: "string", const: target, description: props.target?.description ?? "Selected book target." };
+	props.action = { type: "string", const: action, description: props.action?.description ?? "Selected book action." };
+	schema.required = [...new Set(required)];
+	delete schema.allOf;
+	schema.additionalProperties = false;
+	return schema;
+}
+
+function specializeOperation(target, action, operationSchema, variant) {
+	const schema = structuredClone(operationSchema);
+	for (const condition of schema.allOf ?? []) {
+		const keys = Object.keys(condition?.if?.properties ?? {});
+		const allowed = target === "ledger" && action === "add" ? ["kind"] : target === "plan" && ["add", "edit"].includes(action) ? ["mode"] : [];
+		if (keys.length === 0 || keys.some((key) => !allowed.includes(key))) throw new Error(`The ${target}.${action} operation has an unsupported conditional; refusing to drop it.`);
+	}
+	delete schema.allOf;
+	if (["assessment", "practice"].includes(target) && action === "add") {
+		schema.properties.kind = { type: "string", const: target, description: `The selected ${target} book.` };
+	}
+	if (target === "ledger" && action === "add") {
+		if (![...KINDS].includes(variant)) throw new Error("ledger.add needs a kind choice (goal, question, or note) to specialize its schema.");
+		schema.properties.kind = { type: "string", const: variant, description: "The selected ledger entry kind." };
+		if (variant === POLICY.enums.ledgerKind.goal) schema.required = [...new Set([...(schema.required ?? []), "done_when"])];
+		else delete schema.properties.done_when;
+	}
+	if (target === "plan" && ["add", "edit"].includes(action)) {
+		if (action === "add" && !MODES.includes(variant)) throw new Error("plan.add needs a mode choice (look or change) to specialize its schema.");
+		if (action === "edit" && ![...MODES, "text", "network", "standing"].includes(variant)) throw new Error("plan.edit needs a mode or field choice (look, change, text, network, or standing) to specialize its schema.");
+		if (variant === POLICY.enums.planMode.look) {
+			schema.properties.mode = { type: "string", const: variant, description: "The selected plan mode." };
+			delete schema.properties.network;
+			delete schema.properties.standing;
+			schema.required = [...new Set([...(schema.required ?? []), "mode"])];
+		} else if (variant === POLICY.enums.planMode.change) {
+			schema.properties.mode = { type: "string", const: variant, description: "The selected plan mode." };
+			schema.required = [...new Set([...(schema.required ?? []), "mode"])];
+		} else {
+			const field = variant;
+			if (!["text", "network", "standing"].includes(field)) throw new Error("plan.edit selected an unknown field branch.");
+			for (const key of ["mode", "text", "network", "standing"]) if (key !== field) delete schema.properties[key];
+			schema.required = [...new Set([...(schema.required ?? []), field])];
+			delete schema.anyOf;
+		}
+	}
+	return schema;
+}
 
 /**
  * @param {{ root: string, brainDir: string, config: object, engine: object, gate?: { yolo: boolean } }} input

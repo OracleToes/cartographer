@@ -1,6 +1,6 @@
 # Working design: universal references, books, schemas, and collapse memory
 
-**Status:** Stage 3's file-shelf lifecycle follow-up is implemented; final verification remains pending until Stage 8. Stage 4 is authorized. The user has confirmed the identity, version/conflict, focus/return workflow and has directed the agent to make technical choices without pausing for non-taste questions. 4A is frozen on the conservative first-release capability matrix, resolver contract, source-byte prompt/schema digests, additive migration, and fail-closed provider/context-budget rules documented below. The package-level Durable/schema/provider trace is complete; live endpoint integration remains a deployment-level verification, not a prerequisite to implement the portable contract. Stage 4B implementation is now underway. Do not run tests before final verification and user authorization.
+**Status:** Stage 3's file-shelf lifecycle follow-up and Stage 4 implementation are complete. Stage 5 implementation is complete: compact schema selection, strict provider routing, branch-specific projections, local execution guards, retry/restart recovery, success cleanup, and schema budgeting are in place. Acceptance verification remains deferred to Stage 8; do not run tests unless the user explicitly asks in that conversation. Live endpoint enforcement remains unverified.
 
 ## Confirmed intent
 
@@ -181,13 +181,13 @@ Stage 2’s completed decisions remain valid within their scope: tagged composed
 
 ## Proposed staged implementation plan
 
-Stage 4 is authorized, but identity/resolver implementation remains gated on completion and review of 4A's contract and prerequisites above. Keep phases sequenced and add/update acceptance tests with code, but **do not run tests until final verification (Stage 8)**. Inspect the live diff before editing and avoid overwriting or attributing existing changes to this feature.
+Stage 4 implementation is complete against the frozen 4A contract and its resolver, identity/version, mutation, focus/return, migration, and safety requirements. Acceptance verification remains deferred to Stage 8; do not run tests unless the user explicitly authorizes them in that conversation. Preserve existing changes and keep final verification separate from implementation.
 
 ### Stage 0 — initial implementation audit (complete; universal-contract follow-up remains)
 
 - The earlier audit traced context budgeting/collapse triggers and the installed provider request/argument hooks; findings are recorded above.
 - Stage 1–3 implementation and their narrower acceptance assertions are recorded below. The new universal reference requirement exceeds that audit's original scope.
-- Stage 4 has user-confirmed the reference envelope/version/conflict rules, Durable file-ID lifecycle, existing domain-ID mappings, model/nested tool-call links, one-operation `target`/`action` book API, external-book focus dispatch, and return-time brain-review checkpoint. The initial capability matrix, exact prompt/schema digesting, migration/safety defaults, resolver contract, and deterministic budget policy are now specified for review. Live endpoint schema behavior and model-specific headroom calibration remain unverified because no server/model configuration is present in this checkout.
+- Stage 4 implementation is complete: the confirmed reference/version/conflict policy, Durable provenance links, one-operation `target`/`action` book API, focus dispatch, return checkpoint, migration, and safety behavior are implemented. Acceptance verification and any endpoint-specific behavior remain deferred to Stage 8; no live model endpoint is configured here.
 
 **Exit for the original audit:** provider and budget observations were recorded. **Not an exit for universal implementation:** the newly surfaced contracts remain open.
 
@@ -233,7 +233,7 @@ Stage 4 is authorized, but identity/resolver implementation remains gated on com
 
 **Exit:** final verification confirms immediate visibility, full backing-file persistence through collapse/deletion, range changes from snapshots, rendered-content cap accounting, stable IDs, safe cleanup, task handoff, diffs, and actionable failures.
 
-### Stage 4 — universal reference catalog and `book` operations (authorized; 4A frozen, 4B underway)
+### Stage 4 — universal reference catalog and `book` operations (implementation complete; acceptance verification deferred to Stage 8)
 
 Stage 4 combines a broad catalog, resolver, API, migration, and cross-interface rollout. Keep it as one architectural stage, sequenced through explicit internal phases. Stage 4 is authorized. The 4A behavioral contract and conservative defaults are frozen above; implement 4B–4D against them. Provider-specific schema/headroom checks remain deployment validation and must fail closed when unavailable.
 
@@ -268,11 +268,14 @@ Stage 4 combines a broad catalog, resolver, API, migration, and cross-interface 
 
 ### Stage 5 — on-demand tool-schema lifecycle
 
-- Treat each tool and exact schema version as a first-class referenced entity under Stage 4's identity contract. Keep the `book` schema available; load another full schema on demand when that tool is about to be used.
-- When a selected tool is used, place its exact schema in active context and send it as the provider-facing schema for that request; leave unrelated schemas compact.
-- Preserve useful descriptions and conditionals. Confirm compile/provider transport behavior from the installed dependencies, and locally validate before execution. On success, remove temporary schema material from subsequent context and retain the successful exact call and result as a referenced example. On invalid calls, return a useful error and keep enough schema context for a retry.
+- Treat each tool and exact schema version as a first-class referenced entity under Stage 4's identity contract. Keep a compact schema available at all times that names the top-level call choices; for `book`, it exposes the top-level target/action families (for example, `book > atlas | ledger | plan`) without expanding every operation's full payload schema.
+- A compact selection call identifies the specific tool or `book` branch. Before the actual operation call, prepend that selected branch's exact full schema to the active context and send it as the provider-facing schema for the next request. This adds a prefill step, but gives the model the complete schema it needs to form the call correctly. Keep unrelated schemas compact.
+- Preserve useful descriptions and conditionals. Require constrained JSON-schema sampling for the selected full schema (not best-effort strict mode); the local llama.cpp-compatible provider must send a strict provider-facing schema and fail closed rather than silently fall back when the schema or endpoint cannot enforce it. Locally validate before execution regardless. On success, remove temporary schema material from subsequent context and retain the successful exact call and result as a referenced example. On invalid calls, return a useful error and keep enough schema context for a retry.
+- Shape expanded schemas into the provider's supported strict subset. In particular, expand `book` per selected target/action instead of sending its broad conditional schema; do not weaken the local validator or silently drop unsupported constraints.
 - Reserve and account for schema headroom under the established context-budget policy; persistent schema references count against the shelf cap, one-use schema material does not.
 - Add or update focused tests without running them yet.
+
+**Implementation progress (2026-11-13):** `src/tool-schemas.mjs` adds a compact `tool_schema` selector; provider requests carry only the selector before selection, then only the selected tool with `strict: true` and a closed/nullable-required schema. The OpenAI-compatible adapter path is enabled for strict payloads and rejects other APIs rather than downgrading. Book selection fixes `target` and `action`, including locator, ledger-kind, plan-mode, and plan-edit field variants; Atlas and the other conditional tools are projected per selected branch. Local `prepareArguments` validation remains intact. Selected schema versions are content-addressed and retained as typed schema references; an explicit schema shelf placement resolves its pinned version and is charged using the rendered shelf estimate, while one-use schema output is charged only to the separate schema headroom. Invalid operations retain enough selection state for retry and restart recovery; successful operations clear it, and request dressing removes temporary selector exchanges while preserving the actual call/result. Strict conversion rejects unsupported structures, and provider routing fails closed. Implementation is complete; acceptance verification and live endpoint enforcement remain deferred to Stage 8, with no tests run in this stage.
 
 **Exit:** acceptance coverage addresses provider payload selection, exact schema identity, validation-before-execution, cleanup/retention on success, retry behavior on failure, and persistent versus temporary token accounting.
 

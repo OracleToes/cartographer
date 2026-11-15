@@ -161,8 +161,8 @@ const planSpec = (plan) => ({
 	},
 	editTextRequired: false,
 	editResult: (item) => `${item.id} changed.`,
-	reorder: false,
-	unknownAction: (op) => `Unknown action ${JSON.stringify(op?.action)}; the actions are add, edit, done, remove, clear.`,
+	reorder: true,
+	unknownAction: (op) => `Unknown action ${JSON.stringify(op?.action)}; the actions are add, edit, done, remove, before, clear.`,
 
 });
 

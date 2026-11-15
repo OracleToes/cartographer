@@ -19,6 +19,7 @@ import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs"
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
+import { createToolSchemaLifecycle } from "./tool-schemas.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
@@ -91,7 +92,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			supportsStore: false,
 			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
-			supportsStrictMode: false,
+			// This OpenAI-compatible endpoint must accept strict function JSON Schemas; selected calls fail closed otherwise.
+			supportsStrictMode: true,
 			supportsUsageInStreaming: true,
 			maxTokensField: "max_tokens",
 		},
@@ -242,6 +244,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
+	const schemaLifecycle = createToolSchemaLifecycle(sessionTools, { schemaBudgetTokens: Math.floor(config.contextWindow * POLICY.limits.toolSchemas.contextShare), brainDir });
+	for (let index = 0; index < sessionTools.length; index++) sessionTools[index] = schemaLifecycle.normalizeTool(sessionTools[index]);
+	sessionTools.push(schemaLifecycle.normalizeTool(schemaLifecycle.selector));
 	const core = defineExtension({
 		name: "cartographer",
 		// One section that never changes within a project: a change here makes the server read the whole prompt again.
@@ -256,6 +261,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
+					const schemaRefusal = schemaLifecycle.beforeTool(call, api);
+					if (schemaRefusal !== undefined) return schemaRefusal;
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
 						if (LOOK.has(call.name)) return { block: REFUSALS.mainLooks };
 						if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
@@ -275,6 +282,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					return undefined;
 				},
 				afterTool: async (call, result, api) => {
+					result = schemaLifecycle.afterTool(call, result, api) ?? result;
 					if (call.parent !== undefined) return undefined;
 					const looped = loopCheck(call, result, api);
 					const out = looped ?? result;
@@ -336,14 +344,17 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					let note;
 					if (main) noteUserMessages(brainDir, messages);
 					else note = await engine.beforeTaskRequest(api.conversationId, messages);
-					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) }) };
+					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId), schemaLifecycle }) };
 				},
 				// The request as it is sent: the question before a collapse is put behind exactly this.
-				beforeProviderRequest: ({ payload }, api) => {
-					engine.sending(api.conversationId, payload);
-					return undefined;
+				beforeProviderRequest: ({ payload, model }, api) => {
+					const routed = schemaLifecycle.beforeProviderRequest({ payload, model }, api);
+					if (routed === undefined) throw new Error("On-demand strict schema routing returned no provider payload.");
+					engine.sending(api.conversationId, routed.payload);
+					return routed;
 				},
 				afterResponse: (message, api) => {
+					schemaLifecycle.afterResponse(message, api);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);

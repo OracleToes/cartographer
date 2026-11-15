@@ -58,6 +58,12 @@ const Op = union([
 	),
 ]);
 
+export function atlasOperationSchema(action) {
+	const branch = Op.anyOf?.find((schema) => schema.properties?.action?.const === action);
+	if (branch === undefined) throw new Error(`Atlas has no operation schema for ${action}.`);
+	return structuredClone(branch);
+}
+
 const opLabel = (op) => `${op?.action ?? "?"}${op?.name ? ` ${op.name}` : ""}`;
 
 /** @param {{ root: string, brainDir: string }} input */

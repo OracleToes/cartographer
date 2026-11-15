@@ -33,6 +33,7 @@ import { POLICY } from "./config.mjs";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { readReferenceVersion } from "./catalog.mjs";
 import { TASK_HEADER } from "./prompt.mjs";
 import { stamp } from "./time.mjs";
 import { applyEntryOp } from "./rows.mjs";
@@ -490,12 +491,19 @@ export function parseLines(lines) {
 
 /** Resolve a typed reference to the full content the shelf should show. Add resolvers here, not kind-specific shelf flows. */
 const SHELF_RESOLVERS = {
-	report: (brainDir, id) => {
-		const row = composedRows(loadContext(brainDir)).find((entry) => entry.id === id);
-		return row === undefined ? undefined : loadReport(brainDir, id);
+	report: (brainDir, ref) => {
+		const row = composedRows(loadContext(brainDir)).find((entry) => entry.id === ref.id);
+		return row === undefined ? undefined : loadReport(brainDir, ref.id);
+	},
+	schema: (brainDir, ref) => {
+		const schema = readReferenceVersion(brainDir, { namespace: ref.namespace, kind: "schema", id: ref.id, version: ref.version });
+		return schema === undefined ? undefined : JSON.stringify(schema, null, 2);
 	},
 };
 const referenceOf = (given) => {
+	if (given !== null && typeof given === "object" && typeof given.kind === "string" && typeof given.id === "string") {
+		return { type: given.kind, id: given.id, ...(given.namespace ? { namespace: given.namespace } : {}), ...(given.version ? { version: given.version } : {}) };
+	}
 	const match = /^([a-z][a-z0-9_-]*):(.+)$/.exec(String(given ?? ""));
 	return match === null ? undefined : { type: match[1], id: match[2] };
 };
@@ -567,7 +575,7 @@ export function persistShelfSnapshot(brainDir, item, content) {
 /** Resolve the current selected content. A missing or unreadable source falls back to the full shelf snapshot. */
 function resolveShelfText(root, item, brainDir) {
 	if (item.ref !== undefined) {
-		const content = SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref.id);
+		const content = SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref);
 		return content === undefined ? `== ${shelfLabel(item)} ==\nNot found. The referenced item is no longer available.` : `== ${shelfLabel(item)} ==\n${content}`;
 	}
 	const live = liveShelfSource(root, item);
@@ -594,6 +602,7 @@ export const sameShelfItem = (a, b) => a.ref !== undefined || b.ref !== undefine
 export function shelfItem(root, given, lines, brainDir, existing = []) {
 	const ref = referenceOf(given);
 	if (ref !== undefined && SHELF_RESOLVERS[ref.type] !== undefined) {
+		if (ref.type === "schema" && (typeof ref.namespace !== "string" || typeof ref.version !== "string")) throw new ShelfError("A schema shelf placement needs a version-pinned schema reference.");
 		const item = { type: "reference", ref, id: existing.find((entry) => sameShelfItem(entry, { ref }))?.id ?? newShelfId() };
 		const text = resolveShelfText(root, item, brainDir);
 		if (/\nNot found\. /.test(text)) throw new ShelfError(text.split("\n").slice(1).join(" "));

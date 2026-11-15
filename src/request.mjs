@@ -72,15 +72,17 @@ export function withoutAdditions(text) {
 
 /**
  * @param {readonly any[]} messages  the request's messages, as stored
- * @param {{ brainDir: string, root: string, runner?: any, config?: any, windows?: any, wakes?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number }} input
+ * @param {{ brainDir: string, root: string, runner?: any, config?: any, windows?: any, wakes?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, schemaLifecycle?: { forRequest: (messages: readonly any[], conversationId?: string) => readonly any[] } }} input
  *   conversationId: whose request it is; note: for a task, a note for this one request; used: the server's count
  *   of tokens for the last reply
  *   main: the main agent's request; windows: the session's shell windows (src/windows.mjs); wakes: its wake
  *   triggers (src/wakes.mjs); gate: whether the user has switched approval off
  */
-export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used }) {
+export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, schemaLifecycle }) {
 	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike (src/wake.mjs).
 	let kept = withoutQuietWakes(messages);
+	// Once an operation succeeds, its temporary schema-selection exchange leaves the live prompt; the actual call/result remain.
+	if (schemaLifecycle !== undefined && conversationId !== undefined) kept = schemaLifecycle.forRequest(kept, conversationId);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
 	let focus;
