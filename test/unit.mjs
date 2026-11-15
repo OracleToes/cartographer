@@ -521,3 +521,24 @@ test("shelf add: the ID alone is enough, and it finds the file behind it", async
 	assert.equal(missing.isError, true);
 	assert.match(missing.output[0].text, /Nothing with the ID/);
 });
+
+test("book: prepareArguments repairs the (deeply frozen) harness arguments without throwing", (t) => {
+	// The harness reads the assistant entry and deep-freezes everything in it, the tool-call arguments included
+	// (pi-durable freezeJson). The repair must carry a new object instead of mutating the frozen one.
+	const { root, brainDir } = fresh(t);
+	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const deepFreeze = (value) => {
+		if (value && typeof value === "object") { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value); }
+		return value;
+	};
+	const byPath = deepFreeze({ target: "file", action: "read", path: "index.html" });
+	const preparedPath = tool.prepareArguments(byPath);
+	assert.equal(preparedPath.target, "file");
+	assert.equal(preparedPath.action, "read");
+	assert.equal(preparedPath.ref, undefined, "no ref is invented for a path call");
+	const byRef = deepFreeze({ target: "file", action: "read", ref: { id: "f1" } });
+	const preparedRef = tool.prepareArguments(byRef);
+	assert.equal(preparedRef.ref.id, "f1");
+	assert.ok(typeof preparedRef.ref.namespace === "string" && preparedRef.ref.namespace.length >= 16, "the namespace is inferred");
+	assert.equal(preparedRef.ref.kind, "file", "the kind is inferred from the target");
+});

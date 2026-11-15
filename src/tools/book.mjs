@@ -1097,14 +1097,16 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			}
 			const value = result.value;
 			if (value.target === undefined || value.action === undefined) throw new Error('Validation failed for tool "book": target and action are both required.');
-			value.ref = normalizeRef(brainDir, value.ref, value.target);
-			const { unsupported, problems } = checkCall(value.target, value.action, value);
+			const ref = normalizeRef(brainDir, value.ref, value.target);
+			// The harness hands the call's arguments to tools deeply frozen; never mutate them, carry a new object.
+			const prepared = ref === undefined ? { ...value } : { ...value, ref };
+			const { unsupported, problems } = checkCall(value.target, value.action, prepared);
 			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.${CAPABILITIES[value.target] === undefined ? "" : ` Supported actions for ${value.target}: ${Object.keys(CAPABILITIES[value.target]).join(", ")}.`}`);
 			if (problems.length > 0) {
 				const guide = guideFor(value.target, value.action);
 				throw new Error(`Validation failed for tool "book": ${value.target} ${value.action} needs ${joinList(problems)}.${guide === undefined ? "" : ` ${value.target} ${value.action} takes: ${guide}.`}`);
 			}
-			return value;
+			return prepared;
 		},
 
 		executionMode: "sequential",
