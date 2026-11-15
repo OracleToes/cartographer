@@ -32,6 +32,22 @@ export const WINDOW_ACTIONS = SHELL_ACTIONS.filter((action) => action !== POLICY
 export const MAIN_WINDOW = POLICY.sentinels.mainWindow;
 
 const refuse = (text) => ({ isError: true, output: [{ type: "text", text: `Refused: ${text}` }] });
+/** Which arguments each action consumes; anything else is said, not swallowed. */
+const ACTION_PARAMS = {
+	run: ["command", "window", "seconds"],
+	read: ["window", "lines"],
+	wait: ["window", "seconds", "until"],
+	send: ["window", "text", "seconds"],
+	stop: ["window"],
+	close: ["window"],
+};
+const PARAM_HINT = { command: "run", window: "read, wait, send, stop and close", seconds: "run, wait and send", text: "send", until: "wait", lines: "read" };
+/** One line naming the arguments that mean nothing for this action, when there are any. */
+export const ignoredLine = (args, action) => {
+	const ok = new Set(ACTION_PARAMS[action] ?? []);
+	const ignored = Object.keys(args ?? {}).filter((key) => key !== "action" && !ok.has(key));
+	return ignored.length === 0 ? "" : `\nIgnored as not for \`${action}\`: ${ignored.map((key) => `\`${key}\` (${PARAM_HINT[key] ?? "no action"} only)`).join(", ")}.`;
+};
 const seconds = (ms) => (ms < POLICY.limits.format.durationCompactAtMs ? `${(ms / 1000).toFixed(POLICY.limits.format.durationDecimals)} s` : took(ms));
 const firstLine = (command) => {
 	const line = String(command ?? "").split("\n")[0];
@@ -101,27 +117,26 @@ export function shellTool({ config, runner, windows, runOf }) {
 			),
 			command: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "run: the command line, as you would type it in bash" })),
 			window: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: `Name of the window, a short word such as server or tests. A name that is not open yet opens a new window. Default: ${MAIN_WINDOW}.` })),
-			wait: opt(int({ minimum: POLICY.validation.nonNegativeMin, maximum: WAIT_MAX, description: `run: seconds to wait for the command to end before returning. Default ${config.shellWait}, at most ${WAIT_MAX}. ${POLICY.validation.nonNegativeMin} returns at once.` })),
 			text: opt(str({ description: "send: the line to type. The line end is added." })),
-			seconds: opt(int({ minimum: POLICY.validation.nonNegativeMin, maximum: WAIT_MAX, description: `wait: the longest to wait. Default ${config.shellWait}, at most ${WAIT_MAX}. send: how long to wait for the program's answer, default ${POLICY.timing.windows.sendWaitSeconds}.` })),
+			seconds: opt(int({ minimum: POLICY.validation.nonNegativeMin, maximum: WAIT_MAX, description: `run: seconds to wait before returning. wait: the longest to wait. send: how long to wait for the program's answer. Default ${config.shellWait}, at most ${WAIT_MAX}. ${POLICY.validation.nonNegativeMin} returns at once.` })),
 			until: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "wait: return as soon as a new line of output contains this text, such as the line a server prints when it is ready." })),
 			lines: opt(int({ minimum: POLICY.validation.positiveIntegerMin, maximum: POLICY.limits.windows.outputReadMaxLines, description: `read: how many lines, counted from the end. Default ${POLICY.limits.windows.outputReadDefaultLines}, at most ${POLICY.limits.windows.outputReadMaxLines}.` })),
 		}, {
 			allOf: [
 				...[
-					[POLICY.enums.shellAction.run, ["command"], ["text", "seconds", "until", "lines"]],
-					[POLICY.enums.shellAction.read, ["window"], ["command", "wait", "text", "seconds", "until"]],
-					[POLICY.enums.shellAction.wait, ["window"], ["command", "wait", "text", "lines"]],
-					[POLICY.enums.shellAction.send, ["window", "text"], ["command", "wait", "until", "lines"]],
-					[POLICY.enums.shellAction.stop, ["window"], ["command", "wait", "text", "seconds", "until", "lines"]],
-					[POLICY.enums.shellAction.close, ["window"], ["command", "wait", "text", "seconds", "until", "lines"]],
-				].map(([action, required, forbidden]) => ({
+					[POLICY.enums.shellAction.run, ["command"]],
+					[POLICY.enums.shellAction.read, ["window"]],
+					[POLICY.enums.shellAction.wait, ["window"]],
+					[POLICY.enums.shellAction.send, ["window", "text"]],
+					[POLICY.enums.shellAction.stop, ["window"]],
+					[POLICY.enums.shellAction.close, ["window"]],
+				].map(([action, required]) => ({
 					if: { properties: { action: { const: action } }, required: ["action"] },
-					then: { required, not: { anyOf: forbidden.map((key) => ({ required: [key] })) } },
+					then: { required },
 				})),
 				{
 					if: { not: { required: ["action"] } },
-					then: { required: ["command"], not: { anyOf: ["text", "seconds", "until", "lines"].map((key) => ({ required: [key] })) } },
+					then: { required: ["command"] },
 				},
 			],
 		}),
@@ -146,7 +161,7 @@ export function shellTool({ config, runner, windows, runOf }) {
 				const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
 				let result;
 				try {
-					result = await windows.run(name, args.command, { network: confined ? false : run.network === true, waitMs: waitOf(args.wait, config.shellWait) * 1000, signal: callContext.abortSignal, readOnly: confined });
+					result = await windows.run(name, args.command, { network: confined ? false : run.network === true, waitMs: waitOf(args.seconds, config.shellWait) * 1000, signal: callContext.abortSignal, readOnly: confined });
 				} catch (error) {
 					if (error instanceof WindowError) return refuse(error.message);
 					if (error instanceof SandboxError) return refuse(REFUSALS.noSandbox(error.message));
@@ -157,7 +172,7 @@ export function shellTool({ config, runner, windows, runOf }) {
 				const hint = confined && failed ? "\n[this window is read-only: the project and the brain are mounted read-only, and it has no network. A command that must write runs in a change task of the plan.]" : "";
 				return {
 					isError: failed,
-					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]${hint}` }],
+					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}${ignoredLine(args, action)}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]${hint}` }],
 					details: details(result, confined ? { readOnly: true } : {}),
 				};
 			}
@@ -165,7 +180,7 @@ export function shellTool({ config, runner, windows, runOf }) {
 			if (name === "") return refuse("`window` is missing: name the window to deal with.");
 			const out = (result, isError = false, extra = {}) => ({
 				isError,
-				output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[${statusLine(result)}]` }],
+				output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}${ignoredLine(args, action)}\n[${statusLine(result)}]` }],
 				details: details(result, { action, ...extra }),
 			});
 			try {

@@ -103,7 +103,7 @@ function wakesText(lines = [], fired = []) {
  */
 function commands(runner) {
 	if (runner?.mode === "direct") {
-		return "Commands\nThe user has switched the sandbox off. A change task's commands now run directly on this machine, as the user: they can read and change files outside the project directory, and they reach the network. Only the project directory is in Cartographer's checkpoints, so what a command does outside it cannot be undone. Keep the work inside the project directory unless the user asks for something outside it, and then name the path in the brief.\n\n";
+		return "Commands\nThe user has switched the sandbox off. A change task's commands now run directly on this machine, as the user: they can read and change files outside the project directory, and they reach the network. Only the project directory is in Cartographer's checkpoints, so what a command does outside it cannot be undone. Keep the work inside the project directory unless the user asks for something outside it, and then name the path in the brief. You cannot run commands yourself in this session: the read-only lane needs the sandbox, and the user has switched it off. A check that needs a command is a change item for a task, or it is the user's to run.\n\n";
 	}
 	if (runner?.mode === "none") {
 		return `Commands\nNo command can be run in this session: ${runner.available.why}. \`shell\` is refused. After a change, tell the user how to run or try what was written, and say plainly that it has not been run. Whether a done-when line that needs a run is met is for the user to confirm.\n\n`;
