@@ -1034,13 +1034,10 @@ export function callWords(call) {
 	if (call.name === "write" || call.name === "edit") return `${call.name} ${args.path ?? ""}`;
 	if (call.name === "shell") return `shell ${oneLine(args.command, POLICY.limits.context.shellCommandChars)}`;
 	if (call.name === "book") {
-		const ops = Array.isArray(args.ops) ? args.ops : [];
-		if (args.book === "context") {
-			const op = ops[0] ?? {};
-			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", POLICY.limits.context.operationChars)}`.trim();
-		}
-		const what = args.book === "plan" ? ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()) : ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim());
-		return `${args.book ?? "book"} ${oneLine(what.join(", "), POLICY.limits.context.bookWordsChars)}`.trim();
+		const target = typeof args.target === "string" && args.target !== "" ? args.target : "book";
+		const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
+		const what = args.ref?.id ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
+		return `${target} ${action}${what === "" ? "" : ` ${oneLine(String(what), POLICY.limits.context.bookWordsChars)}`}`.trim();
 	}
 	return `${call.name} ${oneLine(JSON.stringify(args), POLICY.limits.context.genericCallChars)}`;
 }

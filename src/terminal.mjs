@@ -89,12 +89,10 @@ export function describeCall(call) {
 		case "edit":
 			return `edit ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
 		case "book": {
-			const ops = Array.isArray(args.ops) ? args.ops : [];
-			if (args.book === "ledger") return `ledger ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
-			if (args.book === "plan") return `plan ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.mode ?? ""}`.trim()).join(" · ")}`;
-			if (args.book === "books") return typeof args.text === "string" ? `assess  ${count(String(args.text).length)} characters` : `assess ${ops.map((op) => `${op?.action ?? "?"} ${op?.id ?? op?.kind ?? ""}`.trim()).join(" · ")}`;
-			const op = ops[0] ?? {};
-			return `context ${op.action ?? "?"} ${oneLine(op.id ?? op.path ?? op.text ?? "", POLICY.limits.terminal.callSummary.contextOp)}${op.lines ? ` (lines ${oneLine(op.lines, POLICY.limits.terminal.callSummary.lineRange)})` : ""}`.trim();
+			const target = typeof args.target === "string" && args.target !== "" ? args.target : "book";
+			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
+			const what = args.ref?.id ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
+			return `${target} ${action}${what === "" ? "" : ` ${oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)}`}`.trim();
 		}
 		case "read": {
 			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];

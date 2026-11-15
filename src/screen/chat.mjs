@@ -37,7 +37,12 @@ const BLANK = { spans: [] };
 
 /** The tab a call's work lives in, and the view inside it. */
 export function homeOf(name, args = {}) {
-	if (name === "book") name = args.book;
+	if (name === "book") {
+		const target = args?.target;
+		if (target === "ledger" || target === "plan" || target === "atlas" || target === "assessment" || target === "practice") return { tab: "carto", view: target };
+		if (target === "context") return { tab: "context" };
+		return undefined;
+	}
 	if (name === "write" || name === "edit") return { tab: "diff" };
 	if (name === "shell") return { tab: "shells" };
 	if (name === "plan") return { tab: "carto", view: "plan" };
@@ -57,7 +62,7 @@ function bodyOf(call) {
 	const args = call.arguments ?? {};
 	let best = "";
 	for (const key of ["content", "new_text", "command", "brief", "report", "text", "input"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
-	if (best === "" && Array.isArray(args.ops)) best = args.ops.map((op) => JSON.stringify(op)).join("\n");
+	if (best === "" && args.operation !== null && typeof args.operation === "object") best = JSON.stringify(args.operation, null, 1);
 	return best;
 }
 
