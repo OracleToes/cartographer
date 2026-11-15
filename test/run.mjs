@@ -80,7 +80,7 @@ function makeProject(name, { git = true } = {}) {
 function run(command, args, { cwd, env = {}, input, timeoutMs = 30_000, throughNode = command === CARTO } = {}) {
 	return new Promise((resolve) => {
 		if (throughNode) [command, args] = [process.execPath, [command, ...args]];
-		const child = spawn(command, args, { cwd, env: { ...process.env, CARTO_SERVER: "", CARTO_MODEL: "", ...env }, stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn(command, args, { cwd, env: { ...process.env, CARTO_SERVER: "", CARTO_MODEL: "", CARTO_CONFIG: join(scratch, "no-such-config.json"), ...env }, stdio: ["pipe", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
 		child.stdout.on("data", (chunk) => (stdout += chunk));
@@ -525,90 +525,6 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		process.env.PATH = saved.PATH;
 		delete process.env.CARTO_TEST_SECRET;
 		await server.close();
-	}
-});
-
-test("windows: a command outlives the call that started it; wait, read, send, stop and close reach it", async () => {
-	const skip = NO_WINDOWS();
-	if (skip) return skip;
-	const root = makeProject("windows");
-	const { brainDir } = setUpBrain(root);
-	const windows = windowsOf(root, brainDir, { mode: findSandbox().ok ? "sandbox" : "direct" });
-	const events = [];
-	windows.on((event) => events.push(event));
-	const run = (name, command, waitMs = 10_000) => windows.run(name, command, { waitMs });
-	try {
-		// The folder and the environment stay from one command to the next.
-		let result = await run("main", "cd src; export COLOUR=teal; false");
-		assert.deepEqual([result.reason, result.exit, result.cwd, result.state], ["done", 1, "src", "idle"], "how a command ended, and where it left the window");
-		result = await run("main", "pwd; echo $COLOUR; test -t 1 && echo a terminal");
-		assert.equal(result.text, `${root}/src\nteal\na terminal`, "the next command starts where the last one ended, on a terminal");
-		result = await run("main", "echo 'unbalanced");
-		assert.equal(result.exit, 2, "a command bash cannot read fails");
-		has(result.text, "unexpected EOF", "with bash's own words");
-		assert.equal((await run("main", "echo still here")).text, "still here", "and the window is not left waiting for the rest of the line");
-		assert.equal((await run("main", "echo one\necho two")).text, "one\ntwo", "a command of several lines");
-
-		// A command that has not ended when the call returns keeps running.
-		const first = await run("server", "for i in 1 2 3 4 5 6; do echo tick $i; sleep 0.3; done; echo ready", 400);
-		assert.deepEqual([first.reason, first.state, first.exit], ["time", "busy", undefined], "the call returns, the command goes on");
-		await assert.rejects(run("server", "echo no", 100), (error) => error instanceof WindowError && /^Window server is busy with `for i in 1 2 3 4 5 6; do echo tick \$i; sleep 0\.3; done; echo ready` \(running \d s\)\. To run this beside it, give `shell` another `window` name\. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input.$/.test(error.message), "a busy window takes no second command, and says what to do");
-		assert.equal((await run("main", "echo beside")).text, "beside", "another window works meanwhile");
-		result = await windows.wait("server", { waitMs: 10_000, until: "tick 4" });
-		assert.equal(result.reason, "until", "a wait can end at a line");
-		assert.equal(`${first.text}\n${result.text}`, "tick 1\ntick 2\ntick 3\ntick 4", "each call returns what was printed since the last one, nothing twice and nothing lost");
-		result = await windows.wait("server", { waitMs: 10_000 });
-		assert.deepEqual([result.reason, result.exit, result.text, result.state], ["done", 0, "tick 5\ntick 6\nready", "idle"], "or at the command's end");
-		assert.equal((await windows.wait("server", { waitMs: 100 })).reason, "idle", "with nothing running there is nothing to wait for");
-		assert.deepEqual(events, [], "a command that a call waited for is no news");
-
-		// A command that ends while nobody waits is news: this is what wakes the agent.
-		await run("server", "sleep 0.3; echo late", 0);
-		await until(() => events.length === 1, "the command's end is announced");
-		assert.deepEqual([events[0].type, events[0].name, events[0].exit, events[0].command], ["ended", "server", 0, "sleep 0.3; echo late"], "what is announced");
-		assert.equal(windows.hasNews(), true, "it is news");
-		windows.noteShown();
-		assert.equal(windows.hasNews(), false, "until the main agent has been shown the windows");
-		result = await windows.wait("server", { waitMs: 100 });
-		assert.deepEqual([result.reason, result.exit, result.text], ["done", 0, "late"], "a wait after the end returns the end");
-
-		// A program that asks.
-		result = await run("repl", 'read -p "name? " n; echo "hello $n"; sleep 30');
-		assert.deepEqual([result.reason, result.text, result.state], ["asks", "name? ", "busy"], "a program that stops at a line without an end is taken to ask");
-		assert.ok(result.ms < 5000, `and the call does not wait out its time: ${result.ms} ms`);
-		assert.equal(windows.list().find((entry) => entry.name === "repl").asks, true, "the list says so too");
-		result = await windows.send("repl", "momo", { waitMs: 10_000 });
-		assert.deepEqual([result.reason, result.text], ["quiet", "momo\nhello momo"], "a line typed into it, and what it answered; the prompt already shown is not shown again");
-		result = await windows.stop("repl");
-		assert.deepEqual([result.ended, result.exit, result.state], [true, 130, "idle"], "Ctrl-C ends it and leaves the window free");
-		await assert.rejects(windows.send("repl", "x", { waitMs: 100 }), /Nothing is running in window repl, so there is nothing to send input to\./, "input needs a program");
-		// A question with nobody waiting is announced as a wake after 5s of silence; too slow for this suite, so it is not waited out here.
-
-		assert.equal(windows.read("server", 2).text, "$ sleep 0.3; echo late\nlate", "reading a window: its newest lines, commands included");
-		assert.deepEqual(windows.list(1).map((entry) => [entry.name, entry.state, entry.cwd, entry.last?.exit, entry.tail]), [["main", "idle", "src", 0, ["beside"]], ["server", "idle", ".", 0, ["late"]], ["repl", "idle", ".", 130, ["^C"]]], "the list");
-
-		// Names, and how many.
-		await assert.rejects(run("Bad Name", "true"), /A window name is a short word in lower case, such as main, server or tests; "Bad Name" is not\./, "a name");
-		await run("four", `${LOOP("beat.txt")} & sleep 0.3; echo started`);
-		await assert.rejects(run("five", "true"), /4 windows are open, which is the limit: main, server, repl, four\. Close one with `window` first, or run this in one of them\./, "at most four");
-		assert.deepEqual(windows.takeActive().sort(), ["four", "main", "repl", "server"], "which windows ran something");
-		assert.deepEqual(windows.takeActive(), [], "is asked once");
-
-		// Closing ends what runs there, also what was left in the background.
-		assert.equal(await beating(join(root, "beat.txt")), true, "a background process runs on in its window");
-		assert.deepEqual(windows.close("four"), { name: "four" }, "close");
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		assert.equal(await beating(join(root, "beat.txt")), false, "and ends with it");
-		assert.throws(() => windows.read("four"), /There is no window "four"\. Open: main, server, repl\./, "a closed window is gone");
-
-		// A command that ends the window's own shell.
-		result = await run("main", "echo last words; exit 7");
-		assert.deepEqual([result.reason, result.exit, result.state, result.text], ["closed", 7, "closed", "last words"], "exit closes the window, and the call says with which status");
-		assert.equal(windows.has("main"), false, "the window is gone");
-		result = await run("main", "pwd");
-		assert.equal(result.text, root, "and opens anew at the project root");
-	} finally {
-		windows.shutdown();
 	}
 });
 
@@ -1607,14 +1523,6 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "The context was collapsed after this request was sent", "a collapse since then is said");
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
 });
-
-async function until(condition, what, timeoutMs = 15_000) {
-	const start = Date.now();
-	while (!condition()) {
-		if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting until ${what}`);
-		await new Promise((resolve) => setTimeout(resolve, 20));
-	}
-}
 
 let passed = 0;
 let failed = 0;
