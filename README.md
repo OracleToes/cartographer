@@ -314,12 +314,12 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 The agent has three kinds of output.
 
 - **A note to itself.** Text without a tool call. You see it dim behind `┊`, together with the model's reasoning; nobody answers it. In the agent's own context it stands as "Note to self: …", and Cartographer follows it with one line so that the agent goes on. Notes are how a model without reasoning thinks in words. They are dropped when the context is collapsed.
-- **`chat`**: what it wants you to read. It does not wait for you. A reply whose only call is `chat` ends the main agent's turn, and you speak next; `chat` beside another call tells you something and goes on working. A task can use `chat` too and carries on after it.
+- **`chat`**: what it wants you to read. It does not wait for you or end the turn; the agent continues working after sending a message. Use `ask` when it needs your answer to continue, and `sleep` when it is ready to rest. A task can use `chat` too and carries on after it.
 - **`ask`**: the rare blocking question, for when truly nothing can go on without you. A matter of taste that others do not depend on is not this: the agent records it as a question in the ledger, and it waits for you in the Requests view while the agent carries on. With `ask`, the call waits until you answer, and your answer is its result. With `choices` you can answer with a number; you can always type something else. In the full screen the strip says that the agent waits and since when. `askMinutes` in the settings makes it give up after that many minutes and tell the agent to go on without an answer; the default is to wait without limit. `/stop` ends the wait. With piped input, the next line is the answer.
 
 What is said with `chat` and `ask`, and what you answer, is kept as the conversation with you: a collapse keeps the last of it word for word.
 
-The main agent ends its turn with a lone `chat` or with `sleep`. Since a note never ends a turn, two limits stand behind it: a turn ends after `mainTurns` replies, notes included, and at once when the agent writes the same note three times in a row. A turn that a wake started and in which the agent did nothing but write is a rest already.
+The main agent ends its turn only with `sleep`. Since a note never ends a turn, two limits stand behind it: a turn ends after `mainTurns` replies, notes included, and at once when the agent writes the same note three times in a row. A turn that a wake started and in which the agent did nothing but write is a rest already.
 
 ### A reply that repeats itself
 

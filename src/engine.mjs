@@ -244,9 +244,9 @@ export function createEngine({ root, brainDir, config }) {
 			}
 			// A collapse that waits for the end of the turn it was given (the agent was resting when it was asked).
 			if (due === undefined || due.atRest) return undefined;
-			// A reply that ends the turn (nothing but `chat` or `sleep`): the collapse waits for the rest that follows,
-			// where the server can read the result ahead. Here it would tell the agent that its turn goes on.
-			if (callsOf(state.reply).every((call) => call.name === "chat" || call.name === "sleep")) return undefined;
+			// A reply that rests (nothing but `sleep`): the collapse waits for the next wake, where the server can
+			// read the result ahead. `chat` is informational; the agent keeps working after it.
+			if (callsOf(state.reply).length > 0 && callsOf(state.reply).every((call) => call.name === "sleep")) return undefined;
 			const stored = state.messages ?? [];
 			const would = droppable(stored) + (state.reply === undefined ? 0 : messageTokens(state.reply)) + [...state.results.values()].reduce((sum, text) => sum + estimate(text), 0);
 			// Almost nothing would go (a goal that closes early; a context that is full of what a collapse keeps):

@@ -363,8 +363,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (api.conversationId !== ROOT_CONVERSATION_ID && (message.content ?? []).some((part) => part.type === "toolCall" && part.name === "return")) returning.add(api.conversationId);
 				},
 				// A reply with no tool call is a note the agent wrote to itself: it is followed by one line and the run
-				// goes on. A turn of the main agent ends with `chat` or `sleep`, a task with `return`. What bounds this
-				// is the count of replies in the stretch, and the same note written again and again.
+				// goes on. The main agent rests only with `sleep`; a task ends with `return`. What bounds this is the
+				// count of replies in the stretch, and the same note written again and again.
 				onYield: (answer, api) => {
 					const id = api.conversationId;
 					const main = id === ROOT_CONVERSATION_ID;

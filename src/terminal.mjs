@@ -791,7 +791,7 @@ export async function runTerminal(session, options) {
 		enqueue(async () => {
 			if (stopped || event.main !== true) return;
 			// Said after the reply it is about, which comes in a moment later.
-			if (event.type === "limit") afterReply.push(() => line(`! The agent made ${event.replies} replies in this turn without ending it with \`chat\` or \`sleep\`, so Cartographer ended the turn. Say "continue" to let it go on.`));
+			if (event.type === "limit") afterReply.push(() => line(`! The agent made ${event.replies} replies in this turn without calling \`sleep\`, so Cartographer ended the turn. Say "continue" to let it go on.`));
 			else if (event.type === "same-note") afterReply.push(() => line(`! Cartographer ended the turn: the agent wrote ${event.empty ? `nothing and called nothing, ${event.times} times in a row` : `the same note ${event.times} times in a row and called nothing`}.`));
 		});
 	});
