@@ -7,7 +7,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { createRegistry, defineExtension, GenerationTask, Harness, hook, ROOT_CONVERSATION_ID, section, ToolTask } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { describe, LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+import { describe, LOOP_MAX, LOOP_STOP, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
 
 import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
@@ -19,7 +19,6 @@ import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs"
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
-import { createToolSchemaLifecycle } from "./tool-schemas.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
@@ -244,8 +243,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
-	const schemaLifecycle = createToolSchemaLifecycle(sessionTools, { schemaBudgetTokens: Math.floor(config.contextWindow * POLICY.limits.toolSchemas.contextShare), brainDir });
-	for (let index = 0; index < sessionTools.length; index++) sessionTools[index] = schemaLifecycle.normalizeTool(sessionTools[index]);
 	const core = defineExtension({
 		name: "cartographer",
 		// One section that never changes within a project: a change here makes the server read the whole prompt again.
@@ -260,8 +257,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
-					const schemaRefusal = schemaLifecycle.beforeTool(call, api);
-					if (schemaRefusal !== undefined) return schemaRefusal;
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
 						if (LOOK.has(call.name)) return { block: REFUSALS.mainLooks };
 						if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
@@ -281,9 +276,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					return undefined;
 				},
 				afterTool: async (call, result, api) => {
-					result = schemaLifecycle.afterTool(call, result, api) ?? result;
 					if (call.parent !== undefined) return undefined;
-					const looped = schemaLifecycle.isBookBranchRequest(call) ? undefined : loopCheck(call, result, api);
+					const looped = loopCheck(call, result, api);
 					const out = looped ?? result;
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
@@ -343,17 +337,15 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					let note;
 					if (main) noteUserMessages(brainDir, messages);
 					else note = await engine.beforeTaskRequest(api.conversationId, messages);
-					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId), schemaLifecycle }) };
+					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) }) };
 				},
 				// The request as it is sent: the question before a collapse is put behind exactly this.
 				beforeProviderRequest: ({ payload, model }, api) => {
-					const routed = schemaLifecycle.beforeProviderRequest({ payload, model }, api);
-					if (routed === undefined) throw new Error("On-demand strict schema routing returned no provider payload.");
-					engine.sending(api.conversationId, routed.payload);
-					return routed;
+					// The declaration is static and flat; there is nothing to re-route here. `sending` keeps the collapse accounting honest.
+					engine.sending(api.conversationId, payload);
+					return { payload, model };
 				},
 				afterResponse: async (message, api) => {
-					await schemaLifecycle.afterResponse(message, api);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);
@@ -367,8 +359,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				onYield: (answer, api) => {
 					const id = api.conversationId;
 					const main = id === ROOT_CONVERSATION_ID;
-					// Replay hidden book routing with the selected schema and original call intent, without a visible selector tool call.
-					if (schemaLifecycle.hasReplay(id)) return { continue: "\u2063" };
 					// A reply cut off at the output limit: the screen tells the user, who decides. For a task it is the end.
 					if (answer.stopReason === "length") return undefined;
 					const turn = turns.get(id);

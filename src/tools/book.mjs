@@ -1,30 +1,135 @@
-// The `book` tool is the shared interface to the agent's durable books — ledger, plan, project/practice books,
-// and context. Focused contexts may update the shared brain; only the orchestrating context can change the plan.
-// Domain operations live in src/ledger.mjs, src/plan.mjs, src/books.mjs, and src/context.mjs. This tool routes
-// the current shared call shape to those operations while preserving their validation and non-plan safeguards.
+// The `book` tool is the single interface to the agent's durable surfaces — ledger, plan, books, atlas, context,
+// Durable records, referenced entities and the shelf. Focused contexts may update the shared brain; only the
+// orchestrating context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs, src/books.mjs,
+// src/atlas.mjs and src/context.mjs; this file routes target/action calls to them. One flat declaration
+// (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
 import { createHash } from "node:crypto";
 import { defineTool, NestedCallDoc, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { arr, bool, compile, lit, obj, oneOf, opt, str, union, unknown } from "@earendil-works/pi-schema";
+import { bool, compile, obj, opt, str, unknown } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
-import { applyOp, KINDS, LedgerError, loadLedger, open, openCounts, prune, saveLedger, TEXT_MAX as LEDGER_TEXT_MAX } from "../ledger.mjs";
-import { applyPlanOp, authorizationLine, isAuthorized, ITEM_MAX, loadPlan, MODES, PlanError, savePlan } from "../plan.mjs";
+import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
+import { applyPlanOp, authorizationLine, isAuthorized, loadPlan, PlanError, savePlan } from "../plan.mjs";
 import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "../atlas.mjs";
-import { applyBookOp, BOOK_KINDS, BOOK_TEXT_MAX, BookError, loadBooks, renderBook, saveBooks } from "../books.mjs";
+import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "../books.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed } from "../top.mjs";
 import { pin } from "../top.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, curatedRows, applyCuratedRowOp, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots } from "../context.mjs";
 import { fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference } from "../catalog.mjs";
-import { atlasOperationSchema } from "./atlas.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
-const ok = (text, shown) => ({ output: [{ type: "text", text }], details: { shown: [].concat(shown) } });
 const sameItem = sameShelfItem;
-const CONTEXT_WHEN = Object.values(POLICY.enums.contextVisibility);
-const UNIVERSAL_TARGETS = ["file", "report", "ledger", "plan", "atlas", "assessment", "practice", "conversation", "message", "toolCall", "toolResult", "prompt", "tool", "schema", "shelf"];
-const UNIVERSAL_ACTIONS = ["inspect", "read", "list", "create", "add", "edit", "done", "archive", "restore", "remove", "recall", "before", "link", "unlink", "confirm", "rebind"];
+/**
+ * One source of truth for what exists: target → action → validation spec. The provider declaration (enums), the
+ * local validator and the executor's dispatch all derive from this table; the tool description's capability
+ * matrix is written to match it. Spec fields:
+ *   ref: "required" → needs a {namespace,kind,id[,version]} ref; refAlternative overrides the "ref or path" wording
+ *   pathOk: a ref OR an explicit project-relative path locates the thing (file inspect/read; shelf add)
+ *   versionPrecondition: needs expectedVersion or a version-pinned ref
+ *   operation: "required" → needs the target-specific payload object; operationFields lists required non-empty
+ *             string fields inside it; hint overrides the "an operation payload" wording
+ *   fields: required non-empty string arguments on the call itself
+ */
+const CAPABILITIES = {
+	file: {
+		inspect: { pathOk: true },
+		read: { pathOk: true },
+		create: { fields: ["path", "content"] },
+		edit: { ref: "required", fields: ["expectedVersion", "oldText", "newText"] },
+		rebind: { ref: "required", fields: ["expectedVersion", "path"] },
+	},
+	report: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		recall: { ref: "required" },
+		archive: { ref: "required", versionPrecondition: true },
+		restore: { ref: "required", versionPrecondition: true },
+		remove: { ref: "required", versionPrecondition: true },
+	},
+	ledger: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		add: { operation: "required" },
+		edit: { ref: "required", versionPrecondition: true, operation: "required" },
+		done: { ref: "required", versionPrecondition: true, operation: "required" },
+		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+	},
+	plan: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		add: { operation: "required" },
+		edit: { ref: "required", versionPrecondition: true, operation: "required" },
+		done: { ref: "required", versionPrecondition: true, operation: "required" },
+		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		before: { ref: "required", versionPrecondition: true, operation: "required" },
+	},
+	atlas: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		add: { operation: "required" },
+		edit: { ref: "required", versionPrecondition: true, operation: "required" },
+		link: { ref: "required", versionPrecondition: true, operation: "required" },
+		unlink: { ref: "required", versionPrecondition: true, operation: "required" },
+		confirm: { ref: "required", versionPrecondition: true, operation: "required" },
+		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+	},
+	assessment: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		add: { operation: "required" },
+		edit: { ref: "required", versionPrecondition: true, operation: "required" },
+		done: { ref: "required", versionPrecondition: true, operation: "required" },
+		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		before: { ref: "required", versionPrecondition: true, operation: "required" },
+	},
+	practice: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		add: { operation: "required" },
+		edit: { ref: "required", versionPrecondition: true, operation: "required" },
+		done: { ref: "required", versionPrecondition: true, operation: "required" },
+		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		before: { ref: "required", versionPrecondition: true, operation: "required" },
+	},
+	context: {
+		list: {},
+		inspect: { ref: "required" },
+		read: { ref: "required" },
+		add: { operation: "required" },
+		edit: { ref: "required", versionPrecondition: true, operation: "required" },
+		done: { ref: "required", versionPrecondition: true, operation: "required" },
+		remove: { ref: "required", versionPrecondition: true, operation: "required" },
+		before: { ref: "required", versionPrecondition: true, operation: "required" },
+		archive: { ref: "required", versionPrecondition: true },
+		restore: { ref: "required", versionPrecondition: true },
+		fold: { operation: "required", operationFields: ["id"], hint: "operation { id }: the report to drop from view, like t12, or the task-step result ids" },
+		note: { operation: "required", operationFields: ["text"], hint: "operation { text }: what to keep, with file paths and line numbers" },
+		collapse: {},
+	},
+	conversation: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	message: { list: {}, inspect: { ref: "required" }, read: { ref: "required" }, edit: { ref: "required", versionPrecondition: true } },
+	toolCall: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	toolResult: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	prompt: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	tool: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	schema: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	shelf: {
+		list: {},
+		add: { pathOk: true, refAlternative: "a ref or path" },
+		remove: { fields: ["placementId"] },
+	},
+};
+const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
+const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
+const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
 	namespace: str({ minLength: 16, description: "Persistent brain-store namespace." }),
 	kind: str({ minLength: 1, description: "Reference kind; must match target." }),
@@ -386,6 +491,12 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 				return textResult(JSON.stringify({ ref, target, status: "live", metadata, actions: ["inspect", "read", ...(BRAIN_MUTATIONS[target] ?? [])] }, null, 2), { ref, status: "live" });
 			}
 			return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
+		}
+		if (target === "context" && (action === "fold" || action === "note" || action === "collapse")) {
+			// No ref, no precondition: fold takes operation {id}, note takes operation {text}, collapse is free-form.
+			const payload = args.operation ?? {};
+			if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail(`context ${action} needs an operation object with the target-specific fields.`);
+			return runContext({ root, brainDir, config, engine }, { ops: [{ ...payload, action }] }, api);
 		}
 		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
 		const isAdd = action === "add";
@@ -855,382 +966,64 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-// Send the same full conditional schema to the model that local validation enforces, so each book/action
-// advertises its actual required fields instead of a compact shape with every operation field optional.
-const line = (description, maxLength) => str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", ...(maxLength === undefined ? {} : { maxLength }), description });
-const entryId = (description = "The entry (g1, q5, n7).") => line(description);
-
-const LEDGER_OP = union([
-	obj(
-		{ action: lit(POLICY.enums.actions.add), kind: oneOf(KINDS, { description: "goal, question or note." }), text: line("The entry itself, one line in your words.", LEDGER_TEXT_MAX), done_when: opt(line("For a goal: how you and the user will know it is reached.", LEDGER_TEXT_MAX)) },
-		{ allOf: [
-			{ if: { properties: { kind: lit(POLICY.enums.ledgerKind.goal) }, required: ["kind"] }, then: { required: ["done_when"] } },
-			{ if: { properties: { kind: oneOf(POLICY.enums.ledgerNonGoalKinds) }, required: ["kind"] }, then: { not: { required: ["done_when"] } } },
-		], description: "Add a ledger entry; goals need a done-when line." },
-	),
-	obj({ action: lit(POLICY.enums.actions.done), id: entryId(), text: opt(line("How it ended, one line.", LEDGER_TEXT_MAX)) }, { description: "Close a ledger entry." }),
-	obj(
-		{ action: lit(POLICY.enums.actions.edit), id: entryId(), text: opt(line("The new wording, one line.", LEDGER_TEXT_MAX)), done_when: opt(line("For a goal: its new done-when line.", LEDGER_TEXT_MAX)) },
-		{ anyOf: [{ required: ["text"] }, { required: ["done_when"] }], description: "Edit an entry; change its wording or a goal's done-when line." },
-	),
-	obj({ action: lit(POLICY.enums.actions.remove), id: entryId() }, { description: "Remove a ledger entry." }),
-]);
-
-const PLAN_OP = union([
-	obj(
-		{ action: lit(POLICY.enums.actions.add), mode: oneOf(MODES, { description: "look: the task only reads. change: it writes files, which needs the user's authorization." }), text: line("Required: one line saying what this item covers.", ITEM_MAX), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })), before: opt(entryId("Put the new item in front of this one (p3). Default: at the end.")) },
-		{ allOf: [{ if: { properties: { mode: lit(POLICY.enums.planMode.look) }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], description: "Add a plan item; look items cannot have change-only flags." },
-	),
-	obj({ action: lit(POLICY.enums.actions.done), id: entryId("The item (p1, p4)."), text: opt(line("What came of it, one line.", ITEM_MAX)) }, { description: "Mark a plan item finished." }),
-	obj(
-		{ action: lit(POLICY.enums.actions.edit), id: entryId("The item (p1, p4)."), text: opt(line("The new wording, one line.", ITEM_MAX)), mode: opt(oneOf(MODES, { description: "look or change." })), network: opt(bool({ description: "For a change item: true lets its commands reach the network." })), standing: opt(bool({ description: "For a change item: true makes this a duty that stays open." })) },
-		{ allOf: [{ if: { properties: { mode: lit(POLICY.enums.planMode.look) }, required: ["mode"] }, then: { not: { anyOf: [{ required: ["network"] }, { required: ["standing"] }] } } }], anyOf: [{ required: ["text"] }, { required: ["mode"] }, { required: ["network"] }, { required: ["standing"] }], description: "Edit a plan item; look items cannot have change-only flags." },
-	),
-	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The item (p1, p4).") }, { description: "Remove a plan item." }),
-	obj({ action: lit(POLICY.enums.actions.before), id: entryId("The plan item to move (p1, p4)."), before: opt(entryId("The item to stand in front of; omit to move it to the end.")) }, { description: "Reorder an open or finished plan item." }),
-	obj({ action: lit(POLICY.enums.actions.clear) }, { description: "Clear the plan." }),
-]);
-
-const BOOKS_OP = union([
-	obj({ action: lit(POLICY.enums.actions.add), kind: oneOf(BOOK_KINDS, { description: "assessment or practice." }), text: line("One short entry, in your words.", BOOK_TEXT_MAX), before: opt(entryId("Put the new entry in front of this one.")) }, { description: "Add an assessment or practice entry." }),
-	obj({ action: lit(POLICY.enums.actions.edit), id: entryId("The entry (a3, r7)."), text: line("The new wording of this one entry.", BOOK_TEXT_MAX) }, { description: "Reword one entry." }),
-	obj({ action: lit(POLICY.enums.actions.done), id: entryId("The entry (a3, r7)."), text: opt(line("How it was settled, one line.", POLICY.limits.books.outcomeChars)) }, { description: "Settle an entry." }),
-	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The entry (a3, r7).") }, { description: "Remove an entry." }),
-	obj({ action: lit(POLICY.enums.actions.before), id: entryId("The entry (a3, r7)."), before: opt(entryId("The entry to stand in front of.")) }, { description: "Reorder an entry." }),
-]);
-
-const CONTEXT_OP = union([
-	obj({ action: lit(POLICY.enums.actions.add), text: line("A self-contained context row to keep." , POLICY.limits.context.curatedRowChars), before: opt(entryId("Put the row in front of this curated row.")), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Add a curated context row; now makes it visible after this call, next-boundary at the next collapse." }),
-	obj({ action: lit(POLICY.enums.actions.edit), id: entryId("The curated row (c1)."), text: line("The complete replacement text for this row.", POLICY.limits.context.curatedRowChars), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Edit a curated context row." }),
-	obj({ action: lit(POLICY.enums.actions.done), id: entryId("The curated row (c1)."), text: opt(line("How it was settled.", POLICY.limits.context.curatedRowChars)), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Mark a curated row done." }),
-	obj({ action: lit(POLICY.enums.actions.remove), id: entryId("The curated row (c1)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Remove a curated context row." }),
-	obj({ action: lit(POLICY.enums.actions.before), id: entryId("The curated row to move (c1)."), before: opt(entryId("The curated row to stand in front of.")), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Reorder curated context rows." }),
-	obj({ action: lit(POLICY.enums.actions.archive), id: entryId("The context row (c1 or t12)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Archive a context row without deleting its content." }),
-	obj({ action: lit(POLICY.enums.actions.unarchive), id: entryId("The archived context row (c1 or t12)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Restore an archived context row." }),
-	obj({ action: lit(POLICY.enums.actions.delete), id: entryId("The context row to delete (c1 or t12)."), when: opt(oneOf(CONTEXT_WHEN)) }, { description: "Delete a context row and its content." }),
-	obj({ action: lit(POLICY.enums.actions.recall), id: entryId("The report to bring back (t12).") }, { description: "Recall a kept report." }),
-	obj({ action: lit(POLICY.enums.actions.shelve), path: line("A project file/range or typed reference such as report:t12."), lines: opt(line('For files, a line range such as "10-80"; omit for the whole file.')), hand_on: opt(bool({ description: "In a task, put this file or reference on the main agent's shelf when you return." })) }, { description: "Keep a file or typed reference in view." }),
-	obj({ action: lit(POLICY.enums.actions.unshelve), path: line('A shelf item ID or file/reference to take off the shelf, or "all".') }, { description: "Take a shelf item off the shelf; its ID is shown with each entry." }),
-	obj({ action: lit(POLICY.enums.actions.fold), id: entryId("A report id (t12) or task step ids (s3, s5), separated by commas.") }, { description: "Fold a finished report or step." }),
-	obj({ action: lit(POLICY.enums.actions.note), text: line("What the task must keep, with file paths and line numbers.") }, { description: "Keep a finding in task context." }),
-	obj({ action: lit(POLICY.enums.actions.collapse), text: opt(line("Why to collapse, in a few words.")) }, { description: "Collapse context now." }),
-]);
-
-const branchFor = (book, operations) => ({
-	if: { properties: { book: lit(book) }, required: ["book"] },
-	then: { properties: { ops: arr(operations, { minItems: POLICY.validation.nonEmptyArrayMinItems }) }, required: ["ops"], not: { required: ["text"] } },
-});
-// The legacy whole-assessment form keeps its length check in `runBooks`: rejecting a very long value in the
-// schema makes the validator echo the entire argument back into the conversation instead of the concise limit error.
-const BOOK_CONDITIONS = [
-	branchFor(POLICY.enums.bookName.ledger, LEDGER_OP),
-	branchFor(POLICY.enums.bookName.plan, PLAN_OP),
-	branchFor(POLICY.enums.bookName.context, CONTEXT_OP),
-	{
-		if: { properties: { book: lit(POLICY.enums.bookName.books) }, required: ["book"] },
-		then: {
-			properties: { ops: arr(BOOKS_OP, { minItems: POLICY.validation.nonEmptyArrayMinItems }), text: line("The whole assessment, for the legacy write form.") },
-			anyOf: [{ required: ["ops"] }, { required: ["text"] }],
-			not: { required: ["ops", "text"] },
-		},
-	},
-];
-
-export const BOOK_BRANCH_ACTIONS = {
-	file: ["inspect", "read", "create", "edit", "rebind"],
-	report: ["list", "inspect", "read", "recall", "archive", "restore", "remove"],
-	ledger: ["list", "inspect", "read", "add", "edit", "done", "remove"],
-	plan: ["list", "inspect", "read", "add", "edit", "done", "remove", "before"],
-	atlas: ["list", "inspect", "read", "add", "edit", "link", "unlink", "confirm", "remove"],
-	assessment: ["list", "inspect", "read", "add", "edit", "done", "remove", "before"],
-	practice: ["list", "inspect", "read", "add", "edit", "done", "remove", "before"],
-	context: ["list", "inspect", "read", "add", "edit", "done", "remove", "before", "archive", "restore"],
-	conversation: ["list", "inspect", "read"],
-	message: ["list", "inspect", "read", "edit"],
-	toolCall: ["list", "inspect", "read"],
-	toolResult: ["list", "inspect", "read"],
-	prompt: ["list", "inspect", "read"],
-	tool: ["list", "inspect", "read"],
-	schema: ["list", "inspect", "read"],
-	shelf: ["list", "add", "remove"],
-};
-
-const operationBranch = (schema, action) => (schema?.anyOf ?? []).find((branch) => branch.properties?.action?.const === action);
-
-export function bookBranchVariants(target, action) {
-	if (target === "file" && ["inspect", "read"].includes(action)) return ["ref", "path"];
-	if (target === "shelf" && action === "add") return ["file-ref", "report-ref", "schema-ref", "path"];
-	if (target === "atlas" && ["link", "unlink"].includes(action)) return ["links", "files", "both"];
-	if (target === "ledger" && action === "add") return [...KINDS];
-	if (target === "plan" && action === "add") return [...MODES];
-	if (target === "plan" && action === "edit") return [...MODES, "text", "network", "standing"];
-	return [];
-}
-
-/** The exact target/action projection used by both the provider and the persistent schema reference. */
-export function bookBranchParameters(source, target, action, variant) {
-	if (!BOOK_BRANCH_ACTIONS[target]?.includes(action)) throw new Error(`The book target ${target} does not support ${action}.`);
-	const schema = structuredClone(source);
-	for (const condition of schema.allOf ?? []) {
-		const keys = Object.keys(condition?.if?.properties ?? {});
-		if (keys.length !== 1 || keys[0] !== "book") throw new Error("The book schema contains a conditional outside the legacy interface; it cannot be safely specialized.");
-	}
-	const props = schema.properties;
-	const keep = new Set(["target", "action"]);
-	let required = ["target", "action"];
-	const include = (...keys) => keys.forEach((key) => keep.add(key));
-	const require = (...keys) => { include(...keys); required.push(...keys); };
-	let operationSchema;
-	let refKind;
-	let refVersionRequired = false;
-
-	if (target === "file") {
-		if (action === "inspect" || action === "read") {
-			if (!["ref", "path"].includes(variant)) throw new Error(`file.${action} needs a locator choice: ref or path.`);
-			if (variant === "ref") { require("ref"); refKind = "file"; } else require("path");
-			if (action === "read") include("range");
-		}
-		if (action === "create") require("path", "content", "planItem");
-		if (action === "edit") { require("ref", "planItem", "expectedVersion", "oldText", "newText"); refKind = "file"; }
-		if (action === "rebind") { require("ref", "expectedVersion", "path"); refKind = "file"; }
-	} else if (target === "report") {
-		if (action !== "list") { require("ref"); refKind = "report"; }
-		if (["archive", "restore", "remove"].includes(action)) include("expectedVersion");
-	} else if (DURABLE_TARGETS.has(target)) {
-		if (["inspect", "read"].includes(action)) { require("ref"); refKind = target; }
-		if (target === "message" && action === "edit") { require("ref"); refKind = target; include("expectedVersion"); }
-	} else if (BRAIN_TARGETS.has(target)) {
-		if (["inspect", "read"].includes(action)) { require("ref"); refKind = target; }
-		if (BRAIN_MUTATIONS[target]?.has(action)) {
-			if (action !== "add") { require("ref"); refKind = target; include("expectedVersion"); }
-			if (target === "context" && ["archive", "restore"].includes(action)) {
-				require("operation");
-				operationSchema = obj({ when: opt(oneOf(CONTEXT_WHEN)) });
-			} else {
-				require("operation");
-				const operations = target === "ledger" ? LEDGER_OP : target === "plan" ? PLAN_OP : target === "atlas" ? undefined : ["assessment", "practice"].includes(target) ? BOOKS_OP : CONTEXT_OP;
-				operationSchema = target === "atlas" ? atlasOperationSchema(action) : operationBranch(operations, action);
-				if (target === "atlas" && action !== "add" && operationSchema?.properties?.name !== undefined) {
-					delete operationSchema.properties.name;
-					operationSchema.required = (operationSchema.required ?? []).filter((key) => key !== "name");
-				}
-				if (target === "atlas" && ["link", "unlink"].includes(action)) {
-					if (!["links", "files", "both"].includes(variant)) throw new Error(`atlas.${action} needs a links, files, or both branch.`);
-					if (variant !== "both") delete operationSchema.properties[variant === "links" ? "files" : "links"];
-					delete operationSchema.anyOf;
-					operationSchema.required = [...new Set([...(operationSchema.required ?? []), ...(variant === "both" ? ["links", "files"] : [variant])])];
-				}
-				if (operationSchema === undefined && target === "plan" && action === "before") {
-					const add = operationBranch(PLAN_OP, "add");
-					operationSchema = obj({ action: lit(action), id: add.properties.before, before: opt(add.properties.before) });
-				}
-				if (operationSchema === undefined) throw new Error(`No exact ${target} operation schema exists for ${action}.`);
-				operationSchema = specializeOperation(target, action, operationSchema, variant);
-			}
-		}
-	} else if (target === "shelf") {
-		if (action === "add") {
-			if (!["file-ref", "report-ref", "schema-ref", "path"].includes(variant)) throw new Error("shelf.add needs a locator choice: file-ref, report-ref, schema-ref, or path.");
-			if (variant === "path") { require("path"); include("range"); }
-			else {
-				require("ref");
-				refKind = variant === "file-ref" ? "file" : variant === "report-ref" ? "report" : "schema";
-				refVersionRequired = variant === "schema-ref";
-				if (variant === "file-ref") include("range");
-			}
-			include("handOn");
-		}
-		if (action === "remove") require("placementId");
-	}
-	if (operationSchema !== undefined) props.operation = operationSchema;
-	for (const key of Object.keys(props)) if (!keep.has(key)) delete props[key];
-	if (refKind !== undefined && props.ref !== undefined) {
-		props.ref = structuredClone(props.ref);
-		props.ref.properties.kind = { type: "string", const: refKind, description: `Reference kind must be ${refKind}.` };
-		if (refVersionRequired) props.ref.required = [...new Set([...(props.ref.required ?? []), "version"])];
-	}
-	props.target = { type: "string", const: target, description: props.target?.description ?? "Selected book target." };
-	props.action = { type: "string", const: action, description: props.action?.description ?? "Selected book action." };
-	schema.required = [...new Set(required)];
-	delete schema.allOf;
-	schema.additionalProperties = false;
-	return schema;
-}
-
-const schemaAllowsNull = (schema) => schema?.type === "null" || (Array.isArray(schema?.type) && schema.type.includes("null")) || schema?.const === null || schema?.enum?.includes?.(null) || schema?.anyOf?.some(schemaAllowsNull);
-function nonNullSchema(schema) {
-	if (schema?.type === "null" || schema?.const === null) return { type: "null" };
-	if (schema?.anyOf) {
-		const branches = schema.anyOf.filter((branch) => !(branch?.type === "null" || branch?.const === null));
-		if (branches.length === 1) return structuredClone(branches[0]);
-		if (branches.length > 1) return { anyOf: structuredClone(branches) };
-	}
-	if (Array.isArray(schema?.type) && schema.type.includes("null")) return { ...structuredClone(schema), type: schema.type.filter((type) => type !== "null") };
-	return structuredClone(schema);
-}
-const withNullable = (schema) => schemaAllowsNull(schema) ? structuredClone(schema) : { anyOf: [structuredClone(schema), { type: "null" }] };
-
-/** Strict-schema tree for one book target: all actions/variants for that target, and none from sibling targets. */
-export function bookTargetParameters(source, target) {
-	const actions = BOOK_BRANCH_ACTIONS[target];
-	if (!actions) throw new Error(`The book target ${target} has no operation tree.`);
-	const projections = actions.flatMap((action) => {
-		const variants = bookBranchVariants(target, action);
-		return (variants.length === 0 ? [undefined] : variants).map((variant) => bookBranchParameters(source, target, action, variant));
-	});
-	const sourceProps = source.properties ?? {};
-	const keys = new Set(projections.flatMap((schema) => Object.keys(schema.properties ?? {})));
-	keys.delete("book"); keys.delete("ops"); keys.delete("text");
-	const properties = {};
-	for (const key of keys) {
-		if (key === "target") properties.target = { type: "string", const: target, description: "Selected book target." };
-		else if (key === "action") properties.action = oneOf(actions, { description: `An action supported by ${target}.` });
-		else if (key === "operation") {
-			const branches = [...new Map(projections.map((schema) => schema.properties?.operation).filter(Boolean).map((branch) => [JSON.stringify(branch), branch])).values()];
-			properties.operation = { anyOf: [...branches, { type: "null" }] };
-		} else properties[key] = structuredClone(sourceProps[key]);
-	}
-	const anyOf = projections.map((projection) => {
-		const required = new Set(projection.required ?? []);
-		const branchProps = {};
-		for (const key of keys) {
-			if (key === "target") { branchProps.target = projection.properties.target; continue; }
-			if (key === "action") { branchProps.action = projection.properties.action; continue; }
-			const property = projection.properties?.[key];
-			branchProps[key] = property === undefined ? { type: "null" } : required.has(key) ? nonNullSchema(property) : withNullable(property);
-		}
-		return { type: "object", properties: branchProps, required: [...new Set(["target", ...(projection.required ?? [])])], additionalProperties: false };
-	});
-	return { type: "object", properties, required: ["target", "action"], anyOf, additionalProperties: false };
-}
-
-function specializeOperation(target, action, operationSchema, variant) {
-	const schema = structuredClone(operationSchema);
-	for (const condition of schema.allOf ?? []) {
-		const keys = Object.keys(condition?.if?.properties ?? {});
-		const allowed = target === "ledger" && action === "add" ? ["kind"] : target === "plan" && ["add", "edit"].includes(action) ? ["mode"] : [];
-		if (keys.length === 0 || keys.some((key) => !allowed.includes(key))) throw new Error(`The ${target}.${action} operation has an unsupported conditional; refusing to drop it.`);
-	}
-	delete schema.allOf;
-	if (["assessment", "practice"].includes(target) && action === "add") {
-		schema.properties.kind = { type: "string", const: target, description: `The selected ${target} book.` };
-	}
-	if (target === "ledger" && action === "add") {
-		if (![...KINDS].includes(variant)) throw new Error("ledger.add needs a kind choice (goal, question, or note) to specialize its schema.");
-		schema.properties.kind = { type: "string", const: variant, description: "The selected ledger entry kind." };
-		if (variant === POLICY.enums.ledgerKind.goal) schema.required = [...new Set([...(schema.required ?? []), "done_when"])];
-		else delete schema.properties.done_when;
-	}
-	if (target === "plan" && ["add", "edit"].includes(action)) {
-		if (action === "add" && !MODES.includes(variant)) throw new Error("plan.add needs a mode choice (look or change) to specialize its schema.");
-		if (action === "edit" && ![...MODES, "text", "network", "standing"].includes(variant)) throw new Error("plan.edit needs a mode or field choice (look, change, text, network, or standing) to specialize its schema.");
-		if (variant === POLICY.enums.planMode.look) {
-			schema.properties.mode = { type: "string", const: variant, description: "The selected plan mode." };
-			delete schema.properties.network;
-			delete schema.properties.standing;
-			schema.required = [...new Set([...(schema.required ?? []), "mode"])];
-		} else if (variant === POLICY.enums.planMode.change) {
-			schema.properties.mode = { type: "string", const: variant, description: "The selected plan mode." };
-			schema.required = [...new Set([...(schema.required ?? []), "mode"])];
-		} else {
-			const field = variant;
-			if (!["text", "network", "standing"].includes(field)) throw new Error("plan.edit selected an unknown field branch.");
-			for (const key of ["mode", "text", "network", "standing"]) if (key !== field) delete schema.properties[key];
-			schema.required = [...new Set([...(schema.required ?? []), field])];
-			delete schema.anyOf;
-		}
-	}
-	return schema;
-}
-
 /**
  * @param {{ root: string, brainDir: string, config: object, engine: object, gate?: { yolo: boolean } }} input
  */
 export function bookTool({ root, brainDir, config, engine, gate }) {
-	const validationSchema = obj(
-		{
-			// Legacy book/ops calls remain readable for old sessions; all new calls use target+action below.
-			book: opt(oneOf(POLICY.enums.bookNames, {
-				description: "Legacy compatibility only. New calls use target and action.",
-			})),
-			ops: opt(arr(unknown(), { description: "Legacy compatibility only: exactly one operation per call." })),
-			text: opt(line("Legacy whole-assessment replacement only.")),
-			target: opt(oneOf(UNIVERSAL_TARGETS, { description: "The referenced entity family, or shelf." })),
-			action: opt(oneOf(UNIVERSAL_ACTIONS, { description: "One target-specific operation. Unsupported target/action pairs fail closed." })),
-			ref: opt(REFERENCE_SCHEMA),
-			path: opt(str({ description: "Explicit project-relative locator, accepted only for file resolution." })),
-			range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
-			placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
-			planItem: opt(str({ description: "Required authorized change-plan item for file create/edit." })),
-			expectedVersion: opt(str({ description: "Required SHA-256 content version for file edit; stale versions are rejected." })),
-			content: opt(str({ description: "Whole UTF-8 text for file create." })),
-			oldText: opt(str({ description: "Exact passage to replace in file edit." })),
-			newText: opt(str({ description: "Replacement passage in file edit." })),
-			handOn: opt(bool({ description: "When adding from a focus, hand this placement to the shared shelf on return." })),
-			operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations." })),
-
-		},
-		{ allOf: BOOK_CONDITIONS },
-	);
+	/** One flat declaration: the provider grammar stays a root-level object (llama.cpp/Qwen-safe), closed enums, everything optional except target and action. */
+	const validationSchema = obj({
+		target: str({ enum: UNIVERSAL_TARGETS, description: "The referenced entity family, or shelf." }),
+		action: str({ enum: UNIVERSAL_ACTIONS, description: "One target-specific operation. Unsupported target/action pairs fail closed." }),
+		ref: opt(REFERENCE_SCHEMA),
+		path: opt(str({ description: "Explicit project-relative locator, accepted only for file resolution and shelf add." })),
+		range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
+		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
+		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit." })),
+		expectedVersion: opt(str({ description: "Required SHA-256 content version for file edit and version-checked mutations; stale versions are rejected." })),
+		content: opt(str({ description: "Whole UTF-8 text for file create." })),
+		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
+		newText: opt(str({ description: "Replacement passage in file edit." })),
+		handOn: opt(bool({ description: "When adding from a focus, hand this placement to the shared shelf on return." })),
+		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
+	});
 	const validate = compile(validationSchema, { coerce: true });
+	const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";
+	const joinList = (items) => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
+	/** The generic interpreter over CAPABILITIES; the one place the call grammar is enforced. */
+	const checkCall = (target, action, args) => {
+		const spec = capabilityFor(target, action);
+		if (spec === undefined) return { unsupported: true };
+		const problems = [];
+		if (args.ref !== undefined && !validateReference(args.ref)) return { problems: ["a ref of { namespace, kind, id, version? }"] };
+		const kind = spec.refKind ?? target;
+		if (spec.ref === "required" && args.ref === undefined) problems.push(`a ${kind} reference`);
+		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "ref or path");
+		if (spec.versionPrecondition && !nonEmpty(args.expectedVersion) && !nonEmpty(args.ref?.version)) problems.push("expectedVersion (or a version-pinned ref)");
+		for (const field of spec.fields ?? []) if (!nonEmpty(args[field])) problems.push(field);
+		if (spec.operation === "required") {
+			if (args.operation === undefined) problems.push(spec.hint ?? "an operation payload");
+			else for (const field of spec.operationFields ?? []) if (!nonEmpty(args.operation?.[field])) problems.push(`operation.${field}`);
+		}
+		return { problems };
+	};
 	return defineTool({
 		name: "book",
 		description: describe("book"),
 		parameters: validationSchema,
 		prepareArguments(args) {
 			const result = validate.parse(args);
-			if (result.ok) {
-				const value = result.value;
-				const hasTarget = value.target !== undefined;
-				const hasAction = value.action !== undefined;
-				if (hasTarget !== hasAction) throw new Error("Validation failed for tool \"book\": target and action are both required.");
-				if (hasTarget) {
-					if (value.book !== undefined || value.ops !== undefined || value.text !== undefined) throw new Error("Validation failed for tool \"book\": use exactly one interface: target+action or the legacy book form, never both.");
-					if (value.ref !== undefined && !validateReference(value.ref)) throw new Error("Validation failed for tool \"book\": ref must be { namespace, kind, id, version? }.");
-					const target = value.target;
-					const action = value.action;
-					const requireRef = () => { if (value.ref === undefined) throw new Error(`Validation failed for tool \"book\": ${target} ${action} needs a typed ref.`); };
-					if (target === "file" && ["inspect", "read"].includes(action) && value.ref === undefined && value.path === undefined) throw new Error(`Validation failed for tool \"book\": file ${action} needs ref or path.`);
-					if (target === "file" && action === "create" && (typeof value.path !== "string" || typeof value.content !== "string")) throw new Error("Validation failed for tool \"book\": file create needs path and content.");
-					if (target === "file" && action === "edit") { requireRef(); if (typeof value.expectedVersion !== "string" || typeof value.oldText !== "string" || typeof value.newText !== "string") throw new Error("Validation failed for tool \"book\": file edit needs ref, expectedVersion, oldText, and newText."); }
-					if (target === "file" && action === "rebind") { requireRef(); if (typeof value.expectedVersion !== "string" || typeof value.path !== "string") throw new Error("Validation failed for tool \"book\": file rebind needs ref, expectedVersion, and path."); }
-					if (target === "report" && ["inspect", "read", "recall", "archive", "restore", "remove"].includes(action)) requireRef();
-					if (target === "report" && ["archive", "restore", "remove"].includes(action) && value.expectedVersion === undefined && value.ref?.version === undefined) throw new Error("Validation failed for tool \"book\": report mutations need expectedVersion or a version-pinned ref.");
-					if (DURABLE_TARGETS.has(target) && ["inspect", "read"].includes(action)) requireRef();
-					if (target === "message" && action === "edit") { requireRef(); if (value.expectedVersion === undefined && value.ref?.version === undefined) throw new Error("Validation failed for tool \"book\": message edit needs expectedVersion or a version-pinned ref."); }
-					if (target === "shelf" && action === "add" && value.ref === undefined && value.path === undefined) throw new Error("Validation failed for tool \"book\": shelf add needs a ref or path.");
-					if (target === "shelf" && action === "remove" && !value.placementId) throw new Error("Validation failed for tool \"book\": shelf remove needs placementId.");
-					if (BRAIN_TARGETS.has(target)) {
-						if (["inspect", "read"].includes(action)) requireRef();
-						if (BRAIN_MUTATIONS[target]?.has(action)) {
-							if (action !== "add") requireRef();
-							if (value.operation === undefined && !(target === "context" && ["archive", "restore"].includes(action))) throw new Error(`Validation failed for tool \"book\": ${target} ${action} needs an operation payload.`);
-							if (action !== "add" && value.expectedVersion === undefined && value.ref?.version === undefined) throw new Error(`Validation failed for tool \"book\": ${target} ${action} needs expectedVersion (or a version-pinned ref).`);
-						}
-					}
-					return value;
-				}
-				if (value.book === undefined) throw new Error("Validation failed for tool \"book\": use target+action.");
-				if (Array.isArray(value.ops) && value.ops.length !== 1) throw new Error("Validation failed for tool \"book\": exactly one operation per call; send one op at a time.");
-				return value;
+			if (!result.ok) {
+				const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
+				const errors = [...result.errors].map((error) => `  - ${path(error.path)}: ${error.message}`).join("\n");
+				// Do not echo the arguments: malformed text can be very large and the agent already has its original call.
+				throw new Error(`Validation failed for tool "book":\n${errors}`);
 			}
-			const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
-			const issues = [...result.errors];
-			const planAdds = args?.book === POLICY.enums.bookName.plan && Array.isArray(args.ops) ? args.ops.filter((op) => op?.action === POLICY.enums.actions.add) : [];
-			const hasRootPlanText = args?.book === POLICY.enums.bookName.plan && Object.hasOwn(args, "text");
-			if (hasRootPlanText) {
-				// The conditional schema also reports this as an opaque `not` failure; replace it with the actionable cause.
-				for (let index = issues.length - 1; index >= 0; index--) {
-					if (issues[index].path === "" && issues[index].keyword === "not") issues.splice(index, 1);
-				}
-				issues.push({ path: "/text", message: "root text is only for the legacy whole-assessment form with book=books; plan wording belongs inside each add operation" });
-			}
-			const errors = issues.map((error) => `  - ${path(error.path)}: ${error.message}`).join("\n");
-			const hints = planAdds.some((op) => op.mode === undefined || op.text === undefined)
-				? '\nPlan add shape: {"action":"add","mode":"look or change","text":"one-line plan item"}. Put both `mode` and `text` in every add operation.'
-				: "";
-			// Do not echo the arguments: malformed text can be very large and the agent already has its original call.
-			throw new Error(`Validation failed for tool "book":\n${errors}${hints}`);
+			const value = result.value;
+			if (value.target === undefined || value.action === undefined) throw new Error('Validation failed for tool "book": target and action are both required.');
+			const { unsupported, problems } = checkCall(value.target, value.action, value);
+			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.`);
+			if (problems.length > 0) throw new Error(`Validation failed for tool "book": ${value.target} ${value.action} needs ${joinList(problems)}.`);
+			return value;
 		},
 
 		executionMode: "sequential",
@@ -1259,15 +1052,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 				}
 				return await runUniversal({ root, brainDir, config, engine, gate }, args, api, callContext);
 			}
-			const book = args.book;
-			if (book === POLICY.enums.bookName.plan && api.conversationId !== ROOT_CONVERSATION_ID) {
-				return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
-			}
-			const runner = { ledger: runLedger, plan: runPlan, books: runBooks, context: runContext }[book];
-			if (runner === undefined) return fail(`\`book\` is one of ledger, plan, books, context.`);
-			const result = runner({ root, brainDir, config, engine, gate }, args, api);
-			result.details = { book, ...result.details };
-			return result;
+			return fail('Validation failed for tool "book": target and action are both required.');
 		},
 	});
 }

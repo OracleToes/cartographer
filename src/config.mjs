@@ -27,7 +27,6 @@ const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "rem
 const LEDGER_KIND = freezeTree({ goal: "goal", question: "question", note: "note" });
 const PLAN_MODE = freezeTree({ look: "look", change: "change" });
 const BOOK_KIND = freezeTree({ assessment: "assessment", practice: "practice" });
-const BOOK_NAME = freezeTree({ ledger: "ledger", plan: "plan", books: "books", context: "context" });
 const WAKE_KIND = freezeTree({ time: "time", file: "file", window: "window" });
 const WINDOW_WAIT_REASON = freezeTree({ done: "done", time: "time", asks: "asks", until: "until", quiet: "quiet", stopped: "stopped", closed: "closed", nudged: "nudged", idle: "idle", read: "read" });
 
@@ -116,7 +115,6 @@ export const POLICY = freezeTree({
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
-		toolSchemas: { contextShare: 0.15 },
 		change: { contentBytes: 1_000_000, binaryProbeChars: 8000 },
 		shellOutput: { maxBytes: 64_000, maxLines: 1000, pendingChars: 64_000 },
 		windows: { open: 4, waitSeconds: 300, keptLines: 2000, outputReadDefaultLines: 40, outputReadMaxLines: 400, commandSummaryChars: 80, partialChars: 64_000, markerChars: 4200, askLineChars: 200, startupErrorLines: 3, ptyColumns: 120, ptyRows: 40, commandPreviewLines: 5 },
@@ -207,9 +205,6 @@ export const POLICY = freezeTree({
 		bookKind: BOOK_KIND,
 		bookKinds: Object.values(BOOK_KIND),
 		bookActions: [ACTION.add, ACTION.edit, ACTION.done, ACTION.remove, ACTION.before],
-		bookName: BOOK_NAME,
-		bookNames: Object.values(BOOK_NAME),
-		bookToolActions: [ACTION.add, ACTION.done, ACTION.edit, ACTION.remove, ACTION.archive, ACTION.unarchive, ACTION.delete, ACTION.clear, ACTION.before, ACTION.recall, ACTION.shelve, ACTION.unshelve, ACTION.fold, ACTION.note, ACTION.collapse],
 		ledgerNonGoalKinds: [LEDGER_KIND.question, LEDGER_KIND.note],
 		wakeActions: [ACTION.set, ACTION.remove],
 		atlasKinds: ["component", "finding", "dead_end"],

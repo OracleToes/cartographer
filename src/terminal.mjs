@@ -143,7 +143,7 @@ export function describeResult(message) {
 	}
 	if (message.details?.window !== undefined && message.details?.closed) return "closed";
 	// What a task did about its own context, in the tool's own words.
-	if (message.toolName === "book" && message.details?.book === "context" && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), POLICY.limits.terminal.resultSummary.context);
+	if (message.toolName === "book" && (message.details?.target === "context" || message.details?.book === "context") && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), POLICY.limits.terminal.resultSummary.context);
 	// The harness's own words for a call the user stopped, or one that a restart cut off.
 	if (message.isError && /^Tool \w+ was aborted/.test(plain(text))) return "stopped";
 	if (message.isError && /^Tool \w+ was interrupted/.test(plain(text))) return "cut off by a restart, and not run again";
@@ -449,7 +449,7 @@ export async function runTerminal(session, options) {
 						}
 					} else if (message.toolName === "book") {
 						// One tool for the books; each keeps the words on the screen it had as a tool of its own.
-						const name = message.details?.book ?? "book";
+						const name = message.details?.target ?? message.details?.book ?? "book";
 						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);
 						const shown = Array.isArray(message.details?.shown) ? message.details.shown : [];
