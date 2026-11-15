@@ -352,8 +352,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					engine.sending(api.conversationId, routed.payload);
 					return routed;
 				},
-				afterResponse: (message, api) => {
-					schemaLifecycle.afterResponse(message, api);
+				afterResponse: async (message, api) => {
+					await schemaLifecycle.afterResponse(message, api);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);
@@ -367,6 +367,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				onYield: (answer, api) => {
 					const id = api.conversationId;
 					const main = id === ROOT_CONVERSATION_ID;
+					// Replay hidden book routing with the selected schema and original call intent, without a visible selector tool call.
+					if (schemaLifecycle.hasReplay(id)) return { continue: "\u2063" };
 					// A reply cut off at the output limit: the screen tells the user, who decides. For a task it is the end.
 					if (answer.stopReason === "length") return undefined;
 					const turn = turns.get(id);

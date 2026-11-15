@@ -95,6 +95,11 @@ function isBookBranchRequest(args) {
 		&& Object.keys(args).length === 1;
 }
 
+function bookReplayContext(selection, originalCall) {
+	const schema = JSON.stringify(selection.parameters, null, 2);
+	return `Available parameters for the book tool (target: ${selection.branch}):\n${schema}\n\nCurrent requested book call: ${JSON.stringify(originalCall)}. Complete this call with the appropriate action and required arguments, then issue it.`;
+}
+
 function providerTool(payload, name) {
 	if (!Array.isArray(payload?.tools)) throw new Error("The provider request has no tools array; strict book schema routing is unavailable.");
 	const tool = payload.tools.find((entry) => entry?.type === "function" && entry.function?.name === name);
@@ -103,8 +108,8 @@ function providerTool(payload, name) {
 }
 
 /**
- * Keep all top-level tools visible. A hidden target-routing pass discovers the requested `book` branch;
- * its call/result are removed from the next model context, where the branch schema is injected before replay.
+ * Keep all top-level tools visible. Intercept the hidden target-routing response before it is stored as a tool call,
+ * then continue with the selected branch schema and original target intent in request context.
  */
 export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, brainDir } = {}) {
 	const operations = tools.filter((tool) => tool.callers === undefined || tool.callers.includes("model"));
@@ -112,6 +117,8 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 	const book = byName.get("book");
 	if (book === undefined) throw new Error("The top-level book tool is required for hierarchical schema routing.");
 	const pending = new Map();
+	const replays = new Map();
+	const replayAttempts = new Map();
 
 	async function loadBookBranch(args, api) {
 		const target = args.target;
@@ -140,8 +147,50 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 		};
 	}
 
+	async function interceptBranchRequest(message, api) {
+		const probe = (message.content ?? []).find((part) => part.type === "toolCall" && part.name === "book" && isBookBranchRequest(part.arguments));
+		if (probe === undefined) return false;
+		const conversationId = api.conversationId;
+		const attempts = replayAttempts.get(conversationId) ?? 0;
+		if (attempts >= 3) {
+			pending.delete(conversationId);
+			replays.delete(conversationId);
+			replayAttempts.delete(conversationId);
+			message.content = [{ type: "text", text: `I couldn't complete the book.${probe.arguments.target} operation from its schema. Please clarify the action you want.` }];
+			message.stopReason = "stop";
+			return true;
+		}
+		let selection = pending.get(conversationId);
+		if (selection?.branch !== probe.arguments.target) {
+			const result = await loadBookBranch(probe.arguments, api);
+			if (result.isError === true) {
+				pending.delete(conversationId);
+				replayAttempts.delete(conversationId);
+				message.content = [{ type: "text", text: result.output?.map((part) => part.text ?? "").join("\n") || `Could not prepare the book.${probe.arguments.target} operation.` }];
+				message.stopReason = "stop";
+				return true;
+			}
+			selection = pending.get(conversationId);
+		}
+		selection.originalCall = structuredClone(probe.arguments);
+		selection.contextText = bookReplayContext(selection, selection.originalCall);
+		const route = {
+			branch: selection.branch,
+			originalCall: selection.originalCall,
+			...(selection.schemaRef === undefined ? {} : { schemaRef: selection.schemaRef }),
+			schemaVersion: selection.schemaVersion,
+		};
+		message.diagnostics = [...(message.diagnostics ?? []), { type: "cartographer_book_schema_replay", timestamp: Date.now(), details: route }];
+		message.content = [];
+		message.stopReason = "stop";
+		replayAttempts.set(conversationId, attempts + 1);
+		replays.set(conversationId, route);
+		return true;
+	}
+
 	return {
 		pending,
+		hasReplay: (conversationId) => replays.has(conversationId),
 		isBookBranchRequest: (call) => call?.name === "book" && isBookBranchRequest(call.arguments),
 		normalizeTool: (tool) => {
 			const originalPrepare = tool.prepareArguments;
@@ -186,23 +235,19 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 			if (!matchesSchema(call.arguments, selection.parameters, { requireAll: false })) return { block: `Tool call refused: arguments do not match the book.${selection.branch} schema. The operation was not run; retry with the required fields and a supported action.` };
 			return { arguments: cleanNullableArgs(call.arguments, selection.parameters) };
 		},
-		afterResponse: (message, api) => {
+		afterResponse: async (message, api) => {
+			if (await interceptBranchRequest(message, api)) return;
 			const calls = (message.content ?? []).filter((part) => part.type === "toolCall");
-			const probes = calls.filter((part) => part.name === "book" && isBookBranchRequest(part.arguments));
-			if (probes.length > 0) {
-				// This first pass exists only to discover the requested branch. Discard its prose and every
-				// unrelated speculative call; the next pass replays the conversation with the full schema.
-				message.content = probes;
-				message.stopReason = "toolUse";
-				return;
-			}
 			const selection = pending.get(api.conversationId);
 			if (selection === undefined) return;
 			const count = calls.filter((part) => part.name === "book" && part.arguments?.target === selection.branch).length;
 			if (count > 0) {
 				selection.remaining = count;
 				selection.failed = false;
-			} else if (calls.length === 0) pending.delete(api.conversationId);
+			} else if (calls.length === 0) {
+				pending.delete(api.conversationId);
+				replayAttempts.delete(api.conversationId);
+			}
 		},
 		afterTool: (call, result, api) => {
 			if (call.parent !== undefined || call.name !== "book" || isBookBranchRequest(call.arguments)) return;
@@ -211,12 +256,18 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 			if (result?.isError) selection.failed = true;
 			if (Number.isInteger(selection.remaining)) selection.remaining--;
 			const done = selection.remaining === undefined || selection.remaining <= 0;
-			if (done && !selection.failed) pending.delete(api.conversationId);
+			if (done && !selection.failed) {
+				pending.delete(api.conversationId);
+				replayAttempts.delete(api.conversationId);
+			}
 			const details = result?.details !== null && typeof result?.details === "object" && !Array.isArray(result.details) ? result.details : {};
 			return { ...result, details: { ...details, selectedSchemaRef: selection.schemaRef ?? { tool: "book", branch: selection.branch, version: selection.schemaVersion } } };
 		},
 		forRequest: (messages, conversationId) => {
 			let selection = pending.get(conversationId);
+			const routeMarkers = messages.flatMap((message, index) => message.role === "assistant"
+				? (message.diagnostics ?? []).filter((entry) => entry.type === "cartographer_book_schema_replay").map((entry) => ({ message, index, route: entry.details }))
+				: []);
 			const probeIds = new Set(messages.flatMap((message) => message.role === "assistant" && Array.isArray(message.content)
 				? message.content.filter((part) => part.type === "toolCall" && part.name === "book" && isBookBranchRequest(part.arguments)).map((part) => part.id)
 				: []));
@@ -224,12 +275,14 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 				&& (message.details?.schemaSelection?.phase === "branch-route" || message.details?.schemaSelection?.phase === "book-target")
 				&& typeof message.details?.schemaRef?.version === "string");
 			if (selection === undefined && brainDir !== undefined) {
-				const candidate = routeResults.at(-1);
-				if (candidate !== undefined) {
-					const ref = candidate.details.schemaRef;
-					const branch = candidate.details.schemaSelection.branch;
-					const index = messages.indexOf(candidate);
-					const tail = messages.slice(index + 1);
+				const marker = routeMarkers.at(-1);
+				const result = routeResults.at(-1);
+				const branch = marker?.route?.branch ?? result?.details?.schemaSelection?.branch;
+				const ref = marker?.route?.schemaRef ?? result?.details?.schemaRef;
+				const originalCall = marker?.route?.originalCall ?? { target: branch };
+				const routeIndex = marker?.index ?? messages.indexOf(result);
+				if (typeof branch === "string" && ref?.version && routeIndex >= 0) {
+					const tail = messages.slice(routeIndex + 1);
 					const calls = tail.flatMap((message) => message.role === "assistant" ? (message.content ?? []).filter((part) => part.type === "toolCall"
 						&& part.name === "book" && !isBookBranchRequest(part.arguments) && part.arguments?.target === branch) : []);
 					const callIds = new Set(calls.map((call) => call.id));
@@ -240,15 +293,27 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 					if (!answeredWithoutOperation && !completed) {
 						const parameters = readReferenceVersion(brainDir, ref);
 						if (parameters !== undefined) {
-							const contextText = `Available parameters for the book tool (target: ${branch}):\n${JSON.stringify(parameters, null, 2)}`;
-							selection = { name: "book", branch, description: candidate.details.schemaSelection.description, parameters, contextText, schemaVersion: ref.version, schemaRef: ref };
+							selection = { name: "book", branch, description: book.description, parameters, originalCall, schemaVersion: ref.version, schemaRef: ref };
+							selection.contextText = bookReplayContext(selection, originalCall);
 							pending.set(conversationId, selection);
 						}
 					}
 				}
 			}
 			const hiddenIds = new Set(routeResults.map((message) => message.toolCallId));
-			let dressed = messages.flatMap((message) => {
+			const hiddenMarkerIndexes = new Set(routeMarkers.map((marker) => marker.index));
+			const hiddenContinuationUsers = new Set();
+			for (const marker of routeMarkers) {
+				for (let index = marker.index + 1; index < messages.length; index++) {
+					const message = messages[index];
+					if (message.role !== "user") continue;
+					const empty = message.content === "" || message.content === "\u2063" || (Array.isArray(message.content) && message.content.length === 0);
+					if (empty) hiddenContinuationUsers.add(index);
+					break;
+				}
+			}
+			let dressed = messages.flatMap((message, index) => {
+				if (hiddenMarkerIndexes.has(index) || hiddenContinuationUsers.has(index)) return [];
 				if (message.role === "toolResult" && hiddenIds.has(message.toolCallId)) return [];
 				if (message.role === "assistant" && Array.isArray(message.content)) {
 					const content = message.content.filter((part) => !(part.type === "toolCall" && part.name === "book" && hiddenIds.has(part.id)));
@@ -257,7 +322,8 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 				}
 				return [message];
 			});
-			if (selection !== undefined) dressed = [...dressed, { role: "user", content: [{ type: "text", text: selection.contextText ?? `Available parameters for the book tool (target: ${selection.branch}):\n${JSON.stringify(selection.parameters, null, 2)}` }] }];
+			if (selection !== undefined) dressed = [...dressed, { role: "user", content: [{ type: "text", text: selection.contextText ?? bookReplayContext(selection, selection.originalCall ?? { target: selection.branch }) }] }];
+			replays.delete(conversationId);
 			return dressed;
 		},
 	};
