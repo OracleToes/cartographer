@@ -154,7 +154,8 @@ const CAPABILITIES = {
 	schema: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
 	shelf: {
 		list: {},
-		add: { pathOk: true, refAlternative: "a ref or path" },
+		// The namespace and the kind are inferred from the ID alone (src/tools/book.mjs, inferShelfRef); a full reference is not needed.
+		add: { pathOk: true, refAlternative: "a ref or path", refInfer: true },
 		remove: { fields: ["placementId"] },
 	},
 };
@@ -1104,7 +1105,12 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		const spec = capabilityFor(target, action);
 		if (spec === undefined) return { unsupported: true };
 		const problems = [];
-		if (args.ref !== undefined && !validateReference(args.ref)) return { problems: ["a ref with an `id`"] };
+		if (args.ref !== undefined && !validateReference(args.ref)) {
+			// Where the kind can be inferred (the shelf: from what the ID is), an id-carrying ref is enough;
+			// the executor resolves it and says precisely when it cannot.
+			const idOnly = spec.refInfer === true && typeof args.ref === "object" && args.ref !== null && typeof args.ref.id === "string" && args.ref.id.trim() !== "";
+			if (!idOnly) return { problems: [spec.refInfer === true ? "a ref with an `id` (the namespace and kind are inferred from it), or an explicit project-relative path" : "a ref with an `id`"] };
+		}
 		const kind = spec.refKind ?? target;
 		const article = /^[aeiou]/i.test(kind) ? "an" : "a";
 		if (spec.ref === "required" && args.ref === undefined) problems.push(`${article} ${kind} reference ({ \"id\": … } is enough)`);

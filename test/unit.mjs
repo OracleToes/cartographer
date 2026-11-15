@@ -512,7 +512,10 @@ test("shelf add: the ID alone is enough, and it finds the file behind it", async
 	// Root conversation: the main shelf.
 	const focusApi = { conversationId: ROOT_CONVERSATION_ID, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
 
-	const added = await tool.execute({ target: "shelf", action: "add", ref: { id: ref.id } }, focusApi, undefined);
+	// The harness runs every call through prepareArguments before dispatch; an id-only ref must survive it
+	// (it once was refused for missing kind and namespace, which the shelf infers by design).
+	const prepared = tool.prepareArguments({ target: "shelf", action: "add", ref: { id: ref.id } });
+	const added = await tool.execute(prepared, focusApi, undefined);
 	assert.ok(!added.isError, `shelf add by the ID alone succeeded: ${added.output[0].text}`);
 	const listed = await tool.execute({ target: "shelf", action: "list" }, focusApi, undefined);
 	assert.match(listed.output[0].text, /placement/, "and the shelf holds it");
