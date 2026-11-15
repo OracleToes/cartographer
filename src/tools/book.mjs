@@ -112,6 +112,7 @@ const CAPABILITIES = {
 		unlink: { ref: "required", operation: "required" },
 		confirm: { ref: "required", operation: "required" },
 		remove: { ref: "required", operation: "required" },
+		rename: { ref: "required", operation: "required", operationFields: ["to"] },
 		look: { operation: "required", operationFields: ["name"] },
 		tree: {},
 	},
@@ -245,14 +246,14 @@ const ACTION_GUIDE = {
 		before: "id and before",
 	},
 	atlas: {
-		add: "name and gist — kind, detail, files and links optional",
-		edit: "name and gist — kind, detail, files and links optional",
-		rename: "name (the node as it is) and to (its new name); what links to it is rewritten",
-		confirm: "name",
-		link: "for the node `ref` names: files (paths) and/or links (node names) — { files: [\"src/x.js\"], links: [\"other_node\"] }; the ref is the node, no `name` in the operation",
-		unlink: "for the node `ref` names: files (paths) and/or links (node names) to take off; the ref is the node, no `name` in the operation",
-		remove: "name",
-		look: "name (a node name or a project path)",
+		add: "name and gist — kind, detail, files and links optional; the node comes back with its `c<N>` id",
+		edit: "the node `ref` names: gist and optional kind/detail/files/links — the name stays (`rename` moves it)",
+		rename: "the node `ref` names, and `to` (its new name); what links to it is rewritten",
+		confirm: "the node `ref` names — or several via operation `names`",
+		link: "for the node `ref` names: files (paths) and/or links (node names or ids) — { files: [\"src/x.js\"], links: [\"other_node\"] }; the ref is the node, no `name` in the operation",
+		unlink: "for the node `ref` names: files (paths) and/or links (node names or ids) to take off; the ref is the node, no `name` in the operation",
+		remove: "the node `ref` names",
+		look: "name (a node name, a node id such as c3, or a project path)",
 		tree: "anchor and depth (folder of the project; anchor '.' is the root)",
 	},
 	context: {
@@ -329,7 +330,7 @@ function listBrainRecords(target, brainDir) {
 }
 function brainRecord(target, brainDir, id) {
 	const items = listBrainRecords(target, brainDir);
-	const record = target === "atlas" ? items.find((item) => item.name === id) : items.find((item) => item.id === id);
+	const record = items.find((item) => item.id === id);
 	return record === undefined ? undefined : { record, version: contentVersion(record) };
 }
 
@@ -527,7 +528,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			try { namespace = ensureCatalog(brainDir).namespace; }
 			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
 			const items = records.map((record) => {
-				const id = target === "atlas" ? record.name : record.id;
+				const id = record.id;
 				return { ref: listRef(namespace, target, id, contentVersion(record)), summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
 			});
 			let paged;
