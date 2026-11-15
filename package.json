@@ -11,7 +11,7 @@
     "carto": "bin/carto"
   },
   "scripts": {
-    "test": "node -e \"console.error('Test execution is disabled in this workspace. Do not run tests unless the user explicitly asks.'); process.exit(2)\""
+    "test": "node test/unit.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "1.5.2",

@@ -1,7 +1,22 @@
 # Agent instructions
 
-## Tests are disabled
+## Tests
 
-Do not run tests, test suites, test files, test runners, or test-related package scripts in this repository unless the user explicitly asks for test execution in the current conversation. This restriction overrides generic instructions to run tests during verification. Do not interpret authorization to implement, finish a stage, or perform final verification as permission to run tests. If the user has not explicitly asked to run tests, use non-test checks only and report that tests were not run.
+`npm test` runs `test/unit.mjs`, a fast unit suite with no model server, no terminal and no sandbox: temp brain
+directories and direct calls to the operations. It finishes in seconds.
 
-The former test suite and harness were removed at the user's direction. `npm test` is intentionally hard-blocked in `package.json`; do not bypass or alter that guard. Never restore the removed suite unless the user explicitly requests it.
+Rules for running it:
+
+- Do not run the test suite while working a task, to check whether something works mid-step. It is for the end of a
+  piece of work, before committing. (The former integration suite drove the real `carto` command against a stand-in
+  server for five to six minutes per run; running it per step is what made tests a tax, and it is why they were
+  hard-blocked.)
+- Keep it fast. New tests must be unit-level, deterministic and free of the network, the model server, the terminal
+  and bubblewrap. If a check needs any of those, it does not belong in this suite.
+- Every case must assert the specification the code is being held to now — read the code, then write the assertion.
+  Do not carry forward a case that encodes a superseded behaviour without an explicit decision.
+
+The former integration suite (`test/run.mjs`, `test/stand-in.mjs`, `test/vt.py` on the main branch) asserted an
+earlier specification and is not in this branch. It is not to be restored unless the user explicitly asks, and then
+only after an audit of every case against the current specification and with a budget for its minutes. `npm test`
+must never be pointed at it silently.
