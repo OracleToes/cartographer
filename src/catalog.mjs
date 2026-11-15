@@ -48,10 +48,37 @@ function recoverFork(brainDir) {
 }
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+/**
+ * Deterministic JSON serialization for content versions: object keys sorted at every level, no insignificant
+ * whitespace, and the JSON semantics for omitted/non-JSON values. Two values that differ only in key order hash
+ * identically, which is what keeps `expectedVersion` stable across re-serializations.
+ */
+export const canonicalJson = (value) => {
+	if (value === null || value === undefined) return "null";
+	const type = typeof value;
+	if (type === "number") return Number.isFinite(value) ? JSON.stringify(value) : "null";
+	if (type === "boolean" || type === "string") return JSON.stringify(value);
+	if (Array.isArray(value)) {
+		return `[${value.map((item) => item === undefined || typeof item === "function" || typeof item === "symbol" ? "null" : canonicalJson(item)).join(",")}]`;
+	}
+	if (type === "object") {
+		const parts = [];
+		for (const key of Object.keys(value).sort()) {
+			const item = value[key];
+			if (item === undefined || typeof item === "function" || typeof item === "symbol") continue;
+			parts.push(`${JSON.stringify(key)}:${canonicalJson(item)}`);
+		}
+		return `{${parts.join(",")}}`;
+	}
+	return "null";
+};
+
+/** The content version of any JSON value: the SHA-256 of its canonical bytes. Files keep bytes-hash versions. */
+export const contentVersion = (value) => sha256(canonicalJson(value ?? null));
+
 export class CatalogError extends Error {}
 
 const empty = () => ({ version: VERSION, namespace: randomUUID(), files: [] });
-const clone = (value) => JSON.parse(JSON.stringify(value));
 
 /** Read metadata without ever replacing a corrupt catalog. */
 export function loadCatalog(brainDir) {
@@ -77,6 +104,20 @@ export function loadCatalog(brainDir) {
 		if (file.deleted !== true) paths.add(file.path);
 	}
 	return value;
+}
+
+/**
+ * Load the catalog, creating the empty namespace anchor on first use. References minted against a transient random
+ * namespace would be meaningless, so every caller that needs the namespace goes through here; after the first call this
+ * is a plain read.
+ */
+export function ensureCatalog(brainDir) {
+	const catalog = loadCatalog(brainDir);
+	if (!existsSync(catalogPath(brainDir))) {
+		saveCatalog(brainDir, catalog);
+		return loadCatalog(brainDir);
+	}
+	return catalog;
 }
 
 /** Atomic replacement of the catalog metadata. */
@@ -194,6 +235,10 @@ export function observeFile(root, brainDir, given, { create = false } = {}) {
 		// A file still present at the same path is an edit even when an editor replaced its inode atomically.
 		// If absence is observed first, the tombstone ensures a later recreation gets a new identity.
 		const digest = storeVersion(brainDir, previous.id, bytes);
+		if (previous.version === digest && previous.dev === stat.dev && previous.ino === stat.ino && previous.size === stat.size) {
+			// Nothing changed: do not rewrite the catalog. Reads never amplify into writes.
+			return { ref: refFor(catalog, previous), record: previous, bytes, path: path.rel };
+		}
 		const updated = { ...previous, version: digest, dev: stat.dev, ino: stat.ino, size: stat.size, updatedAt: Date.now() };
 		catalog.files = records.map((file) => file.id === previous.id ? updated : file);
 		saveCatalog(brainDir, catalog);
@@ -254,11 +299,8 @@ export function resolveFile(root, brainDir, ref) {
 	let record = catalog.files.find((file) => file.id === ref.id);
 	if (record === undefined) return { status: "deleted", ref, error: "No catalog record exists for this file identity." };
 	if (ref.version === undefined && record.deleted !== true) {
-		try {
-			observeFile(root, brainDir, record.path);
-			catalog = loadCatalog(brainDir);
-			record = catalog.files.find((file) => file.id === ref.id) ?? record;
-		} catch { /* The status calculation below reports deletion/inaccessibility. */ }
+		// No write on read: staleness is detected here by re-hashing the current bytes below, without re-observing the
+		// path. The catalog is only refreshed by explicit operations (an edit, a rebind, an observe).
 	}
 	const requested = ref.version ?? record.version;
 	if (requested === undefined) return { status: "deleted", ref, error: "The file has no recorded content version." };
@@ -274,12 +316,10 @@ export function resolveFile(root, brainDir, ref) {
 	let path;
 	try { path = confinedFile(root, record.path); }
 	catch (error) {
+		// Report the deletion without tombstoning it: recording it would be a write on a read path. The next explicit
+		// operation observes the absence for real.
 		if (!existsSync(resolve(root, record.path))) {
-			const next = clone(catalog);
-			const at = next.files.findIndex((file) => file.id === record.id);
-			next.files[at] = { ...record, deleted: true, deletedAt: Date.now() };
-			saveCatalog(brainDir, next);
-			return { status: "deleted", ref, requestedVersion: requested, resolvedVersion: requested, bytes, record: next.files[at] };
+			return { status: "deleted", ref, requestedVersion: requested, resolvedVersion: requested, bytes, record };
 		}
 		return { status: "inaccessible", ref, error: error.message };
 	}
@@ -314,12 +354,12 @@ export function validateReference(ref) {
 		&& (ref.version === undefined || (typeof ref.version === "string" && ref.version.length <= 128));
 }
 
-/** Retain an immutable version of a non-file entity under its typed reference. */
+/** Retain an immutable version of a non-file entity under its typed reference. Call only at an explicit pin (e.g. a schema shelf add) or a migration — never on a read path. */
 export function retainReferenceVersion(brainDir, ref, value) {
 	if (!validateReference(ref) || !DIGEST.test(ref.version ?? "")) throw new CatalogError("A version-pinned reference is required");
 	const catalog = loadCatalog(brainDir);
 	if (catalog.namespace !== ref.namespace) throw new CatalogError("The reference belongs to another brain-store namespace");
-	const bytes = Buffer.from(JSON.stringify(value));
+	const bytes = Buffer.from(canonicalJson(value ?? null));
 	if (sha256(bytes) !== ref.version) throw new CatalogError("The supplied content does not match the reference version");
 	const path = entityVersionPath(brainDir, ref);
 	if (existsSync(path)) {
@@ -327,7 +367,7 @@ export function retainReferenceVersion(brainDir, ref, value) {
 		if (info.isSymbolicLink() || !info.isFile()) throw new CatalogError("Immutable entity-version storage is not a regular file");
 		let saved;
 		try { saved = JSON.parse(readFileSync(path, "utf8")); } catch { throw new CatalogError("Immutable entity-version storage is corrupt"); }
-		if (sha256(Buffer.from(JSON.stringify(saved))) !== ref.version) throw new CatalogError("Immutable entity-version storage failed its digest check");
+		if (sha256(Buffer.from(canonicalJson(saved ?? null))) !== ref.version) throw new CatalogError("Immutable entity-version storage failed its digest check");
 	} else {
 		mkdirSync(dirname(path), { recursive: true });
 		const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -348,6 +388,17 @@ export function readReferenceVersion(brainDir, ref) {
 		const info = lstatSync(path);
 		if (info.isSymbolicLink() || !info.isFile()) return undefined;
 		const value = JSON.parse(readFileSync(path, "utf8"));
-		return sha256(Buffer.from(JSON.stringify(value))) === ref.version ? value : undefined;
+		return sha256(Buffer.from(canonicalJson(value ?? null))) === ref.version ? value : undefined;
 	} catch { return undefined; }
+}
+
+/**
+ * Read-only counterpart of observing a file: the current identity for a stored relative path, or undefined when the
+ * catalog knows no live identity for it. Never creates files, versions, or catalog entries — safe for render paths.
+ */
+export function fileIdentityForPath(brainDir, relPath) {
+	let catalog;
+	try { catalog = loadCatalog(brainDir); } catch { return undefined; }
+	const record = fileAt(catalog, relPath);
+	return record === undefined ? undefined : refFor(catalog, record);
 }
