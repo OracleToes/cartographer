@@ -5,6 +5,7 @@ import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 import { forkCatalogNamespace } from "./catalog.mjs";
+import { traceFile } from "./trace.mjs";
 
 const HELP = `carto: Cartographer, run from a project folder.
 
@@ -157,6 +158,9 @@ export async function main(argv) {
 			intro.push(text);
 			console.log(text);
 		};
+		// CARTO_TRACE: the model's requests and responses, one JSON line per call, for debugging. Resolved
+		// once here so the line below and the session agree on the file; passed through to openSession.
+		const trace = traceFile({ root: project.root, brainDir: brainPath });
 		say(`Cartographer · ${project.root}`);
 		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
@@ -171,13 +175,14 @@ export async function main(argv) {
 		// carto runs (/initiate) is never remembered.
 		const initiation = { on: config.initiate !== false };
 		if (!initiation.on) say("the agent waits for you (/initiate on lets it start on its own)");
+		if (trace !== undefined) say(`trace  ${trace} (CARTO_TRACE)`);
 		if (adopted) say("The ledger file ledger.json is now carto-ledger.json; its entries are unchanged.");
 		if (forked) say(`Independent brain namespace created (${forked.previous} → ${forked.namespace}); internal references were rebound.`);
 
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, trace });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,

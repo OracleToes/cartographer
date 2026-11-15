@@ -27,6 +27,7 @@ import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
+import { traceFile, watchTrace } from "./trace.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit"]);
@@ -71,7 +72,7 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels }) {
+export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace }) {
 	const context = BACKGROUND_CONTEXT;
 	const model = {
 		id: config.model,
@@ -121,6 +122,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		}
 	};
 	if (config.prefill !== false) watchPrefill(provider, notify);
+	// CARTO_TRACE: one JSON line per model call, appended as it is answered. After the prefill watcher,
+	// whose fetch is then the one the trace records around. The health check in cli.mjs is not traced.
+	const tracePath = trace ?? traceFile({ root, brainDir });
+	if (tracePath !== undefined) watchTrace(provider, tracePath);
 	models.setProvider(provider);
 
 	const runs = new Map();

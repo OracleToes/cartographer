@@ -1003,6 +1003,17 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `handoffQuestion` | false | Whether a collapse the agent did not ask for is preceded by the `{"handoff": true|false}` question. false: the collapse carries the last reply mechanically |
 | `shellRead` | `[]` | More folders a command may read, besides the system and the project: full paths, or starting with `~/`. For programs installed in your home folder that the sandbox does not show by itself |
 
+## Seeing what the model was actually sent
+
+`/copy session` exports the session as Markdown (each call as one line), `/copy tab` with the Context tab open exports the request the model was sent, part by part, and `/copy report` the last task's report — each goes to the clipboard and to a file under `.atlas/export/`. For anything the above cannot show, `CARTO_TRACE` dumps the wire itself:
+
+```
+CARTO_TRACE=1 carto                    writes .atlas/export/trace-<time>.jsonl
+CARTO_TRACE=/tmp/wire.jsonl carto      writes that file instead
+```
+
+One JSON line per call to the model: the request exactly as it went on the wire (it may carry `return_progress`, which the prefill watcher adds), and the raw response body as it came back — the SSE stream, unparsed. The `/models` check before the session begins is not traced. A trace file can be large, since every request holds a whole context; nothing in Cartographer reads it. Delete it when you are done with it.
+
 ## What is not here yet
 
 In build order:

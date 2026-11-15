@@ -22,6 +22,7 @@ import { stateBlock } from "../src/state.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
+import { traceFile, watchTrace } from "../src/trace.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -347,4 +348,51 @@ test("state: the no-sandbox line says no command can be run at all", (t) => {
 test("state: the sandboxed block does not claim the main agent is blocked", (t) => {
 	const block = blockOf(t, runnerOf(false, { ok: true, version: "0.9.0", shell: "bash" }));
 	assert.doesNotMatch(block, /You yourself may still run commands in this session/);
+});
+
+// ─── The trace ─────────────────────────────────────────────────────────────
+
+test("trace: CARTO_TRACE names the default file under the brain's export folder", (t) => {
+	const { brainDir } = fresh(t);
+	const file = traceFile({ env: { CARTO_TRACE: "1" }, brainDir, root: brainDir });
+	assert.equal(file?.startsWith(join(brainDir, "export")), true);
+	assert.match(file ?? "", /trace-\d{8}-\d{6}\.jsonl$/);
+});
+
+test("trace: CARTO_TRACE with a path is used as it is; nothing traces when it is not set", (t) => {
+	const { root } = fresh(t);
+	assert.equal(traceFile({ env: {}, root }), undefined);
+	assert.equal(traceFile({ env: { CARTO_TRACE: "  " }, root }), undefined);
+	assert.equal(traceFile({ env: { CARTO_TRACE: "/tmp/wire.jsonl" }, root }), "/tmp/wire.jsonl");
+	assert.equal(traceFile({ env: { CARTO_TRACE: "wire.jsonl" }, root }), join(root, "wire.jsonl"));
+});
+
+test("trace: one call to the model is one JSON line: the request as sent, the response as read", async (t) => {
+	const { brainDir } = fresh(t);
+	const file = join(brainDir, "wire.jsonl");
+	const provider = {
+		stream: (model, request, options) => options.fetch("http://server.invalid/v1/chat/completions", { method: "POST", body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "hi" }], return_progress: true }) }),
+		streamSimple: (model, request, options) => provider.stream(model, request, options),
+	};
+	watchTrace(provider, file);
+	const body = new TextEncoder().encode('data: {"id":"x","choices":[{"delta":{"role":"assistant"}}]}\n\ndata: [DONE]\n\n');
+	const realFetch = globalThis.fetch;
+	globalThis.fetch = async () => new Response(new ReadableStream({ start(controller) { controller.enqueue(body); controller.close(); } }), { status: 200, headers: { "content-type": "text/event-stream" } });
+	t.after(() => {
+		globalThis.fetch = realFetch;
+	});
+	const response = await provider.stream({ id: "m" }, {}, {});
+	const chunks = [];
+	for await (const chunk of response.body) chunks.push(chunk);
+	// The trace writes at the end of the stream; give it a tick to land.
+	await new Promise((resolve) => setImmediate(resolve));
+	const lines = readFileSync(file, "utf8").trim().split("\n");
+	assert.equal(lines.length, 1);
+	const record = JSON.parse(lines[0]);
+	assert.equal(record.method, "POST");
+	assert.equal(record.request.model, "m");
+	assert.equal(record.request.return_progress, true);
+	assert.match(record.response, /data: \[DONE\]/);
+	assert.equal(record.status, 200);
+	assert.equal(record.bytesSent, Buffer.byteLength(JSON.stringify(record.request)));
 });
