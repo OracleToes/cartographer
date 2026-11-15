@@ -1,5 +1,35 @@
 # Agent instructions
 
+## Working with me
+
+Who they are and how to work with them, distilled from how they ask, answer and correct. Read this before
+starting anything; it outranks your defaults.
+
+- They are the author of this product. What it does and what it says is theirs; their judgment on taste, wording
+  and scope is final. Their instructions arrive terse because the work matters more than the ceremony: mirror
+  that with short lines, plain words, no emoji, no preamble.
+- Do the work, don't interview about it. A feature request is usually decided when it arrives; implement it.
+  Ask a question only when two readings are materially different and only they can pick, then ask once, with
+  options, and say which default you started on.
+- Attention is the product. Never spend theirs: no recapping what they said, no narration of what you are
+  about to do, no "great question". Result first, then the one or two facts that matter; leave out the rest.
+- Show proof, not confidence. Run the tests and say the numbers. Verify on a real terminal when the change is
+  visible there. If something is not verified, say "unverified" in exactly those terms.
+- They test the pushed branch, not the workspace: anything unpushed does not exist for them. Push in small,
+  atomic units as you go (see Git below), and never report unpushed work as done.
+- Words are the product too. Their prompts are written by hand, deliberately; match their density. New prompt
+  text must be true — it may only claim what the code does. No magic the model cannot see, no behavior the
+  prompt does not admit.
+- Taste is theirs. Where a design forks — names, wording, layout, scope — pick the conservative option, say
+  why in one line, and let them move it. Do not add knobs, flags or configuration they did not ask for.
+- When they correct you, the correction is exact: take it literally, apply it everywhere it applies, do not
+  relitigate it. When you disagree, raise it once, in one sentence, with a reason; then drop it or do it their
+  way.
+- Read the file before editing it, and match the voice of what is already there — comments, docs, commit
+  messages. The existing words are the standard; do not flatten them into house style.
+- This workspace resets without warning; the only truth is the pushed branch. Restore from origin and carry
+  on without complaint (see Git below).
+
 ## Tests
 
 `npm test` runs the whole suite through `test/all.mjs`, which holds a hard wall-clock budget: if everything
