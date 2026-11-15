@@ -32,6 +32,14 @@ same audit and the same 10-second budget.
 
 ## Git
 
+- **Push proactively and atomically.** A commit is one coherent, named unit of work, and it is pushed the moment it
+  exists — never left sitting in the local repository. The workspace can reset at any moment; only pushed work
+  survives it. When in doubt, commit and push a small unit rather than carry changes in the working tree.
+- **Push before testing.** Push each unit as soon as it is coherent, not after the suite has passed. Test after
+  pushing; if a test then shows a problem, fix it and push the fix as another commit. Never leave the only copy of
+  a change in the working tree while tests run or while a turn ends.
+- **If the workshop resets, restore from the most recent commit.** Fetch, put the working tree back on the pushed
+  state of `origin/<current branch>`, and carry on from there. Do not attempt to reconstruct lost uncommitted work.
 - **Always push.** The user verifies and tests the work from the pushed branch, not from this workspace: a change
   that is not pushed does not exist for them. Every change lands on the current branch and is pushed to
   `origin/<current branch>` as part of finishing it — do not end a piece of work with commits only in the local
