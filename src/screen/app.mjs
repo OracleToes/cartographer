@@ -39,6 +39,7 @@ import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mj
 import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
+import { createRefDescriber } from "../refs.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
@@ -273,7 +274,8 @@ export async function runScreen(session, options, runTerminal) {
 		const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
-	const chat = createChat({ markdown });
+	const describeRef = createRefDescriber({ brainDir });
+	const chat = createChat({ markdown, describeRef });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {

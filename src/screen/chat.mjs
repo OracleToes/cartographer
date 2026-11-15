@@ -70,10 +70,10 @@ function bodyOf(call) {
 }
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[] }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
  */
-export function createChat({ now = () => Date.now(), markdown } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -186,7 +186,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 							rows.set(call.id, { quiet: true, name: call.name });
 							continue;
 						}
-						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call), args: call.arguments ?? {}, state: "running", started: now() };
+						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now() };
 						rows.set(call.id, row);
 						group().rows.push(row);
 					}
@@ -256,7 +256,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 				const { message } = live.get(deepest);
 				const call = callsOf(message).at(-1);
 				if (call?.name === "chat" || call?.name === "ask") return { what: "writing to you", depth: deepest, task };
-				if (call !== undefined) return { what: `writing ${cut(describeCall(call).replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars)}`, depth: deepest, task };
+				if (call !== undefined) return { what: `writing ${cut(describeCall(call, describeRef).replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars)}`, depth: deepest, task };
 				if (textOf(message).trim() !== "") return { what: "writing a note", depth: deepest, task };
 				return { what: "thinking", depth: deepest, task };
 			}
@@ -486,7 +486,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 						said(String(call.arguments?.text ?? ""), { kind: "live" });
 						continue;
 					}
-					add([[`${indent}✎ `, "warn"], [cut(describeCall(call).replace(/\n/g, " "), inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
+					add([[`${indent}✎ `, "warn"], [cut(describeCall(call, describeRef).replace(/\n/g, " "), inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
 					const body = bodyOf(call);
 					if (body !== "") {
 						const text = wrap(body, inner - width(indent) - 4);

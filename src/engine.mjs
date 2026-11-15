@@ -18,6 +18,7 @@
 import { POLICY } from "./config.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { describeCall } from "./terminal.mjs";
+import { createRefDescriber } from "./refs.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
 import { calibrate } from "./calibrate.mjs";
 import { ASK_MAIN, ASK_TASK, HANDOFF_IN_TURN, TASK_HANDOFF } from "./prompt.mjs";
@@ -47,6 +48,7 @@ function replyForServer(message, results) {
  * @param {{ root: string, brainDir: string, config: any }} input
  */
 export function createEngine({ root, brainDir, config }) {
+	const describeRef = createRefDescriber({ brainDir });
 	// Per conversation: the body of the last request as it was sent, the reply to it, what its calls returned so
 	// far, the stored messages that request was made from, and the server's count of tokens.
 	const sent = new Map();
@@ -283,7 +285,7 @@ export function createEngine({ root, brainDir, config }) {
 					by: at.turn?.by ?? "user",
 					reminded: at.turn?.reminded ?? false,
 					...(at.turn?.by === "note" && turnStart !== undefined ? { note: textOf(turnStart).replace(NOTE_TAG, "").trim().slice(0, POLICY.limits.engine.noteChars) } : {}),
-					calls: callsOf(reply).map((call) => ({ text: describeCall(call), result: state.results.get(call.id) ?? "(no result)" })),
+					calls: callsOf(reply).map((call) => ({ text: describeCall(call, describeRef), result: state.results.get(call.id) ?? "(no result)" })),
 				},
 			});
 			return { handoff: text };

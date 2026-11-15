@@ -16,6 +16,7 @@
 // back (/undo): the two things only the user can do. And it is what wakes the agent
 // when something happens in a shell window while the agent is not working.
 import { POLICY } from "./config.mjs";
+import { createRefDescriber } from "./refs.mjs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
@@ -72,8 +73,8 @@ const count = (n) => (n >= POLICY.limits.format.countTenThousands ? `${Math.roun
 /** A harness message without its wrapping. */
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?|^Tool call blocked: /, "").trim();
 
-/** One line that says what a tool call is doing. */
-export function describeCall(call) {
+/** One line that says what a tool call is doing. `describeRef`, when given, names a ref instead of showing its bare id. */
+export function describeCall(call, describeRef) {
 	const args = call.arguments ?? {};
 	switch (call.name) {
 		case "task":
@@ -93,7 +94,8 @@ export function describeCall(call) {
 		case "book": {
 			const target = typeof args.target === "string" && args.target !== "" ? args.target : "";
 			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
-			const what = args.ref?.id ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
+			const refText = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== "" ? describeRef?.(args.ref) ?? args.ref.id : undefined;
+			const what = refText ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
 			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
 		}
 		case "read": {
@@ -172,6 +174,7 @@ export async function runTerminal(session, options) {
 	// commands, wakes and rests, and the same words for what Cartographer itself has to say. What differs is where
 	// text goes. Everything printed is handed to the screen as text for its Chat tab, except what is printed about
 	// one entry of a conversation: that is handed over together with the entry, which the screen draws itself.
+	const describeRef = createRefDescriber({ brainDir: options.brainDir });
 	const ui = options.screen;
 	let capture;
 	const out = ui
@@ -367,7 +370,7 @@ export async function runTerminal(session, options) {
 				// A reply cut off at the output limit may end in half a call, which is never carried out.
 				let commandShown = false;
 				for (const call of message.stopReason === "length" ? [] : calls) {
-					const text = describeCall(call);
+					const text = describeCall(call, describeRef);
 					// A task runs for a while, so its call is shown at once. So is a command, the first of a reply: the
 					// user sees what is running while it runs. Every other call is shown together with its result, as one line.
 					// What `chat` says is on screen already.
