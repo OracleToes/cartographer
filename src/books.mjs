@@ -7,7 +7,7 @@
 // is one `edit`, not a rewrite of the whole, and a lesson about how Cartographer
 // works is recorded the same way as a goal or a plan item.
 //
-// The two lists live in <project>/.atlas/carto-books.json as plain JSON. The
+// The two lists live in <project>/.brain/carto-books.json as plain JSON. The
 // assessment is mirrored to the old assessment.md so the copy at the top of the
 // context, /assessment and anything the user edits by hand still work. A project
 // that has no books file yet has its assessment.md split into entries by

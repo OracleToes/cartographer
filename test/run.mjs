@@ -34,6 +34,7 @@ import { createWakes, NOTE_MAX, WakeError, wakesPath, WAKES_MAX } from "../src/w
 import { createWindows, findScript, KEEP_LINES, WindowError } from "../src/windows.mjs";
 import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
+import { USER_NAME } from "../src/user.mjs";
 
 /** The first line of every block the harness writes; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -47,8 +48,8 @@ const tests = [];
 const test = (name, run) => tests.push({ name, run });
 /** Write the project's config by hand (tests use it to switch features off). */
 const configure = (root, config) => {
-	mkdirSync(join(root, ".atlas"), { recursive: true });
-	writeFileSync(join(root, ".atlas", "config.json"), JSON.stringify(config));
+	mkdirSync(join(root, ".brain"), { recursive: true });
+	writeFileSync(join(root, ".brain", "config.json"), JSON.stringify(config));
 };
 const NO_WINDOWS = () => (findScript() ? undefined : "the script program (util-linux) is needed for a shell window");
 const NO_SANDBOX = () => (findSandbox().ok ? undefined : `no sandbox on this machine: ${findSandbox().why}`);
@@ -231,18 +232,35 @@ test("launch: going up, the first brain or git repository is the project", () =>
 	mkdirSync(join(top, "vendor", "lib", ".git"));
 	assert.deepEqual(findProject(join(top, "src", "deep")), { root: join(top, "src", "deep"), why: "here" }, "nothing above: the folder itself");
 	setUpBrain(top);
-	assert.deepEqual(findProject(join(top, "src", "deep")), { root: join(top, "src", "deep"), why: "here" }, "an .atlas folder without a session is not a brain");
-	writeFileSync(join(top, ".atlas", "session.sqlite"), "");
+	assert.deepEqual(findProject(join(top, "src", "deep")), { root: join(top, "src", "deep"), why: "here" }, "a brain folder without a session is not a brain");
+	writeFileSync(join(top, ".brain", "session.sqlite"), "");
 	assert.deepEqual(findProject(join(top, "src", "deep")), { root: top, why: "brain" }, "a brain above");
 	assert.deepEqual(findProject(join(top, "vendor", "lib", "src")), { root: join(top, "vendor", "lib"), why: "git" }, "a repository nearer than the brain wins");
 
 	// What setUpBrain does to a .gitignore that is already there.
-	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "session.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "a new one");
-	writeFileSync(join(top, ".atlas", ".gitignore"), "notes.txt");
+	assert.equal(readFileSync(join(top, ".brain", ".gitignore"), "utf8"), "session.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "a new one");
+	writeFileSync(join(top, ".brain", ".gitignore"), "notes.txt");
 	setUpBrain(top);
-	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "missing lines are added to an existing one");
+	assert.equal(readFileSync(join(top, ".brain", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "missing lines are added to an existing one");
 	setUpBrain(top);
-	assert.equal(readFileSync(join(top, ".atlas", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "and not twice");
+	assert.equal(readFileSync(join(top, ".brain", ".gitignore"), "utf8"), "notes.txt\nsession.sqlite*\ncarto.lock\ncheckpoints.git/\nhome/\ncarto-context.json\nreports/\nshelf/\ncarto-wakes.json\nexport/\n", "and not twice");
+});
+
+test("launch: a legacy .atlas brain is renamed to .brain, and its checkpoints exclusion follows", () => {
+	const top = join(scratch, "legacy");
+	mkdirSync(join(top, ".atlas", "checkpoints.git", "info"), { recursive: true });
+	writeFileSync(join(top, ".atlas", "session.sqlite"), "");
+	writeFileSync(join(top, ".atlas", "carto-ledger.json"), "{}\n");
+	writeFileSync(join(top, ".atlas", "checkpoints.git", "info", "exclude"), "/.atlas/\nnode_modules/\n");
+	assert.deepEqual(findProject(top), { root: top, why: "brain" }, "the legacy folder still counts as a brain");
+	const setup = setUpBrain(top);
+	assert.equal(setup.migrated, true, "the folder is renamed");
+	assert.equal(setup.created, false, "and it is the same brain, not a new one");
+	assert.ok(!existsSync(join(top, ".atlas")), "the old folder is gone");
+	assert.ok(existsSync(join(top, ".brain", "session.sqlite")), "the brain stands at the new path");
+	assert.ok(existsSync(join(top, ".brain", "carto-ledger.json")), "with its files");
+	assert.equal(readFileSync(join(top, ".brain", "checkpoints.git", "info", "exclude"), "utf8"), "/.brain/\nnode_modules/\n", "the checkpoint exclusion carries over");
+	assert.equal(setUpBrain(top).migrated, false, "and the migration happens once");
 });
 
 test("ledger: a call that is run again after a crash is not applied twice", async () => {
@@ -277,13 +295,13 @@ test("state: the block is added to the last message of a request only, and the i
 	saveLedger(dir, { version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Which port?", status: "open" }] });
 	assert.equal(
 		stateBlock(dir, undefined, { now: new Date(2026, 0, 1, 9, 5).getTime() }),
-		"<state>\nWritten by me, from my own records, not by the user's hand. This is the current state; it supersedes any earlier copy I carry.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for the user:\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. I find out what the user wants to achieve. When we agree on it, I record it as a goal with a done-when line. I need not sit idle meanwhile: in the same reply I may start a look task that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.\n</state>",
+		"<state>\n" + RECORD + " This is the current state; it supersedes any earlier copy I carry.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for " + USER_NAME + ":\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. I find out what " + USER_NAME + " wants to achieve. When we agree on it, I record it as a goal with a done-when line. I need not sit idle meanwhile: in the same reply I may start a look task that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.\n</state>",
 	);
 });
 
 // ─── The plan, change tasks, checkpoints ─────────────────────────────────────
 
-const readPlan = (root) => JSON.parse(readFileSync(join(root, ".atlas", "carto-plan.json"), "utf8"));
+const readPlan = (root) => JSON.parse(readFileSync(join(root, ".brain", "carto-plan.json"), "utf8"));
 const planMessage = (...ops) => `plan: ${JSON.stringify(ops)}`;
 const LOOK_ITEM = { action: "add", mode: "look", text: "See what is in the project" };
 const WRITE_ITEM = { action: "add", mode: "change", text: "Write the roller" };
@@ -312,7 +330,7 @@ test("change: the paths a task may write to", () => {
 	refuse("link-dir/deeper/new.txt", "leads outside the project (a symlinked folder)");
 	refuse("link-file", "is a symlink");
 	refuse("link-inside", "is a symlink");
-	refuse(".atlas/carto-plan.json", "is in .atlas/, which is Cartographer's own folder");
+	refuse(".brain/carto-plan.json", "is in .brain/, which is Cartographer's own folder");
 	refuse(".git/hooks/pre-commit", "is inside a .git folder");
 	refuse("src/.git/config", "is inside a .git folder");
 	refuse("ignored.log", "is ignored by git. Checkpoints leave ignored files out, so a change there could not be undone");
@@ -350,7 +368,7 @@ test("checkpoints: files come back byte for byte; an undo takes back one task an
 	writeFileSync(join(root, "binary.dat"), Buffer.from([0, 1, 2, 0, 255]));
 	assert.equal(lastChange(root, brain), undefined, "nothing to show before any task");
 	assert.equal(undo(root, brain), undefined, "and nothing to undo");
-	assert.deepEqual([isIgnored(root, brain, "ignored.log"), isIgnored(root, brain, "src/math.js"), isIgnored(root, brain, ".atlas/x"), isIgnored(root, brain, "a/node_modules/b.js")], [true, false, true, true], "what a checkpoint leaves out");
+	assert.deepEqual([isIgnored(root, brain, "ignored.log"), isIgnored(root, brain, "src/math.js"), isIgnored(root, brain, ".brain/x"), isIgnored(root, brain, "a/node_modules/b.js")], [true, false, true, true], "what a checkpoint leaves out");
 
 	// The first task: changes, deletes and creates.
 	const before1 = checkpoint(root, brain, "before p1: first task");
@@ -481,7 +499,7 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		assert.equal(result.text.split("\n")[0], "the manual", "a folder named in shellRead can be read");
 		has(result.text, "Read-only file system", "and not written");
 
-		result = await sh("echo kept > ~/cache.txt; touch .atlas/x; echo x > .atlas/home/y; touch .git/x; git status --short | head -1");
+		result = await sh("echo kept > ~/cache.txt; touch .brain/x; echo x > .brain/home/y; touch .git/x; git status --short | head -1");
 		assert.equal((result.text.match(/Read-only file system/g) ?? []).length, 3, `the brain and .git are read-only:\n${result.text}`);
 		assert.ok(!existsSync(join(brainDir, "x")) && !existsSync(join(root, ".git", "x")), "nothing was written there");
 		has(result.text, "?? ", "git can still read the repository");
@@ -617,7 +635,7 @@ test("windows: what the windows block says about them", () => {
 		text,
 		[
 			"<windows>",
-			"Written by me, from my own records, not by the user's hand. The shell windows as they are at this moment:",
+			"" + RECORD + " The shell windows as they are at this moment:",
 			"  main · free, in src/ · last: `npm test` ended with exit 1, 2 m ago",
 			"    | 2 failed",
 			"    | done",
@@ -652,7 +670,7 @@ test("windows: what the windows block says about them", () => {
 		note,
 		[
 			"<cartographer>",
-			"Written by me, from my own records, not by the user's hand. Nobody typed this. It tells me what happened while I was not working.",
+			"" + RECORD + " Nobody typed this. It tells me what happened while I was not working.",
 			"",
 			"Window build: `make all` ended with exit 2 after 1 m 15 s.",
 			"Window repl: `python` has printed nothing for a while and its last line has no line end, so it may be waiting for input. The line: >>> ",
@@ -759,11 +777,11 @@ test("tree: levels, folders with counts, the anchor, the marks of nodes, and a d
 	assert.ok(drawTree([...many, "other/x.txt"], { depth: 3, maxLines: 4 }).lines.length <= 4, "and it never exceeds the limit");
 
 	const root = makeProject("tree-unit", { git: false });
-	mkdirSync(join(root, ".atlas"));
-	writeFileSync(join(root, ".atlas", "note.txt"), "brain\n");
+	mkdirSync(join(root, ".brain"));
+	writeFileSync(join(root, ".brain", "note.txt"), "brain\n");
 	const whole = treeSection(root).text;
 	has(whole, "From the project root, 3 levels deep: 5 files in all.\nsrc/\n  deep/\n    er/  (1 file)\n  main.js\n  math.js\nREADME.md\nlong.txt", "the whole project");
-	hasNot(whole, ".atlas", "the brain is not part of the project");
+	hasNot(whole, ".brain", "the brain is not part of the project");
 	has(treeSection(root, { anchor: "src/", depth: 1 }).text, 'From src/ (the anchor I set), 1 level deep: 3 of the project\'s 5 files are under it. `atlas` with a tree operation and anchor "." returns to the project root.\nsrc/\n  deep/  (1 file)\n  main.js\n  math.js', "anchored");
 	const lost = treeSection(root, { anchor: "gone" });
 	has(lost.text, "The anchor was gone, which is no longer a folder with files in it.", "a folder that is gone is said");
@@ -779,7 +797,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 	const text = loadTop(dir).text;
 	assert.equal(
 		text,
-		"<project>\nWritten by me, from my own records, not by the user's hand. My own records of this project, as they stood on Tue 10 Nov 2026, 14:05 (the first start). What was written since is listed in the state block at the end of the request.\n\nMy assessment\nNone written yet.\n\nMy graph (0 nodes)\nThe graph has no nodes yet.\n</project>",
+		"<project>\n" + RECORD + " My own records of this project, as they stood on Tue 10 Nov 2026, 14:05 (the first start). What was written since is listed in the state block at the end of the request.\n\nMy assessment\nNone written yet.\n\nMy graph (0 nodes)\nThe graph has no nodes yet.\n</project>",
 	);
 	const file = readFileSync(topPath(dir), "utf8");
 	assert.deepEqual(pin(dir, { now: at + 60_000, reason: "goal g1 was closed" }), { changed: false }, "nothing changed, nothing is written");
@@ -852,7 +870,7 @@ const fakeWindows = () => {
 /** Wake triggers on a clock the test moves; nothing fires by itself. */
 function wakesAt(name, more = {}) {
 	const root = makeProject(name, { git: false });
-	const brainDir = join(root, ".atlas");
+	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	const clock = { now: Date.parse("2026-03-01T10:00:00Z") };
 	const windows = fakeWindows();
@@ -922,7 +940,8 @@ test("wakes: what cannot be set", () => {
 	refusedWake(wakes, { note: "n", path: "a.txt", window: "main" }, "Give `path` or `window`, not both");
 	refusedWake(wakes, { note: "n", path: "../elsewhere" }, 'is outside the project');
 	refusedWake(wakes, { note: "n", path: "/etc/passwd" }, 'is outside the project');
-	refusedWake(wakes, { note: "n", path: ".atlas/carto-plan.json" }, "`.atlas` is Cartographer's own folder and is not watched.");
+	refusedWake(wakes, { note: "n", path: ".brain/carto-plan.json" }, "`.brain` is Cartographer's own folder and is not watched (the old `.atlas` folder is none either).");
+	refusedWake(wakes, { note: "n", path: ".atlas/carto-plan.json" }, "`.brain` is Cartographer's own folder and is not watched (the old `.atlas` folder is none either).");
 	refusedWake(wakes, { note: "n", every: 60, match: "ERROR" }, "`match` goes with `window`");
 	assert.deepEqual(wakes.list(), [], "a refused wake is not set");
 	for (let i = 0; i < WAKES_MAX; i++) wakes.set({ note: `number ${i}`, every: 60 });
@@ -1124,7 +1143,7 @@ test("yolo: the prompt shows it for as long as it is on", async () => {
 
 // ─── Talking to the user, thinking, and calls that fail again and again ─────
 
-const REMINDER = "<cartographer>\nWritten by me, from my own records, not by the user's hand. My last message had no tool call.\n\nSo it is kept as a note to myself, and nobody else read it. If it was meant for the user, I say it with `chat`. If work is left, I go on with it. If nothing is left to do, I call `sleep`.\n</cartographer>";
+const REMINDER = "<cartographer>\n" + RECORD + " My last message had no tool call.\n\nSo it is kept as a note to myself, and nobody else read it. If it was meant for " + USER_NAME + ", I say it with `chat`. If work is left, I go on with it. If nothing is left to do, I call `sleep`.\n</cartographer>";
 const REMINDED = "◆ That reply had no tool call: it is a note the agent wrote to itself, not an answer to you. The agent goes on.\n";
 /** The requests whose newest message is the reminder. */
 const reminders = (server) => server.requests.filter((request) => messageText(request.messages.at(-1)).startsWith(REMINDER));
@@ -1504,9 +1523,9 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 		tools: [{ type: "function", function: { name: "read", description: "Read files.", parameters: { type: "object", properties: { paths: { type: "array" } } } } }],
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
-			{ role: "user", content: `<project>\nWritten by me, from my own records, not by the user's hand. My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\nWritten by me, from my own records, not by the user's hand. Kept.\nt1 · look · asked: x → y\n</context>\n\nWhere is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
+			{ role: "user", content: `<project>\n${RECORD} My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\n${RECORD} Kept.\nt1 · look · asked: x → y\n</context>\n\nWhere is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
 			{ role: "assistant", content: "I should look.", tool_calls: [{ id: "c1", type: "function", function: { name: "task", arguments: JSON.stringify({ brief: "Find the config\nand say where" }) } }] },
-			{ role: "tool", tool_call_id: "c1", content: `${big}\n\n<state>\nWritten by me, from my own records, not by the user's hand. This is the current state.\nNow: Thu 12 Nov 2026, 14:03\n</state>\n\n<windows>\nWritten by me, from my own records, not by the user's hand. The shell windows as they are at this moment:\n  main · free\n</windows>` },
+			{ role: "tool", tool_call_id: "c1", content: `${big}\n\n<state>\n${RECORD} This is the current state.\nNow: Thu 12 Nov 2026, 14:03\n</state>\n\n<windows>\n${RECORD} The shell windows as they are at this moment:\n  main · free\n</windows>` },
 		],
 	};
 	const reply = { role: "assistant", content: [{ type: "thinking", thinking: "Say it." }, { type: "toolCall", id: "c2", name: "chat", arguments: { text: "It is in src/config.js." } }] };

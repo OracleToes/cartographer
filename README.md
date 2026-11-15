@@ -1,6 +1,6 @@
 # Cartographer
 
-A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.atlas/`, which holds the agent's memory of that project.
+A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.brain/`, which holds the agent's memory of that project.
 
 Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and books are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update shared books and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with tabs for chat, the brain, changes, shell windows, and context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
@@ -34,7 +34,7 @@ carto
 The first run in a project names the folder it is about to use and asks before it creates anything:
 
 ```
-No brain for this project yet. Set one up in /home/momo/some/project/.atlas? [Y/n]
+No brain for this project yet. Set one up in /home/momo/some/project/.brain? [Y/n]
 ```
 
 Enter or `y` sets up the brain and starts a session. Anything else leaves the folder untouched. Later runs continue the session, from the project folder or any folder below it, and do not ask again. With `-p` or piped input there is nobody to ask, so the brain is set up without the question.
@@ -177,8 +177,8 @@ The parts are the system prompt, the tools with their descriptions and schemas, 
 |---|---|
 | System prompt | The wording's source, `src/prompt.mjs` in the core folder. The prompt is code, not an overwrite file; the next run of carto reads what it says |
 | A tool of the Tools part | The tool's source file, where its description stands |
-| Assessment and graph | The assessment file (`.atlas/assessment.md`); the graph beside it is the atlas, edited on the Carto tab. The copy at the top is rewritten at the next collapse, or by `/pin` now |
-| What the last collapse kept | The store itself, `.atlas/carto-context.json` — the records, the shelf and the talk. Surgery by hand: take care, a file that does not parse falls back to a fresh store |
+| Assessment and graph | The assessment file (`.brain/assessment.md`); the graph beside it is the atlas, edited on the Carto tab. The copy at the top is rewritten at the next collapse, or by `/pin` now |
+| What the last collapse kept | The store itself, `.brain/carto-context.json` — the records, the shelf and the talk. Surgery by hand: take care, a file that does not parse falls back to a fresh store |
 | Chat · You, Chat · Agent | The words of the message (see [Saying a message anew](#saying-a-message-anew)) |
 | Result of …, State block, Windows block, what Cartographer wrote | Nothing: a result is tool work, and the state and windows blocks are written anew for every request — what they read (ledger, plan, atlas, the windows) is editable in its own place | The blocks that Cartographer adds to messages are parts of their own, cut off the message they ride on: the copy of the assessment and the graph, what the last collapse kept, the state block, the windows block. Below a rule follows what has come since that request and will be in the next one: the reply, as far as it is written while it is being written, and what its calls returned.
 
@@ -201,13 +201,13 @@ The sizes of the parts are estimates, four characters to a token; the first line
 | `/copy tab` | The tab that is showing |
 | `y`, `Y` | In the commands mode: what is selected (a message, a run of calls, one call with what it returned, an item of tabs 2 to 5), and the whole tab |
 
-Those also write a file under `.atlas/export/`, and the line they print names it. The clipboard is reached through the terminal (OSC 52), through tmux's own buffer when carto runs in tmux, and through `wl-copy`, `xclip`, `xsel` or `pbcopy` when one is installed. In tmux, OSC 52 needs `set -g set-clipboard on` in `~/.tmux.conf`; without it, paste from tmux's buffer (prefix, then `]`) or take the file.
+Those also write a file under `.brain/export/`, and the line they print names it. The clipboard is reached through the terminal (OSC 52), through tmux's own buffer when carto runs in tmux, and through `wl-copy`, `xclip`, `xsel` or `pbcopy` when one is installed. In tmux, OSC 52 needs `set -g set-clipboard on` in `~/.tmux.conf`; without it, paste from tmux's buffer (prefix, then `]`) or take the file.
 
 **What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. Otherwise the main agent reads it after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
 
 #### Saying a message anew
 
-`e` on a message of yours or of the agent opens it in your editor — in Chat, or on the Context tab on the **Chat · You** and **Chat · Agent** parts of the request, where `e` on what the agent said to you opens the saying itself and not the rendering of the call. What comes back stands in the tab in its place, and the talk that the context keeps is rewritten to match, so what comes after reads the edited words — for what the agent writes outside a `chat` call, which the talk does not hold, the edit is on the screen only. The conversation's own record is never rewritten: what was sent to the model was sent, and a collapse decides what of it is kept. Tool work — a run of calls, a call with what it returned — and what Cartographer printed cannot be edited; `e` on those says so. The scratch file lives at `.atlas/scratch/message.md`.
+`e` on a message of yours or of the agent opens it in your editor — in Chat, or on the Context tab on the **Chat · You** and **Chat · Agent** parts of the request, where `e` on what the agent said to you opens the saying itself and not the rendering of the call. What comes back stands in the tab in its place, and the talk that the context keeps is rewritten to match, so what comes after reads the edited words — for what the agent writes outside a `chat` call, which the talk does not hold, the edit is on the screen only. The conversation's own record is never rewritten: what was sent to the model was sent, and a collapse decides what of it is kept. Tool work — a run of calls, a call with what it returned — and what Cartographer printed cannot be edited; `e` on those says so. The scratch file lives at `.brain/scratch/message.md`.
 
 What the full screen does not do yet: it does not replay earlier sessions (Chat starts with this run of carto).
 
@@ -217,7 +217,7 @@ With `--plain` the screen looks like this (an illustration of the layout, not a 
 
 ```
 Cartographer · /home/momo/some/project
-new brain /home/momo/some/project/.atlas · ByteShape at http://127.0.0.1:8888/v1
+new brain /home/momo/some/project/.brain · ByteShape at http://127.0.0.1:8888/v1
 Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl-T hides and shows its thinking.
 › where is the config loaded?
 ┊ The user wants the place where configuration is read. I have no node for it yet, so a look task.
@@ -307,7 +307,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/kill NAME`, `/kill all` | Close a shell window, or all of them, and end what runs there |
 | `/send NAME line` | Type a line into a shell window, as you; `/shells` lists the windows |
 | `/stop`, Ctrl-C | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
-| `/new` | Start a fresh context: the current assessment and graph, and nothing else in view. The record of finished tasks, the shelf and the talk start empty; the reports stay in `.atlas/reports/` |
+| `/new` | Start a fresh context: the current assessment and graph, and nothing else in view. The record of finished tasks, the shelf and the talk start empty; the reports stay in `.brain/reports/` |
 | `/status` | Messages in view, context size, which model is on, working or idle, how many shell windows are open, how many wakes are set, whether approval is off |
 | `/quit`, Ctrl-C when idle | Leave |
 
@@ -354,7 +354,7 @@ The model a session is on comes from the settings at every start, so a model cha
 Going up from the folder you are in, the first folder that has a Cartographer brain or is the top of a git repository. If there is none, the folder you are in.
 
 - The search stops before your home folder and before `/`. A brain or a repository there never becomes the project of the folders below it.
-- A brain is an `.atlas/` folder that holds `session.sqlite`. An `.atlas/` folder with other contents does not count (see the next section).
+- A brain is a `.brain/` folder that holds `session.sqlite`. A `.brain/` folder with other contents does not count (see the next section).
 - Your home folder and `/` are refused as projects unless you pass `--here`.
 - `carto --here` uses the folder you are in, whatever is above it.
 - `carto --where` shows which folder would be used and why, and creates nothing.
@@ -382,9 +382,9 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | `return` | focused context | End this focus and hand over its report and any shelf items; shared-book updates already persist |
 | `context` | orchestrating and focused contexts | Recall a kept report, keep a file on the shelf, fold a report after its bookkeeping, or collapse the current context |
 
-`book` project-file references are confined to the project root; symlinks, `.atlas/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches to an authorized change focus and retains the plan, approval, sandbox, network, and root protections. A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. Chat-message `edit` is soft-forget from future context/ordinary recall; the raw Durable transcript remains append-only. The old `read`, `write`, and `edit` executors are internal primitives and are not model-callable.
+`book` project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches to an authorized change focus and retains the plan, approval, sandbox, network, and root protections. A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. Chat-message `edit` is soft-forget from future context/ordinary recall; the raw Durable transcript remains append-only. The old `read`, `write`, and `edit` executors are internal primitives and are not model-callable.
 
-**References.** New `book` calls pass `{ id, namespace?, kind?, version? }` — the ID alone is enough; the namespace and kind are inferred and the live version is used unless one is pinned. Paths are locators, not identities. File versions are SHA-256 digests and exact bytes are kept under `.atlas/catalog/versions/`; retained non-file versions are under `.atlas/catalog/entities/`. Durable-owned transcript/task IDs remain their native IDs. App-managed catalog file IDs and shelf placement IDs count up within the brain — `f1`, `f2`, … and `sh1`, `sh2`, … — because they only ever need to be unique per project directory; ids written before 2026-11-15 (`f-`/`sh-<uuid>`) stay valid. An explicit `carto --fork-brain` rotates the namespace, transactionally rebinds saved internal references, and records its source namespace; backups/restores keep their namespace. Tool schemas are static and flat in every request; there is no provider-side schema expansion to verify.
+**References.** New `book` calls pass `{ id, namespace?, kind?, version? }` — the ID alone is enough; the namespace and kind are inferred and the live version is used unless one is pinned. Paths are locators, not identities. File versions are SHA-256 digests and exact bytes are kept under `.brain/catalog/versions/`; retained non-file versions are under `.brain/catalog/entities/`. Durable-owned transcript/task IDs remain their native IDs. App-managed catalog file IDs and shelf placement IDs count up within the brain — `f1`, `f2`, … and `sh1`, `sh2`, … — because they only ever need to be unique per project directory; ids written before 2026-11-15 (`f-`/`sh-<uuid>`) stay valid. An explicit `carto --fork-brain` rotates the namespace, transactionally rebinds saved internal references, and records its source namespace; backups/restores keep their namespace. Tool schemas are static and flat in every request; there is no provider-side schema expansion to verify.
 
 The same tool set is registered in every request, for the orchestrating context and each focus, so a fork keeps the provider prompt prefix stable. Project-file operations from the orchestrator run in a short focus; when already in a focus, the bounded operation runs inline. Brain-scoped book operations run directly, but only the orchestrating context changes plans or controls session wakes/sleep. `shell` remains focus-only. Focus returns now include an internal yes/no checkpoint for shared atlas, ledger, or assessment updates; this is not a user-approval bypass.
 
@@ -419,7 +419,7 @@ It is a notebook, not a gate. Nothing in it stops the agent from working, and th
 
 When there is no open goal, `carto` says so at the start, and the agent is told to answer what you ask and to find out what you want to achieve. When it closes a goal, it is told to say what was achieved against the done-when line and to ask whether that is what you wanted.
 
-**Editing it yourself.** The ledger is `<project>/.atlas/carto-ledger.json`. Change it in any editor, or tell the agent what to change. The file is read again at every step, so an edit takes effect at the agent's next request. An entry needs only `id` (like `g1`, `q2`, `n3`), `kind` and `text`; a goal also takes `doneWhen`, a note may take `"salient": true`, and `"status": "done"` closes an entry. If the file cannot be read after an edit, `carto` and the agent both say what is wrong, and nothing writes to the file until it is repaired.
+**Editing it yourself.** The ledger is `<project>/.brain/carto-ledger.json`. Change it in any editor, or tell the agent what to change. The file is read again at every step, so an edit takes effect at the agent's next request. An entry needs only `id` (like `g1`, `q2`, `n3`), `kind` and `text`; a goal also takes `doneWhen`, a note may take `"salient": true`, and `"status": "done"` closes an entry. If the file cannot be read after an edit, `carto` and the agent both say what is wrong, and nothing writes to the file until it is repaired.
 
 Limits: 400 characters per entry, 40 open entries, and the newest 50 closed entries are kept.
 
@@ -452,12 +452,12 @@ An approval covers the item as it stood when you gave it. When the agent rewords
 
 - The main agent never writes. Neither does a task without an item, or a task for a look item.
 - A path outside the project is refused, also through a symlinked folder, and so is a symlink itself.
-- `.atlas/` and any `.git/` folder are refused.
+- `.brain/` and any `.git/` folder are refused.
 - A file that git ignores is refused, because a checkpoint would not hold it and the change could not be undone. `node_modules/` counts as ignored. For the same reason, so is a file inside a folder that is a git repository of its own.
 
 **Checkpoints.** Before a change task starts, Cartographer records every file of the project, and again when the task ends. The difference between the two is added to the task's report as "Cartographer's record of the files changed", so the main agent learns what was changed from the record and not from the task's own account, and the screen shows the same list. A task that claims a change it did not make is contradicted by the record.
 
-The checkpoints are kept in a git repository of Cartographer's own, `.atlas/checkpoints.git`, with the project folder as its work tree. It works whether or not the project is a git repository, and your own repository is never touched: no commit, no ref, no change to its index. There a change task's work shows up as ordinary uncommitted changes, yours to commit. Files are stored and restored byte for byte, whatever the project's `.gitattributes` says about line endings.
+The checkpoints are kept in a git repository of Cartographer's own, `.brain/checkpoints.git`, with the project folder as its work tree. It works whether or not the project is a git repository, and your own repository is never touched: no commit, no ref, no change to its index. There a change task's work shows up as ordinary uncommitted changes, yours to commit. Files are stored and restored byte for byte, whatever the project's `.gitattributes` says about line endings.
 
 **Undo.** `/undo` takes the last change task back: every file it changed becomes what it was before, and files it created are removed, along with folders that leaves empty. Files the task did not touch stay as they are, including your own edits made since. `/undo` again takes back the task before it. An undo:
 
@@ -467,9 +467,9 @@ The checkpoints are kept in a git repository of Cartographer's own, `.atlas/chec
 
 A task that you stopped, or that was cut off by a kill, has no checkpoint after it. `/diff` then compares with the files as they are now, and `/undo` puts the whole project back to the checkpoint before that task, which also takes back edits you made since.
 
-The checkpoint history only grows, so every recorded state can be reached with git: `git --git-dir .atlas/checkpoints.git log`.
+The checkpoint history only grows, so every recorded state can be reached with git: `git --git-dir .brain/checkpoints.git log`.
 
-**Editing the plan yourself.** The plan is `<project>/.atlas/carto-plan.json`, read again at every step. An item needs `id` (like `p3`), `mode` and `text`; `"status": "done"` finishes it, `"network": true` on a change item lets its commands reach the network, and `"standing": true` makes it a standing item. Setting `"approved"` to a time approves that one item by hand; the old whole-plan `authorized` field still works and covers every open change item. Limits: 300 characters per item, 30 items.
+**Editing the plan yourself.** The plan is `<project>/.brain/carto-plan.json`, read again at every step. An item needs `id` (like `p3`), `mode` and `text`; `"status": "done"` finishes it, `"network": true` on a change item lets its commands reach the network, and `"standing": true` makes it a standing item. Setting `"approved"` to a time approves that one item by hand; the old whole-plan `authorized` field still works and covers every open change item. Limits: 300 characters per item, 30 items.
 
 Limits of this version:
 
@@ -561,7 +561,7 @@ Besides the automatic wakes above, the agent can set its own with the `wake` too
 | The agent gives | It is woken |
 |---|---|
 | `every` (seconds) | each time that long has passed |
-| `path` | when that file changes, appears or disappears; for a folder, any file under it. Inside the project only, and not `.atlas/` |
+| `path` | when that file changes, appears or disappears; for a folder, any file under it. Inside the project only, and not `.brain/` |
 | `window`, optionally `match` | when that shell window prints something, or a line containing the given text. What was printed before the wake was set does not count |
 
 Each wake has an id (`w1`), a note the agent writes to itself and gets back when it fires, and a number of times: 1 unless the agent says otherwise, and 0 for "until removed". With 0 the agent watches over something for as long as `carto` runs, without ever having to set the wake again. The agent removes a wake with the same tool; you list them with `/wakes` and remove one with `/wakes remove w1`, or all with `/wakes remove all`. At most 8 are set at a time (`wakesMax`).
@@ -588,7 +588,7 @@ Wakes
 
 **When it wakes too often.** An agent that reacts to every wake by starting something that wakes it again could run in circles. It is slowed down, never stopped: the first 12 wakes in quick succession go through at once, and after that one more is let through per minute (`wakeMin`), with everything that happened meanwhile told together. A line on the screen says when that begins, `/wakes` shows how long the next wake is held, and a message from you lifts it. A wake that fires every few minutes never reaches this.
 
-**Between runs.** Wakes are kept in `.atlas/carto-wakes.json` and are there again at the next start. Nothing fires while `carto` is not running: a time that came due meanwhile fires once at the start, and a file wake compares with the files as they are then.
+**Between runs.** Wakes are kept in `.brain/carto-wakes.json` and are there again at the next start. Nothing fires while `carto` is not running: a time that came due meanwhile fires once at the start, and a file wake compares with the files as they are then.
 
 What this does not do yet:
 
@@ -605,9 +605,9 @@ Every window is a [bubblewrap](https://github.com/containers/bubblewrap) sandbox
 | | |
 |---|---|
 | The project folder | Writable |
-| `.atlas/` and `.git/` in it | Read-only. `git status`, `diff` and `log` work; committing, resetting and stashing do not, so your repository stays yours |
+| `.brain/` and `.git/` in it | Read-only. `git status`, `diff` and `log` work; committing, resetting and stashing do not, so your repository stays yours |
 | The system (`/usr`, `/etc`, …) | Read-only |
-| Your home folder | Not there. In its place is a home of the sandbox's own, `<project>/.atlas/home/`, which keeps what tools store there (package caches, settings) and is the same in every window |
+| Your home folder | Not there. In its place is a home of the sandbox's own, `<project>/.brain/home/`, which keeps what tools store there (package caches, settings) and is the same in every window |
 | Toolchains in your home folder | Read-only: every `PATH` entry that lies in your home folder, and these folders when they exist: `.nvm` `.volta` `.bun` `.deno` `.rustup` `.pyenv` `.rbenv` `.asdf` `.sdkman` `.juliaup` `.ghcup` `.dotnet` `.local/lib` `.local/share/{mise,uv,pnpm,fnm}` |
 | `/tmp`, `/var/tmp` | The window's own: empty when it opens, gone when it closes |
 | `/run`, `/mnt`, `/media` | Empty: no sockets of your session, no other drives |
@@ -657,7 +657,7 @@ What you give up:
 
 - `/undo` and the record of changed files cover the project folder only. What a command changes outside it is neither listed nor reversible. The task's record says so.
 - The plan's `network` mark means nothing: every command has the network.
-- A command can also change the project's `.git` folder and the brain in `.atlas/`, checkpoints included. In the sandbox both are read-only.
+- A command can also change the project's `.git` folder and the brain in `.brain/`, checkpoints included. In the sandbox both are read-only.
 
 The switch is not stored. Every start is sandboxed again unless you pass `--no-bwrap` or the settings say `"bwrap": false`, and that includes a task that was cut off by a kill and is resumed: its remaining commands run in the sandbox. `/bwrap` waits until the agent has stopped, because a running task was told how its commands run when it started. A window keeps the way it was opened, so a switch in either direction closes every open window, with what runs there; the same name is a new window afterwards.
 
@@ -669,7 +669,7 @@ Limits:
 
 - The sandbox guards against accidents: a command that deletes the wrong folder, kills the wrong process or writes where it should not. It is as strong as bubblewrap and the kernel, and it was not examined as a defence against a program written to break out.
 - In a project without a `.gitignore`, everything a command creates is checkpointed, a virtual environment or a build folder included. That costs time and space; a `.gitignore` avoids it.
-- `.atlas/home/` grows with the caches tools keep there. It can be deleted at any time.
+- `.brain/home/` grows with the caches tools keep there. It can be deleted at any time.
 - A command's output appears on the screen only as its last line, when the call returns. `/shells` shows more of it while it runs.
 - A window is line-based. A program that draws the whole screen (an editor, `top`, `less`) cannot be used in it.
 - The guess that a program waits for input rests on a line without a line end followed by silence. A progress display that stops moving looks the same.
@@ -679,7 +679,7 @@ Limits:
 
 The atlas is the agent's map of the project. It has two parts, and they are kept apart on purpose: one is what the folder holds, the other is what the agent has understood.
 
-**The tree** is drawn by Cartographer from the files as they are, so it cannot be wrong or out of date. It respects `.gitignore` and leaves out `.atlas/`. It is drawn three levels below an anchor, which starts at the project root; a folder below the last level is one line with a file count. A drawing longer than 60 lines is made smaller, first by showing fewer entries of each folder, then fewer levels, and the first line says so. The agent sees the tree in every request and can move it: an `atlas` call with a `tree` operation sets the anchor to a folder, sets it back with anchor `.`, or changes the depth from 1 to 6. The view stays as the agent left it, across sessions. A task gets the tree in its brief and looks further with `list`.
+**The tree** is drawn by Cartographer from the files as they are, so it cannot be wrong or out of date. It respects `.gitignore` and leaves out `.brain/`. It is drawn three levels below an anchor, which starts at the project root; a folder below the last level is one line with a file count. A drawing longer than 60 lines is made smaller, first by showing fewer entries of each folder, then fewer levels, and the first line says so. The agent sees the tree in every request and can move it: an `atlas` call with a `tree` operation sets the anchor to a folder, sets it back with anchor `.`, or changes the depth from 1 to 6. The view stays as the agent left it, across sessions. A task gets the tree in its brief and looks further with `list`.
 
 **The graph** is written by the agent and its tasks as nodes. A node has a name, one line that says what it is, and optionally a longer detail, links to other nodes, links to files or folders, and a kind: `component`, `finding`, or `dead_end` for something tried and ruled out. A node needs no file and no link, and no file needs a node: what gets a node is the agent's decision. Each file line of the tree names the nodes that link to it.
 
@@ -693,7 +693,7 @@ When a node links to a file, Cartographer keeps a fingerprint of that file from 
 
 **Mapping without a goal.** When no goal is set, or a plan waits for your `/approve`, the agent is told it may start a look task that maps a part of the project the graph says nothing about. Whether to do that and when to stop is left to it. Nothing in the project changes; type a message or `/stop` at any time.
 
-**Editing them yourself.** The graph is `<project>/.atlas/carto-atlas.json`, the books are `<project>/.atlas/carto-books.json` (one list of entries). Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. The assessment half of the books is mirrored to the old `<project>/.atlas/assessment.md`, and a project that has one is split into entries by paragraph the first time the agent edits its books — so an assessment you keep by hand still works, and `/assessment` shows it. A node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
+**Editing them yourself.** The graph is `<project>/.brain/carto-atlas.json`, the books are `<project>/.brain/carto-books.json` (one list of entries). Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. The assessment half of the books is mirrored to the old `<project>/.brain/assessment.md`, and a project that has one is split into entries by paragraph the first time the agent edits its books — so an assessment you keep by hand still works, and `/assessment` shows it. A node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
 
 ```
 › /atlas
@@ -711,12 +711,12 @@ Components:
   roller  roll(sides) returns a random whole number from 1 to sides  [src/roll.py]  → cli
 Findings:
   tests_are_empty  tests/test_roll.py holds one test that checks nothing
-  /home/momo/Projects/simpledice/.atlas/carto-atlas.json · edit it by hand, or tell the agent what to change
+  /home/momo/Projects/simpledice/.brain/carto-atlas.json · edit it by hand, or tell the agent what to change
 ```
 
 ## The built-in prompt
 
-The system prompt and tool descriptions are source code in `src/prompt.mjs`. They are fixed for a run; changing them is a code change reviewed and made by the project maintainer. There is no agent-facing proposal, approval, or runtime overlay workflow. The old core `prompt.json` and project `.atlas/carto-proposals.json`, if present, are left untouched but are no longer read or applied.
+The system prompt and tool descriptions are source code in `src/prompt.mjs`. They are fixed for a run; changing them is a code change reviewed and made by the project maintainer. There is no agent-facing proposal, approval, or runtime overlay workflow. The old core `prompt.json` and project `.brain/carto-proposals.json`, if present, are left untouched but are no longer read or applied.
 
 Besides the tool descriptions, the prompt tells the agent how to work when nobody is talking to it. In substance:
 
@@ -764,7 +764,7 @@ Findings:
 </project>
 ```
 
-This is a copy, kept in `.atlas/carto-top.json`, and it is replaced at four moments only: the first start in a project, when the context is collapsed (a closed goal is the usual cause), on `/new`, and on `/pin`. Writing a node or the assessment does not touch it, because a change here makes the server read the whole context again; at a collapse the whole context is read again anyway, so the new copy costs nothing more. Between those moments the state block lists the nodes written since the copy, and the agent's own `assess` call holds its newest assessment. An outline over 6,000 characters lists its oldest nodes by name only.
+This is a copy, kept in `.brain/carto-top.json`, and it is replaced at four moments only: the first start in a project, when the context is collapsed (a closed goal is the usual cause), on `/new`, and on `/pin`. Writing a node or the assessment does not touch it, because a change here makes the server read the whole context again; at a collapse the whole context is read again anyway, so the new copy costs nothing more. Between those moments the state block lists the nodes written since the copy, and the agent's own `assess` call holds its newest assessment. An outline over 6,000 characters lists its oldest nodes by name only.
 
 **At the end: the state block.** Each request of the main agent ends with a block, built at that moment and added to that request only:
 
@@ -819,7 +819,7 @@ The model reads one context of at most `contextWindow` tokens, and a long piece 
 
 A collapse writes no summary and asks the model for nothing but one word. What it keeps was collected while the work happened:
 
-- **One line for each finished task**, with an id: when, which kind, what was asked, how it ended. The report itself is kept in `.atlas/reports/t12.md`, and the agent gets it back in full with `context` and the id. You read it with `/report t12`.
+- **One line for each finished task**, with an id: when, which kind, what was asked, how it ended. The report itself is kept in `.brain/reports/t12.md`, and the agent gets it back in full with `context` and the id. You read it with `/report t12`.
 - **The shelf**: files, or line ranges of files, that the agent chose to keep in view. See below.
 - **The talk**: what you wrote and what the agent said to you with `chat`, word for word, the newest `chatWindow` tokens of it (8,000 unless you change it). The agent's own notes and reasoning are not talk and are not kept, which is the reason `chat` is a tool of its own.
 
@@ -938,7 +938,7 @@ Not tried, because it needs your machine:
 ## The brain folder
 
 ```
-<project>/.atlas/
+<project>/.brain/
   carto-ledger.json   goals, questions, notes. Yours to read, edit and commit
   carto-plan.json     the plan and its authorization. Yours to read and edit
   carto-atlas.json    the graph, and where the agent put the tree. Yours to read, edit and commit
@@ -958,20 +958,21 @@ Not tried, because it needs your machine:
   .gitignore          keeps what belongs to this machine out of git: the lines above that say so
 ```
 
-Deleting `.atlas/` makes Cartographer forget the project. One `carto` runs per project at a time.
+Deleting `.brain/` makes Cartographer forget the project. One `carto` runs per project at a time.
 
-**Sharing the folder with the Orchestrator extension.** The Orchestrator pi extension also writes an `.atlas/` folder, in whatever folder pi was started from: `graph.json`, `ledger.json`, `working-direction.json` and a `.gitignore`. Cartographer reads and writes none of those files. A folder that holds only those is not a brain, and Cartographer does not pick it as a project. When you start `carto` in such a folder and agree to set up a brain, it adds its own files next to them.
+**The rename from `.atlas/`.** Before 2026-11-15 the brain lived in `.atlas/`, a name the Orchestrator pi extension also used for its own files (`graph.json`, `ledger.json`, `working-direction.json`). Since the rename the brain is `.brain/`, Cartographer's alone. The first time you start `carto` after updating, a folder `.atlas/` that is a Cartographer brain (it holds `session.sqlite`) is renamed to `.brain/`, and a line on the screen says so; the checkpoint exclusion list inside it is carried over. A folder that holds only other tools' files is not a brain and is left alone. Cartographer never reads or writes the extension's files, and a folder with only those is still not a project.
 
 An earlier version kept the ledger in `ledger.json`. On the first start after the update, a `ledger.json` written by Cartographer is renamed to `carto-ledger.json` and a line on the screen says so. The Orchestrator's file of that name stays where it is.
 
 ## Settings
 
-`~/cartographer/config.json` applies to every project. `<project>/.atlas/config.json` overrides it for one project, the environment variables `CARTO_SERVER` and `CARTO_MODEL` override both, and `--url` and `--model` override everything.
+`~/cartographer/config.json` applies to every project. `<project>/.brain/config.json` overrides it for one project, the environment variables `CARTO_SERVER` and `CARTO_MODEL` override both, and `--url` and `--model` override everything. The `user` setting names the person Cartographer works with, and follows the same order with `CARTO_USER` as the environment override; it defaults to the OS user who started `carto`.
 
 | Key | Default | |
 |---|---|---|
 | `server` | none | Address of the server, ending in `/v1` |
 | `model` | none | Model name as the server knows it |
+| `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
 | `contextWindow` | 100000 | Context size the server was started with (`-c`) |
 | `maxTokens` | 8192 | Longest single reply, thinking included |
 | `writeLines` | 60 | Longest new file one `write` call creates, in lines. A file to grow beyond that is written and then edited |
@@ -1005,10 +1006,10 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 
 ## Seeing what the model was actually sent
 
-`/copy session` exports the session as Markdown (each call as one line), `/copy tab` with the Context tab open exports the request the model was sent, part by part, and `/copy report` the last task's report — each goes to the clipboard and to a file under `.atlas/export/`. For anything the above cannot show, `CARTO_TRACE` dumps the wire itself:
+`/copy session` exports the session as Markdown (each call as one line), `/copy tab` with the Context tab open exports the request the model was sent, part by part, and `/copy report` the last task's report — each goes to the clipboard and to a file under `.brain/export/`. For anything the above cannot show, `CARTO_TRACE` dumps the wire itself:
 
 ```
-CARTO_TRACE=1 carto                    writes .atlas/export/trace-<time>.jsonl
+CARTO_TRACE=1 carto                    writes .brain/export/trace-<time>.jsonl
 CARTO_TRACE=/tmp/wire.jsonl carto      writes that file instead
 ```
 
@@ -1018,7 +1019,7 @@ One JSON line per call to the model: the request exactly as it went on the wire 
 
 In build order:
 
-1. **Plugins** under `.atlas/plugins/`: the agent testing the project by extending its own harness.
+1. **Plugins** under `.brain/plugins/`: the agent testing the project by extending its own harness.
 2. **Heat and focus for the graph**, so that a large graph shows the part in use.
 
 And smaller things, named where they belong above: the full screen does not replay earlier sessions; the reading of the prompt is not shown for the read-ahead after a collapse.
@@ -1044,7 +1045,7 @@ The former integration suite (the real `carto` command against a scripted stand-
 | `bin/carto` | The command. Checks Node and hands over to `src/cli.mjs` |
 | `install.sh` | Packages, the executable mark, the link on your PATH, `config.json` |
 | `src/cli.mjs` | Options, finding the project, checking the server, start and exit |
-| `src/project.mjs` | Which folder is the project; creating and locking `.atlas/` |
+| `src/project.mjs` | Which folder is the project; creating and locking `.brain/` |
 | `src/config.mjs` | Settings and where they come from |
 | `src/harness.mjs` | Opens the session: model provider, tools, and who may call which |
 | `src/prompt.mjs` | The built-in system prompt, tool descriptions, the task's role line and refusals |
@@ -1052,7 +1053,7 @@ The former integration suite (the real `carto` command against a scripted stand-
 | `src/requests.mjs` | The one list of what waits for the user, and carrying a decision out |
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |
 | `src/plan.mjs` | The plan: its file, its operations, the per-item approval rules |
-| `src/checkpoints.mjs` | Checkpoints in `.atlas/checkpoints.git`: record, compare, undo |
+| `src/checkpoints.mjs` | Checkpoints in `.brain/checkpoints.git`: record, compare, undo |
 | `src/sandbox.mjs` | The bubblewrap sandbox: what a window sees, and bounding a command's output |
 | `src/windows.mjs` | The shell windows: opening one, typing into it, waiting, reading, stopping, closing, and announcing what happens in them |
 | `src/reaper.mjs` | Ends a window's processes when the sandbox is off, also when `carto` itself was killed |
@@ -1089,5 +1090,5 @@ The former integration suite (the real `carto` command against a scripted stand-
 | `src/screen/views.mjs` | What those tabs hold: the brain's files as items with their place in the file, the changes by file, the shell windows, and the request the agent was sent, part by part |
 | `src/screen/text.mjs` | Text in cells: width, wrapping, styled lines; and telling a repeating reply from ordinary text |
 | `src/screen/theme.mjs` | The palette: levels of text, one hue for each kind of block, backgrounds made for the terminal's own |
-| `src/screen/copy.mjs` | Copying to the clipboard and to `.atlas/export/` |
+| `src/screen/copy.mjs` | Copying to the clipboard and to `.brain/export/` |
 | `test/unit.mjs` | The fast unit suite; `npm test` runs it |

@@ -17,14 +17,14 @@ The target model is a large one (the user runs Qwen3.8-27B, byteshape GGUF, on l
 The user's own framing: *the guy from Memento* — a highly capable agent that can manage its own context and orchestrate long-running work. The Memento rules, taken seriously:
 
 1. **Memory is the scarce resource.** The method is: externalize what matters, keep the artifacts cheap to consult, trust nothing that was not verified.
-2. **The context is working memory; the brain is long memory.** The brain lives in `.atlas/`, in files the user can read, edit and commit. What is not in the brain is not in memory.
+2. **The context is working memory; the brain is long memory.** The brain lives in `.brain/`, in files the user can read, edit and commit. What is not in the brain is not in memory.
 3. **Provenance everywhere.** Every artifact says when, by whom, and from what. A 27B will write notes that are wrong or stale; the design must make re-verification the cheapest operation, not the most faithful annotation.
 4. **Re-verify sources, don't worship summaries.** Recall by id, re-read the file, check the digest. The agent that says "my note says X, but let me check line 40" is the agent that survives a month-long goal.
 5. **The principal is in the room.** The user steers by talking (first-class `chat`), approves changes, answers questions, edits any artifact by hand or by the same actions the agent has. The brain is a shared thing; the relationship is a dyad.
 
 ## 3. The brain, the context, the talk
 
-- **The brain** (`.atlas/`): the ledger (goals/questions/notes), the plan, the atlas (project map + node graph), the books (assessment/practice/…), reports of finished work, the catalog (identity/versions), the context store (what a collapse keeps), and the raw Durable transcript. The user edits any of it; the agent sees hand-edits at the next step.
+- **The brain** (`.brain/`): the ledger (goals/questions/notes), the plan, the atlas (project map + node graph), the books (assessment/practice/…), reports of finished work, the catalog (identity/versions), the context store (what a collapse keeps), and the raw Durable transcript. The user edits any of it; the agent sees hand-edits at the next step.
 - **The context**: what the model can see *now* — the system prompt, the copied top block, the collapse block, the work since, and the two per-request blocks (state, windows). It is a cache. It is rebuilt mechanically at collapse.
 - **The talk**: the user↔agent conversation, kept word for word up to `chatWindow` across collapses, and *both parties hold the pruning tool*: either may edit any message (`e`, and agent-side the soft-forget contract for messages). Poor prompting and mistakes are pruned at the source, so intent stays sharp. The user is a gardener of the conversation, not a spectator of it.
 
@@ -35,7 +35,7 @@ The user's direction, recorded verbatim in substance:
 - **Default mode.** The agent initiates, but any *intent to change* is submitted to the user for asynchronous review. It works what has been approved and keeps going on everything that does not depend on a pending answer. Approval is per plan item, asynchronous, non-blocking — as the Requests machinery already works.
 - **Yolo mode.** Approval is off. The harness does not decide whether the agent may act; it only *facilitates autonomy*. The agent's own judgment governs. (`/yolo` remains never-remembered, as today.)
 
-**The line that holds in both modes:** yolo removes the *human* gate; it never removes the *mechanical* ones. Project-root confinement, the sandbox and its network control, checkpoints and `/undo` around change tasks, `.atlas/` and `.git/` protection, the ignore rules — unchanged in every mode (user-confirmed 2026-11-15). Yolo says "I trust your judgment," never "delete what you like."
+**The line that holds in both modes:** yolo removes the *human* gate; it never removes the *mechanical* ones. Project-root confinement, the sandbox and its network control, checkpoints and `/undo` around change tasks, `.brain/` and `.git/` protection, the ignore rules — unchanged in every mode (user-confirmed 2026-11-15). Yolo says "I trust your judgment," never "delete what you like."
 
 ## 5. The charter — what the agent does when nobody is talking
 
@@ -82,7 +82,7 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 
 ## 9. What the harness guarantees, always
 
-- The plan is the only way project files change; approval is per item and async; checkpoints bracket every change task; `/undo` reverts one task's work; `.git/` and `.atlas/` are never written by change tasks; project-root confinement including symlinks; sandboxed commands by default with per-item network control.
+- The plan is the only way project files change; approval is per item and async; checkpoints bracket every change task; `/undo` reverts one task's work; `.git/` and `.brain/` are never written by change tasks; project-root confinement including symlinks; sandboxed commands by default with per-item network control.
 - The agent cannot brick anything it does not own: it cannot touch the user's `.git`, cannot edit the plan of *its own* program directory without a project there (and it has no standing duty to edit its own harness at all — see §10), cannot erase the transcript.
 - Every failure is actionable: local validators fail closed with a message naming the exact field at fault; unresolved references report their status (`live | stale | deleted | …`); unsupported operations list what *is* supported. If the 27B fails, it fails in one round trip with the fix in hand — never a silent swallow.
 - Nothing is lost silently: soft-forget never claims erasure; the checkpoint journal contradicts any task that claims a change it did not make.

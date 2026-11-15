@@ -1,7 +1,7 @@
 // Seeing exactly what was sent to, and exactly what came back from, the model server.
 //
 // CARTO_TRACE turns it on:
-//   CARTO_TRACE=1                    → <project>/.atlas/export/trace-<time>.jsonl
+//   CARTO_TRACE=1                    → <project>/.brain/export/trace-<time>.jsonl
 //   CARTO_TRACE=/path/to/file.jsonl  → that file; a relative path resolves from the project root
 //
 // One JSON line per call to the model: the request exactly as it went on the wire (the body may carry

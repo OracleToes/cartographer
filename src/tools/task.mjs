@@ -19,6 +19,7 @@ import { applyPlanOp, loadPlan, mayRun, savePlan } from "../plan.mjs";
 import { CHANGE_NOTE, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";
 import { treeSection } from "../tree.mjs";
+import { USER_NAME } from "../user.mjs";
 
 const textOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 const fail = (text, details) => ({ isError: true, output: [{ type: "text", text }], ...(details ? { details } : {}) });
@@ -67,7 +68,7 @@ function treeNow(root, brainDir, config) {
 function kindOf(brainDir, item, gate) {
 	if (item === undefined || item === null || String(item).trim() === "") return { run: { mode: POLICY.enums.planMode.look } };
 	const { plan, error } = loadPlan(brainDir);
-	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell the user; they have to repair the file. A task without \`item\` can still look.` };
+	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; they have to repair the file. A task without \`item\` can still look.` };
 	const found = plan.items.find((entry) => entry.id === String(item).trim());
 	if (found === undefined) {
 		const ids = plan.items.map((entry) => entry.id).join(", ");
@@ -156,7 +157,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 						}
 					} catch (error) {
 						if (!(error instanceof CheckpointError)) throw error;
-						return fail(`No checkpoint could be taken, so the task was not started and nothing was changed: ${error.message}. Tell the user.`);
+						return fail(`No checkpoint could be taken, so the task was not started and nothing was changed: ${error.message}. Tell ${USER_NAME}.`);
 					}
 				}
 			}
@@ -250,7 +251,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			if (heard.length > 0) {
 				details.heard = heard.length;
 				const missed = unread.length > 0 ? ` The task did not get to read ${unread.length === heard.length ? "it" : `the last ${unread.length === 1 ? "one" : unread.length}`}.` : "";
-				spoken = `\n\nWhile this task ran, the user wrote to it:${missed}\n${heard.map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`).join("\n")}`;
+				spoken = `\n\nWhile this task ran, ${USER_NAME} wrote to it:${missed}\n${heard.map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`).join("\n")}`;
 			}
 
 			// What the task changed, from the record. Told to the main agent whether or not the task finished.

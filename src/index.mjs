@@ -1,5 +1,5 @@
 // The Durable-record index for the `book` tool's durable targets — a namespace-scoped memo of derived records at
-// `.atlas/catalog/index.json`. The probe asks one cheap question per conversation ("any entry newer than the watermark?")
+// `.brain/catalog/index.json`. The probe asks one cheap question per conversation ("any entry newer than the watermark?")
 // plus one per task table scan; when the answer is "no", list paths serve the memo without touching the store. When the
 // answer is "yes", one full derivation rebuilds it. It is a memo, not a database: correctness never depends on it.
 // Nested-call snapshots (NestedCallDoc) are read only when (re)building, and for a single `read`; never per list render.

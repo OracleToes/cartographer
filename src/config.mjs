@@ -3,17 +3,18 @@
 // Read in this order, later ones winning:
 //   1. defaults
 //   2. <core>/config.json            the install's settings, shared by every project (CARTO_CONFIG names another file)
-//   3. <project>/.atlas/config.json  one project's own settings
-//   4. CARTO_SERVER, CARTO_MODEL     environment
+//   3. <project>/.brain/config.json  one project's own settings
+//   4. CARTO_SERVER, CARTO_MODEL     environment (CARTO_USER for the name)
 //   5. --url, --model                command line
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { USER_NAME } from "./user.mjs";
 
 /** The core folder: where Cartographer is installed. Every project runs this one copy. */
 export const CORE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 
-const BRAIN_DIR = ".atlas";
+const BRAIN_DIR = ".brain";
 
 const freezeTree = (value) => {
 	if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
@@ -33,6 +34,8 @@ const WINDOW_WAIT_REASON = freezeTree({ done: "done", time: "time", asks: "asks"
 export const DEFAULTS = freezeTree({
 	server: undefined,
 	model: undefined,
+	// Which name the agent calls you by, in its notes, prompts and messages. Nothing set: the OS user who launched carto.
+	user: undefined,
 	// What the server was started with (-c). Cartographer never asks for more than this.
 	contextWindow: 100000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
@@ -255,7 +258,7 @@ export const POLICY = freezeTree({
 	control: {
 		terminate: Object.freeze({ terminate: true }),
 		windowGoneReason: "it ended when Cartographer last exited",
-		windowKilledReason: "the user closed it with /kill",
+		windowKilledReason: `${USER_NAME} closed it with /kill`,
 		restingMessage: "Resting.",
 	},
 	sentinels: { mainWindow: "main", sandboxHome: "home", brainDir: BRAIN_DIR, reportHeading: "REPORT", windowMark: "\x1e", windowSeparator: "\x1f" },
@@ -271,6 +274,7 @@ export const POLICY = freezeTree({
 		writeLinesMin: 1,
 		nonNegativeMin: 0,
 		prefillTokensMin: 0,
+		userChars: 80,
 	},
 });
 
@@ -302,6 +306,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 		...readJson(projectPath),
 		...(env.CARTO_SERVER ? { server: env.CARTO_SERVER } : {}),
 		...(env.CARTO_MODEL ? { model: env.CARTO_MODEL } : {}),
+		...(env.CARTO_USER !== undefined && env.CARTO_USER !== "" ? { user: env.CARTO_USER } : {}),
 		...(flags.url ? { server: flags.url } : {}),
 		...(flags.model ? { model: flags.model } : {}),
 	};
@@ -320,6 +325,13 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 		);
 	}
 	config.server = config.server.replace(/\/+$/, "");
+	if (config.user !== undefined) {
+		if (typeof config.user !== "string") throw new ConfigError("config: user must be one name, as a string");
+		const user = config.user.trim();
+		if (user === "" || /[\r\n]/.test(config.user)) throw new ConfigError("config: user must be one name on one line");
+		if (user.length > POLICY.validation.userChars) throw new ConfigError(`config: user must be ${POLICY.validation.userChars} characters or fewer`);
+		config.user = user;
+	}
 	for (const key of ["contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "treeDepth", "windowTail", "wakeMin", "wakesMax"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
 	}

@@ -253,7 +253,8 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = POL
 				const full = resolve(root, wanted.path.trim());
 				const rel = relative(root, full).split(sep).join("/");
 				if (rel.startsWith("..") || isAbsolute(rel)) throw new WakeError(`${JSON.stringify(wanted.path)} is outside the project. A wake watches a file or a folder of the project.`);
-				if (rel === POLICY.sentinels.brainDir || rel.startsWith(`${POLICY.sentinels.brainDir}/`)) throw new WakeError("`.atlas` is Cartographer's own folder and is not watched.");
+				const ownFolder = rel === POLICY.sentinels.brainDir || rel.startsWith(`${POLICY.sentinels.brainDir}/`) || rel === ".atlas" || rel.startsWith(".atlas/");
+				if (ownFolder) throw new WakeError("`.brain` is Cartographer's own folder and is not watched (the old `.atlas` folder is none either).");
 				wake.path = rel === "" ? "." : rel;
 			}
 			if (kind === POLICY.enums.wakeKinds.window) {

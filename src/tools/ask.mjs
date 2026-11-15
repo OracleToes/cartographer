@@ -7,6 +7,7 @@ import { POLICY } from "../config.mjs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { noteChat } from "../context.mjs";
+import { USER_NAME, USER_HEAD } from "../user.mjs";
 
 const fail = (text, details) => ({ isError: true, output: [{ type: "text", text }], ...(details ? { details } : {}) });
 
@@ -21,11 +22,11 @@ export function askTool({ brainDir, asks }) {
 	return defineTool({
 		name: "ask",
 		description: [
-			"Put a question to the user and wait for their answer, which comes back as the result. I use it when I cannot go on without it; to tell the user something, I use `chat`, which does not wait.",
-			"With `choices`, the user can pick one by its number; they can also type an answer of their own.",
+			`Put a question to ${USER_NAME} and wait for their answer, which comes back as the result. I use it when I cannot go on without it; to tell ${USER_NAME} something, I use \`chat\`, which does not wait.`,
+			`With \`choices\`, ${USER_NAME} can pick one by its number; they can also type an answer of their own.`,
 		].join(" "),
 		parameters: obj({
-			text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "The question, as the user reads it. One question, in plain sentences." }),
+			text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: `The question, as ${USER_NAME} reads it. One question, in plain sentences.` }),
 			choices: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength }), { minItems: POLICY.limits.askChoices.min, maxItems: POLICY.limits.askChoices.max, description: "A few short answers to pick from. Leave out when the answer is open." })),
 		}),
 		executionMode: "sequential",
@@ -40,13 +41,13 @@ export function askTool({ brainDir, asks }) {
 			if (outcome === undefined) {
 				if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), questionText(text, choices));
 				outcome = await asks.put({ text, choices, task }, callContext.abortSignal);
-				if (outcome.kind === "stopped") return fail("The user stopped this before answering.", { ask: { text, choices, outcome } });
+				if (outcome.kind === "stopped") return fail(`${USER_HEAD} stopped this before answering.`, { ask: { text, choices, outcome } });
 				await api.memo("answer", outcome, callContext);
 				if (outcome.kind === "answer" && brainDir !== undefined) noteChat(brainDir, "user", Date.now(), outcome.text, { seen: false });
 			}
 			const details = { ask: { text, choices, outcome } };
-			if (outcome.kind === "answer") return { output: [{ type: "text", text: `The user answered: ${outcome.text}` }], details };
-			const why = outcome.kind === "timeout" ? `the user did not answer within ${spanOf(outcome.minutes)}` : "nobody is at the terminal: its input has ended";
+			if (outcome.kind === "answer") return { output: [{ type: "text", text: `${USER_HEAD} answered: ${outcome.text}` }], details };
+			const why = outcome.kind === "timeout" ? `${USER_NAME} did not answer within ${spanOf(outcome.minutes)}` : "nobody is at the terminal: its input has ended";
 			return {
 				output: [{ type: "text", text: `No answer: ${why}. The question stays on their screen. I go on with what I can decide myself and say what I assumed${task ? " in my report" : ""}, or leave the matter open.` }],
 				details,

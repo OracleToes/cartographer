@@ -12,12 +12,13 @@
 // A change item marked `network` lets its task's commands reach the network
 // (src/sandbox.mjs); without the mark they cannot.
 //
-// The plan lives in <project>/.atlas/carto-plan.json as plain JSON. The user can
+// The plan lives in <project>/.brain/carto-plan.json as plain JSON. The user can
 // read and edit it; it is read again every time it is needed.
 import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { applyEntryOp } from "./rows.mjs";
+import { USER_NAME } from "./user.mjs";
 
 export const MODES = POLICY.enums.planModes;
 const ITEM_ID = new RegExp(POLICY.patterns.planId);
@@ -95,11 +96,11 @@ export const openStanding = (plan) => openItems(plan).filter((item) => item.stan
 /** One line for an item, as the agent and the user see it. */
 export function itemLine(item) {
 	const outcome = item.status === POLICY.enums.entryStatus.done && item.outcome ? ` → ${item.outcome}` : "";
-	const undone = item.undone ? " (undone by the user: the files are as they were before this item ran)" : "";
+	const undone = item.undone ? ` (undone by ${USER_NAME}: the files are as they were before this item ran)` : "";
 	return `${item.id} [${item.mode}${item.network ? ", network" : ""}${item.standing ? ", standing" : ""}] ${item.text}${outcome}${undone}`;
 }
 
-const WITHDRAWN = "This changed what the plan may change, so the user's authorization no longer holds. Tell the user what changed and why, and ask them to type /approve.";
+const WITHDRAWN = `This changed what the plan may change, so ${USER_NAME}'s authorization no longer holds. Tell ${USER_NAME} what changed and why, and ask them to type /approve.`;
 const marks = (target, wanted) => {
 	if (wanted.network === true && target !== POLICY.enums.planMode.change) throw new PlanError("`network` goes with a change item: only a change task runs commands.");
 	if (wanted.standing === true && target !== POLICY.enums.planMode.change) throw new PlanError("`standing` goes with a change item: a look item needs no authorization and may be carried out as often as it needs to be.");
@@ -228,9 +229,9 @@ export const YOLO_LINE = "approval: OFF (yolo) · the agent's change items run w
 /** The first line of the plan as text: whether change items may run. */
 export function authorizationLine(plan, { yolo = false } = {}) {
 	if (yolo && openItems(plan, POLICY.enums.planMode.change).length > 0) return "Change items may run without /approve.";
-	if (isAuthorized(plan)) return "Authorized by the user: change items may run.";
-	if (waiting(plan).length > 0) return "Not approved: change items wait for the user. Look items may run.";
-	if (openItems(plan, POLICY.enums.planMode.change).length > 0) return "Authorized by the user: change items may run.";
+	if (isAuthorized(plan)) return `Authorized by ${USER_NAME}: change items may run.`;
+	if (waiting(plan).length > 0) return `Not approved: change items wait for ${USER_NAME}. Look items may run.`;
+	if (openItems(plan, POLICY.enums.planMode.change).length > 0) return `Authorized by ${USER_NAME}: change items may run.`;
 	return "No change item is open, so nothing needs authorizing.";
 }
 

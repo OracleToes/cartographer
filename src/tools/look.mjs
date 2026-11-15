@@ -225,7 +225,7 @@ export function listProject(root, args) {
 		// Said plainly, so that an empty folder is not listed a second time to make sure.
 		const name = path.rel === "." ? "The project folder" : path.rel;
 		const present = readdirSync(path.abs).filter((entry) => !(path.rel === "." && (entry === BRAIN || entry === ".git")));
-		if (present.length === 0) return `${name} is empty: there are no files or folders in it, hidden ones included. (A .git folder and Cartographer's own .atlas folder are never listed.)`;
+		if (present.length === 0) return `${name} is empty: there are no files or folders in it, hidden ones included. (A .git folder and Cartographer's own .brain folder are never listed.)`;
 		return `${name} has no files to list: what is in it is ignored by git, or is an empty folder.`;
 	}
 	// Build the tree down to `depth`; deeper folders are shown with a file count.

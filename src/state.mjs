@@ -22,6 +22,7 @@ import { loadTop, sinceTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
 import { isNote } from "./wake.mjs";
 import { RECORD } from "./voice.mjs";
+import { USER_NAME, USER_HEAD } from "./user.mjs";
 
 /** The stable anchor every block written by me starts with; regexes are built from it so the marker cannot drift. */
 const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -31,7 +32,7 @@ const CLOSE = POLICY.markup.state.close;
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const HEAD = `${RECORD} This is the current state; it supersedes any earlier copy I carry.`;
 
-const FIRST = "The user's newest message comes first.";
+const FIRST = `${USER_HEAD}'s newest message comes first.`;
 /** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
 const MAP =
 	"I need not sit idle meanwhile: in the same reply I may start a look task that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
@@ -42,16 +43,16 @@ function direction(ledger, plan, yolo = false) {
 	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
 	if (plan === undefined || plan.items.length === 0) {
 		if (goals) {
-			return `${FIRST} Beyond that, I work toward the open goals. If reaching one needs changes to the project, I find out what I need with look tasks, then write the plan. When a goal is reached, I close it and tell the user what was achieved.`;
+			return `${FIRST} Beyond that, I work toward the open goals. If reaching one needs changes to the project, I find out what I need with look tasks, then write the plan. When a goal is reached, I close it and tell ${USER_NAME} what was achieved.`;
 		}
 		return [
 			"No goal is set. Looking and answering questions is fine without one.",
-			"I find out what the user wants to achieve. When we agree on it, I record it as a goal with a done-when line.",
+			`I find out what ${USER_NAME} wants to achieve. When we agree on it, I record it as a goal with a done-when line.`,
 			MAP,
 		].join(" ");
 	}
 	// A plan stands for a goal. One without is possible (the user closed the goal, or wrote the plan by hand).
-	const noGoal = goals ? "" : " No goal is recorded for this plan: I agree one with the user and record it with a done-when line.";
+	const noGoal = goals ? "" : ` No goal is recorded for this plan: I agree one with ${USER_NAME} and record it with a done-when line.`;
 	// A standing item is a duty: it is never "next", and it does not keep the plan from being finished otherwise.
 	const duties = openStanding(plan);
 	const standing =
@@ -61,15 +62,15 @@ function direction(ledger, plan, yolo = false) {
 	const next = openOnce(plan)[0];
 	const waits = awaitsApproval(plan) && !yolo;
 	if (next === undefined && duties.length > 0) {
-		if (waits) return `${FIRST} Change items wait for the user: I show them the plan in a few lines and ask them to type /approve. I do not start ${duties[0].id} before that.${noGoal} ${MAP}`;
+		if (waits) return `${FIRST} Change items wait for ${USER_NAME}: I show them the plan in a few lines and ask them to type /approve. I do not start ${duties[0].id} before that.${noGoal} ${MAP}`;
 		return `${FIRST} Beyond that, nothing of the plan is left to do once.${standing}${noGoal}`;
 	}
 	if (next === undefined) {
-		const check = goals ? " I check each open goal against its done-when line. Before I close one, I bring the assessment book up to date with `book` (target=assessment, action=edit) if the work changed my picture of the project: the copy at the top of my context is rewritten when a goal closes. I close the goals that are reached, tell the user what was achieved and how to try it, and clear the plan." : " I tell the user what was done and how to try it, and clear the plan.";
+		const check = goals ? ` I check each open goal against its done-when line. Before I close one, I bring the assessment book up to date with \`book\` (target=assessment, action=edit) if the work changed my picture of the project: the copy at the top of my context is rewritten when a goal closes. I close the goals that are reached, tell ${USER_NAME} what was achieved and how to try it, and clear the plan.` : ` I tell ${USER_NAME} what was done and how to try it, and clear the plan.`;
 		return `${FIRST} Every item of the plan is done.${check} If something is still missing, I add items for it.`;
 	}
 	if (waits) {
-		const wait = "Change items wait for the user: I show them the plan in a few lines and ask them to type /approve.";
+		const wait = `Change items wait for ${USER_NAME}: I show them the plan in a few lines and ask them to type /approve.`;
 		if (next.mode === POLICY.enums.planMode.look) return `${FIRST} Beyond that, I carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
 		return `${FIRST} ${wait} I do not start ${next.id} before that.${noGoal} ${MAP}`;
 	}
@@ -86,7 +87,7 @@ function focusDirection(task) {
 /** Said only while approval is off, as the plain state of how this session runs. Here and not in the system prompt, because the user can change it while the session runs, and the present state is all the prompt needs to carry. */
 function approval(yolo) {
 	if (!yolo) return "";
-	return "Approval\nChange items may run without /approve, also ones marked network or standing; I do not ask for /approve. Every change still needs a plan item: I write the item, then start its task. I keep items small, so that the user can follow each step and take one back with /undo.\n\n";
+	return `Approval\nChange items may run without /approve, also ones marked network or standing; I do not ask for /approve. Every change still needs a plan item: I write the item, then start its task. I keep items small, so that ${USER_NAME} can follow each step and take one back with /undo.\n\n`;
 }
 
 /**
@@ -107,10 +108,10 @@ function wakesText(lines = [], fired = []) {
  */
 function commands(runner) {
 	if (runner?.mode === "direct") {
-		return "Commands\nCommands of a change task run directly on this machine, as the user: they can read and change files outside the project directory, and they reach the network. Only the project directory is in my checkpoints, so what a command does outside it cannot be undone. I keep the work inside the project directory unless the user asks for something outside it, and then I name the path in the brief. I myself may still run commands in this session, always in a read-only window, when bubblewrap works; when it does not, I run none at all.\n\n";
+		return `Commands\nCommands of a change task run directly on this machine, as ${USER_NAME}: they can read and change files outside the project directory, and they reach the network. Only the project directory is in my checkpoints, so what a command does outside it cannot be undone. I keep the work inside the project directory unless ${USER_NAME} asks for something outside it, and then I name the path in the brief. I myself may still run commands in this session, always in a read-only window, when bubblewrap works; when it does not, I run none at all.\n\n`;
 	}
 	if (runner?.mode === "none") {
-		return `Commands\nNo command can be run in this session: ${runner.available.why}. \`shell\` is refused. After a change, I tell the user how to run or try what was written, and say plainly that it has not been run. Whether a done-when line that needs a run is met is for the user to confirm.\n\n`;
+		return `Commands\nNo command can be run in this session: ${runner.available.why}. \`shell\` is refused. After a change, I tell ${USER_NAME} how to run or try what was written, and say plainly that it has not been run. Whether a done-when line that needs a run is met is for ${USER_NAME} to confirm.\n\n`;
 	}
 	return "";
 }
@@ -144,7 +145,7 @@ function clock(messages, now) {
 		if (earlier < 0) break;
 		began = earlier;
 	}
-	const newest = `The user's newest message came ${ago(now - messages[at].timestamp)}.`;
+	const newest = `${USER_HEAD}'s newest message came ${ago(now - messages[at].timestamp)}.`;
 	return began === at ? `${said} ${newest}` : `${said} ${newest} I have been working since their message of ${ago(now - messages[began].timestamp)}.`;
 }
 
@@ -219,7 +220,7 @@ function atlasText(brainDir, root, config, now) {
 	const { atlas, error } = loadAtlas(brainDir);
 	const tree = treeSection(root, atlas?.view, { marks: atlas ? fileMarks(atlas) : undefined, depth: config?.treeDepth });
 	const head = `Tree\n${tree.text}\n\nAtlas\n`;
-	if (atlas === undefined) return `${head}The graph cannot be read: ${error}. It was probably edited by hand. Tell the user; until they repair the file, nodes cannot be shown or written.\n\n`;
+	if (atlas === undefined) return `${head}The graph cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, nodes cannot be shown or written.\n\n`;
 	const lines = [];
 	const assessment = loadAssessment(brainDir);
 	const linked = atlas.nodes.length === 0 ? "" : ` Files a node links to: ${linkedCount(atlas, tree.files)} of ${tree.files.length}.`;
@@ -236,7 +237,7 @@ function atlasText(brainDir, root, config, now) {
 	if (since.assessment && assessment.text !== "") {
 		// The agent's own rewrite is in its context as the call that made it. An edit by hand is not, so it is shown.
 		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("I rewrote the assessment since that copy: my `book` call holds the text that counts.");
-		else lines.push(`The assessment was edited outside this conversation since that copy, probably by the user. It now reads:\n${assessment.text}`);
+		else lines.push(`The assessment was edited outside this conversation since that copy, probably by ${USER_NAME}. It now reads:\n${assessment.text}`);
 	}
 	const stale = staleNodes(root, atlas, now);
 	if (stale.length > 0) {
@@ -262,17 +263,17 @@ export function stateBlock(brainDir, runner, more = {}) {
 	const front = `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now)}`;
 	let body;
 	if (ledger === undefined) {
-		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell the user; until they repair the file, the ledger cannot be shown or changed.`;
+		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, the ledger cannot be shown or changed.`;
 		} else {
 			// No plan, no section: the instruction below says when to write one.
 			let planText = "";
-			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell the user; until they repair the file, no plan item can run.\n\n`;
+			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, no plan item can run.\n\n`;
 			else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
 			// What waits for the user: approvals of change items, questions of taste, and proposed edits to the
 			// prompt. Put at the very end, so the shape of the block before it stays as it was. The agent keeps
 			// working on whatever does not depend on one.
 			const waiting = more.requests === true ? requestLines(brainDir, { yolo: more.yolo === true }) : "";
-			const requests = waiting === "" ? "" : `\n\nRequests\nThese wait for the user; carry on with what does not depend on them:\n${waiting}\n`;
+			const requests = waiting === "" ? "" : `\n\nRequests\nThese wait for ${USER_NAME}; carry on with what does not depend on them:\n${waiting}\n`;
 			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${more.task === undefined ? direction(ledger, plan, more.yolo === true) : focusDirection(more.task)}${requests}`;
 		}
 	// How full the context is and what on the shelf is not as shown (src/context.mjs).

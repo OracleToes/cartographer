@@ -145,7 +145,7 @@ export async function main(argv) {
 				return;
 			}
 		}
-		const { brainDir, created } = setUpBrain(project.root);
+		const { brainDir, created, migrated } = setUpBrain(project.root);
 		release = lockBrain(brainDir);
 		const forked = flags.forkBrain === true ? forkCatalogNamespace(brainDir) : undefined;
 		const { adoptOldLedger } = await import("./ledger.mjs");
@@ -162,6 +162,7 @@ export async function main(argv) {
 		// once here so the line below and the session agree on the file; passed through to openSession.
 		const trace = traceFile({ root: project.root, brainDir: brainPath });
 		say(`Cartographer · ${project.root}`);
+		if (migrated) say(`the brain was renamed from .atlas to .brain, as it is called now`);
 		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
 		const { YOLO_LINE } = await import("./plan.mjs");

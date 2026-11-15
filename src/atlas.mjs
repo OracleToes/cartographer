@@ -9,7 +9,7 @@
 // fingerprint is kept with the link. A file that changed or disappeared since
 // marks the node as possibly out of date, until someone rewrites or confirms it.
 //
-// It lives in <project>/.atlas/carto-atlas.json as plain JSON so the user can read
+// It lives in <project>/.brain/carto-atlas.json as plain JSON so the user can read
 // and edit it; the file is read again every time it is needed.
 import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
@@ -19,6 +19,7 @@ import { BRAIN } from "./project.mjs";
 import { ago, since } from "./time.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { cleanAnchor, DEPTH_MAX, isFolder } from "./tree.mjs";
+import { USER_NAME } from "./user.mjs";
 
 /** A node without a kind is a plain node. */
 export const KINDS = POLICY.enums.atlasKinds;
@@ -221,8 +222,8 @@ function checkedFiles(root, given, created = [], mayCreate = false) {
 			throw new AtlasError(`\`files\`: ${error.message}.`);
 		}
 		if (!existsSync(join(root, rel))) {
-			if (rel === "" || /^(\.atlas|\.git)(\/|$)/.test(rel)) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project, and none can be made there.`);
-			if (!mayCreate) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project. Check the path against the tree. If the file is planned, write the node without it for now, since a node needs no file: once the user has authorized the plan, linking a missing file creates it, empty.`);
+			if (rel === "" || /^(\.brain|\.atlas|\.git)(\/|$)/.test(rel)) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project, and none can be made there.`);
+			if (!mayCreate) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project. Check the path against the tree. If the file is planned, write the node without it for now, since a node needs no file: once ${USER_NAME} has authorized the plan, linking a missing file creates it, empty.`);
 			const folder = /\/\s*$/.test(String(path));
 			try {
 				if (folder) mkdirSync(join(root, rel), { recursive: true });
@@ -264,7 +265,7 @@ function missingLinks(atlas, node) {
 /** One node in full, as `look` shows it. */
 export function renderNode(root, atlas, node, now = Date.now()) {
 	const age = since(node.written, now);
-	const lines = [`${node.name} (${kindWord(node)})${age === undefined ? "" : ` · written ${ago(age)}`}${node.by ? ` by ${node.by === POLICY.enums.atlasAuthors.task ? "a task" : node.by === POLICY.enums.atlasAuthors.main ? "the main agent" : "the user"}` : ""}`, node.gist];
+	const lines = [`${node.name} (${kindWord(node)})${age === undefined ? "" : ` · written ${ago(age)}`}${node.by ? ` by ${node.by === POLICY.enums.atlasAuthors.task ? "a task" : node.by === POLICY.enums.atlasAuthors.main ? "the main agent" : `${USER_NAME}`}` : ""}`, node.gist];
 	if (node.detail) lines.push("Detail:", node.detail);
 	if (node.files.length > 0) {
 		lines.push("Files:");

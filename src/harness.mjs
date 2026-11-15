@@ -1,4 +1,4 @@
-// Opens one project's session: the Durable harness over `.atlas/session.sqlite`,
+// Opens one project's session: the Durable harness over `.brain/session.sqlite`,
 // the model provider, and the tools with the rule of who may call what.
 import { POLICY } from "./config.mjs";
 import { join } from "node:path";
@@ -28,6 +28,7 @@ import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
 import { traceFile, watchTrace } from "./trace.mjs";
+import { USER_HEAD } from "./user.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit"]);
@@ -181,7 +182,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const active = { id: undefined, said: [], heard: [] };
 	const takeSaid = () => {
 		const lines = active.said.splice(0).map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`);
-		return lines.length === 0 ? undefined : ["The user wrote this while I was working. I take it into account, and put into my report what I could not act on.", ...lines].join("\n");
+		return lines.length === 0 ? undefined : [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });
 	const textOfAnswer = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();

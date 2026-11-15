@@ -12,6 +12,7 @@ import { POLICY } from "./config.mjs";
 // not fill the context with "nothing happened".
 import { took } from "./time.mjs";
 import { RECORD } from "./voice.mjs";
+import { USER_NAME, USER_HEAD } from "./user.mjs";
 
 const OPEN = POLICY.markup.note.open;
 const HEAD = RECORD;
@@ -36,7 +37,7 @@ export function eventLine(event) {
 	if (event.type === "ended") return `Window ${event.name}: \`${first(event.command)}\` ended with exit ${event.exit} after ${took(event.ms)}.`;
 	if (event.type === "closed") return `Window ${event.name} closed: its shell ended, and with it \`${first(event.command)}\` after ${took(event.ms)}.`;
 	if (event.type === "asks") return `Window ${event.name}: \`${first(event.command)}\` has printed nothing for a while and its last line has no line end, so it may be waiting for input. The line: ${event.line}`;
-	if (event.type === "changed") return `Files changed while ${event.names.length === 1 ? `window ${event.names[0]}` : `windows ${event.names.join(", ")}`} ran with no task around: ${event.summary}. The user can see them with /diff and take them back with /undo.`;
+	if (event.type === "changed") return `Files changed while ${event.names.length === 1 ? `window ${event.names[0]}` : `windows ${event.names.join(", ")}`} ran with no task around: ${event.summary}. ${USER_HEAD} can see them with /diff and take them back with /undo.`;
 	return `Window ${event.name}: ${event.type}.`;
 }
 
@@ -64,7 +65,7 @@ export function startNote() {
 		OPEN,
 		`${HEAD} Nobody typed this. The session has started, and nothing is waiting on me: this turn is mine.`,
 		"",
-		"The standing duty. I look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what I learn in the books and the atlas. I form hypotheses and record them; I verify what I can, with the commands I may run; I carry out what stands approved in the plan. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved open item, no question waiting for the user — I call `sleep`.",
+		`The standing duty. I look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what I learn in the books and the atlas. I form hypotheses and record them; I verify what I can, with the commands I may run; I carry out what stands approved in the plan. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved open item, no question waiting for ${USER_NAME} — I call \`sleep\`.`,
 		CLOSE,
 	].join("\n");
 }
@@ -84,7 +85,7 @@ export const noted = ({ main, first, extra }) =>
 			? [
 					"",
 					main
-						? "So it is kept as a note to myself, and nobody else read it. If it was meant for the user, I say it with `chat`. If work is left, I go on with it. If nothing is left to do, I call `sleep`."
+						? `So it is kept as a note to myself, and nobody else read it. If it was meant for ${USER_NAME}, I say it with \`chat\`. If work is left, I go on with it. If nothing is left to do, I call \`sleep\`.`
 						: "So it is kept as a note to myself, and nobody else read it. I go on with the brief. When the work is finished, I call `return` with my report.",
 				]
 			: []),

@@ -26,8 +26,8 @@
 // What a collapse needs is collected as it happens, not dug out of the conversation
 // afterwards: the task tool writes the record line and the report file when a task
 // ends, and what is said is noted when it is said. The context is kept in
-// <project>/.atlas/carto-context.json, full file shelf snapshots in
-// <project>/.atlas/shelf/, and reports in <project>/.atlas/reports/.
+// <project>/.brain/carto-context.json, full file shelf snapshots in
+// <project>/.brain/shelf/, and reports in <project>/.brain/reports/.
 //
 // A task has the same means for its own steps, and only for those: what stands in
 // front of its brief is the main agent's and stays as it is (see `dressTask`).
@@ -45,6 +45,7 @@ import { stamp } from "./time.mjs";
 import { entryLine, loadLedger, salientNotes, saveLedger } from "./ledger.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { fileReference } from "./catalog.mjs";
+import { USER_NAME, USER_HEAD } from "./user.mjs";
 
 const OPEN = POLICY.markup.context.open;
 const CLOSE = POLICY.markup.context.close;
@@ -651,7 +652,7 @@ function readShelfSnapshot(brainDir, item) {
 	} catch { return undefined; }
 }
 
-/** Persist a full backing snapshot atomically under .atlas/shelf; callers validate context budget first. Skips the write when the backing is unchanged. */
+/** Persist a full backing snapshot atomically under .brain/shelf; callers validate context budget first. Skips the write when the backing is unchanged. */
 export function persistShelfSnapshot(brainDir, item, content) {
 	if ((item?.type !== "file" && item?.type !== "reference") || typeof content !== "string") return;
 	const path = safeShelfSnapshotPath(brainDir, item, { create: true });
@@ -842,7 +843,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 		const talk = store.chat.map(chatLine).join("\n");
 		const parts = [
 			OPEN,
-			`${HEAD} My context was collapsed on ${stamp(now)} (${reason}). What I had in view before is gone except for what stands here: one line for each finished task, ${salient.length > 0 ? "my salient notes, " : ""}my shelf, and the last of my talk with the user. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.`,
+			`${HEAD} My context was collapsed on ${stamp(now)} (${reason}). What I had in view before is gone except for what stands here: one line for each finished task, ${salient.length > 0 ? "my salient notes, " : ""}my shelf, and the last of my talk with ${USER_NAME}. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.`,
 			"",
 			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
 			record.text,
@@ -853,13 +854,13 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 			...shelf.left.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] remains on the shelf but is not shown: ${entry.why}.)`),
 			...shelf.stale.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] is stale: ${entry.why}.)`),
 			"",
-			store.chat.length === 0 ? "The user and I have not talked yet." : "My talk with the user, word for word; what was said before it is gone",
+			store.chat.length === 0 ? `${USER_HEAD} and I have not talked yet.` : `My talk with ${USER_NAME}, word for word; what was said before it is gone`,
 			...(talk === "" ? [] : [talk]),
 		];
 		let nowText = "";
 		if (midTurn !== undefined) {
 			const lines = ["", "This collapse came in the middle of my turn, so the turn goes on."];
-			if (midTurn.by === "note" && midTurn.note) lines.push(`The turn began with a note I wrote, not with a message of the user:\n${midTurn.note}`);
+			if (midTurn.by === "note" && midTurn.note) lines.push(`The turn began with a note I wrote, not with a message of ${USER_NAME}:\n${midTurn.note}`);
 			if (midTurn.calls.length > 0) {
 				lines.push("The calls of my last reply, all carried out, and what each returned:");
 				for (const call of midTurn.calls) {
@@ -1312,7 +1313,7 @@ export function shelveForUser(root, brainDir, config, path, lines) {
 		if (at >= 0) next.shelf[at] = item;
 		else next.shelf.push(item);
 	});
-	return `${shelfLabel(item)} is on the shelf as ${item.id} (about ${count(tokens)} rendered tokens; the shelf then puts ${count(total)} of ${count(config.shelfTokens)} into context). For project files, the full backing snapshot is saved under .atlas; the selected content is available now and after collapse, and every task begins with it read.\n\n${item.snapshot}`;
+	return `${shelfLabel(item)} is on the shelf as ${item.id} (about ${count(tokens)} rendered tokens; the shelf then puts ${count(total)} of ${count(config.shelfTokens)} into context). For project files, the full backing snapshot is saved under .brain; the selected content is available now and after collapse, and every task begins with it read.\n\n${item.snapshot}`;
 }
 
 /** The user takes a file, or everything, off the shelf. Throws ShelfError for a name that is not on it. */

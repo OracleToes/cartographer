@@ -15,7 +15,7 @@
 // Between those moments the copy stays as it is, and the state block at the end
 // of each request (src/state.mjs) lists what was written since.
 //
-// The copy is kept in <project>/.atlas/carto-top.json and added to the first
+// The copy is kept in <project>/.brain/carto-top.json and added to the first
 // message of every request, for the main agent and for tasks alike: a task's
 // prompt must begin exactly as the main agent's does. It is never stored in the
 // conversation.

@@ -28,10 +28,11 @@ import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
+import { USER_NAME } from "../src/user.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
-	const brainDir = join(root, ".atlas");
+	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	return { root, brainDir };
@@ -59,7 +60,7 @@ test("ledger: closing a goal re-pins the copy at the top of the context", (t) =>
 	const { brainDir, root } = fresh(t);
 	applyAdd(brainDir, "ledger", JSON.stringify({ kind: "goal", text: "Ship the dice roller.", done_when: "It rolls." }), root);
 	const settled = settleRow(brainDir, "g1", root);
-	assert.match(settled, /copy of your assessment and graph/);
+	assert.match(settled, /copy of my assessment and graph/);
 	assert.equal(existsSync(topPath(brainDir)), true);
 });
 
@@ -252,7 +253,7 @@ test("shell: a run with a cross-action argument still runs, and says so", async 
 });
 
 test("shell: TOOLS.shell and the charter both say the lane survives the sandbox being off while bubblewrap works", () => {
-	assert.match(TOOLS.shell, /With the sandbox switched off the main context still runs commands in a read-only window when bubblewrap works, and none at all when it does not\./);
+	assert.match(TOOLS.shell, /when it says they run directly, I still run only in a read-only window, and only when bubblewrap works — when it does not, I run none at all\./);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
 });
 
@@ -260,7 +261,7 @@ test("shell: TOOLS.shell and the charter both say the lane survives the sandbox 
 
 const scratchProject = () => {
 	const root = mkdtempSync(join(tmpdir(), "carto-ids-"));
-	const brainDir = join(root, ".atlas");
+	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	return { root, brainDir };
 };
@@ -421,7 +422,7 @@ test("plan: an item approved one by one is authorized everywhere the agent is to
 	approveRequests(brainDir, ["p2"]);
 	({ plan } = loadPlan(brainDir));
 	assert.equal(awaitsApproval(plan), false);
-	assert.match(authorizationLine(plan), /^Authorized by the user/);
+	assert.match(authorizationLine(plan), new RegExp("^Authorized by " + USER_NAME));
 	assert.match(planSummary(plan), /authorized$/);
 });
 

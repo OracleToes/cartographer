@@ -5,7 +5,7 @@
 //   note      anything else worth keeping: a decision, a preference, a finding
 //
 // It is a notebook, not a gate: nothing here stops the agent from working. It lives
-// in <project>/.atlas/carto-ledger.json as plain JSON so the user can read and edit it;
+// in <project>/.brain/carto-ledger.json as plain JSON so the user can read and edit it;
 // the file is read again every time it is needed, so an edit made by hand takes
 // effect at the agent's next step.
 import { POLICY } from "./config.mjs";
@@ -13,6 +13,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ago, since } from "./time.mjs";
 import { applyEntryOp, flat } from "./rows.mjs";
+import { USER_NAME } from "./user.mjs";
 
 export const KINDS = POLICY.enums.ledgerKinds;
 const ENTRY_ID = new RegExp(POLICY.patterns.ledgerId);
@@ -139,9 +140,9 @@ const LEDGER_SPEC = {
 	outcome: (op, checked) => (op.text !== undefined && flat(op.text) !== "" ? checked(op.text, "`text` (how it ended)") : undefined),
 	markClosed: true,
 	doneFollow: (item) =>
-		item.kind === POLICY.enums.ledgerKind.goal ? " Tell the user what was achieved against its done-when line, and ask whether that is what they wanted." : "",
+		item.kind === POLICY.enums.ledgerKind.goal ? ` Tell ${USER_NAME} what was achieved against its done-when line, and ask whether that is what they wanted.` : "",
 	addFields: (op, kind, checked) => {
-		const fields = kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, "`done_when` (how the user and I will know the goal is reached)") } : {};
+		const fields = kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, `\`done_when\` (how ${USER_NAME} and I will know the goal is reached)`) } : {};
 		const salient = salientOf(op.salient, kind);
 		if (salient !== undefined) fields.salient = true;
 		return fields;
@@ -188,7 +189,7 @@ export function openCounts(ledger) {
 	}).join(", ");
 }
 
-const HEADINGS = { goal: "Goals", question: "Questions for the user", note: "Notes" };
+const HEADINGS = { goal: "Goals", question: `Questions for ${USER_NAME}`, note: "Notes" };
 
 /**
  * The open entries as text, grouped by kind.

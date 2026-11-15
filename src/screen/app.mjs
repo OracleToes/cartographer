@@ -45,6 +45,7 @@ import { Air, AIRY_ROWS, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, 
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { atlasView, booksView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
+import { USER_NAME } from "../user.mjs";
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
@@ -155,7 +156,7 @@ export const KEYS_HELP = [
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of the user or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file",
+	`  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file; in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
 	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a plan item done, a book entry settled, a node confirmed); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
 	"  n                a new ledger entry, plan item, book entry or node: an editor opens on a template, and what you save goes in through the same operations the agent uses",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
@@ -185,7 +186,7 @@ export const KEYS_HELP = [
 	"  /copy session    the whole session as Markdown",
 	"  /copy report     the last task's report",
 	"  /copy tab        the tab that is showing",
-	"  Each goes to the clipboard and to a file under .atlas/export/.",
+	"  Each goes to the clipboard and to a file under .brain/export/.",
 ].join("\n");
 
 /**
@@ -661,7 +662,7 @@ export async function runScreen(session, options, runTerminal) {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
 		if (!chat.editable(line.item)) {
-			return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "tool work cannot be edited: e opens a message of the user or the agent");
+			return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : `tool work cannot be edited: e opens a message of ${USER_NAME} or the agent`);
 		}
 		const item = chat.items.find((entry) => entry.key === line.item);
 		const file = scratch("message.md", item.text);
@@ -779,7 +780,7 @@ export async function runScreen(session, options, runTerminal) {
 			case "reply":
 				return flash("the reply is being written; e on it works once it is done");
 			case "result":
-				return flash("tool work cannot be edited: e opens a message of the user or the agent");
+				return flash(`tool work cannot be edited: e opens a message of ${USER_NAME} or the agent`);
 			case "state":
 				return flash("the state block is written anew for every request; what it reads is editable: e on Atlas, Ledger, Plan or Assessment in the Carto tab");
 			case "windows":
@@ -787,7 +788,7 @@ export async function runScreen(session, options, runTerminal) {
 			case "carto":
 				return flash("what Cartographer writes into a message cannot be edited");
 			default: {
-				// Hands: a shelved file is its file; a report is its file in .atlas/reports.
+				// Hands: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
 					if (!existsSync(item.path)) return flash("the shelved file is not there");
 					if (!runEditor(item.path)) return;

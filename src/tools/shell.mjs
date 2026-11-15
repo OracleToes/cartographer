@@ -24,6 +24,7 @@ import { describe, REFUSALS } from "../prompt.mjs";
 import { SandboxError } from "../sandbox.mjs";
 import { ago, took } from "../time.mjs";
 import { WAIT_MAX, WindowError } from "../windows.mjs";
+import { USER_NAME } from "../user.mjs";
 
 export const SHELL_ACTIONS = POLICY.enums.shellActions;
 /** The actions that only deal with a window that is open. */
@@ -71,9 +72,9 @@ export function statusLine(result, { noNetwork = false } = {}) {
 		case POLICY.enums.windowWaitReasons.until:
 			return `the line appeared after ${after}; the command is still running in window ${name}`;
 		case POLICY.enums.windowWaitReasons.nudged:
-			return `the wait ended after ${after} because ${result.nudgedBy ?? "the user wrote a message"}; the command is still running in window ${name}`;
+			return `the wait ended after ${after} because ${result.nudgedBy ?? `${USER_NAME} wrote a message`}; the command is still running in window ${name}`;
 		case POLICY.enums.windowWaitReasons.stopped:
-			return result.state === POLICY.enums.windowStates.busy ? `stopped by the user after ${after}, but the command did not end on Ctrl-C and is still running in window ${name}` : `stopped by the user after ${after} · window ${name}`;
+			return result.state === POLICY.enums.windowStates.busy ? `stopped by ${USER_NAME} after ${after}, but the command did not end on Ctrl-C and is still running in window ${name}` : `stopped by ${USER_NAME} after ${after} · window ${name}`;
 		case POLICY.enums.windowWaitReasons.closed:
 			return result.exit === undefined
 				? `window ${name} is closed: its shell ended`

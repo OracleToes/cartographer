@@ -1,24 +1,54 @@
-// Which folder is the project, and its brain folder `.atlas/`.
+// Which folder is the project, and its brain folder `.brain/`.
 //
 // The brain is the only thing Cartographer keeps per project. The program itself
 // lives once in the core folder; a project holds no copy of it.
 //
-// The folder name `.atlas/` is shared with the Orchestrator pi extension, which keeps
+// The folder name `.brain/` is shared with the Orchestrator pi extension, which keeps
 // its own files there (graph.json, ledger.json, working-direction.json). Cartographer
 // leaves those alone, and a folder that holds only those is not a Cartographer brain.
 import { POLICY } from "./config.mjs";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 export const BRAIN = POLICY.sentinels.brainDir;
-/** The file that makes an `.atlas/` folder a Cartographer brain. */
+/** The file that makes a brain folder a Cartographer brain. */
 const SESSION = "session.sqlite";
 
 export class ProjectError extends Error {}
 
-/** Whether `dir` has a brain that Cartographer set up. */
-export const hasBrain = (dir) => existsSync(join(dir, BRAIN, SESSION));
+/** The old folder name, before 2026-11-15. A Cartographer brain there is renamed on the first start after the update. */
+const LEGACY_BRAIN = ".atlas";
+/** Whether `dir` has a brain that Cartographer set up, in either folder name. */
+export const hasBrain = (dir) => existsSync(join(dir, BRAIN, SESSION)) || existsSync(join(dir, LEGACY_BRAIN, SESSION));
+
+/**
+ * Move a legacy `.atlas/` Cartographer brain to `.brain/`. A legacy folder holding only
+ * other tools' files (no session database) is left untouched. When both folders exist,
+ * `.brain/` wins and the legacy one is left alone. @returns true when the folder was renamed.
+ */
+export function migrateBrain(root) {
+	const brainDir = join(root, BRAIN);
+	const legacy = join(root, LEGACY_BRAIN);
+	if (existsSync(join(brainDir, SESSION))) return false;
+	if (!existsSync(join(legacy, SESSION))) return false;
+	if (existsSync(brainDir)) return false;
+	renameSync(legacy, brainDir);
+	// The checkpoint repository inside the brain excludes the brain folder by absolute-from-root path;
+	// carry that exclusion over from the old name.
+	const exclude = join(brainDir, "checkpoints.git", "info", "exclude");
+	try {
+		if (existsSync(exclude)) {
+			const text = readFileSync(exclude, "utf8");
+			const next = text.split("\n").map((line) => (line.trim() === `/${LEGACY_BRAIN}/` ? `/${BRAIN}/` : line)).join("\n");
+			if (!next.split("\n").includes(`/${BRAIN}/`)) writeFileSync(exclude, `${next}${next.endsWith("\n") ? "" : "\n"}/${BRAIN}/\n`);
+			else writeFileSync(exclude, next);
+		}
+	} catch {
+		// An unreadable exclude list is not worth failing a start over; checkpoints re-add it on creation.
+	}
+	return true;
+}
 
 /** The home folder and the root of the disk are never a project unless the user says so with --here. */
 function isCatchAll(dir) {
@@ -52,11 +82,12 @@ export function checkProject(root, options = {}) {
 }
 
 /**
- * Create what is missing of the brain folder. An `.atlas/` folder that is already there, from the Orchestrator
- * extension, is completed, and its files are left as they are.
- * @returns {{ brainDir: string, created: boolean }}  created: this project had no Cartographer brain before
+ * Create what is missing of the brain folder, migrating a legacy `.atlas/` brain first when there is one.
+ * @returns {{ brainDir: string, created: boolean, migrated: boolean }}
+ *   created: this project had no Cartographer brain before; migrated: a legacy `.atlas/` brain was renamed
  */
 export function setUpBrain(root) {
+	const migrated = migrateBrain(root);
 	const brainDir = join(root, BRAIN);
 	const created = !hasBrain(root);
 	mkdirSync(join(brainDir, "plugins"), { recursive: true });
@@ -69,7 +100,7 @@ export function setUpBrain(root) {
 	// A file that ignores everything (the Orchestrator extension writes one) already covers these.
 	const missing = lines.includes("*") ? [] : wanted.filter((line) => !lines.includes(line));
 	if (missing.length > 0) writeFileSync(ignore, `${have}${have === "" || have.endsWith("\n") ? "" : "\n"}${missing.join("\n")}\n`);
-	return { brainDir, created };
+	return { brainDir, created, migrated };
 }
 
 function alive(pid) {

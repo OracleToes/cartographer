@@ -19,6 +19,7 @@ import { pin } from "../top.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
 import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
 import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
+import { USER_NAME } from "../user.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
@@ -732,7 +733,7 @@ function runLedger({ brainDir, engine }, args, api) {
 	if (ops.length === 0) return fail("`ops` is empty: give at least one operation.");
 	const { ledger, error } = loadLedger(brainDir);
 	if (ledger === undefined) {
-		return fail(`The ledger cannot be read: ${error}. It was probably edited by hand. Nothing was changed. Tell the user; they have to repair the file.`);
+		return fail(`The ledger cannot be read: ${error}. It was probably edited by hand. Nothing was changed. Tell ${USER_NAME}; they have to repair the file.`);
 	}
 	// This call ran before and was cut off after saving (a crash, then a restart): do not apply it twice.
 	if (ledger.lastCall === api.taskId) {
@@ -779,7 +780,7 @@ function runPlan({ brainDir, gate }, args, api) {
 	const ops = Array.isArray(args.ops) ? args.ops : [];
 	if (ops.length === 0) return fail("`ops` is empty: give at least one operation.");
 	const { plan, error } = loadPlan(brainDir);
-	if (plan === undefined) return fail(`The plan cannot be read: ${error}. It was probably edited by hand. Nothing was changed. Tell the user; they have to repair the file.`);
+	if (plan === undefined) return fail(`The plan cannot be read: ${error}. It was probably edited by hand. Nothing was changed. Tell ${USER_NAME}; they have to repair the file.`);
 	if (plan.lastCall === api.taskId) {
 		return { output: [{ type: "text", text: `These operations were already applied, before a restart.\n${authorizationLine(plan)}` }], details: { shown: ["(applied before the restart)"] } };
 	}
@@ -938,8 +939,8 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				shown.push(`shelved ${shelfLabel(item)} as ${item.id} · about ${count(tokens)} rendered tokens${handOn ? " · handed on to the main agent at the end" : ""}`);
 				lines.push(
 					main
-						? `${shelfLabel(item)} is on my shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .atlas; selected content is in view now and will stand at the start after the next collapse; every task begins with it read.\n\n${item.snapshot}`
-						: `${shelfLabel(item)} is on my shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .atlas; selected content is in view now and stays when my steps are collapsed.${handOn ? " When I return, it goes onto the orchestrating context's shelf as well." : ""}\n\n${item.snapshot}`,
+						? `${shelfLabel(item)} is on my shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .brain; selected content is in view now and will stand at the start after the next collapse; every task begins with it read.\n\n${item.snapshot}`
+						: `${shelfLabel(item)} is on my shelf as ${item.id} (${size}). For project files, the full snapshot is backed under .brain; selected content is in view now and stays when my steps are collapsed.${handOn ? " When I return, it goes onto the orchestrating context's shelf as well." : ""}\n\n${item.snapshot}`,
 				);
 				continue;
 			}

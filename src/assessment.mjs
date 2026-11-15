@@ -2,7 +2,7 @@
 //
 // What the project is, how it is built and run, what state it is in, what matters
 // when changing it. The agent replaces it whole when its picture changes. It lives
-// in <project>/.atlas/assessment.md as plain text, so the user can read and edit it.
+// in <project>/.brain/assessment.md as plain text, so the user can read and edit it.
 import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";

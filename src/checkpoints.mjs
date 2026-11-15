@@ -1,7 +1,7 @@
 // Checkpoints: a copy of the project's files taken before and after every change
 // task, so that what a task did can be shown exactly and taken back.
 //
-// They are kept in a git repository of Cartographer's own, `.atlas/checkpoints.git`,
+// They are kept in a git repository of Cartographer's own, `.brain/checkpoints.git`,
 // with the project folder as its work tree. It works the same whether or not the
 // project is a git repository, and it never touches the project's own `.git`: no
 // commit, no ref, no index change there.

@@ -6,10 +6,10 @@
 //
 //   the system (/usr, /etc, ...)   read-only
 //   the project directory          writable
-//   <project>/.atlas               read-only: the brain is Cartographer's
+//   <project>/.brain               read-only: the brain is Cartographer's
 //   <project>/.git                 read-only: commits are the user's
 //   the user's home folder         not there. In its place is a home of the sandbox's own,
-//                                  <project>/.atlas/home, which keeps what tools store there
+//                                  <project>/.brain/home, which keeps what tools store there
 //                                  (package caches, settings) from one window to the next
 //   /tmp, /var/tmp                 empty, gone when the window closes
 //   /run, /mnt, /media             empty: no sockets of the user's session, no other drives

@@ -10,6 +10,7 @@ const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 // each request stays in the book it belongs to.
 import { loadLedger, saveLedger } from "./ledger.mjs";
 import { approve, itemLine, loadPlan, savePlan, waiting } from "./plan.mjs";
+import { USER_HEAD } from "./user.mjs";
 
 /**
  * @param {string} brainDir
@@ -60,7 +61,7 @@ export function denyRequest(brainDir, id, reason, now = Date.now()) {
 		savePlan(brainDir, plan);
 		return { kind: "approval", text: itemLine(item) };
 	}
-	if (QUESTION_ID.test(id)) return answerQuestion(brainDir, id, reason === "" ? "The user does not want this pursued." : `The user does not want this pursued: ${reason}`, now);
+	if (QUESTION_ID.test(id)) return answerQuestion(brainDir, id, reason === "" ? `${USER_HEAD} does not want this pursued.` : `${USER_HEAD} does not want this pursued: ${reason}`, now);
 	return undefined;
 }
 

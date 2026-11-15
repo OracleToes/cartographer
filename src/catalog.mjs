@@ -1,5 +1,5 @@
 // Stable references for project files and Cartographer-owned catalog metadata.
-// Paths are locators, never identities. File bytes are retained by digest under .atlas/catalog/versions so pinned
+// Paths are locators, never identities. File bytes are retained by digest under .brain/catalog/versions so pinned
 // references remain exact after an edit or removal. pi-durable 1.5.2's public tool API does not expose DocumentId
 // allocation/lookup for app-owned documents, so the file catalog uses its own opaque ID while preserving the
 // brain-store namespace and native Durable IDs for Durable-owned conversations and entries.

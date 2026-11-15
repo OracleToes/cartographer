@@ -38,6 +38,7 @@ import { questionText, spanOf } from "./tools/ask.mjs";
 import { repeats } from "./screen/text.mjs";
 import { REPEAT_NOTE } from "./wake.mjs";
 import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
+import { USER_NAME } from "./user.mjs";
 
 /**
  * How often the agent is woken in quick succession before its wakes are spaced out. One more becomes free with
@@ -691,12 +692,12 @@ export async function runTerminal(session, options) {
 		const due = engine.due();
 		let reason;
 		let asked = false;
-		if (user) reason = "the user asked for it";
+		if (user) reason = `${USER_NAME} asked for it`;
 		else if (due !== undefined && (due.asked || would >= FLOOR)) {
 			reason = due.reason;
 			asked = due.asked === true;
 		} else if (would >= config.collapseTokens) reason = `about ${tokens(would)} tokens of finished work were in view while you rested`;
-		else if (away && would >= FLOOR) reason = `the user had been away for ${took(config.collapseMinutes * 60_000)}`;
+		else if (away && would >= FLOOR) reason = `${USER_NAME} had been away for ${took(config.collapseMinutes * 60_000)}`;
 		else {
 			engine.forget();
 			return false;
@@ -1140,7 +1141,7 @@ export async function runTerminal(session, options) {
 					line("  The agent is working. /stop first, then /pin.");
 					return true;
 				}
-				const result = pin(options.brainDir, { reason: "the user asked for it" });
+				const result = pin(options.brainDir, { reason: `${USER_NAME} asked for it` });
 				if (result.error !== undefined) line(`! The graph cannot be read, so the copy stays as it is: ${result.error}`);
 				else if (result.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
 				else line("  The copy at the top of the context is already current.");
@@ -1645,7 +1646,7 @@ export async function runTerminal(session, options) {
 		const were = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (were.length === 0) return;
 		recordWindows();
-		windows.closeAll({ why: `the user switched the sandbox ${to}, which closes every window` });
+		windows.closeAll({ why: `${USER_NAME} switched the sandbox ${to}, which closes every window` });
 		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
 	}
 

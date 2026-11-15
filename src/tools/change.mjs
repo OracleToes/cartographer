@@ -4,7 +4,7 @@
 // change item of an authorized plan (the rule is in src/harness.mjs). Every path
 // they accept is one a checkpoint holds, so whatever they do can be undone:
 //   - not outside the project, also not through a symlinked folder;
-//   - not the brain folder `.atlas/` and not `.git/`;
+//   - not the brain folder `.brain/` and not `.git/`;
 //   - not a file that git ignores, and not one inside a nested git repository,
 //     because checkpoints leave those out.
 import { POLICY } from "../config.mjs";
@@ -16,6 +16,7 @@ import { obj, opt, str } from "@earendil-works/pi-schema";
 import { isIgnored } from "../checkpoints.mjs";
 import { BRAIN } from "../project.mjs";
 import { fileReference } from "../catalog.mjs";
+import { USER_NAME } from "../user.mjs";
 
 const CONTENT_MAX_BYTES = POLICY.limits.change.contentBytes;
 
@@ -90,7 +91,7 @@ export function writeOne(root, brainDir, given, content, options = {}) {
 			if (had === undefined) unlinkSync(path.abs);
 			else writeFileSync(path.abs, priorBytes);
 		} catch (rollbackError) {
-			throw new ChangeError(`The write landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell the user.`);
+			throw new ChangeError(`The write landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell ${USER_NAME}.`);
 		}
 		throw new ChangeError(`The stable file identity could not be recorded (${error.message}); the file was restored and nothing was changed.`);
 	}
@@ -121,7 +122,7 @@ export function editOne(root, brainDir, given, oldText, newText, { expectedVersi
 	try { fileReference(root, brainDir, path.rel); }
 	catch (error) {
 		try { writeFileSync(path.abs, buffer); }
-		catch (rollbackError) { throw new ChangeError(`The edit landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell the user.`); }
+		catch (rollbackError) { throw new ChangeError(`The edit landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell ${USER_NAME}.`); }
 		throw new ChangeError(`The stable file identity could not be recorded (${error.message}); the file was restored and nothing was changed.`);
 	}
 	const line = text.slice(0, first).split("\n").length;

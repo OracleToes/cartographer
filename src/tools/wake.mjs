@@ -4,6 +4,7 @@ import { defineTool } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { took } from "../time.mjs";
 import { EVERY_MAX, NOTE_MAX, wakeAbout, WakeError, wakeRepeats } from "../wakes.mjs";
+import { USER_NAME } from "../user.mjs";
 
 /** @param {{ wakes: ReturnType<typeof import("../wakes.mjs").createWakes>, config: { wakeMin: number, wakesMax: number } }} input */
 export function wakeTool({ wakes, config }) {
@@ -94,7 +95,7 @@ export function sleepTool({ wakes }) {
 	return defineTool({
 		name: "sleep",
 		description: [
-			"End my turn and rest. I am woken by the user's next message, by a wake I set, and when a command ends or asks for input in a shell window.",
+			`End my turn and rest. I am woken by ${USER_NAME}'s next message, by a wake I set, and when a command ends or asks for input in a shell window.`,
 			"Call it alone, with no text, when a wake found nothing that needs me. A turn in which I called nothing but `sleep` is taken out of my context when the next wake comes, so a hundred quiet wakes cost no context.",
 			"So when such a turn found something worth keeping, I record it in the ledger before I sleep: a turn in which I used another tool stays.",
 		].join(" "),
