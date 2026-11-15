@@ -141,17 +141,20 @@ const planSpec = (plan) => ({
 		return { ...(op.network === true ? { network: true } : {}), ...(op.standing === true ? { standing: true } : {}) };
 	},
 	addBefore: true,
-	editFields: (item, op, hasText) => {
+	editFields: (item, op, hasText, checked) => {
 		const hasMode = op.mode !== undefined && op.mode !== "";
 		const hasNetwork = typeof op.network === "boolean";
 		const hasStanding = typeof op.standing === "boolean";
-		if (!hasText && !hasMode && !hasNetwork && !hasStanding) throw new PlanError("An edit needs `text`, `mode`, `network` or `standing`.");
+		const hasOutcome = op.outcome !== undefined;
+		if (!hasText && !hasMode && !hasNetwork && !hasStanding && !hasOutcome) throw new PlanError("An edit needs `text`, `mode`, `network`, `standing` or `outcome`.");
 		if (hasMode && !MODES.includes(op.mode)) throw new PlanError(`\`mode\` is ${JSON.stringify(op.mode)}; it is look or change.`);
+		if (hasOutcome && item.status !== POLICY.enums.entryStatus.done) throw new PlanError(`${item.id} is open; an outcome is what it ended with, and is set when it is done.`);
 		marks(hasMode ? op.mode : item.mode, op);
 		return {
 			...(hasMode ? { mode: op.mode } : {}),
 			...(hasNetwork && op.network ? { network: true } : {}),
 			...(hasStanding && op.standing ? { standing: true } : {}),
+			...(hasOutcome ? { outcome: checked(op.outcome, "`outcome`") } : {}),
 		};
 	},
 	afterEdit: (item, op) => {

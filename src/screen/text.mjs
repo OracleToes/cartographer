@@ -176,16 +176,44 @@ export const sgr = (style) => {
  * background of the block the line belongs to, or the mark of a selection.
  */
 export function paint(line, cols, extra = "") {
+	// A row is one line of the screen: what does not fit is not painted, so something that does not fit leaves a
+	// mark at the end of the row rather than vanishing without a word.
+	const flatOf = (raw) => clean(raw).replace(/\n/g, " ");
+	let room = cols;
+	let dropped = false;
+	{
+		let cells = 0;
+		for (const [raw] of line) {
+			const flat = flatOf(raw);
+			if (flat.trim() === "") continue;
+			if (cells >= cols) {
+				dropped = true;
+				break;
+			}
+			const text = fit(flat, cols - cells);
+			if (text === "" || text !== flat) {
+				dropped = true;
+				break;
+			}
+			cells += width(text);
+		}
+		if (dropped) room = Math.max(1, cols - 1);
+	}
 	let cells = 0;
 	let out = "";
 	for (const [raw, style] of line) {
-		if (cells >= cols) break;
-		const text = fit(clean(raw).replace(/\n/g, " "), cols - cells);
+		if (cells >= room) break;
+		const text = fit(flatOf(raw), room - cells);
 		if (text === "") continue;
 		cells += width(text);
 		// The line's own style comes first, so that a span's colour wins over it and its background stays.
 		const code = sgr(`${extra} ${style ?? ""}`.trim());
 		out += code === "" ? text : `${code}${text}\x1b[0m`;
+	}
+	if (dropped) {
+		const code = sgr(`${extra} faint`.trim());
+		out += code === "" ? "…" : `${code}…\x1b[0m`;
+		cells += 1;
 	}
 	if (cells < cols) {
 		const pad = " ".repeat(cols - cells);

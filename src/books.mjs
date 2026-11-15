@@ -54,7 +54,20 @@ const BOOK_SPEC = {
 	outcome: (op) => { if (op.text === undefined || flat(op.text) === "") return undefined; const text = flat(op.text); if (text.length <= POLICY.limits.books.outcomeChars) return text; warn(`\`text\` (how it ended) was clipped from ${text.length} to ${POLICY.limits.books.outcomeChars} characters; the rest is dropped. Edit if the cut lost the point.`); return `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…`; },
 	markClosed: false,
 	addBefore: true,
-	editTextRequired: true,
+	editFields: (item, op, hasText, checked) => {
+		const hasOutcome = op.outcome !== undefined;
+		if (!hasText && !hasOutcome) throw new BookError("An edit needs `text` or `outcome`: what changes.");
+		if (hasOutcome && item.status !== POLICY.enums.entryStatus.done) throw new BookError(`${item.id} is not settled; an outcome is how it ended, and is set when it settles.`);
+		if (!hasOutcome) return {};
+		const text = flat(op.outcome);
+		if (text === "") throw new BookError("`outcome` is empty: say how it ended, or leave it out.");
+		if (text.length > POLICY.limits.books.outcomeChars) {
+			warn(`\`outcome\` was clipped from ${text.length} to ${POLICY.limits.books.outcomeChars} characters; the rest is dropped. Edit if the cut lost the point.`);
+			return { outcome: `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…` };
+		}
+		return { outcome: text };
+	},
+	editTextRequired: false,
 	reorder: true,
 	unknownAction: (op) => `Unknown action ${JSON.stringify(op?.action)}; the actions are ${BOOK_ACTIONS.join(", ")}.`,
 };

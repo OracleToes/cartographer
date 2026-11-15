@@ -417,6 +417,20 @@ export function applyAtlasOp(atlas, op, who) {
 			if (done.length === 0) throw new AtlasError(lines.join(" "));
 			return { line: lines.join(" "), shown: `✓ confirmed ${done.join(", ")}`, changed: true };
 		}
+		case POLICY.enums.atlasActions.rename: {
+			const from = normName(op.name);
+			const to = normName(op.to);
+			if (from === "") throw new AtlasError("`name` is the node as it is.");
+			if (to === "") throw new AtlasError("`to` is the name the node should have: lowercase letters, digits and underscores.");
+			if (to.length > NAME_MAX) throw new AtlasError(`The name is ${to.length} characters; the limit is ${NAME_MAX}.`);
+			if (from === to) return { line: `${from} is its name already.`, changed: false };
+			if (atlas.nodes.some((entry) => entry.name === to)) throw new AtlasError(`There is a node ${to} already; pick another name.`);
+			const node = find(atlas, from);
+			node.name = to;
+			// Links are names: what pointed at the old name points at the new one now.
+			for (const other of atlas.nodes) other.links = other.links.map((link) => (link === from ? to : link));
+			return { line: `${from} is ${to} now; what links to it was rewritten to match.`, shown: `~ ${kindWord(node)} ${nodeLine(node)}`, changed: true };
+		}
 		case POLICY.enums.atlasActions.remove: {
 			const node = find(atlas, op.name);
 			atlas.nodes.splice(atlas.nodes.indexOf(node), 1);

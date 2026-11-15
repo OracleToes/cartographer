@@ -24,7 +24,7 @@ const freezeTree = (value) => {
 	return value;
 };
 
-const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close" });
+const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close", rename: "rename" });
 const LEDGER_KIND = freezeTree({ goal: "goal", question: "question", note: "note" });
 const PLAN_MODE = freezeTree({ look: "look", change: "change" });
 const BOOK_KIND = freezeTree({ assessment: "assessment", practice: "practice" });
@@ -219,7 +219,7 @@ export const POLICY = freezeTree({
 		ledgerNonGoalKinds: [LEDGER_KIND.question, LEDGER_KIND.note],
 		wakeActions: [ACTION.set, ACTION.remove],
 		atlasKinds: ["component", "finding", "dead_end"],
-		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree },
+		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree, rename: ACTION.rename },
 		atlasAuthors: { main: "main", task: "task", user: "user" },
 		shellAction: { run: ACTION.run, read: ACTION.read, wait: ACTION.wait, send: ACTION.send, stop: ACTION.stop, close: ACTION.close },
 		shellActions: [ACTION.run, ACTION.read, ACTION.wait, ACTION.send, ACTION.stop, ACTION.close],

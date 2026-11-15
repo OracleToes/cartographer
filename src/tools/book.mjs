@@ -246,6 +246,7 @@ const ACTION_GUIDE = {
 	atlas: {
 		add: "name and gist — kind, detail, files and links optional",
 		edit: "name and gist — kind, detail, files and links optional",
+		rename: "name (the node as it is) and to (its new name); what links to it is rewritten",
 		confirm: "name",
 		link: "for the node `ref` names: files (paths) and/or links (node names) — { files: [\"src/x.js\"], links: [\"other_node\"] }; the ref is the node, no `name` in the operation",
 		unlink: "for the node `ref` names: files (paths) and/or links (node names) to take off; the ref is the node, no `name` in the operation",
@@ -312,7 +313,7 @@ const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "assessment", "practic
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
 	plan: new Set(["add", "edit", "done", "remove", "before"]),
-	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove"]),
+	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove", "rename"]),
 	assessment: new Set(["add", "edit", "done", "remove", "before"]),
 	practice: new Set(["add", "edit", "done", "remove", "before"]),
 	context: new Set(["archive", "restore"]),

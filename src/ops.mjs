@@ -315,3 +315,80 @@ export function applyAdd(brainDir, book, text, root) {
 		throw error;
 	}
 }
+
+/**
+ * The fields the screen's small box edits, applied with the same operations the agent uses. `changes` holds only
+ * what was edited — `text`, `doneWhen`, `outcome`, `gist`, `detail`, `name` — so a save carries the whole edit in
+ * one pass: one operation per book, one save at the end, nothing half-applied. @returns the line to show
+ */
+export function editRow(brainDir, id, changes, root) {
+	const found = row(brainDir, id);
+	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
+	const now = new Date().toISOString();
+	try {
+		if (found.what === "ledger entry") {
+			const { ledger, error } = loadLedger(brainDir);
+			if (ledger === undefined) return `! The ledger cannot be read: ${error}`;
+			const op = {
+				action: POLICY.enums.actions.edit,
+				id,
+				...(changes.text !== undefined ? { text: changes.text } : {}),
+				...(changes.doneWhen !== undefined ? { done_when: changes.doneWhen } : {}),
+				...(changes.outcome !== undefined ? { outcome: changes.outcome } : {}),
+			};
+			const result = applyOp(ledger, op, now);
+			saveLedger(brainDir, ledger);
+			return result.line;
+		}
+		if (found.what === "plan item") {
+			const { plan, error } = loadPlan(brainDir);
+			if (plan === undefined) return `! The plan cannot be read: ${error}`;
+			const op = {
+				action: POLICY.enums.actions.edit,
+				id,
+				...(changes.text !== undefined ? { text: changes.text } : {}),
+				...(changes.outcome !== undefined ? { outcome: changes.outcome } : {}),
+			};
+			const result = applyPlanOp(plan, op, now);
+			savePlan(brainDir, plan);
+			return result.line;
+		}
+		if (found.what === "assessment entry" || found.what === "practice entry") {
+			const book = loadBooks(brainDir);
+			const op = {
+				action: POLICY.enums.actions.edit,
+				id,
+				...(changes.text !== undefined ? { text: changes.text } : {}),
+				...(changes.outcome !== undefined ? { outcome: changes.outcome } : {}),
+			};
+			const result = applyBookOp(book, op, now);
+			saveBooks(brainDir, book);
+			syncAssessment(brainDir, book);
+			return result.line;
+		}
+		if (found.what === "node") {
+			const { atlas, error } = loadAtlas(brainDir);
+			if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+			const node = atlas.nodes.find((entry) => entry.name === id);
+			if (node === undefined) return `There is no node ${id}.`;
+			const who = { root, now, by: POLICY.enums.atlasAuthors.user };
+			const lines = [];
+			// The edit goes first, by the name the node carries now; the rename last. One save after both, or none.
+			if (changes.gist !== undefined || changes.detail !== undefined) {
+				const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.edit, name: id, gist: changes.gist ?? node.gist, ...(changes.detail !== undefined ? { detail: changes.detail } : {}) }, who);
+				lines.push(result.line);
+			}
+			if (changes.name !== undefined && changes.name !== id) {
+				const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.rename, name: id, to: changes.name }, who);
+				lines.push(result.line);
+			}
+			if (lines.length === 0) return "Nothing is changed.";
+			saveAtlas(brainDir, atlas);
+			return lines.join(" ");
+		}
+		return `There is no ${id}. ${BOOKS}.`;
+	} catch (error) {
+		if (error instanceof LedgerError || error instanceof PlanError || error instanceof BookError || error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
+}

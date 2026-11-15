@@ -150,10 +150,15 @@ const LEDGER_SPEC = {
 	editFields: (item, op, hasText, checked) => {
 		const hasDoneWhen = op.done_when !== undefined && flat(op.done_when) !== "";
 		const hasSalient = op.salient !== undefined;
-		if (!hasText && !hasDoneWhen && !hasSalient) throw new LedgerError("An edit needs `text`, `done_when` or `salient`: what changes.");
+		const hasOutcome = op.outcome !== undefined;
+		if (!hasText && !hasDoneWhen && !hasSalient && !hasOutcome) throw new LedgerError("An edit needs `text`, `done_when`, `salient` or `outcome`: what changes.");
 		if (hasDoneWhen && item.kind !== POLICY.enums.ledgerKind.goal) throw new LedgerError(`${item.id} is a ${item.kind}; only a goal has a done-when line.`);
 		if (hasSalient) salientOf(op.salient, item.kind);
-		return hasDoneWhen ? { doneWhen: checked(op.done_when, "`done_when`") } : {};
+		if (hasOutcome && item.status !== POLICY.enums.entryStatus.done) throw new LedgerError(`${item.id} is open; an outcome is what it ended with, and is set when it closes.`);
+		return {
+			...(hasDoneWhen ? { doneWhen: checked(op.done_when, "`done_when`") } : {}),
+			...(hasOutcome ? { outcome: checked(op.outcome, "`outcome`") } : {}),
+		};
 	},
 	afterEdit: (item, op) => {
 		if (op.salient === true) item.salient = true;
