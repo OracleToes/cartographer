@@ -197,6 +197,8 @@ export const REFUSALS = {
 	taskSleeps: "A focused context does not put the whole session to sleep; return when its assigned work is complete.",
 	mainRuns:
 		"The orchestrating context does not type into a running program. `shell` with action send belongs to a task carrying out an authorized change item: call `task` with that item's id. Use action stop to interrupt the program.",
+	mainReadOnlyOff:
+		"A read-only window needs the sandbox, and the user has switched the sandbox off: without it there is nothing to hold a command to read-only, so the main agent cannot run one at all. Work without running commands, or say that /bwrap on brings the lane back, or carry it out with an approved change item and a task.",
 	lookTaskRuns: "This focus is read-only and cannot run commands. Keep in your report what should be run; the orchestrating context decides what happens next.",
 	noSandbox: (why) => `Commands cannot be run in this session: ${why}, and the user has not switched the sandbox off. Say in your report what should be run, so that the user can run it.`,
 	mainNotes: "A note of this kind is for a task's own steps. What you need after a collapse belongs in the ledger (a decision, a finding, a constraint), in a node of the graph (something about the project), or in your books.",

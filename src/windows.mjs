@@ -242,6 +242,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 		if (mode === "none") throw new SandboxError(runner.available?.why ?? "no sandbox");
 		if (!findScript()) throw new SandboxError("the `script` program (part of util-linux) was not found, and a shell window needs it for its terminal");
 		if (mode === "sandbox" && runner.available?.shell !== undefined && runner.available.shell !== "bash") throw new SandboxError("bash was not found, and a shell window needs it");
+		if (readOnly === true && mode !== "sandbox") throw new SandboxError("a read-only window needs the sandbox: it mounts the project read-only and blocks the network, and without the sandbox nothing holds a command to either");
 		const confined = readOnly && mode === "sandbox"; // read-only is a sandbox promise; without the sandbox nothing can hold it
 		mkdirSync(dir, { recursive: true });
 		const rc = join(dir, "rc");
