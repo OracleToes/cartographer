@@ -161,7 +161,77 @@ function renderReadSelection(bytes, path, range) {
 	const more = to < lines.length ? `\n(${lines.length - to} more lines; ask for range ${to + 1}-${Math.min(lines.length, to + POLICY.limits.look.readDefaultLines)}.)` : "";
 	return `== ${path} (lines ${from}-${Math.max(from - 1, to)} of ${lines.length})\n${body.join("\n")}${more}`;
 }
-const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.`);
+const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
+
+// ─── Error-attached guidance (Q3, 2026-11-15) ───────────────────────────────
+// One line per action, appended ONLY to local failures, only for brain targets whose operation payloads are
+// opaque to the declaration. Durable/report/file failures are already precise; the happy path never pays for this.
+const ACTION_GUIDE = {
+	ledger: {
+		add: "kind (goal | question | note) and text — a goal also needs done_when",
+		edit: "id, plus text and/or done_when (done_when only on a goal)",
+		done: "id, plus an optional text outcome",
+		remove: "id",
+	},
+	plan: {
+		add: "mode (look | change) and text — before, network and standing optional (network/standing only with change)",
+		edit: "id, plus text, mode, network or standing",
+		done: "id, plus an optional text outcome",
+		remove: "id",
+		before: "id and before",
+	},
+	assessment: {
+		add: "text (one short entry; the book implies the kind)",
+		edit: "id and text",
+		done: "id, plus an optional text outcome",
+		remove: "id",
+		before: "id and before",
+	},
+	practice: {
+		add: "text (one short entry; the book implies the kind)",
+		edit: "id and text",
+		done: "id, plus an optional text outcome",
+		remove: "id",
+		before: "id and before",
+	},
+	atlas: {
+		add: "name and gist — kind, detail, files and links optional",
+		edit: "name and gist — kind, detail, files and links optional",
+		confirm: "name",
+		link: "name, plus files and/or links (lists)",
+		unlink: "name, plus files and/or links (lists)",
+		remove: "name",
+		look: "name (a node name or a project path)",
+		tree: "anchor and depth (folder of the project; anchor '.' is the root)",
+	},
+	context: {
+		add: "text",
+		edit: "id and text",
+		done: "id, plus an optional text outcome",
+		remove: "id",
+		archive: "id",
+		restore: "id",
+		fold: "{ id } (an id like t12)",
+		note: "{ text }",
+		collapse: "{ text } optional",
+	},
+};
+const guideFor = (target, action) => ACTION_GUIDE[target]?.[action];
+/** Append the one-line field summary to a failure result, when one exists. Success results pass through unchanged. */
+const withGuide = (target, action, result) => {
+	if (result === null || typeof result !== "object" || result.isError !== true) return result;
+	const guide = guideFor(target, action);
+	if (guide === undefined) return result;
+	const parts = result.output ?? [];
+	const textParts = parts.filter((part) => part?.type === "text");
+	if (textParts.length === 0) return { ...result, output: [...parts, { type: "text", text: `${target} ${action} takes: ${guide}.` }] };
+	let appended = false;
+	return { ...result, output: parts.map((part) => {
+		if (appended || part?.type !== "text") return part;
+		appended = true;
+		return { ...part, text: `${part.text}\n${target} ${action} takes: ${guide}.` };
+	}) };
+};
 
 function currentShelf(brainDir, conversationId, main) {
 	const store = loadContext(brainDir);
@@ -474,17 +544,17 @@ async function runUniversal({ root, brainDir, config, engine, gate }, args, api,
 				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => [], created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
 				if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
 				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
-			} catch (error) { return error instanceof AtlasError ? fail(`Atlas ${action} refused: ${error.message}.`) : Promise.reject(error); }
+			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
 		}
-		if (target === "ledger") return runLedger({ brainDir, engine }, { ops: [operation] }, api);
-		if (target === "plan") return runPlan({ brainDir, gate }, { ops: [operation] }, api);
-		if (target === "assessment" || target === "practice") return runBooks({ brainDir }, { ops: [operation] }, api);
+		if (target === "ledger") return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [operation] }, api));
+		if (target === "plan") return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [operation] }, api));
+		if (target === "assessment" || target === "practice") return withGuide(target, action, runBooks({ brainDir }, { ops: [operation] }, api));
 		if (target === "context") {
 			if (action === "archive" || action === "restore") {
 				try { return textResult(applyContextRowAction(brainDir, args.ref.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, args.operation?.when, api.taskId), { target, action, ref: args.ref }); }
-				catch (error) { return fail(`Context row ${action} refused: ${error.message}.`); }
+				catch (error) { return withGuide(target, action, fail(`Context row ${action} refused: ${error.message}.`)); }
 			}
-			return runContext({ root, brainDir, config, engine }, { ops: [operation] }, api);
+			return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [operation] }, api));
 		}
 	}
 	if (target === "report" && action === "list") {
@@ -994,8 +1064,11 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			const value = result.value;
 			if (value.target === undefined || value.action === undefined) throw new Error('Validation failed for tool "book": target and action are both required.');
 			const { unsupported, problems } = checkCall(value.target, value.action, value);
-			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.`);
-			if (problems.length > 0) throw new Error(`Validation failed for tool "book": ${value.target} ${value.action} needs ${joinList(problems)}.`);
+			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.${CAPABILITIES[value.target] === undefined ? "" : ` Supported actions for ${value.target}: ${Object.keys(CAPABILITIES[value.target]).join(", ")}.`}`);
+			if (problems.length > 0) {
+				const guide = guideFor(value.target, value.action);
+				throw new Error(`Validation failed for tool "book": ${value.target} ${value.action} needs ${joinList(problems)}.${guide === undefined ? "" : ` ${value.target} ${value.action} takes: ${guide}.`}`);
+			}
 			return value;
 		},
 
