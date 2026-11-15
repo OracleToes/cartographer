@@ -98,6 +98,12 @@ const shelfIdLine = (text, item) => {
 	return `${clean} [shelf id ${item.id}]${rest.length > 0 ? `\n${rest.join("\n")}` : ""}`;
 };
 
+/** The raw text a placement held when its snapshot was taken, and what it resolves to now. */
+const rawShelf = (root, item, brainDir) => {
+	const now = item.ref !== undefined ? SHELF_RESOLVERS[item.ref.type]?.(brainDir, item.ref, item) : liveShelfSource(root, item)?.content;
+	return { before: readShelfSnapshot(brainDir, item), now };
+};
+
 /** The line delta of a shelf change, as +added −removed lines; for the one-line notices in the state block. */
 function shelfDelta(before, after) {
 	const oldLines = String(before ?? "").split("\n");
@@ -941,7 +947,9 @@ export function contextLines(brainDir, root, { used, window }) {
 		// One line per changed file (O3): the diff is a tool call away — re-shelve the file or read it — not prompt cargo.
 		lines.push("Shelved files changed since their snapshots (the snapshots stay as they were until collapse; read the file or re-shelve it for the difference):");
 		for (const { item, current } of changes) {
-			const { added, removed } = shelfDelta(item.snapshot, current);
+			// The stored snapshot is the rendered view, whose header line (`(lines a-b of N)`) changes on every line-count edit: diff the raw file text instead when it is available, and fall back to the rendered view otherwise.
+			const raw = rawShelf(root, item, brainDir);
+			const { added, removed } = raw.before !== undefined && raw.now !== undefined ? shelfDelta(raw.before, raw.now) : shelfDelta(item.snapshot, current);
 			lines.push(`  ${shelfLabel(item)} [${item.id}] changed (+${added} −${removed} lines)`);
 		}
 	}
