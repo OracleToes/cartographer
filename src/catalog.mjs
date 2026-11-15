@@ -360,14 +360,14 @@ export function retainReferenceVersion(brainDir, ref, value) {
 	const catalog = loadCatalog(brainDir);
 	if (catalog.namespace !== ref.namespace) throw new CatalogError("The reference belongs to another brain-store namespace");
 	const bytes = Buffer.from(canonicalJson(value ?? null));
-	if (sha256(bytes) !== ref.version) throw new CatalogError("The supplied content does not match the reference version");
+	if (!matchesReferenceVersion(value, ref.version)) throw new CatalogError("The supplied content does not match the reference version");
 	const path = entityVersionPath(brainDir, ref);
 	if (existsSync(path)) {
 		const info = lstatSync(path);
 		if (info.isSymbolicLink() || !info.isFile()) throw new CatalogError("Immutable entity-version storage is not a regular file");
 		let saved;
 		try { saved = JSON.parse(readFileSync(path, "utf8")); } catch { throw new CatalogError("Immutable entity-version storage is corrupt"); }
-		if (sha256(Buffer.from(canonicalJson(saved ?? null))) !== ref.version) throw new CatalogError("Immutable entity-version storage failed its digest check");
+		if (!matchesReferenceVersion(saved, ref.version)) throw new CatalogError("Immutable entity-version storage failed its digest check");
 	} else {
 		mkdirSync(dirname(path), { recursive: true });
 		const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -377,6 +377,16 @@ export function retainReferenceVersion(brainDir, ref, value) {
 	}
 	return path;
 }
+
+/**
+ * Version match for retained blobs. Current blobs hash their canonical bytes; blobs written before the canonical-digest
+ * change hashed `JSON.stringify(value)` — those are accepted too (explicit user decision 2026-11-15). Legacy matches are
+ * honored in place, never rewritten on a read path.
+ */
+const matchesReferenceVersion = (value, version) => {
+	if (sha256(Buffer.from(canonicalJson(value ?? null))) === version) return true;
+	try { return sha256(Buffer.from(JSON.stringify(value ?? null))) === version; } catch { return false; }
+};
 
 /** Resolve an exact retained non-file entity version, or return undefined when unavailable. */
 export function readReferenceVersion(brainDir, ref) {
@@ -388,7 +398,7 @@ export function readReferenceVersion(brainDir, ref) {
 		const info = lstatSync(path);
 		if (info.isSymbolicLink() || !info.isFile()) return undefined;
 		const value = JSON.parse(readFileSync(path, "utf8"));
-		return sha256(Buffer.from(canonicalJson(value ?? null))) === ref.version ? value : undefined;
+		return matchesReferenceVersion(value, ref.version) ? value : undefined;
 	} catch { return undefined; }
 }
 
