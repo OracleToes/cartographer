@@ -121,18 +121,19 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 		} catch (error) {
 			return { isError: true, output: [{ type: "text", text: `Cannot load a strict schema for book.${target}: ${error.message} No operation was enabled.` }] };
 		}
-		const schemaText = JSON.stringify(parameters);
-		const schemaVersion = createHash("sha256").update(schemaText).digest("hex");
+		const schemaVersionText = JSON.stringify(parameters);
+		const schemaText = JSON.stringify(parameters, null, 2);
+		const schemaVersion = createHash("sha256").update(schemaVersionText).digest("hex");
 		const schemaId = `cartographer:book:${target}:tree`;
 		const schemaRef = brainDir === undefined ? undefined : nativeReference(brainDir, "schema", schemaId, schemaVersion);
 		const referenceText = schemaRef === undefined ? "" : `Schema reference: ${JSON.stringify(schemaRef)}\n`;
-		const prelude = `${referenceText}Loaded the complete book.${target} action schema. Use the action and matching payload from this branch in the next book call.\n\n`;
+		const prelude = `${referenceText}Loaded the complete book.${target} action schema into the next request's context. Use it for the next book operation.\n\n`;
 		const estimatedTokens = Math.ceil((schemaText.length + prelude.length + 32) / POLICY.estimation.charsPerToken);
 		if (estimatedTokens > schemaBudgetTokens) return { isError: true, output: [{ type: "text", text: `The book.${target} schema is about ${estimatedTokens} tokens, above the ${schemaBudgetTokens}-token schema budget; no operation was enabled.` }] };
 		if (brainDir !== undefined) retainReferenceVersion(brainDir, schemaRef, parameters);
-		pending.set(api.conversationId, { name: "book", branch: target, parameters, description: book.description, schemaVersion, schemaRef });
+		pending.set(api.conversationId, { name: "book", branch: target, parameters, description: book.description, prelude, schemaVersion, schemaRef });
 		return {
-			output: [{ type: "text", text: `${prelude}${schemaText}` }],
+			output: [{ type: "text", text: `Loaded the book.${target} schema into request context. No book operation was performed; call book with a ${target} action next.` }],
 			details: {
 				schemaRef: { ...(schemaRef ?? {}), estimatedTokens },
 				schemaSelection: { tool: "book", branch: target, phase: "book-target", description: book.description },
@@ -234,7 +235,9 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 					if (!answeredWithoutOperation && (pendingCall || (calls.length === 0 && (lastOperationResult === undefined || lastOperationResult.isError === true)))) {
 						const parameters = readReferenceVersion(brainDir, ref);
 						if (parameters !== undefined) {
-							selection = { name: "book", branch: meta.branch, description: meta.description, parameters, schemaVersion: ref.version, schemaRef: ref };
+							const referenceText = `Schema reference: ${JSON.stringify(ref)}\n`;
+							const prelude = `${referenceText}Loaded the complete book.${meta.branch} action schema into the request context. Use it for the next book operation.\n\n`;
+							selection = { name: "book", branch: meta.branch, description: meta.description, parameters, prelude, schemaVersion: ref.version, schemaRef: ref };
 							pending.set(conversationId, selection);
 							activeSchemaResult = candidate;
 						}
@@ -257,8 +260,7 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 				}
 			}
 			const removeIds = new Set(branchResults.filter((message) => message !== activeSchemaResult).map((message) => message.toolCallId).filter(Boolean));
-			if (removeIds.size === 0) return messages;
-			return messages.flatMap((message) => {
+			let dressed = removeIds.size === 0 ? messages : messages.flatMap((message) => {
 				if (message.role === "toolResult" && message.toolName === "book" && removeIds.has(message.toolCallId)) return [];
 				if (message.role === "assistant" && Array.isArray(message.content)) {
 					const content = message.content.filter((part) => !(part.type === "toolCall" && part.name === "book" && removeIds.has(part.id)));
@@ -267,6 +269,11 @@ export function createToolSchemaLifecycle(tools, { schemaBudgetTokens = 4096, br
 				}
 				return [message];
 			});
+			if (selection !== undefined) {
+				const schemaText = JSON.stringify(selection.parameters, null, 2);
+				dressed = [...dressed, { role: "user", content: [{ type: "text", text: `${selection.prelude ?? `Cartographer schema context for book.${selection.branch}. Use this for the next book call.\n\n`}${schemaText}` }] }];
+			}
+			return dressed;
 		},
 	};
 }
