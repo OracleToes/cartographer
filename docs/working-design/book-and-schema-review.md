@@ -548,7 +548,7 @@ Deleting the routing ceremony does not weaken the confirmed Stage-4/5 intent: ev
 - `node --check` on every touched file; scratch harness (since deleted) with a fake Durable world covered: fresh/cached lists (memo mtime stable on cached calls), pagination over 250 items across two pages, toolCall/toolResult/prompt/conversation lists, canonical-digest key-order stability, soft-forget end-to-end (marker → store → list filter), sidecar crash recovery incl. backing sweep, snapshot skip/rewrite behavior, file observe/resolve (external-edit → stale, catalog untouched), schema shelf pin (current version retained; wrong pin refused), report list/inspect/read/stale refusal, empty ledger/report/brain paths, shelf add-time backing render after soft-forget.
 
 **Open**
-- **Canonical-vs-legacy digest hazard**: retained entity blobs written before this change were hashed as `sha256(JSON.stringify(value))`; canonical-bytes verification now fails them, so `readReferenceVersion` reports them unavailable rather than trusting them. Needs the user's decision — silent legacy fallback, one-time migration, or leave failing closed (current behavior). Gates schema/report shelf pins on pre-existing brain-stores.
-- §6.6 afterTool/afterResponse hook (index update on the write path) — lazy backfill is the current design.
+- ~~Canonical-vs-legacy digest hazard~~ — RESOLVED 2026-11-15: the user chose the legacy fallback. Retained blobs are verified against both digests (canonical bytes, then `sha256(JSON.stringify(value))`); legacy matches are honored in place, never rewritten (`cfbc8a2`).
+- ~~§6.6 afterTool/afterResponse hook~~ — RESOLVED 2026-11-15: the user chose lazy backfill; no write-path hook for now.
 - §8 Q5 (retained-version retention cap) and Q6 (default `--frozen-lockfile`-adjacent review flag); Q3 (Phase 3 error-attached guidance) awaits live-server evidence.
 - Phase 3 (error guidance), Phase 4 (test port), Phase 5 (docs) — not authorized.
