@@ -1281,6 +1281,33 @@ test("context: read results are ephemeral — all but the newest leave one line,
 	assert.match(endedAssistant.at(-1).content[0].text, /<read-tail>/);
 });
 
+test("screen: a collapse of the main context leaves only the marker, and the agent's blocks fold open", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	let clock = 1000;
+	const chat = createChat({ now: () => clock });
+	const out = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
+	chat.print("Cartographer · /project\nbrain /project/.brain · model at server\n", { keep: true });
+	chat.user("hello before");
+	chat.entry(0, reply([call("c1", "chat", { text: "Hi." })], 1));
+	chat.block("the state block — the time, the atlas, the books, the ledger, the plan", "Ledger\n- g1 finish the roller\n\nPlan\np1 open");
+	assert.match(out(), /the state block/, "a block folds to one line");
+	assert.equal(out().includes("g1 finish the roller"), false, "and its content is not in view until it is opened");
+	const before = chat.lines(80).find((line) => line.kind === "block");
+	chat.toggle(before.item);
+	assert.match(out(), /g1 finish the roller/, "opened, the content stands as the agent sees it");
+	assert.equal(chat.textOf(before.item), "Ledger\n- g1 finish the roller\n\nPlan\np1 open", "and copies as it stands");
+	// The collapse: everything of the conversation is out, the marker stands, the intro survives.
+	chat.entry(0, { model: [{ role: "user", content: [{ type: "text", text: `<context>\n${RECORD} My context was collapsed\n</context>` }] }] }, "◆ context collapsed (you rested): about 9,000 → 800 tokens · kept 1 task record, 0 shelf items, 2 messages of talk  (/context shows it)\n");
+	const after = out();
+	assert.equal(after.includes("hello before"), false, "the messages the collapse dropped are out of the tab");
+	assert.equal(after.includes("the state block"), false, "the blocks of the request as well");
+	assert.match(after, /Cartographer · /, "the intro stays");
+	assert.match(after, /context collapsed \(you rested\)/);
+	assert.equal(after.includes("Hi."), false, "and what was said with `chat`");
+});
+
 test("screen: text is measured in cells, wrapped and painted to the width; a repeating tail is told from ordinary text", async () => {
 	const { cut, fit, paint, repeats, short, span, width, wrap } = await import("../src/screen/text.mjs");
 	assert.deepEqual([width("abc"), width("日本"), width("e\u0301"), width("│ ✓")], [3, 4, 1, 3], "wide characters take two cells, a combining mark none");

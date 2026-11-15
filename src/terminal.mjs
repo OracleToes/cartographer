@@ -21,7 +21,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, foldReports, isFront, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem } from "./context.mjs";
+import { clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
@@ -29,16 +29,17 @@ import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
 import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { listRequests, approveRequests, denyRequest, answerQuestion } from "./requests.mjs";
 import { booksPath } from "./books.mjs";
-import { stateBlock, windowLines } from "./state.mjs";
+import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
-import { loadTop, pin, sinceTop } from "./top.mjs";
+import { loadTop, pin, sinceTop, splitTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
-import { eventLine, isNoChat, startNote, wakeNote, withoutQuietWakes } from "./wake.mjs";
+import { eventLine, isNote, isNoChat, startNote, wakeNote, withoutQuietWakes } from "./wake.mjs";
 import { questionText, spanOf } from "./tools/ask.mjs";
 import { repeats } from "./screen/text.mjs";
 import { REPEAT_NOTE } from "./wake.mjs";
 import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
 import { USER_NAME } from "./user.mjs";
+import { dressRequest, withoutAdditions } from "./request.mjs";
 
 /**
  * How often the agent is woken in quick succession before its wakes are spaced out. One more becomes free with
@@ -53,10 +54,10 @@ const KILLED = POLICY.control.windowKilledReason;
 const DIFF_LINES = POLICY.limits.terminal.diffLines;
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
-const textOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-const callsOf = (message) => (message?.content ?? []).filter((part) => part.type === "toolCall");
+const textOf = (message) => (typeof message?.content === "string" ? message.content : (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""));
+const callsOf = (message) => (Array.isArray(message?.content) ? message.content : []).filter((part) => part.type === "toolCall");
 /** What a reply holds that is the agent's own: the model's reasoning and its plain text, in the order written. */
-const notesOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "thinking" ? [part.thinking ?? ""] : part.type === "text" ? [part.text] : [])).filter((text) => text !== "").join("\n");
+const notesOf = (message) => (Array.isArray(message?.content) ? message.content : []).flatMap((part) => (part.type === "thinking" ? [part.thinking ?? ""] : part.type === "text" ? [part.text] : [])).filter((text) => text !== "").join("\n");
 /** What a reply says to the user: the text of its `chat` calls, also while a call is still being written. */
 const chatOf = (message) => callsOf(message).flatMap((call) => (call.name === "chat" && typeof call.arguments?.text === "string" && call.arguments.text !== "" ? [call.arguments.text] : [])).join("\n\n");
 /** In front of each line of the agent's own text. */
@@ -583,11 +584,102 @@ export async function runTerminal(session, options) {
 		return queue;
 	};
 
+	/** The folded blocks of a request (they are what the agent sees, and then does not need to hold again). */
+	const printBlocks = (state, windows, tail) => {
+		if (state !== undefined) ui.block("the state block — the time, the atlas, the books, the ledger, the plan", state);
+		if (windows !== undefined) ui.block("the shell windows as they stand", windows);
+		if (tail !== undefined) ui.block("the newest read — its content stands at the end of the request", tail);
+	};
+	/**
+	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in
+	 * between, the blocks the message carries after it. The screen only; the plain terminal has its own behavior.
+	 */
+	const renderDressed = (depth, message) => {
+		const original = textOf(message);
+		const { text: afterTail, tail } = splitReadTail(original);
+		const { text: afterState, state, windows } = splitState(afterTail);
+		const { text: afterTop, top } = splitTop(afterState);
+		const body = afterTop;
+		const front = depth === 0 && message.role === "user" && isFront({ role: "user", content: [{ type: "text", text: body }] });
+		if (front) {
+			// The front block of a collapse: everything before it is gone from the agent's view, so the tab shows
+			// only the marker (the collapse leaves the intro alone), and then what stands in its place.
+			const store = loadContext(options.brainDir);
+			ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`);
+			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
+		} else {
+			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
+			if (message.role === "user" && body.startsWith(`${POLICY.markup.note.open}\n`)) {
+				// A task's collapsed steps: one block stands in their place, and the steps themselves are gone.
+				ui.print(`◆ its steps collapsed — their results are no longer in view, one line each says what they were\n`);
+			} else if (message.role === "user") {
+				const cleaned = withoutAdditions(body).trim();
+				if (cleaned === "") {
+					// A message that was all additions is not shown; the agent never saw words of its own there.
+				} else if (isNote({ role: "user", content: [{ type: "text", text: cleaned }] })) {
+					ui.print(`◆ a note Cartographer left itself: ${oneLine(cleaned.replace(/\n/g, " "), POLICY.limits.terminal.messageSummaryChars)}\n`);
+				} else {
+					ui.user(cleaned);
+				}
+			} else {
+				const cleaned = message.role === "toolResult" ? withoutAdditions(body).trim() : undefined;
+				ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "");
+			}
+		}
+		if (state !== undefined || windows !== undefined || tail !== undefined) printBlocks(state, windows, tail);
+	};
+	/**
+	 * Replay what the agent keeps in view, in the order it sees it: on start, before any new entry arrives. The
+	 * plain terminal prints nothing of the past; the screen shows it. A task's replay begins at its brief (the
+	 * fork point is the main conversation's story, shown at depth 0).
+	 */
+	const replayHistory = async (conversation, id, depth, fallback = []) => {
+		if (ui === undefined) return;
+		// What the agent keeps in view is the current stretch of the conversation since its last restart, exactly as
+		// the request sees it — not a window of the newest entries. The brief of a task's fork is in it, unless the task
+		// has collapsed since, in which case everything before its restart is out of view anyway.
+		let entries = fallback;
+		try {
+			entries = (await conversation.context(context)).entries ?? fallback;
+		} catch {
+			// An unreadable stretch: show what the watch happens to hold rather than nothing.
+		}
+		if (entries.length === 0) return;
+		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.sibling");
+		const at = found < 0 ? 0 : found;
+		const own = depth === 0 ? entries : entries.slice(at);
+		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
+		const briefIds = new Set();
+		for (const entry of own) for (const message of entry.model ?? []) if (message.role === "toolResult" && message.toolName === "task") briefIds.add(message.toolCallId);
+		const raw = [];
+		// The system prompt rides in its own entry and is rebuilt fresh for every request; it is not part of the
+		// conversation the tab shows, and a system message at the end would keep the state and windows blocks off
+		// the end of the request.
+		for (const entry of own) for (const message of entry.model ?? []) {
+			if (message.role === "system") continue;
+			raw.push(message);
+		}
+		if (raw.length === 0) return;
+		let dressed;
+		try {
+			dressed = dressRequest(raw, { brainDir: options.brainDir, root: options.root, runner: options.runner, config, windows, wakes, gate, main: depth === 0, conversationId: depth === 0 ? undefined : id, replay: true });
+		} catch (error) {
+			ui.print(`! the stored conversation could not be shown as the agent sees it (${error?.message ?? error}); it is stored safely\n`);
+			dressed = raw;
+		}
+		for (const message of dressed) {
+			if (message.role === "toolResult" && briefIds.has(message.toolCallId)) continue;
+			renderDressed(depth, message);
+		}
+	};
+
 	const follow = async (id, depth) => {
 		const conversation = depth === 0 ? main : await harness.conversation(id, context);
 		if (conversation === undefined) return;
 		const watch = await conversation.watch(context);
 		watches.push(watch);
+		// Awaited: entries that come in while the replay is built are handed in after it, in order.
+		await replayHistory(conversation, id, depth, watch.value.entries ?? []);
 		if (depth === 0 && watch.value.docs["pi.live"]?.run !== undefined) line(dim("Continuing unfinished work from the last session…"));
 		// The main agent's history is not replayed. A task is shown from its brief on.
 		let newest = watch.value.entries.at(-1)?.id ?? 0;
@@ -636,15 +728,20 @@ export async function runTerminal(session, options) {
 
 	// ─── The context engine on screen (src/engine.mjs) ──────────────────────
 	const tokens = (n) => (Number.isFinite(n) ? `${count(n)}` : "?");
+	/** The words of the collapse marker, in a few lines; `line` per piece elsewhere. */
+	const collapsePrinted = (info) => {
+		const kept = [plural(info.kept?.tasks ?? 0, "task record"), plural(info.kept?.shelf ?? 0, "shelf item"), `${plural(info.kept?.talk ?? 0, "message")} of talk`].join(", ");
+		const size = info.before !== undefined && info.after !== undefined ? `about ${tokens(info.before)} → ${tokens(info.after)} tokens` : info.after !== undefined ? `now about ${tokens(info.after)} tokens` : "";
+		const lines = [`context collapsed (${ofAgent(info.reason)})${size === "" ? "" : `: ${size}`} · kept ${kept}  (/context shows it)`];
+		for (const entry of info.left ?? []) lines.push(`  taken off the shelf: ${shelfLabel(entry.item)} (${entry.why})`);
+		return lines.join("\n");
+	};
 	/** A collapse of the main context, said when its front block shows up in the conversation. */
 	function collapsedLine() {
 		// Said once: by `rest` for a collapse it made, by the conversation's entry for one made in the middle of a turn.
 		const info = engine?.takeCollapsed();
 		if (info === undefined) return;
-		const kept = [plural(info.kept.tasks, "task record"), plural(info.kept.shelf, "shelf item"), `${plural(info.kept.talk, "message")} of talk`].join(", ");
-		const size = info.before !== undefined && info.after !== undefined ? `about ${tokens(info.before)} → ${tokens(info.after)} tokens` : info.after !== undefined ? `now about ${tokens(info.after)} tokens` : "";
-		line(`${bold("◆")} context collapsed (${ofAgent(info.reason)})${size === "" ? "" : `: ${size}`} · kept ${kept}  ${dim("(/context shows it)")}`);
-		for (const entry of info.left ?? []) line(dim(`  taken off the shelf: ${shelfLabel(entry.item)} (${entry.why})`));
+		line(`${bold("◆")} ${collapsePrinted(info)}`);
 	}
 	/** A reason as the front block words it for the agent ("you asked for it"), worded for the user. */
 	const ofAgent = (reason) => reason.replace(/^you asked/, "the agent asked").replace(/ while you rested$/, " while it rested");
@@ -725,7 +822,9 @@ export async function runTerminal(session, options) {
 		const { text, info } = engine.collapse({ reason });
 		await main.reset(text, context);
 		// A collapse is the boundary at which the prompt the agent approved for itself takes effect.
-		collapsedLine();
+		// In the line-by-line terminal the marker is said here; in the full screen it is said by the
+		// conversation's front-block entry, so that it is said after everything before it is wiped.
+		if (ui === undefined) collapsedLine();
 		if (config.readAhead !== false && !final) {
 			const ahead = engine.readAhead(text, info.at);
 			if (ahead !== undefined) {

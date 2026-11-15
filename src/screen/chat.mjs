@@ -19,6 +19,8 @@
 // nothing and knows no terminal (src/screen/app.mjs does).
 import { POLICY } from "../config.mjs";
 import { describeCall, describeResult } from "../terminal.mjs";
+import { isFront } from "../context.mjs";
+import { splitTop } from "../top.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
@@ -29,6 +31,8 @@ const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
 const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
 /** The most rows an opened result shows; the rest is in the tab it leads to, or in /report. */
 const DETAIL_ROWS = POLICY.limits.screen.chatDetailRows;
+/** The most rows an opened request block shows (the state block and the copy at the top of the context). */
+const BLOCK_ROWS = DETAIL_ROWS * 2;
 /** Items kept; older ones leave the tab (they stay in the session and in the export of what is left). */
 const ITEMS_MAX = POLICY.limits.screen.chatItems;
 
@@ -121,19 +125,39 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		user(text) {
 			say({ type: "user", text });
 		},
-		/** Text from Cartographer itself: what a command printed, a notice. Consecutive pieces are one block. */
-		print(text) {
+		/** Text from Cartographer itself: what a command printed, a notice. Consecutive pieces are one block. `{ keep: true }`: survives a collapse of the conversation. */
+		print(text, options = {}) {
 			const cleaned = String(text).replace(/\r\x1b\[2?K/g, "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
 			if (cleaned === "") return;
 			const last = items.at(-1);
-			if (last?.type === "console" && !last.sealed) last.text += cleaned;
-			else say({ type: "console", text: cleaned });
+			if (last?.type === "console" && !last.sealed) {
+				last.text += cleaned;
+				if (options.keep === true) last.keep = true;
+			} else say({ type: "console", text: cleaned, ...(options.keep === true ? { keep: true } : {}) });
 			touch();
 		},
 		/** The block of printed text is complete: what is printed next starts a new one. */
 		seal() {
 			const last = items.at(-1);
 			if (last?.type === "console") last.sealed = true;
+		},
+		/**
+		 * A collapse of the main context: everything the agent could see before it is out of the tab, so only the
+		 * marker of the collapse stands. Items flagged `keep` (what was said before the screen opened) survive.
+		 */
+		collapse() {
+			for (let index = items.length - 1; index >= 0; index--) if (items[index].keep !== true) items.splice(index, 1);
+			rows.clear();
+			live.clear();
+			touch();
+		},
+		/**
+		 * A block the agent sees at the start or the end of its request — the copy at the top of the context, the
+		 * state block, the shell windows block, the newest read. One line until opened, the way a run of calls folds.
+		 */
+		block(label, text) {
+			closeGroup();
+			push({ type: "block", label: String(label).replace(/\s+/g, " ").trim(), text: String(text), open: false, at: now() });
 		},
 		/**
 		 * One new entry of a conversation: depth 0 is the main agent, 1 a task. `printed` is what the plain
@@ -185,8 +209,12 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 						say({ type: "console", text: outcome.endsWith("\n") ? outcome : `${outcome}\n`, sealed: true, of: row.id });
 					}
 					touch();
-				} else if (message.role === "user" && depth === 0 && printed.trim() !== "" && /context collapsed/.test(printed)) {
-					say({ type: "console", text: printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""), sealed: true });
+				} else if (message.role === "user" && depth === 0 && isFront({ role: "user", content: [{ type: "text", text: splitTop(textOf(message)).text }] })) {
+					// The front block of a collapse, whenever it reached the tab — live or replayed: everything the
+					// agent could see before it is out of view, so only the marker stands.
+					api.collapse();
+					const said = printed.trim() !== "" ? printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "") : "◆ the context was collapsed; /context shows it\n";
+					say({ type: "console", text: said, sealed: true });
 				}
 			}
 		},
@@ -242,7 +270,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		lastAgent: () => items.findLast((item) => item.type === "agent")?.text,
 		toggle(key, to) {
 			const item = items.find((entry) => entry.key === key);
-			if (item?.type === "group") item.open = to ?? !item.open;
+			if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
 			touch();
 		},
 		/** Open every run of calls, or fold them all with what was opened inside them. */
@@ -375,6 +403,15 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					for (const [index, piece] of wrap(item.text, inner - 2).entries()) add([[index === 0 ? "› " : "  ", "user bold"], [piece, "bold"]], { item: item.key, kind: "user", bg: "bgUser" });
 				} else if (item.type === "agent") {
 					said(item.text, { item: item.key, kind: "agent" }, item);
+				} else if (item.type === "block") {
+					const ref = { item: item.key, kind: "block", bg: "bgTool" };
+					add([[item.open ? "▾ " : "▸ ", "carto"], [cut(item.label, inner - 2), "muted"]], ref);
+					if (item.open) {
+						const indent = "  ";
+						const pieces = wrap(item.text, inner - width(indent));
+						for (const piece of pieces.slice(0, BLOCK_ROWS)) add([[indent, "faint"], [piece, "muted"]], ref);
+						if (pieces.length > BLOCK_ROWS) add([[indent, "faint"], [`… ${pieces.length - BLOCK_ROWS} more lines (y copies it)`, "faint"]], ref);
+					}
 				} else if (item.type === "note") {
 					if (!thinking) return;
 					for (const piece of wrap(item.text, cols - 2)) add([["┊ ", "faint"], [piece, "note italic"]], { item: item.key, kind: "note" });
@@ -411,7 +448,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 			const base = `${cols}|${thinking}|${styleRev}`;
 			const linesOf = (item) => {
 				const still = item.type !== "group" || (item.closed && !item.rows.some((row) => row.kind === "call" && row.state === "running"));
-				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : `${base}|${item.text.length}`;
+				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : `${base}|${item.text.length}|${item.open ?? ""}`;
 				if (sign !== undefined && item.made?.sign === sign) return item.made.lines;
 				sink = [];
 				make(item);
@@ -464,6 +501,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		textOf(key, rowIndex) {
 			const item = items.find((entry) => entry.key === key);
 			if (item === undefined) return "";
+			if (item.type === "block") return item.text;
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note") return row.text;
@@ -479,6 +517,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 				if (item.type === "user") parts.push("## You", "", item.text, "");
 				else if (item.type === "agent") parts.push(`## Cartographer${item.task ? " (from a task)" : ""}`, "", item.text, "");
 				else if (item.type === "note") parts.push(...item.text.split("\n").map((line) => `> ${line}`), "");
+				else if (item.type === "block") parts.push("```text", `// ${item.label}`, item.text.replace(/\n+$/, ""), "```", "");
 				else if (item.type === "console") parts.push("```text", item.text.replace(/\n+$/, ""), "```", "");
 				else if (item.type === "group" && item.rows.length > 0) {
 					for (const row of item.rows) {

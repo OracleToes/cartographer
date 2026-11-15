@@ -188,6 +188,32 @@ export function withoutWindows(text) {
 	return text.replace(WINDOWS_BLOCK, "");
 }
 
+const STATE_ONE = new RegExp(`\\n*${OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${CLOSE}`);
+const WINDOWS_ONE = new RegExp(`\\n*${WINDOWS_OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${WINDOWS_CLOSE}`);
+
+/**
+ * Text with the state and windows blocks split off: what the message itself says, and each block as its own text.
+ * For display (the Chat tab shows the blocks folded, apart from the message); `withoutState`/`withoutWindows` remain
+ * the way to drop them without reading them.
+ * @returns {{ text: string, state?: string, windows?: string }}
+ */
+export function splitState(text) {
+	let body = String(text ?? "");
+	let state;
+	let windows;
+	const s = STATE_ONE.exec(body);
+	if (s !== null) {
+		state = s[0].replace(/^\n+/, "");
+		body = body.replace(s[0], "");
+	}
+	const w = WINDOWS_ONE.exec(body);
+	if (w !== null) {
+		windows = w[0].replace(/^\n+/, "");
+		body = body.replace(w[0], "");
+	}
+	return { text: body.replace(/\n{3,}/g, "\n\n").trim(), state, windows };
+}
+
 /**
  * One line for each window, and under it the newest lines it printed.
  * @param {{ busy?: number, free?: number }} [tail]  how many printed lines to show for a window that is busy, and for one that is free

@@ -344,6 +344,14 @@ export async function runScreen(session, options, runTerminal) {
 			chat.print(text);
 			draw();
 		},
+		user(text) {
+			chat.user(text);
+			draw();
+		},
+		block(label, text) {
+			chat.block(label, text);
+			draw();
+		},
 		entry(depth, entry, printed) {
 			chat.seal();
 			chat.entry(depth, entry, printed);
@@ -361,7 +369,7 @@ export async function runScreen(session, options, runTerminal) {
 			flash(text);
 		},
 	};
-	for (const line of options.intro ?? []) chat.print(`${line}\n`);
+	for (const line of options.intro ?? []) chat.print(`${line}\n`, { keep: true });
 	chat.seal();
 
 	// ─── What the status strip is made of ───────────────────────────────────
@@ -1053,7 +1061,7 @@ export async function runScreen(session, options, runTerminal) {
 	const activate = ({ to, jump = false } = {}) => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
-		if (line.kind === "group") inPlace(() => chat.toggle(line.item, to));
+		if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
 		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];

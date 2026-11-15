@@ -128,3 +128,17 @@ export function withTop(messages, block) {
 export function withoutTop(text) {
 	return text.replace(TOP_BLOCK, "");
 }
+
+const TOP_BLOCK_ONE = new RegExp(`${OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${CLOSE}\\n*`);
+
+/**
+ * Text with the copy split off: what stands behind it, and the copy as its own text. For display (the Chat tab
+ * shows the copy folded, apart from the message it was glued to).
+ * @returns {{ text: string, top?: string }}
+ */
+export function splitTop(text) {
+	const body = String(text ?? "");
+	const m = TOP_BLOCK_ONE.exec(body);
+	if (m === null) return { text: body };
+	return { text: body.replace(m[0], "").replace(/^\n+/, ""), top: m[0].replace(/\n+$/, "") };
+}
