@@ -36,9 +36,11 @@ const APPROVAL = /^(?:i\s+)?(?:y(?:es|eah|ep)|yeah|ok(?:ay)?|sure|approved?|go(?
 
 /**
  * Approve waiting change items from what the user typed, without the slash command.
- * Bare words authorize the waiting change items that do NOT reach the network; an item marked `network`
- * needs to be named (approvalWords("approved p2")) or the slash command. A line that only names network
- * items is still an approval of them — naming is deliberate.
+ * Bare words authorize the waiting change item that does NOT reach the network; an item marked `network`
+ * needs to be named (approvalWords("approved p2")) or the slash command. A bare affirmative with more
+ * than one item waiting authorizes nothing — the line goes to the agent as written, and the batch waits
+ * for the slash command or scope words ("yes, the plan"). A line that names or scopes the batch is still
+ * an approval of it — naming and scoping are deliberate.
  * @returns {string[] | undefined} the approved ids, or undefined when the line is not an approval or nothing waits
  */
 export function approvalWords(brainDir, text, now = new Date().toISOString()) {
@@ -49,10 +51,14 @@ export function approvalWords(brainDir, text, now = new Date().toISOString()) {
 	const pending = waiting(plan);
 	if (pending.length === 0) return undefined;
 	const asked = line.match(/p\d+/gi)?.map((id) => id.toLowerCase());
-	// Unambiguous, item by item: the user named it, so it runs. Anything else on the line does not ride along.
-	const ids = asked === undefined
-		? pending.filter((item) => item.network !== true).map((item) => item.id)
-		: pending.filter((item) => asked.includes(item.id)).map((item) => item.id);
+	const SCOPE = /(?:the\s+)?(?:plan|it|them|all|everything)\b/i;
+	let ids;
+	if (asked !== undefined) ids = pending.filter((item) => asked.includes(item.id)).map((item) => item.id);
+	else if (SCOPE.test(line)) ids = pending.filter((item) => item.network !== true).map((item) => item.id);
+	else {
+		const open = pending.filter((item) => item.network !== true);
+		ids = open.length === 1 ? [open[0].id] : [];
+	}
 	if (ids.length === 0) return undefined;
 	const result = approve(plan, now, ids);
 	if (result.approved.length === 0) return undefined;

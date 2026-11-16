@@ -149,7 +149,7 @@ test("assessment: the book tool writes it whole, and /assessment reads the file"
 
 // ─── The plan: approval in the user's own words ─────────────────────────────
 
-test("approval words: a bare affirmative authorizes the waiting change items", (t) => {
+test("approval words: a bare affirmative authorizes the one item waiting", (t) => {
 	const { brainDir } = fresh(t);
 	savePlan(brainDir, { version: 1, next: 1, items: [
 		{ id: "p1", mode: "change", text: "Change the palette.", status: "open", added: 1 },
@@ -162,6 +162,19 @@ test("approval words: a bare affirmative authorizes the waiting change items", (
 	assert.equal(plan.items.find((item) => item.id === "p2").approved, undefined, "a network item never rides a bare word — name it or /approve it");
 	// Naming the network item approves it: deliberate, item by item.
 	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
+});
+
+test("approval words: a bare affirmative with a batch waiting approves nothing", (t) => {
+	const { brainDir } = fresh(t);
+	savePlan(brainDir, { version: 1, next: 1, items: [
+		{ id: "p1", mode: "change", text: "One.", status: "open", added: 1 },
+		{ id: "p2", mode: "change", text: "Two.", status: "open", added: 1 },
+	] });
+	assert.equal(approvalWords(brainDir, "yes"), undefined, "an unrelated yes never approves a queue of changes");
+	assert.equal(approvalWords(brainDir, "ok"), undefined);
+	assert.deepEqual(loadPlan(brainDir).plan.items.filter((item) => item.approved !== undefined), [], "nothing was approved");
+	// Scoped to the batch on purpose: "yes all" is a batch approval, minus the network items.
+	assert.deepEqual(approvalWords(brainDir, "yes all"), ["p1", "p2"]);
 });
 
 test("approval words: only the named items are approved; look items never wait", (t) => {
