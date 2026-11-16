@@ -68,11 +68,11 @@ function treeNow(root, brainDir, config) {
 function kindOf(brainDir, item, gate) {
 	if (item === undefined || item === null || String(item).trim() === "") return { run: { mode: POLICY.enums.planMode.look } };
 	const { plan, error } = loadPlan(brainDir);
-	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; they have to repair the file. A task without \`item\` can still look.` };
+	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; they have to repair the file. A task without \`item\` reads only.` };
 	const found = plan.items.find((entry) => entry.id === String(item).trim());
 	if (found === undefined) {
 		const ids = plan.items.map((entry) => entry.id).join(", ");
-		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `plan` first, or leave `item` out for a task that only looks." : `The plan has ${ids}.`}` };
+		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `plan` first, or leave `item` out for a task that reads only." : `The plan has ${ids}.`}` };
 	}
 	if (found.status === POLICY.enums.entryStatus.done) return { refusal: `${found.id} is marked done. For further work, add a new item to the plan.` };
 	// Approval is per item: a change item runs once the user has approved it (requests), once the
@@ -94,7 +94,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			"Enter one focused context for bounded work. It is the same agent over the shared ledger and atlas, but its working conversation is temporary and may be forgotten when it returns. Without `item` the focus only reads project files with `book` target=file action=read, plus `search` and `list`. With an authorized change `item`, it can also use `book` target=file action=create/edit/remove and run commands. Its purpose appears in the state block; keep lasting findings before returning a report.",
 		parameters: obj({
 			brief: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "What the task must do, and what its report must contain" }),
-			item: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.planId, description: "The plan item this task carries out (p2). Leave out for a task that only looks." })),
+			item: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.planId, description: "The plan item this task carries out (p2). Leave out for a task that reads only." })),
 		}),
 		// One model, one context: when a turn asks for several tasks they run in order, not at once.
 		executionMode: "sequential",

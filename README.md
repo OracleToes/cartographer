@@ -222,7 +222,7 @@ Cartographer · /home/momo/some/project
 new brain /home/momo/some/project/.brain · ByteShape at http://127.0.0.1:8888/v1
 Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl-T hides and shows its thinking.
 › where is the config loaded?
-┊ The user wants the place where configuration is read. I have no node for it yet, so a look task.
+┊ The user wants the place where configuration is read. I have no node for it yet, so I start a task (no item, only reading).
 ▸ task  Find where configuration is loaded. Report the file, the function and the line numbers…
 │ search /config/ in src                           → 14 matches in 5 files of src.
 │ read src/config.ts, src/main.ts                  → 212 lines
@@ -690,9 +690,9 @@ When a node links to a file, Cartographer keeps a fingerprint of that file from 
 
 **The assessment.** The agent keeps one summary of the project for itself: what it is, how it is built and run, what state it is in, what matters when changing it. It lives in `.brain/assessment.md` as plain text, rides at the top of the agent's context, and its only write path is one whole-text `book` call (`target=assessment, action=write`) — the whole text at once, no entries, no partial edits; the details that would not fit belong in nodes of the atlas. A task cannot rewrite it; it puts what it learned in its report.
 
-**Who writes.** A look task is asked to record what it learned that will still matter later, and a change task to rewrite the nodes about what it changed. Both write directly, so the knowledge does not have to pass through a report and be written down a second time. Under the task's report the main agent gets Cartographer's own record: which nodes the task wrote, removed, or left possibly out of date. The main agent can write, correct and remove nodes too.
+**Who writes.** A task that carries no item is asked to record what it learned that will still matter later, and a task that carries a change item to rewrite the nodes about what it changed. Both write directly, so the knowledge does not have to pass through a report and be written down a second time. Under the task's report the main agent gets Cartographer's own record: which nodes the task wrote, removed, or left possibly out of date. The main agent can write, correct and remove nodes too.
 
-**Mapping without a goal.** When no goal is set, or a plan waits for your `/approve`, the agent is told it may start a look task that maps a part of the project the graph says nothing about. Whether to do that and when to stop is left to it. Nothing in the project changes; type a message or `/stop` at any time.
+**Mapping without a goal.** When no goal is set, or a plan waits for your `/approve`, the agent is told it may start a task (no item, only reading) that maps a part of the project the graph says nothing about. Whether to do that and when to stop is left to it. Nothing in the project changes; type a message or `/stop` at any time.
 
 **Editing them yourself.** The graph is `<project>/.brain/carto-atlas.json`, the assessment is `<project>/.brain/assessment.md`. Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. An assessment you keep by hand works as it is, and `/assessment` shows it. A books file (`carto-books.json`) left from an earlier Cartographer is folded into the assessment the first time it is read, once, and its practice entries are dropped — the practice book is retired. A node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
 

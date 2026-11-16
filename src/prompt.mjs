@@ -118,14 +118,14 @@ export const TASK_HEADER =
  */
 export const TASK_EXAMPLE = {
 	look: [
-		"The shape of a look task, shown on another project. Nothing in the example is about this one.",
+		"The shape of a task that carries no item, shown on another project. Nothing in the example is about this one.",
 		"  Note to self: the brief asks where sessions expire. Start at the router.",
 		'  search "expire" · read src/session.js, lines 40 to 90',
 		"  Note to self: expiry is set in two places and they disagree.",
 		'  return {"done": true, "report": "Sessions expire in two places: src/session.js:52 (30 minutes) and src/cache.js:17 (60 minutes). The cache value wins, because it is read last. Not checked: the mobile client."}',
 	].join("\n"),
 	change: [
-		"The shape of a change task, shown on another project. Nothing in the example is about this one.",
+		"The shape of a task that carries an authorized change item, shown on another project. Nothing in the example is about this one.",
 		"  read src/session.js",
 		"  edit src/session.js · shell `npm test`",
 		"  Note to self: two tests fail, and both expect the old 30 minutes.",
@@ -134,14 +134,14 @@ export const TASK_EXAMPLE = {
 };
 
 /** Which kind of task it is; follows TASK_HEADER. */
-export const LOOK_NOTE = "This is a look task: `book` with target=file and action=read works for project content; `search` and `list` find files. A read is never kept: a new read takes the content of every earlier read out of view, and its own content stands at the very end of the request; keep a file I need again with `book` (target=shelf, action=add). `book` file create/edit/remove and `shell` are refused without an authorized change item, so I report any change needed. `shell` with action read or wait lets me read an open shell window and wait for it, never type into it. `book` with `target=atlas` works too: before returning, record lasting findings as nodes linked to their files.";
+export const LOOK_NOTE = "This task carries no authorized change item, so it only reads: `book` with target=file and action=read works for project content; `search` and `list` find files. A read is never kept: a new read takes the content of every earlier read out of view, and its own content stands at the very end of the request; keep a file I need again with `book` (target=shelf, action=add). `book` file create/edit/remove and `shell` are refused without an authorized change item, so I report any change needed. `shell` with action read or wait lets me read an open shell window and wait for it, never type into it. `book` with `target=atlas` works too: before returning, record lasting findings as nodes linked to their files.";
 /**
  * @param {{ commands: "sandbox" | "direct" | "none", network: boolean }} can
  *   commands: how this session runs commands (src/sandbox.mjs), as it stands when the task starts
  */
 export const CHANGE_NOTE = (item, text, can = { commands: "none", network: false }) =>
 	[
-		`This is a change task for plan item ${item} (${text}): besides \`book\` file read, \`search\` and \`list\`, use \`book\` target=file action=create/edit/remove for project changes — reads are ephemeral: a new read takes the content of every earlier read out of view, and its own content stands at the very end of the request; keep a file I need again with \`book\` (target=shelf, action=add)${can.commands === "none" ? "" : " and `shell` for commands"}${can.commands === "direct" ? "" : ", inside the project directory"}.`,
+		`This task carries out plan item ${item} (${text}): besides \`book\` file read, \`search\` and \`list\`, use \`book\` target=file action=create/edit/remove for project changes — reads are ephemeral: a new read takes the content of every earlier read out of view, and its own content stands at the very end of the request; keep a file I need again with \`book\` (target=shelf, action=add)${can.commands === "none" ? "" : " and `shell` for commands"}${can.commands === "direct" ? "" : ", inside the project directory"}.`,
 		`Change only what the brief asks for. Every file I change is recorded, and ${USER_NAME} can undo it with /undo.`,
 		{
 			sandbox: `When what I wrote can be run, I run it, and the command and what it printed go into my report. ${can.network ? "Commands in this task can reach the network." : "Commands in this task have no network; if one needs it, I say so in my report instead of trying other ways."}`,
@@ -189,10 +189,10 @@ export const REFUSALS = {
 		"The orchestrating context does not type into a running program. `shell` with action send belongs to a task carrying out an authorized change item: call `task` with that item's id. Use action stop to interrupt the program.",
 	mainReadOnlyOff: (why) =>
 		`A read-only window needs bubblewrap, and it is not working here (${why ?? "the sandbox is switched off without it"}): without a sandbox nothing holds a command to read-only, so no command runs here at all. Work without running commands, fix bubblewrap (the lane comes back), or carry it out with an approved change item and a task — with the sandbox off its commands run directly on this machine.`,
-	lookTaskRuns: "This focus is read-only and cannot run commands. Keep in my report what should be run; the orchestrating context decides what happens next.",
+	lookTaskRuns: "This task carries no authorized change item, so it cannot run commands. Keep in my report what should be run; the orchestrating context decides what happens next.",
 	noSandbox: (why) => `Commands cannot be run in this session: ${why}. My report says what should be run, so that ${USER_NAME} can run it.`,
 	mainNotes: "A note of this kind is for a task's own steps. What is needed after a collapse belongs in the ledger (a decision, a finding, a constraint) or in a node of the graph (something about the project).",
-	lookTaskChanges: "This is a look task, so it cannot change files. Say in the report what should be changed and where; the orchestrating context decides what happens next.",
+	lookTaskChanges: "This task carries no authorized change item, so it cannot change files. Say in the report what should be changed and where; the orchestrating context decides what happens next.",
 	notAuthorized: (item) =>
 		`${item} is a change item and ${USER_NAME} has not authorized the plan, so this task was not started and nothing was changed. Show ${USER_NAME} the plan in a few lines and ask them to type /approve. Until then, look items and tasks without \`item\` can run. It waits among their requests: keep going with whatever does not depend on it.`,
 };

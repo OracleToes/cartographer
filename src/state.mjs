@@ -35,7 +35,7 @@ const HEAD = `${RECORD} This is the current state; it supersedes any earlier cop
 const FIRST = `${USER_HEAD}'s newest message comes first.`;
 /** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
 const MAP =
-	"I need not sit idle meanwhile: in the same reply I may start a look task that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
+	"I need not sit idle meanwhile: in the same reply I may start a task (no item, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
 const names = (list, max = POLICY.limits.state.listedNames) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
 
 /** What the block says to do next. One situation, one instruction; a session with approval off is told only the workflow of that session, as plain state. */
@@ -43,7 +43,7 @@ function direction(ledger, plan, yolo = false) {
 	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
 	if (plan === undefined || plan.items.length === 0) {
 		if (goals) {
-			return `${FIRST} Beyond that, I work toward the open goals. If reaching one needs changes to the project, I find out what I need with look tasks, then write the plan. When a goal is reached, I close it and tell ${USER_NAME} what was achieved.`;
+			return `${FIRST} Beyond that, I work toward the open goals. If reaching one needs changes to the project, I find out what I need with read-only tasks, then write the plan. When a goal is reached, I close it and tell ${USER_NAME} what was achieved.`;
 		}
 		return [
 			"No goal is set. Looking and answering questions is fine without one.",
