@@ -1,12 +1,10 @@
 // The operations the user has on a row of any view, in one place.
 //
-// The screen's views show rows of several books: Hands holds the kept reports and the shelf, Carto's tabs the
+// The screen's views show rows of the brain: Hands holds the kept reports and the shelf, Carto's tabs the
 // atlas, the ledger and the plan, Requests what waits for the user. The keys over those rows (f, v, d, x, t and
 // n in src/screen/app.mjs) and the commands that name a row by its id (/archive, /unarchive, /delete, /done in
-// src/terminal.mjs) do the same work, so the work lives here: an id names a row of one of the books, and each
-// function carries the operation out and returns the line to show.
-//
-// Resolve a row by searching the owning books; an id prefix is not a dispatch mechanism for context-row species.
+// src/terminal.mjs) do the same work, so the work lives here: an id names a row of one of these books of rows,
+// and each function carries the operation out and returns the line to show.
 import { POLICY } from "./config.mjs";
 import { applyContextRowAction, ContextRowError, foldReports, loadContext, recallReport, unshelveForUser } from "./context.mjs";
 import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "./atlas.mjs";
@@ -14,7 +12,7 @@ import { applyOp, LedgerError, loadLedger, prune, saveLedger } from "./ledger.mj
 import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
 import { pin } from "./top.mjs";
 
-/** The books an id might name, and the words for them in a line of refusal. */
+/** Where each id belongs, in the words for them in a line of refusal. */
 export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
 const contextAction = (brainDir, id, action) => {
 	try {
