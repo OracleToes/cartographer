@@ -40,6 +40,15 @@ export const DEFAULTS = freezeTree({
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
 	// how long a file one `write` call can hold.
 	maxTokens: 32768,
+	// One question to Mythos-nano, a small long-reasoning model served by the same endpoint. llama-swap swaps it in
+	// for the agent's model for the duration; the call itself takes as long as the model takes. Empty switches it off.
+	consultModel: "MythosNano",
+	// The most Mythos-nano is asked to write: the model card's own ceiling for hard problems.
+	consultMaxTokens: 40960,
+	// The model card's recommended sampling for single-shot reasoning.
+	consultTemperature: 0.6,
+	// How long a `consult` call may wait before it gives up; at the ceiling above, generation alone can take that long.
+	consultTimeoutSeconds: 1800,
 	// Tool rounds one run may take before it stops and says so. Carrying out a plan takes about two per item.
 	mainTurns: 40,
 	taskTurns: 30,
@@ -123,6 +132,7 @@ export const POLICY = freezeTree({
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
 		book: { listCap: 200, listCursorTokens: 64 },
 		change: { contentBytes: 1_000_000, binaryProbeChars: 8000 },
+		consult: { contextChars: 64_000, modelChars: 128, bodyChars: 400 },
 		shellOutput: { maxBytes: 64_000, maxLines: 1000, pendingChars: 64_000 },
 		windows: { open: 4, waitSeconds: 300, keptLines: 2000, outputReadDefaultLines: 40, outputReadMaxLines: 400, commandSummaryChars: 80, partialChars: 64_000, markerChars: 4200, askLineChars: 200, startupErrorLines: 3, ptyColumns: 120, ptyRows: 40, commandPreviewLines: 5 },
 		wakes: { noteChars: 300, noteSummaryChars: 80, pendingChars: 200, intervalSeconds: 7 * 24 * 3600, watchedFiles: 2000, pathExamples: 3 },
@@ -306,6 +316,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	// The write limit may be overridden for one run (the stand-in tests exercise the old create-or-replace
 	// behaviour, so they relax it); real runs keep the strict default above.
 	if (env.CARTO_WRITE_LINES !== undefined && env.CARTO_WRITE_LINES !== "") config.writeLines = Number(env.CARTO_WRITE_LINES);
+	if (env.CARTO_CONSULT_MODEL !== undefined && env.CARTO_CONSULT_MODEL !== "") config.consultModel = env.CARTO_CONSULT_MODEL.trim();
 	if (env.CARTO_WRITE_CREATES_ONLY !== undefined && env.CARTO_WRITE_CREATES_ONLY !== "") config.writeCreatesOnly = env.CARTO_WRITE_CREATES_ONLY === "1" || env.CARTO_WRITE_CREATES_ONLY === "true";
 	if (typeof config.server !== "string" || typeof config.model !== "string") {
 		throw new ConfigError(
@@ -328,6 +339,12 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	for (const key of ["contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "treeDepth", "windowTail", "wakeMin", "wakesMax"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
 	}
+	if (typeof config.consultModel !== "string") throw new ConfigError("config: consultModel must be a string — the name llama-swap serves the consult model under; empty switches the consult tool off");
+	if (config.consultModel.length > POLICY.limits.consult.modelChars) throw new ConfigError(`config: consultModel must be ${POLICY.limits.consult.modelChars} characters or fewer`);
+	if (/[\r\n]/.test(config.consultModel)) throw new ConfigError("config: consultModel must be one name on one line");
+	if (!Number.isInteger(config.consultMaxTokens) || config.consultMaxTokens < 1 || config.consultMaxTokens > 131072) throw new ConfigError("config: consultMaxTokens must be a whole number of tokens, 1 to 131072");
+	if (typeof config.consultTemperature !== "number" || !Number.isFinite(config.consultTemperature) || config.consultTemperature < 0 || config.consultTemperature > 2) throw new ConfigError("config: consultTemperature must be a number from 0 to 2");
+	if (!Number.isInteger(config.consultTimeoutSeconds) || config.consultTimeoutSeconds < 1) throw new ConfigError("config: consultTimeoutSeconds must be a whole number of seconds, 1 or more");
 	for (const key of ["chatWindow", "collapseTokens"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.minimumTokenSetting) throw new ConfigError(`config: ${key} must be a whole number of tokens, ${POLICY.validation.minimumTokenSetting} or more`);
 	}

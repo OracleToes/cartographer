@@ -350,6 +350,31 @@ carto --url URL --model NAME             # another server or model for this run
 
 The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on. The context window is one of the settings: at startup it is narrowed to what the server says (`meta.n_ctx`) when that is less than `contextWindow`, and `/model` does the same on a switch — the window becomes the smaller of `contextWindow` in the settings and the new model's own limit, and the collapse threshold, the reply budget, the shelf's soft cap (half of it), and the display all follow. `/model` lists each served model's limit, warns when `chatWindow` is more than half of the window it switches to, and never raises the window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
 
+### Consulting another model (Mythos-nano)
+
+Cartographer can hand one hard, verifiable sub-problem — a kernel, an invariant, a proof — to [Mythos-nano](https://huggingface.co/squ11z1/Mythos-nano), a 3B long-reasoning model, on the same endpoint llama-swap already serves. It is not an assistant with tools: it has none, and it cannot act. It is a calculator with a very long think time, and the agent uses it the way it uses a calculation — for problems where a test or a proof can refute the answer.
+
+**What it costs you.** llama-swap serves one model at a time, so a consult swaps Mythos-nano in and the agent's own model out. The agent is unloaded while it thinks (deliberate on a card that holds one at a time) and reloads with the agent's next request. A call takes as long as a long think takes — minutes, not seconds — which is why it is one call per problem, with the whole problem in it.
+
+**What comes back.** The answer is written into the project as `consult/<stamp>.md` (visible in the tree, catalogued as a file) and shelved for whoever asked — main agent or focus. Over the shelf's view budget it is kept unseen and the state block says so; either way the file stands. The agent reads it, verifies it, and applies it itself, with the same gate as any other change. Its answer is a proposal, never a verdict: the model was not trained on tool-calling or agent work, it is strong on algorithms and math and weak anywhere a test cannot refute it, and it is abliterated (no refusals) — all the more reason nothing rides on its confidence.
+
+**To set it up**, add a section to your llama-swap config next to ByteShape's (names match `consultModel`):
+
+```yaml
+  MythosNano:
+    cmd: >
+      /home/momo/git/llama.cpp/build/bin/llama-server
+      --port ${PORT}
+      -m /home/momo/AI/t2t_models/Mythos/mythos-nano-Q8_0.gguf
+      -c 65536 -fa on -ngl 99 --cache-type-k q8_0 --cache-type-v q4_0
+      --jinja --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --no-mmproj
+      --context-shift --keep 2048 --cache-reuse 6000
+```
+
+`-c 65536` covers the 40960-token answer ceiling plus ~24k of question and context — the length the model was trained at (its base trained at 64K; the advertised 128K is beyond that and unverified). The model for the `consult` call comes from `consultModel`; `""` switches the tool off. `consultTimeoutSeconds` bounds the wait; at 40960 tokens, generation alone can take a long while, so it defaults to 1800 seconds.
+
+`consult` is offered to the main agent and to foci alike. Nothing about the change gate, the checkpoints, the confinement or the sandbox changes: the answer is text, the agent applies it through the ordinary paths. The context you hand it leaves nowhere — it goes to your own local endpoint, same as every other request.
+
 ### Which folder is the project
 
 Going up from the folder you are in, the first folder that has a Cartographer brain or is the top of a git repository. If there is none, the folder you are in.
@@ -983,6 +1008,10 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
 | `contextWindow` | 100000 | Context size the server was started with (`-c`) |
 | `maxTokens` | 32768 | Longest single reply, thinking included |
+| `consultModel` | `"MythosNano"` | Model name as llama-swap serves the consult model (an optional hard-problem solver, see [Consulting another model](#consulting-another-model-mythos-nano)). `""` switches it off. `CARTO_CONSULT_MODEL` overrides both settings files |
+| `consultMaxTokens` | 40960 | Longest answer a `consult` call may write — the model card's ceiling for hard problems |
+| `consultTemperature` | 0.6 | Sampling temperature for `consult` calls — the model card's recommendation for single-shot reasoning |
+| `consultTimeoutSeconds` | 1800 | How long a `consult` call may wait before giving up. Generation at the ceiling can alone take that long |
 | `writeLines` | 60 | Longest new file one `write` call creates, in lines (or 250 characters a line, whichever binds first). What a `write` call keeps is the head of the file; the result says so when it was cut, and the way to finish such a file is `edit` anchored on its end |
 | `writeCreatesOnly` | true | Whether `write` refuses to replace an existing file whole, pointing at `edit` instead. false: the old create-or-replace |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Carrying out a plan takes about two per item |

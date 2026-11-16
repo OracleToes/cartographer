@@ -25,6 +25,7 @@ import { loadTop, pin } from "./top.mjs";
 import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
 import { shellTool } from "./tools/shell.mjs";
+import { consultTool } from "./tools/consult.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
@@ -257,6 +258,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		...lookTools(root),
 		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
 		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		consultTool({ root, brainDir, config }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.

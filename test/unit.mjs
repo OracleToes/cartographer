@@ -25,6 +25,7 @@ import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { describeCall } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
+import { consultTool } from "../src/tools/consult.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -896,3 +897,113 @@ test("shelf ask: the question stays until the agent has answered, then dresses o
 	assert.match(text0(after), /content of the read/, "the read itself stays");
 });
 const text0 = (messages) => messages.map((m) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((p) => p.text ?? "").join(""))).join("\n");
+
+// ─── The consult tool ────────────────────────────────────────────────────────
+
+const consultConfig = { server: "http://127.0.0.1:8888/v1", consultModel: "MythosNano", consultMaxTokens: 40960, consultTemperature: 0.6, consultTimeoutSeconds: 1800, contextWindow: 100000 };
+const consultApi = (conversationId) => ({ conversationId, taskId: "c1", now: () => 1726000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
+const okAnswer = (content = "The answer is 42.", finishReason = "stop", completionTokens = 1234) =>
+	new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }], usage: { prompt_tokens: 256, completion_tokens: completionTokens, total_tokens: 256 + completionTokens } }), { status: 200, headers: { "content-type": "application/json" } });
+
+test("consult: one plain chat completion, the answer in a file, shelved", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		calls.push({ url, init });
+		return okAnswer("The answer is 42.\n");
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "What is the answer?", context: "It was asked before." }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	// The request: same endpoint, plain chat completion, no tools, no grammar, the question last.
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url, "http://127.0.0.1:8888/v1/chat/completions");
+	assert.equal(calls[0].init.method, "POST");
+	const sent = JSON.parse(calls[0].init.body);
+	assert.equal(sent.model, "MythosNano");
+	assert.equal(sent.max_tokens, 40960);
+	assert.equal(sent.temperature, 0.6);
+	assert.equal("tools" in sent, false, "no tool definitions are sent");
+	assert.equal(sent.messages.length, 1);
+	assert.equal(sent.messages[0].role, "user");
+	assert.ok(sent.messages[0].content.endsWith("What is the answer?"), "the question is last");
+	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
+	// The answer lands in the project as a file; the question stands in it for whoever reads it later.
+	const rel = result.details.file;
+	assert.match(rel, /^consult\/\d{8}-\d{6}\.md$/);
+	const file = readFileSync(join(root, rel), "utf8");
+	assert.ok(file.includes("What is the answer?"));
+	assert.ok(file.includes("The answer is 42."));
+	assert.ok(file.includes("finish: stop"));
+	// Shelved for the main agent; the receipt names the placement, not the answer.
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 1);
+	assert.equal(store.shelf[0].path, rel);
+	assert.match(result.output[0].text, new RegExp(`shelved as placement ${store.shelf[0].id}`, "i"));
+	assert.doesNotMatch(result.output[0].text, /The answer is 42/, "the answer is not dumped into the context");
+});
+
+test("consult: a focus shelves the answer into its own shelf, not the main one", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => okAnswer("Task-scoped answer.");
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "Settle this kernel." }, consultApi(7777), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 0, "the main shelf is untouched");
+	assert.equal(taskState(store, "7777").shelf.length, 1, "the focus shelf holds it");
+	assert.equal(taskState(store, "7777").shelf[0].path, result.details.file);
+});
+
+test("consult: the context is clipped to the cap, in prepareArguments and at send time", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const big = "c".repeat(65000);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => okAnswer("clipped ok") });
+	const prepared = tool.prepareArguments({ question: "q?", context: big });
+	assert.equal(prepared.context.length, 64000, "prepareArguments clips to the cap before validation sees it");
+	const calls = [];
+	const spy = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("clipped ok"); } });
+	const result = await spy.execute({ question: "q?", context: big }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const sent = calls[0].messages[0].content;
+	assert.ok(sent.includes("c".repeat(64000)) && !sent.includes("c".repeat(64001)), "only the head is sent");
+	assert.match(result.output[0].text, /clipped to the first/);
+});
+
+test("consult: an HTTP error names the model and the setting that fixes it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => new Response("unknown model: MythosNano", { status: 404 });
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /HTTP 404/);
+	assert.match(result.output[0].text, /consultModel/, "it says which setting names the model");
+});
+
+test("consult: a cut-off answer says the ending is incomplete", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => okAnswer("Partial reasoning…", "length", 40960);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.match(result.output[0].text, /ran out of room/);
+	assert.match(readFileSync(join(root, result.details.file), "utf8"), /finish: length/);
+});
+
+test("consult: an empty consultModel switches the tool off and asks nothing", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: { ...consultConfig, consultModel: "" }, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /switched off/);
+	assert.equal(called, 0, "the endpoint is never hit");
+});
+
+test("consult: a timeout is reported as a timeout and writes nothing", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { throw new DOMException("The operation timed out.", "TimeoutError"); } });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /did not answer within 1800 seconds/);
+	assert.equal(existsSync(join(root, "consult")), false, "no file is written");
+});
