@@ -1243,3 +1243,25 @@ test("consult: a story survives a question that carries its own fenced blocks an
 	assert.equal(sent.messages[0].content, tricky, "the tricky round-one payload round-trips byte for byte");
 	assert.equal(sent.messages[1].content, "The exit code is 1.\n```\nb ```\nDone.");
 });
+
+test("consult: a server refusing an over-long conversation is said as such — the story outgrew the storyteller", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let call = 0;
+	const fetchImpl = async () => {
+		call += 1;
+		if (call === 1) return okAnswer("Roll twice.");
+		return new Response("request (99999 tokens) exceeds the available context size (65536 tokens)", { status: 400 });
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "Is the roller sound?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const thread = first.details.thread;
+	const second = await tool.execute({ question: "Go on.", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(second.isError, true);
+	assert.match(second.output[0].text, /outgrown what the storyteller can hold/);
+	assert.match(second.output[0].text, /let it rest, or begin a new one with the crux/);
+	assert.doesNotMatch(second.output[0].text, /consultModel/, "an overflow is not a model-name problem");
+	// Round one overflow names the ask, not a story:
+	const solo = await consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => new Response("prompt is too long: 99999 tokens", { status: 400 }) }).execute({ question: "x".repeat(50000) }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(solo.isError, true);
+	assert.match(solo.output[0].text, /outgrew what the storyteller can hold/);
+});

@@ -125,10 +125,18 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 					? `The storyteller did not answer within ${config.consultTimeoutSeconds} seconds (consultTimeoutSeconds); the server stops generating when the connection drops. Nothing was written.${keptNote} Give it a narrower question, or raise consultTimeoutSeconds.`
 					: `The storyteller could not be reached at ${config.server}: ${snippet(error?.message ?? error)}. Nothing was asked of it.${keptNote}`;
 			const refusal = (status, raw) => {
+				const body = snippet(raw);
+				// The server refusing an over-long conversation: the storyteller can hold no more — said plainly, not as a model-name problem.
+				const overflow = status >= 400 && /context( size| length| window)?|n_ctx|too many tokens|prompt[^\n]{0,40}too long|exceed/i.test(String(raw ?? "")) && /context|n_ctx|tokens/i.test(String(raw ?? ""));
+				if (overflow) {
+					return fail(story !== undefined
+						? `The story has outgrown what the storyteller can hold — the server refused round ${story.rounds.length + 1} (HTTP ${status}). The story keeps its ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}: let it rest, or begin a new one with the crux.`
+						: `The context and the question outgrew what the storyteller can hold (HTTP ${status}: ${body}). Nothing was written. Send less — the crux, and what it may not guess — or give the storyteller a larger -c.`);
+				}
 				const likely = status >= 400 && status < 500
 					? ` The model named "${model}" is probably not what llama-swap serves: set \`consultModel\` to the llama-swap section name (or CARTO_CONSULT_MODEL).`
 					: "";
-				return fail(`The storyteller refused the call: HTTP ${status}. ${snippet(raw)}${likely}${keptNote}`);
+				return fail(`The storyteller refused the call: HTTP ${status}. ${body}${likely}${keptNote}`);
 			};
 			let response;
 			try {
