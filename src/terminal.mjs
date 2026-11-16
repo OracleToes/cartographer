@@ -561,9 +561,6 @@ export async function runTerminal(session, options) {
 	let stopped = false;
 	let closing = false;
 	let paused = false; // the user's pause: the agent is interrupted at once and gets nothing new until it is lifted
-	/** Lines the user wrote while the agent worked, sent to join its run. A run that ends without reading them —
-	 * stopped, or failed — withdraws them unread; they are sent again when the run is over, so nothing said is lost. */
-	const steered = [];
 	let onIdle = () => {};
 	// Wakes the agent may still get at once (see WAKE_BURST), and since when the next one is being earned.
 	const spacing = (options.wakeMin ?? WAKE_MIN) * 1000;
@@ -1905,16 +1902,6 @@ export async function runTerminal(session, options) {
 			endLine();
 			usageLine();
 			approvalLine();
-			// Lines the user wrote while the agent worked, which the run that just ended left unread, go out now:
-			// the agent reads them as the next thing. What it read stands in the conversation, and is not sent again.
-			for (const wait of [...steered]) {
-				const record = await wait.submission.status(context).catch(() => undefined);
-				if (record === undefined || record.status === "queued") continue;
-				steered.splice(steered.indexOf(wait), 1);
-				if (record.status !== "unanswered") continue;
-				const again = await submit(wait.content);
-				if (again !== undefined) steered.push({ content: wait.content, submission: again });
-			}
 			// Something may have happened in a window while the agent was finishing.
 			if (closing || (await wake()) !== undefined) return;
 			// The agent rests: the moment to collapse its context when that is due.
