@@ -114,7 +114,8 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 		}
 		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
 	} else {
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {} }));
+		// A focus is a live agent too: it gets the lines about the context itself (how full it is, the shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
+		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
 	}
 	// The windows come before the newest read of all, in a task's request too: they change from one request to
 	// the next, and a task that left a command running sees how it is doing each time it thinks.

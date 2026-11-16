@@ -1880,6 +1880,29 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
 });
 
+test("screen: a windows block followed by an ephemeral read tail is still a part of its own, and a request without a state block says so", async () => {
+	const { contextView } = await import("../src/screen/views.mjs");
+	// Exactly what dressRequest produces after a read: the blocks are glued to the result, and the newest read stands at the very end.
+	const payload = {
+		messages: [
+			{ role: "system", content: "You are Cartographer." },
+			{ role: "tool", tool_call_id: "c1", content: `== a.js (lines 1-2 of 2)\n1  alpha\n2  beta\n\n<state>\n${RECORD} This is the current state.\nNow: Thu 12 Nov 2026, 14:03\n\nLedger\nThe ledger is empty.\n</state>\n\n<windows>\n${RECORD} The shell windows as they are at this moment:\n  main · free\n</windows>\n\n<read-tail>\n== c.js (lines 1-40 of 300)\n1  gamma` },
+		],
+	};
+	const sent = { task: false, payload, reply: undefined, results: new Map(), at: Date.now(), count: 1, used: undefined, collapsedSince: false };
+	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
+	const keys = view.items.map((item) => String(item.key ?? ""));
+	const byKey = (key) => view.items.find((item) => item.key === key);
+	assert.ok(keys.some((key) => key.endsWith(".windows")), "the windows block stands as its own part even with the read tail after it");
+	assert.ok(keys.some((key) => key.endsWith(".state")), "and so does the state block");
+	hasNot(byKey("m0.0.result").body, "<windows>", "the result keeps only the result and the tail");
+	// A request with no state block at all: a loud, visible marker, not silence.
+	const bare = { ...sent, payload: { messages: [{ role: "system", content: "You are Cartographer." }, { role: "tool", tool_call_id: "c1", content: "== a.js" }] } };
+	const bareView = contextView(bare, { windowSize: 20_000, cols: 40 });
+	assert.ok(bareView.items.some((item) => item.key === "state:missing"), "the absence of the state block is said out loud");
+	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this request", "and the marker tells the user what one should always carry");
+});
+
 test("screen: the Context tab unfolds the collapse block into one row per kept object, with the same verbs", async () => {
 	const { contextView } = await import("../src/screen/views.mjs");
 	const { writeFront, noteChat, shelfItem, updateContext } = await import("../src/context.mjs");

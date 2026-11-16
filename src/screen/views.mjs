@@ -29,7 +29,7 @@ const PROJECT_BLOCK = new RegExp(`^${POLICY.markup.project.open}\\n[\\s\\S]*?\\n
 const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.context.close}\\n*`);
 const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.state.close}`);
-const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.windows.close}\\s*$`);
+const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.windows.close}`);
 
 const heading = (text) => ({ key: `heading:${text}`, plain: true, head: [[text, "heading"]] });
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
@@ -738,6 +738,20 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 				});
 			}
 		}
+	}
+	// The state block stands at the end of every request; one that is not in view here is a defect, not the absence of one: say so instead of showing nothing.
+	if (!parts.some((part) => part.cat === "state")) {
+		const missing = {
+			key: "state:missing",
+			plain: true,
+			editKind: "state",
+			head: [["! ", "warn"], ["  No state block in this request — every request ends with one; this should never happen.", "warn"]],
+			body: "The state block is written anew for every request and rides at its very end. If it is not in view here, the request never carried one (or it was cut off the message it was glued to) — either way the block is missing, not just this row. Please report this.",
+			copy: "",
+		};
+		const at = items.findIndex((item) => item.key === "since");
+		if (at < 0) items.push(missing);
+		else items.splice(at, 0, missing);
 	}
 	return { header, items, parts };
 }

@@ -787,7 +787,7 @@ Your graph (3 nodes)
 
 This is a copy, kept in `.brain/carto-top.json`, and it is replaced at four moments only: the first start in a project, when the context is collapsed (a closed goal is the usual cause), on `/new`, and on `/pin`. Writing a node or the assessment does not touch it, because a change here makes the server read the whole context again; at a collapse the whole context is read again anyway, so the new copy costs nothing more. Between those moments the state block lists the nodes written since the copy, and the agent's own `book` (target=assessment, action=write) call holds its newest assessment. An outline over 6,000 characters lists its oldest nodes by name only.
 
-**At the end: the state block.** Each request of the main agent ends with a block, built at that moment and added to that request only:
+**At the end: the state block.** Each request of the main agent ends with a block, built at that moment and added to that request only (a task gets its own copy too — see below):
 
 ```
 <state>
@@ -830,7 +830,7 @@ Answer the user's newest message first. Change items wait for the user: show the
 
 The last paragraph is one instruction for the situation at hand: no goal, a goal without a plan, a plan waiting for you, an authorized plan with its next item, or a finished plan.
 
-So the agent always sees exactly one copy of the state, the current one, also after `/new` and after an edit by hand. The block does not depend on what the conversation holds, so a collapse of the context does not lose it. Because the block is at the very end of the prompt, the server re-reads only the block and what follows the previous request, not what comes before. Measured on llama.cpp with a goal and a note in the ledger: 130 to 230 tokens read per main-agent request. A task does not get the state block, and starting a task cost 119 tokens there, the same as without it. (The windows block, which a task does get while a window is open, is described under [Shell windows](#shell-windows).) Those figures are from before the tree and the atlas lines were part of the block; it is longer now by those lines, and none of this slice has been measured on a real server yet.
+So the agent always sees exactly one copy of the state, the current one, also after `/new` and after an edit by hand. The block does not depend on what the conversation holds, so a collapse of the context does not lose it. Because the block is at the very end of the prompt, the server re-reads only the block and what follows the previous request, not what comes before. Measured on llama.cpp with a goal and a note in the ledger: 130 to 230 tokens read per main-agent request. A task gets its own copy of the block too — the never-stale truth plus its purpose in place of the main agent's next-step instruction, its own server count and the same shelf lines, and what waits for you; only the wakes stay the main agent's, since nothing in a task can act on one. (The windows block, which a task also gets while a window is open, is described under [Shell windows](#shell-windows).) Those figures are from before the tree and the atlas lines were part of the block; it is longer now by those lines, and none of this slice has been measured on a real server yet.
 
 The fixed part of the prompt, system text plus tool descriptions, grew with the plan, the change tools, the atlas, the shell windows, the wakes, the context engine and the task flow (`ask`, `return`). It was about 2,100 tokens before them. It is now about 9,100 tokens by a rough count of four characters per token, of which the `atlas` tool's description is about 1,100, `shell` and `window` together about 900, `wake` and `sleep` together about 650 and `context` about 500, and the first request of an empty project comes to about 9,400; that is an estimate, and `/context` after the first answer shows the real number on your server. The fixed part is read once per server start and reused after that. The figures in the paragraph above were measured before the plan was part of the block; with a plan in it the block is longer by the plan's lines.
 
@@ -1104,7 +1104,7 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/engine.mjs` | When the context is collapsed, the question before it, the read-ahead after it |
 | `src/time.mjs` | How times, durations and ages are written |
 | `src/request.mjs` | What is added to a request as it is sent: the copy at the front, the times, the state block, the windows block |
-| `src/state.mjs` | The state block added to the end of each main-agent request, and the windows block added after it and to each task request |
+| `src/state.mjs` | The state block added to the end of each request — the main agent's and a task's — and the windows block added after it and to each task request |
 | `src/tools/ledger.mjs` | The `ledger` tool |
 | `src/tools/plan.mjs` | The `plan` tool |
 | `src/tools/atlas.mjs`, `src/tools/assess.mjs` | The `atlas` and `assess` tools |

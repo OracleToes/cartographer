@@ -26,6 +26,7 @@ import { stateBlock } from "../src/state.mjs";
 import { describeCall } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
+import { dressRequest } from "../src/request.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -563,6 +564,37 @@ test("state: the no-sandbox line says no command can be run at all", (t) => {
 test("state: the sandboxed block does not claim the main agent is blocked", (t) => {
 	const block = blockOf(t, runnerOf(false, { ok: true, version: "0.9.0", shell: "bash" }));
 	assert.doesNotMatch(block, /You yourself may still run commands in this session/);
+});
+
+test("dressRequest: a task carries the context lines and the requests, as the live agent does", (t) => {
+	const { brainDir, root } = fresh(t);
+	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
+	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ version: 1, items: [] }, null, "\t"));
+	applyAdd(brainDir, "ledger", JSON.stringify({ kind: "question", text: "Which parser?" }), null);
+	// A report in full, and a file on the shelf: the coordination lines need both.
+	mkdirSync(join(brainDir, "reports"), { recursive: true });
+	writeFileSync(join(brainDir, "reports", "s1.md"), "# Report s1\n\nIt parses now.\n");
+	updateContext(brainDir, (store) => {
+		store.rows.push({ id: "s1", species: "composed", at: "2026-11-15T09:00:00.000Z", mode: "look", brief: "Map the parser", outcome: "It parses.", changed: 0, ref: { type: "report", id: "s1" } });
+	});
+	writeFileSync(join(root, "shelf.txt"), "the shelf keeps this\n");
+	const shelved = shelfItem(root, "shelf.txt", undefined, brainDir, []);
+	updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
+	const messages = [{ role: "user", content: [{ type: "text", text: "Carry out the brief." }], timestamp: Date.parse("2026-11-15T10:00:00.000Z") }];
+	const textOf = (message) => (typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join(""));
+	const dressed = dressRequest(messages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: false, conversationId: "task-1", used: 1234 });
+	const block = new RegExp(`<state>\\n[\\s\\S]*\\n</state>`).exec(textOf(dressed.at(-1)))?.[0];
+	assert.ok(block !== undefined, "a task's request ends with its state block");
+	assert.match(block, /Focus\n/, "with its one-line purpose");
+	assert.match(block, /My context holds about 1,234 of 100,000 tokens\./, "and its own server count");
+	assert.match(block, /Shelf items \(stable ID; unshelve by ID or path\):/, "and the shelf lines");
+	assert.match(block, /In view in full: s1 \(about [\d,]+ tokens\)\./, "and which reports stand in view in full");
+	assert.match(block, /Requests\nThese wait for /, "and what waits for the user");
+	assert.match(block, /q1 {2}Which parser\?/, "named, not counted");
+	assert.doesNotMatch(block, /Wakes\n/, "wakes alone stay the main agent's");
+	const main = dressRequest(messages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID, used: 1234 });
+	const mainBlock = new RegExp(`<state>\\n[\\s\\S]*\\n</state>`).exec(textOf(main.at(-1)))?.[0];
+	assert.match(mainBlock, /Requests\nThese wait for /, "the main agent's block keeps the same list");
 });
 
 // ─── The trace ─────────────────────────────────────────────────────────────

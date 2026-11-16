@@ -9,7 +9,8 @@
 // block itself (some hundreds of tokens, most of them the tree), not what comes before it.
 //
 // Every request receives a fresh block. A focused context gets the shared project/brain state
-// plus its own purpose and reminder that its working conversation will be forgotten.
+// plus its own purpose, the forget-threshold reminder, the lines about the context itself, and what
+// waits for its user; its working conversation will be forgotten when it leaves view.
 import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
 import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
@@ -278,7 +279,7 @@ function atlasText(brainDir, root, config, now) {
  * @param {{ root?: string, config?: { treeDepth?: number }, messages?: readonly any[], now?: number, wakes?: string[], yolo?: boolean, requests?: boolean, context?: string }} [more]
  *   wakes: my wake triggers, one line each; yolo: approval is off in this session (carried as plain state, not as an exception)
  *   context: the lines about the context itself, ready made; requests: whether to list what waits for the user
- *     (only the live agent's block lists it; a plain read of the state, as /context and the tests do, does not)
+ *     (the live agents list it, the main agent's block and a task's alike; a plain read of the state, as /context and the tests do, does not)
  *   root: the project, for the tree and the atlas (left out, the block has neither); messages: the request's messages;
  * @returns {string} the block, tags included
  */
