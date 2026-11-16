@@ -159,7 +159,7 @@ request 23 of this run, sent 14:02 (just now), as the server got it · part size
 ■ State block .............   1.2k 1.2%   □ Free ....................   59k   59%
 ▸ ■  2.8k  System prompt  You are Cartographer, an agent working in one project directory …
 ▸ ■  6.3k  Tools · 13: chat, ask, task, return, book, read, search, …
-▸ ■  4.1k  What the last collapse kept  <context> Written by Cartographer, not by the user …
+▸ ■  4.1k  What the last collapse kept  1 task · 1 note · 1 shelf item · 2 talk · 2 calls
 ▸ ■    31  You  add a seed option to the roller [sent Thu 12 Nov 2026, 14:01]
 ▸ ■    58  Agent · note and call: task  The roller needs a look first.
 ▸ ■  1.9k  Result of task  The roller is src/roll.py; it reads no arguments yet …
@@ -171,6 +171,8 @@ The **Window** view is the request the agent was last sent, exactly as the serve
 
 The parts are the system prompt, the tools with their descriptions and schemas, and then every message. The tools are one part, as the model reads them as one block; opened, it gives a line to each tool, so that one description can be read, copied, and opened in the editor where it is defined. The messages stand as **Chat · You** and **Chat · Agent** — the talk between you and the agent, in the order the model reads it — and the results of calls as **Result of …**.
 
+What the last collapse kept opens the same way: one row per stored object inside it. A finished task stands as its report row (`f` folds it out of view, `v` archives it, `d` deletes it — the same verbs as in Hands); a salient note as its ledger entry (`e` opens its fields, `t` settles it, `d` deletes it); a shelved file as its shelf row (`e` opens it, `x` takes it off the shelf); each saying of the talk as a chat row (`e` edits the words, `d` takes them out of the talk the collapse keeps); and each call of the stretch as a line of history you can select and copy, not edit. `e` on the folder itself still opens the raw store, `.brain/carto-context.json`.
+
 `e` works on the tab part by part, wherever there is a source to edit:
 
 | Part | What `e` opens |
@@ -178,7 +180,7 @@ The parts are the system prompt, the tools with their descriptions and schemas, 
 | System prompt | The wording's source, `src/prompt.mjs` in the core folder. The prompt is code, not an overwrite file; the next run of carto reads what it says |
 | A tool of the Tools part | The tool's source file, where its description stands |
 | Assessment and graph | The assessment file (`.brain/assessment.md`); the graph beside it is the atlas, edited on the Carto tab. The copy at the top is rewritten at the next collapse, or by `/pin` now |
-| What the last collapse kept | The store itself, `.brain/carto-context.json` — the records, the shelf and the talk. Surgery by hand: take care, a file that does not parse falls back to a fresh store |
+| What the last collapse kept | The store itself, `.brain/carto-context.json`, on `e` — surgery by hand, take care: a file that does not parse falls back to a fresh store. Opened first, it gives one row per object, and `e` on each opens that object: a report's file, a ledger entry's fields, a shelved file, the words of a saying |
 | Chat · You, Chat · Agent | The words of the message (see [Saying a message anew](#saying-a-message-anew)) |
 | Result of …, State block, Windows block, what Cartographer wrote | Nothing: a result is tool work, and the state and windows blocks are written anew for every request — what they read (ledger, plan, atlas, the windows) is editable in its own place | The blocks that Cartographer adds to messages are parts of their own, cut off the message they ride on: the copy of the assessment and the graph, what the last collapse kept, the state block, the windows block. Below a rule follows what has come since that request and will be in the next one: the reply, as far as it is written while it is being written, and what its calls returned.
 
@@ -819,9 +821,12 @@ The model reads one context of at most `contextWindow` tokens, and a long piece 
 
 A collapse writes no summary and asks the model for nothing but one word. What it keeps was collected while the work happened:
 
-- **One line for each finished task**, with an id: when, which kind, what was asked, how it ended. The report itself is kept in `.brain/reports/t12.md`, and the agent gets it back in full with `context` and the id. You read it with `/report t12`.
-- **The shelf**: files, or line ranges of files, that the agent chose to keep in view. See below.
-- **The talk**: what you wrote and what the agent said to you with `chat`, word for word, the newest `chatWindow` tokens of it (8,000 unless you change it). The agent's own notes and reasoning are not talk and are not kept, which is the reason `chat` is a tool of its own.
+- **One line for each finished task**, with an id and the minute it ended: which kind, what was asked, how it ended, in the order the tasks ended. The report itself is kept in `.brain/reports/t12.md`, and the agent gets it back in full with `context` and the id. You read it with `/report t12`.
+- **The shelf**: files, or line ranges of files, that the agent chose to keep in view — a structured listing of what stands, then the contents, as the collapse found them. See below.
+- **The talk**: what you wrote and what the agent said to you with `chat`, word for word, in order, each saying with the minute it was said, the newest `chatWindow` tokens of it (8,000 unless you change it). The agent's own notes and reasoning are not talk and are not kept, which is the reason `chat` is a tool of its own.
+- **The calls of the stretch before the collapse**: one line per call — the minute, the call as Cartographer describes it, its outcome — in the order they were made. The newest that fit (about 1,000 tokens) stand; the rest are counted out, one line. This part is history: it is never re-dressed or re-read, only written.
+
+Every line of the block carries a local hour:minute; each cluster reads in the order it happened.
 
 The ledger, the plan, the graph and the assessment are not in the conversation at all, so a collapse cannot touch them. (A salient note is shown in the kept block as a copy re-read from the ledger at the boundary; the ledger itself remains the only copy that counts.) The agent is told this in its prompt: what it will need later belongs there.
 
@@ -830,7 +835,7 @@ After a collapse a request is laid out like this, from what changes least to wha
 ```
 the prompt and the tools          never change
 <project> … </project>            the copy of the assessment and the graph, renewed at each collapse
-<context> … </context>            the block: task lines, shelf, talk. Unchanged until the next collapse
+<context> … </context>            the block: task lines, salient notes, shelf, talk, calls. Unchanged until the next collapse
 the work since the collapse       grows at its end only
 <state> … </state>                written anew for every request
 <windows> … </windows>            written anew for every request
@@ -840,23 +845,29 @@ The block as the agent reads it:
 
 ```
 <context>
-Written by Cartographer, not by the user. Your context was collapsed on Tue 10 Nov 2026, 14:05 (goal g1 was closed). What you had in view before is gone except for what stands here: …
+Written by me, from my own records, not by user's hand. My context was collapsed at 14:32 (it held about 78% of what fits). What I had in view before is gone except for what stands here: the finished tasks, my salient notes, my shelf, the last of my talk with user, and the calls of the stretch before the collapse. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.
 
-Finished tasks (`context` with action recall and the id brings a report back in full; a report you archived leaves this list, its file stays, recall by id finds it)
-t1 · Tue 10 Nov 2026, 13:20 · look · asked: Map src/ and record what each file does → Three files; roll.py holds the roller …
-t2 · Tue 10 Nov 2026, 13:41 · change p1 · asked: Add a --sides option to cli.py → Added; 2 files changed, tests pass
+Finished tasks (`book` with book context, action recall and the id brings a report back in full)
+s3 · 13:05 · look · asked: Map src/ and record what each file does → Three files; roll.py holds the roller …
+s4 · 13:40 · change p1 · asked: Add a --sides option to cli.py → Added; 2 files changed, tests pass
 
 Salient notes (ledger notes marked salient; `book` with target=ledger, action=edit, salient: false drops the mark)
-● n3  roll.py's watch step must survive the rename
+09:12  ● n3  roll.py's watch step must survive the rename
 
-Your shelf: 1 item, as the files were at the collapse
-== src/roll.py (lines 1-18 of 18)
+Shelf at 14:32 · 1 item, as the files were at the collapse
+14:32  src/roll.py [sh1]
+
+== src/roll.py (lines 1-18 of 18) [shelf id sh1]
  1  import random
  …
 
-Your talk with the user, word for word; what was said before it is gone
-[user · Tue 10 Nov 2026, 13:18] make the dice roller take the number of sides
-[you · Tue 10 Nov 2026, 13:19] Then the goal is: …
+Talk with the user, word for word, in order; what was said before 13:18 is gone
+13:18  user: make the dice roller take the number of sides
+13:19  me: Then the goal is: …
+
+Calls of the stretch before the collapse (the minute, the call, its outcome; the newest that fit stand here)
+13:20  read README.md → 2 lines
+13:22  shell npm test → exit 0 · 4.2 s
 </context>
 ```
 
