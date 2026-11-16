@@ -1,13 +1,12 @@
 import { POLICY } from "./config.mjs";
 const PLAN_ID = new RegExp(POLICY.patterns.planId);
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
-// What waits for the user: one list over all the agent's books.
-//
-// The agent does not stop for the user. A change item it adds to the plan waits for approval; a matter of taste
-// becomes a question in the ledger. Each request can wait independently while the agent goes on with whatever
-// does not depend on its answer. The user answers in their own time: /requests lists them,
-// /approve and /deny decide, /answer answers a question. This file gathers the list and carries a decision out;
-// each request stays in the book it belongs to.
+// What waits for the user: one list, gathered from the plan (change items awaiting approval) and the ledger
+// (questions of taste). The agent does not stop for the user; each request waits independently while the agent
+// goes on with whatever does not depend on its answer. The user answers in their own time: /requests lists them,
+// /approve and /deny decide, /answer answers a question — or the user's own words in the chat carry the decision
+// out (see approvalWords below). This file gathers the list and carries a decision out; each request stays
+// in the book it belongs to.
 import { loadLedger, saveLedger } from "./ledger.mjs";
 import { approve, itemLine, loadPlan, savePlan, waiting } from "./plan.mjs";
 import { USER_HEAD } from "./user.mjs";
@@ -66,7 +65,7 @@ export function requestLines(brainDir, more) {
 	const all = listRequests(brainDir, more);
 	if (all.length === 0) return "";
 	const label = { approval: "approval", question: "an answer" };
-	return all.map((request) => `  ${request.kind === "approval" ? request.text : request.text} · waits for ${label[request.kind]}`).join("\n");
+	return all.map((request) => `  ${request.text} · waits for ${label[request.kind]}`).join("\n");
 }
 
 /** Approve named change items, or all waiting change items when no ids are supplied. */
