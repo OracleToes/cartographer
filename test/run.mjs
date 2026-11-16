@@ -1194,29 +1194,53 @@ test("thinking: Ctrl-T hides and shows it on a terminal, and leaves what is bein
 	}
 });
 
-test("pause: Ctrl-V interrupts the agent at once, and what you write waits until you unpause", async () => {
+test("pause: a line written while the agent is held in its stream interrupts it, and is the next thing", async () => {
 	const root = makeProject("pause-key", { git: false });
 	configure(root, { initiate: false });
-	// The stand-in holds the first reply open (after the role chunk) until the test releases it; only the newest
-	// message "hold this please" triggers the hold, so the turn started by the held line after the unpause flows.
+	// The stand-in holds the held reply open (after the role chunk); the freeze lands on that live stream. A line
+	// written while paused lets the held stream go and starts fresh — only the newest message decides the hold,
+	// so the fresh turn ("say: answered…") flows.
 	const server = await startStandIn({ holdWhen: (body) => JSON.stringify(body.messages.at(-1)).includes("hold this please") });
 	try {
 		const result = await cartoOnTerminal(root, server, [], [
 			["Set one up in", ""],
-			["Type a message", "hold this please"],
-			[3, "\x16", false],
-			["paused: the agent is interrupted", "did you get that?"],
-			["(held: the agent is paused", "\x16", false],
-			["on again: what you wrote is sent now", "/quit"],
+			["Type a message", "hold this please || say: gone || sleep"],
+			[1, "\x16", false],
+			["paused: the agent is held in its stream", "say: answered || sleep"],
+			["read for this answer", "/quit"],
 		]);
 		if (result === undefined) return "python3 is needed for a terminal";
-		has(result.screen, "paused: the agent is interrupted where it stands", "Ctrl-V interrupts the run at once");
-		has(result.screen, "(held: the agent is paused — 1 line waits", "what is written while paused waits, and says so");
-		has(result.screen, "on again: what you wrote is sent now (1 line)", "unpausing sends the held line");
-		const sent = server.requests.map((request) => JSON.stringify(request.messages.at(-1)));
+		has(result.screen, "paused: the agent is held in its stream, mid-sentence", "Ctrl-V holds the stream");
+		const sent = server.requests.map((request) => JSON.stringify(request.messages));
 		assert.ok(sent.some((entry) => entry.includes("hold this please")), "the first message started a turn");
-		assert.ok(sent.some((entry) => entry.includes("did you get that?")), "the held line reached the agent after the unpause");
-		assert.equal(sent.filter((entry) => entry.includes("did you get that?")).length, 1, "the held line was sent once");
+		assert.ok(sent.some((entry) => entry.includes("say: answered")), "the line written while paused reached the agent as the next thing");
+		assert.equal(server.requests.length, 2, "the held stream was let go, and the line started a fresh request");
+	} finally {
+		await server.close();
+	}
+});
+
+test("pause: Ctrl-V again lets the very same reply go on — no second request is made", async () => {
+	const root = makeProject("pause-resume", { git: false });
+	configure(root, { initiate: false });
+	// The held reply lets itself go 0.8 s in, while the stream is still frozen, so whether the release lands
+	// before or after the unpause, the one same HTTP response must carry the whole reply to its end.
+	const server = await startStandIn({ holdWhen: (body) => JSON.stringify(body.messages.at(-1)).includes("hold this please"), releaseAfterMs: 800 });
+	try {
+		const result = await cartoOnTerminal(root, server, [], [
+			["Set one up in", ""],
+			["Type a message", "hold this please || say: answered || sleep"],
+			[0.8, "\x16", false],
+			["paused: the agent is held in its stream", ""],
+			[0.6, "\x16", false],
+			["on again — the agent goes on with its stream", ""],
+			["read for this answer", "/quit"],
+		]);
+		if (result === undefined) return "python3 is needed for a terminal";
+		has(result.screen, "paused: the agent is held in its stream, mid-sentence", "Ctrl-V holds the stream");
+		has(result.screen, "on again — the agent goes on with its stream", "Ctrl-V again lets the same stream go on");
+		assert.equal(server.requests.length, 1, "the same HTTP response carried the whole reply; the freeze did not re-request");
+		assert.ok(result.screen.includes("answered"), "the reply reached the screen after the resume");
 	} finally {
 		await server.close();
 	}

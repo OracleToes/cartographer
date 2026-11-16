@@ -30,6 +30,7 @@ import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
 import { traceFile, watchTrace } from "./trace.mjs";
+import { createStreamFreeze } from "./stream.mjs";
 import { USER_HEAD } from "./user.mjs";
 
 const PROVIDER = "local";
@@ -137,6 +138,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// whose fetch is then the one the trace records around. The health check in cli.mjs is not traced.
 	const tracePath = trace ?? traceFile({ root, brainDir });
 	if (tracePath !== undefined) watchTrace(provider, tracePath);
+	// The resume behind Ctrl-V: the response body of every model call goes through this gate, outside the other
+	// watchers, last of all — what it declines to read, the server does not write.
+	const streamFreeze = createStreamFreeze();
+	streamFreeze.watchProvider(provider);
 	models.setProvider(provider);
 
 	const runs = new Map();
@@ -439,6 +444,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		harness,
 		main,
 		context,
+		/** The gate the model's response body passes through; /pause holds it mid-stream and lets it go on. */
+		streamFreeze,
 		/** The model the main conversation is on, as { provider, modelId }. */
 		model: async () => (await main.agent(context)).model,
 		/**

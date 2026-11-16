@@ -288,7 +288,9 @@ export function decide(messages) {
 }
 
 /**
- * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, asideDelayMs?: number }} options
+ * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
+ *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
+ *   releaseAfterMs: a held reply lets itself go after this many milliseconds, without anyone calling `release()`.
  *   progress: { total, cache, steps, stepMs }: before each reply, say in `steps` steps how far the prompt is read.
  *   refuseSchema: answer 400 to a request that names the shape of its answer, as llama.cpp does with some chat templates.
  *   refuseAsides: answer Cartographer's own requests with an error, as a server would that cannot take them.
@@ -358,7 +360,10 @@ export async function startStandIn(options = {}) {
 			}
 		}
 		send({ role: "assistant", content: null });
-		if (options.holdWhen?.(body)) await new Promise((resolve) => held.push(resolve));
+		if (options.holdWhen?.(body)) {
+			if (options.releaseAfterMs !== undefined) setTimeout(() => { for (const release of held.splice(0)) release(); }, options.releaseAfterMs);
+			await new Promise((resolve) => held.push(resolve));
+		}
 		let generated = 0;
 		for (const piece of decision.reason?.match(/\S+\s*/g) ?? []) {
 			await pause();

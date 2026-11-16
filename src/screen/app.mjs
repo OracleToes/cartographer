@@ -106,7 +106,7 @@ const COMMANDS = [
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
 	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
-	["pause", "interrupt the agent at once and hold everything new back (Ctrl-V)"],
+	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
@@ -175,7 +175,7 @@ export const KEYS_HELP = [
 	"  Ctrl-Shift-F     search the tab that shows, where the terminal can send that key (else: Esc, then /)",
 	"  Ctrl-T           show or hide the agent's notes and thinking",
 	"  Ctrl-C           clear what you have typed; with the line empty, again (soon after) leaves, the way /quit does",
-	"  Ctrl-X           stop the agent; Ctrl-V pauses it: interrupts it at once, and it gets nothing new until you unpause",
+	"  Ctrl-X           stop the agent; Ctrl-V pauses it: holds the agent in its stream mid-reply; until you unpause, it starts nothing of its own (a line or command you write ends the held stream)",
 	"  Ctrl-L           draw the screen again",
 	"  Ctrl-O           the $EDITOR door, in every tab and mode, including while typing",
 	"  F1               this sheet",
@@ -456,7 +456,7 @@ export async function runScreen(session, options, runTerminal) {
 			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < POLICY.limits.format.rateDecimalBelow ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
 			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < POLICY.timing.screen.prefillRecentMs && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
 		} else first.push(["○ ", "muted"], ["resting", ""], [` · ${span(Date.now() - state.restSince)}`, "muted"]);
-		if (core.paused?.()) first.push([" · paused: interrupted · /pause or Ctrl-V lets it go on", "warn"]);
+		if (core.paused?.()) first.push([" · paused: held · /pause or Ctrl-V lets it go on", "warn"]);
 
 		const second = [];
 		const size = core.contextSize();

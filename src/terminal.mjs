@@ -38,6 +38,7 @@ import { eventLine, isNote, isNoChat, startNote, wakeNote, withoutQuietWakes } f
 import { questionText, spanOf } from "./tools/ask.mjs";
 import { repeats } from "./screen/text.mjs";
 import { REPEAT_NOTE } from "./wake.mjs";
+import { createStreamFreeze } from "./stream.mjs";
 import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
 import { USER_NAME } from "./user.mjs";
 import { dressRequest, withoutAdditions } from "./request.mjs";
@@ -166,6 +167,9 @@ const NOTHING_TO_APPROVE =
 
 export async function runTerminal(session, options) {
 	const { harness, main, context, windows, wakes, engine, asks } = session;
+	// The gate between the model's response body and the network; the full build wires it for real. Tests and
+	// harnesses that bring their own session may not — there the pause is simply an interrupt.
+	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
@@ -536,6 +540,7 @@ export async function runTerminal(session, options) {
 		const again = cuts > 1;
 		const what = `${JSON.stringify(oneLine(found.unit, POLICY.limits.terminal.repeatedPhraseChars))}, ${found.times} times over`;
 		line(`! The ${depth > 0 ? "task" : "agent"}'s reply was repeating itself (${what}). Cartographer cut it off${again ? " again, and stopped the agent: say how it should go on. If this keeps happening, look at the model's sampling settings." : " and lets the agent try once more."}`);
+		streamFreeze.abandon();
 		cutDone = main
 			.abort(context)
 			.then(() => harness.waitForIdle(context))
@@ -556,7 +561,6 @@ export async function runTerminal(session, options) {
 	let stopped = false;
 	let closing = false;
 	let paused = false; // the user's pause: the agent is interrupted at once and gets nothing new until it is lifted
-	const heldInputs = []; // what the user wrote while it was paused, sent when it is lifted
 	/** Lines the user wrote while the agent worked, sent to join its run. A run that ends without reading them —
 	 * stopped, or failed — withdraws them unread; they are sent again when the run is over, so nothing said is lost. */
 	const steered = [];
@@ -968,12 +972,6 @@ export async function runTerminal(session, options) {
 	};
 
 	const submit = async (content) => {
-		// Paused, nothing new reaches the agent: what the user writes waits here, and goes when the pause is lifted.
-		if (paused && options.interactive && options.oneShot === undefined) {
-			heldInputs.push(content);
-			line(dim(`  (held: the agent is paused — ${plural(heldInputs.length, "line")} wait${heldInputs.length === 1 ? "s" : ""} · /pause or Ctrl-V sends ${heldInputs.length === 1 ? "it" : "them"})`));
-			return undefined;
-		}
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
 		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
@@ -1082,6 +1080,11 @@ export async function runTerminal(session, options) {
 		const argument = parts[0];
 		const args = parts.filter((part) => part !== "");
 		const tail = args.slice(1).join(" ");
+		// Anything written while the agent is held in its stream lets go of that stream — except /pause, the lever itself.
+		if (paused && name !== "pause" && streamFreeze.frozen()) {
+			streamFreeze.abandon();
+			line(dim("  (the held stream was let go: the agent's reply ends here)"));
+		}
 		switch (name) {
 			case "help":
 				line(
@@ -1097,7 +1100,7 @@ export async function runTerminal(session, options) {
 						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
 						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
-						"  /pause    interrupt the agent at once (a run in flight is aborted) and hold everything new back; /pause or Ctrl-V again lets it go on",
+						"  /pause    hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream",
 						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
 						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
 						"  /initiate /initiate off keeps the agent waiting for you at the start; /initiate on lets it start on its own again",
@@ -1513,13 +1516,19 @@ export async function runTerminal(session, options) {
 					line("  nothing runs: the agent rests (Ctrl-X does the same when something does)");
 					return true;
 				}
+				streamFreeze.abandon();
 				await main.abort(context);
 				line(dim("  stopped"));
 				runningLine();
 				return true;
 			}
 			case "pause": {
-				// The pause interrupts at once: a run in flight is aborted here (the same abort /stop uses), whatever it is doing; nothing of the answer it was writing stands after. Until the pause is lifted nothing new reaches the agent: no line the user writes (they wait below), no wake of its own, no auto-collapse.
+				// Pausing holds the agent mid-sentence: the gate keeps the model's reply unread — nothing is committed —
+				// and if nothing else is written, lifting the pause lets the very same stream go on. When the agent is
+				// mid-round of tool calls there is no stream to hold, so the pause cuts it at once (as /stop does). A line or
+				// a command written while paused abandons the held stream for good: the agent is interrupted at once and
+				// what was written is the next thing it sees. Until the pause is lifted it starts nothing of its own:
+				// no wake of its own, no auto-collapse.
 				const to = argument === "on" ? true : argument === "off" ? false : !paused;
 				if (to === paused) {
 					line(to ? "  already paused. /pause or Ctrl-V lets it go on." : "  nothing is paused.");
@@ -1528,26 +1537,21 @@ export async function runTerminal(session, options) {
 				paused = to;
 				setPrompt();
 				if (paused) {
-					line(busy
-						? `${bold("●")} paused: the agent is interrupted where it stands · /pause or Ctrl-V lets it go on`
-						: `${bold("●")} paused: nothing new reaches the agent · /pause or Ctrl-V lets it go on`);
-					if (busy) await main.abort(context);
+					if (streamFreeze.freeze()) {
+						line(`${bold("●")} paused: the agent is held in its stream, mid-sentence · /pause or Ctrl-V lets it continue · a line or command you write ends it`);
+					} else {
+						streamFreeze.abandon();
+						if (busy) await main.abort(context);
+						line(busy
+							? `${bold("●")} paused: the agent is interrupted where it stands · your lines still reach it · /pause or Ctrl-V lets it go on`
+							: `${bold("●")} paused: the agent starts nothing of its own · your lines still reach it · /pause or Ctrl-V lets it go on`);
+					}
 					return true;
 				}
-				const held = heldInputs.splice(0);
-				line(`${bold("●")} on again${held.length > 0 ? `: what you wrote is sent now (${plural(held.length, "line")})` : ", and what happened while it was paused is told"}`);
-				for (const text of held) {
-					const wasBusy = busy;
-					const submission = await submit(text);
-					if (submission === undefined) {
-						busy = wasBusy;
-						if (!busy) reader.prompt();
-						continue;
-					}
-					// busy may still say true until the stopped run's ending is seen; the submission's own status says what happened to the line.
-					const record = await submission.status(context).catch(() => undefined);
-					if (record?.status === "queued") line(dim("  (sent; the agent reads it after its current step)"));
-				}
+				const resumed = streamFreeze.resume();
+				line(resumed
+					? `${bold("●")} on again — the agent goes on with its stream`
+					: `${bold("●")} on again, and what happened while it was paused is told`);
 				await wake();
 				return true;
 			}
@@ -1997,20 +2001,23 @@ export async function runTerminal(session, options) {
 					line(dim("  (sent to the running task: it reads it at its next step, and the main agent is told with the report)"));
 					return;
 				}
+				if (wasBusy) {
+					// A new message interrupts at once: whatever the agent is doing — even a stream held by the pause — stops here,
+					// and this line is the next thing.
+					streamFreeze.abandon();
+					await main.abort(context);
+				}
 				// A call that only waits for a window returns, so that the agent reads this sooner.
 				if (wasBusy) windows?.nudge();
 				const submission = await submit(text);
 				if (submission === undefined) {
 					busy = wasBusy;
 					if (!busy) reader.prompt();
-				} else if (wasBusy) {
-					steered.push({ content: text, submission });
-					line(dim("  (sent; the agent reads it after its current step, and a running task finishes first)"));
 				}
 			});
 		});
 		// Bash-like: Ctrl-C clears what is typed on the line. With the line already clear, Ctrl-C twice in a row
-		// leaves the way /quit does; Ctrl-X stops the agent instead, and Ctrl-V interrupts it and holds what you write.
+		// leaves the way /quit does; Ctrl-X stops the agent instead, and Ctrl-V holds the agent in its stream (Ctrl-V again lets it continue).
 		let armedQuit = 0;
 		reader.on("SIGINT", () => {
 			const typed = typeof reader.line === "string" ? reader.line : "";
@@ -2040,7 +2047,7 @@ export async function runTerminal(session, options) {
 				if (!busy) reader.prompt(true);
 			});
 		});
-		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V interrupts it and holds what you write." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V interrupts it and holds what you write; Ctrl-T hides and shows its thinking."));
+		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue; Ctrl-T hides and shows its thinking."));
 		// A context left large by the last session is collapsed before the first message has to carry it. Then,
 		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.
 		enqueue(async () => {
