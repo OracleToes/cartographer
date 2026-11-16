@@ -1014,6 +1014,35 @@ test("consult: an empty consultModel switches the tool off and asks nothing", as
 	assert.equal(called, 0, "the endpoint is never hit");
 });
 
+test("consult: the stream is read the way llama.cpp frames it — pings, CRLF, and frames split mid-frame across chunks", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const encoder = new TextEncoder();
+	const frames = [
+		": ping\r\n\r\n",
+		`data: {"choices":[{"delta":{"role":"assistant","content":"It "},"finish_reason":null}]}\r\n\r\n`,
+		`data: {"choices":[{"delta":{"content":"is 42."},"finish_reason":null}]}\r\n\r\n`,
+		": ping\r\n\r\n",
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":12}}\r\n\r\n`,
+		"data: [DONE]\r\n\r\n",
+	];
+	// Bytes, not frames: every TCP chunk boundary is fair game.
+	const bytes = encoder.encode(frames.join(""));
+	const stream = new ReadableStream({
+		async start(controller) {
+			for (let at = 0; at < bytes.length; at += 7) controller.enqueue(bytes.slice(at, at + 7));
+			controller.close();
+		},
+	});
+	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+	const chunks = [];
+	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, api, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(chunks.join(""), "It is 42.", "the pieces are reassembled across chunk boundaries");
+	assert.ok(readFileSync(join(root, result.details.file), "utf8").includes("It is 42."));
+});
+
 test("consult: a story that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const encoder = new TextEncoder();

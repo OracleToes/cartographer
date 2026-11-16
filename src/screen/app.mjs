@@ -370,6 +370,10 @@ export async function runScreen(session, options, runTerminal) {
 			chat.live(depth, message);
 			draw();
 		},
+		liveTools(depth, slots) {
+			chat.liveTools(depth, slots);
+			draw();
+		},
 		attach(given) {
 			core = given;
 		},
