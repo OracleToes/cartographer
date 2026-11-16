@@ -64,7 +64,8 @@ flowchart TD
     MR -- "read / search / list, book reads, recall, shelf, read-only command" --> MINLINE["runs inline - no plan item, no approval"]
     MR -- "write / edit / rm, or a command with writes or network" --> MREF["REFUSED - the main agent never changes the project"]
     MR -- "typing into a running program" --> MREF2["REFUSED - a command started is a read, typing into one is not"]
-    MR -- "task / wake / sleep / return" --> MAINEPTY["allowed - these are the main agent's alone"]
+    MR -- "task / wake / sleep" --> MAINEPTY["allowed - the main agent's alone"]
+    MR -- "return" --> MRET["REFUSED - return belongs to a task"]
     WHICH -- "a task focus (a fork)" --> TF{"main-only call? task / wake / sleep"}
     TF -- "yes" --> TREF["REFUSED - the brief says so, it ends with return"]
     TF -- "no" --> TR{"read-only?"}
@@ -104,9 +105,9 @@ Default mode: an item waits for you, and the agent does everything that does not
 flowchart LR
     FULL["context fills - the state block says how full"] --> DUE{"at the collapse point?"}
     DUE -- "no" --> FULL
-    DUE -- "yes" --> HANDOFF["handoff question - a single-token-shape JSON: handoff true or false - thinking off, one request of its own"]
-    HANDOFF -- "true" --> NOTES["the agent writes what would be lost - one turn"]
-    HANDOFF -- "false" --> NOW
+    DUE -- "yes" --> HANDOFF["opt-in only (handoffQuestion): one JSON, handoff true or false, thinking off - off by default, no ask"]
+    HANDOFF -- "asked and true" --> NOTES["the agent writes what would be lost - one turn"]
+    HANDOFF -- "not asked, or false" --> NOW
     NOTES --> NOW["collapse"]
     NOW --> KEEP["front block: finished tasks as one-liners + salient notes chronological + a structured shelf listing + the talk, capped at chatWindow, minute-stamped + one line per call of the stretch, capped at callsTokens"]
     KEEP --> TRANSCRIPT["the Durable transcript is kept whole - soft-forget never claims erasure"]
@@ -114,7 +115,8 @@ flowchart LR
     FULL2 --> FULL
 ```
 
-- The collapse is mechanical. No model writes any of the keep-set; the keep-set is what the harness knows to keep.
+- The collapse is decided in `afterMainCall`, after a round of tool results, once they have all come back — never on a plain reply. The fullness check runs there and the collapse rides the round's last result.
+- The handoff question is opt-in (`handoffQuestion`, decision O1); with it off the collapse carries the last reply mechanically, with no ask. Either way, no model writes any of the keep-set — it is what the harness knows to keep.
 - The context is a cache: the ledger, plan, atlas, assessment, reports and the transcript are never inside it in full — a collapse cannot touch them. What is in the front block is a projection of them.
 - Folds (`book context fold`) shrink mid-session what is carried; recall brings back by id. The state block shows what stands in full, with ids and token counts.
 
