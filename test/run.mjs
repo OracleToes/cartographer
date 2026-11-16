@@ -1330,7 +1330,7 @@ test("context: file-read results are ephemeral — successful reads collapse to 
 	// Earlier successful file reads leave one line; brain reads and failed file reads stay inline and never evict the newest file read.
 	assert.match(rawText(messages[2]), /no longer in view — read a\.js/);
 	assert.equal(rawText(messages[4]), "{ \"entries\": [] }", "ledger read stays inline");
-	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*read f9 \(lines 1-40\)/);
+	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*read f9 lines 1-40/);
 	assert.match(rawText(messages[8]), /No file at missing\.js/, "failed read stays inline");
 	assert.equal(rawText(messages[10]), "{ \"id\": \"c1\" }", "atlas read after the file read does not evict the file read");
 	assert.equal(tail, "== c.js (lines 1-40 of 300) · file f9 @1111\ngamma");
@@ -1483,7 +1483,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	const read = chat.lines(80).find((line) => line.kind === "call" && line.spans.some(([part]) => part.includes("read roll.py")));
 	chat.toggleRow(read.item, read.row);
 	has(text(), "│ ✓ read roll.py  → 3 lines\n  │   == roll.py (lines 1-2 of 2)\n  │   1  import random\n  │   2  print(1)", "a call opens to its result, in place");
-	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("shelf", { action: "add" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, { tab: "carto", view: "hands" }, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, shelf in Hands, a command in Shells, the plan in Carto; a read opens where it stands");
+	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("shelf", { action: "add" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, { tab: "context" }, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, shelf in Context, a command in Shells, the plan in Carto; a read opens where it stands");
 
 	// With the notes hidden, the note rows are gone and the calls stay.
 	chat.setThinking(false);

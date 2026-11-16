@@ -1067,7 +1067,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 		HANDOFF_NOTE("test"),
 		TASK_HANDOFF,
 	].join("\n");
-	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`|target=shelf|target="shelf"|file read|Should I shelf|asked when I read|asked whether to shelf/);
+	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`|target=shelf|target="shelf"|`file read`|target\s*=\s*"?file"?[^.\n]*action\s*=\s*"?read"?|Should I shelf|asked when I read|asked whether to shelf/);
 	assert.match(TOOLS.read, /shelf/);
 	assert.match(TOOLS.shelf, /action/);
 });

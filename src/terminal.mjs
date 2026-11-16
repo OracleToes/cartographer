@@ -116,7 +116,7 @@ export function describeCall(call, describeRef) {
 			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
 			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
 				? args.ref
-				: (typeof args.id === "string" && args.id !== "" ? { id: args.id } : undefined);
+				: (typeof args.id === "string" && args.id !== "" ? { ...(/^f\d+$/.test(args.id) ? { kind: "file" } : /^c\d+$/.test(args.id) ? { kind: "atlas" } : {}), id: args.id } : undefined);
 			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
 			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
 			return `shelf ${[action, oneLine(String(target), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}${range}`.trim();
