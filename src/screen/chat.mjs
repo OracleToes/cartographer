@@ -21,6 +21,7 @@ import { POLICY } from "../config.mjs";
 import { describeCall, describeResult } from "../terminal.mjs";
 import { isFront } from "../context.mjs";
 import { splitTop } from "../top.mjs";
+import { parseStory, STORY_ID } from "../story.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
@@ -76,11 +77,11 @@ function bodyOf(call) {
 /**
  * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readFile: reads a project-relative file; for a consult row, so the whole exchange can be shown from the
- *   file the answer was written to, without keeping that text in the session. Without it, a consult row
+ *   readStory: reads the story under a thread (st-…); for a consult row, so the whole exchange can be shown from
+ *   the story itself, without keeping that text in the session. Without it, a consult row
  *   opens to the call and its outcome only.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef, readFile } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readStory } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -121,26 +122,29 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 	};
 
 	/**
-	 * What a consult row holds, assembled once and kept: the ask from the call's arguments, the answer from the
-	 * file the tool wrote (never from the session — the answer is large and belongs on disk exactly once). The
-	 * file's own "Answer:" line is the marker; a file without one (hand-edited, or older) is shown whole.
+	 * What a consult row holds, assembled once and kept: the rounds from the story the call belongs to (never from
+	 * the session — the exchange is large and belongs in the brain exactly once), the thread marker from the call's
+	 * details, and the call's own ask as the fallback when no story stands behind it (a failed call, or a thread the
+	 * brain no longer holds).
 	 */
+	const shortWhen = (at) => `${String(at ?? "").slice(0, 16).replace("T", " ")} UTC`;
 	const storyOf = (row) => {
 		if (row.story !== undefined) return row.story;
 		const args = row.args ?? {};
 		const question = String(args.question ?? "").trim();
 		const context = typeof args.context === "string" ? args.context.trim() : "";
-		const file = typeof row.details?.file === "string" ? row.details.file : undefined;
-		const raw = file !== undefined && readFile !== undefined ? readFile(file) : undefined;
-		const unreadable = file !== undefined && readFile === undefined;
-		let answer;
+		const thread = typeof row.details?.thread === "string" && STORY_ID.test(row.details.thread) ? row.details.thread : undefined;
+		const raw = thread !== undefined && typeof readStory === "function" ? readStory(thread) : undefined;
+		let rounds;
+		let unparsable = false;
 		if (raw !== undefined) {
-			const marker = "\nAnswer:\n";
-			const at = raw.indexOf(marker);
-			const body = at >= 0 ? raw.slice(at + marker.length) : raw;
-			answer = body.trim() === "" ? undefined : body.trim();
+			try {
+				rounds = parseStory(raw).rounds;
+			} catch {
+				unparsable = true;
+			}
 		}
-		row.story = { file, question, context, answer, unreadable, missing: raw === undefined };
+		row.story = { thread, rounds, question, context, unparsable, missing: thread !== undefined && raw === undefined };
 		return row.story;
 	};
 
@@ -439,11 +443,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					// The storyteller: the call opens to the whole exchange — what I asked, and what it answered.
 					add(callLine(row), { ...ref, kind: "call" });
 					if (row.state === "running") {
-						// Its words as they come: the tail the harness keeps, not the file (the file lands when it finishes).
+						// Its words as they come: the tail the harness keeps, not the story (the round lands in the brain when it finishes).
 						const tail = toolTails.get(row.id);
 						if (tail !== undefined) {
 							const indentLive = row.depth > 0 ? "  │   " : "    ";
-							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the story is on its way to the file", "faint"]], { ...ref, kind: "detail" });
+							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the story is on its way to the brain", "faint"]], { ...ref, kind: "detail" });
 							const shown = wrap(tail.text.replace(/\s+$/, ""), inner - width(indentLive));
 							for (const piece of shown.slice(-POLICY.limits.screen.chatLiveTextRows)) add([[indentLive, "faint"], [piece, "muted"]], { ...ref, kind: "detail" });
 						}
@@ -455,10 +459,29 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 							for (const piece of wrap(text, inner - width(indent))) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : style]], { ...ref, kind: "detail" });
 						};
 						const story = storyOf(row);
-						if (story.file !== undefined) add([[indent, "faint"], [`the answer stands in ${story.file}`, "faint"]], { ...ref, kind: "detail" });
+						const clippedContext = (text) => (text.length > CONTEXT_MAX ? `${text.slice(0, CONTEXT_MAX)}\n… (${text.length - CONTEXT_MAX} more characters of context)` : text);
+						if (story.thread !== undefined) add([[indent, "faint"], [`the story stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
+						if (story.rounds !== undefined) {
+							for (const [index, round] of story.rounds.entries()) {
+								section(`round ${index + 1} · ${shortWhen(round.at)}`);
+								if (round.context !== "") {
+									section("what I sent — the context");
+									body(clippedContext(round.context));
+								}
+								section("what I asked — the question");
+								body(round.question === "" ? "(the question is not in the call)" : round.question);
+								section("what the storyteller answered");
+								body(round.answer);
+							}
+							if (row.state === "failed") {
+								section("why it failed");
+								body(plain(row.receipt ?? ""));
+							}
+							return;
+						}
 						if (story.context !== "") {
 							section("what I sent — the context");
-							body(story.context.length > CONTEXT_MAX ? `${story.context.slice(0, CONTEXT_MAX)}\n… (${story.context.length - CONTEXT_MAX} more characters of context)` : story.context);
+							body(clippedContext(story.context));
 						}
 						section("what I asked — the question");
 						body(story.question === "" ? "(the question is not in the call)" : story.question);
@@ -468,11 +491,10 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 							return;
 						}
 						section("what the storyteller answered");
-						if (story.answer !== undefined) body(story.answer);
-						else if (row.state === "running") body("(the storyteller is still writing; the answer lands in the file when it finishes)", "faint");
-						else if (story.unreadable) body(`(this view cannot read ${story.file}; the answer stands in it)`, "faint");
-						else if (story.missing) body(story.file === undefined ? "(the answer is not in the session, and no file was named)" : `(${story.file} is gone from disk; the answer stood in it)`, "faint");
-						else body("(the file holds no answer)", "faint");
+						if (row.state === "running") body("(the storyteller is still writing; the answer lands in the story when it finishes)", "faint");
+						else if (story.unparsable) body(`(the story under thread ${story.thread} cannot be read as a story; the answer stood there)`, "faint");
+						else if (story.missing) body(story.thread === undefined ? "(the answer is not in the session, and no thread was named)" : `(the story under thread ${story.thread} is gone from the brain; the answer stood there)`, "faint");
+						else body("(no answer stands behind this call)", "faint");
 					}
 					return;
 				}
@@ -606,9 +628,17 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				if (row?.name === "consult") {
 					const story = storyOf(row);
 					const parts = [row.label];
-					if (story.file !== undefined) parts.push(`The answer stands in ${story.file}`);
+					if (story.thread !== undefined) parts.push(`The story stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`);
+					if (story.rounds !== undefined) {
+						for (const [index, round] of story.rounds.entries()) {
+							parts.push("", `Round ${index + 1} — ${shortWhen(round.at)}`);
+							if (round.context !== "") parts.push("", "What I sent — the context", "", round.context);
+							parts.push("", "What I asked — the question", "", round.question === "" ? "(the question is not in the call)" : round.question, "", "What the storyteller answered", "", round.answer);
+						}
+						return parts.join("\n");
+					}
 					if (story.context !== "") parts.push("", "What I sent — the context", "", story.context);
-					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the storyteller answered", "", story.answer ?? (story.missing ? `(${story.file ?? "the consult file"} is gone from disk; the answer stood in it)` : "(the file holds no answer)"));
+					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the storyteller answered", "", story.unparsable ? `(the story under thread ${story.thread} cannot be read as a story; the answer stood there)` : story.missing ? `(the story under thread ${story.thread} is gone from the brain; the answer stood there)` : "(the answer is not in the session)");
 					return parts.join("\n");
 				}
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;

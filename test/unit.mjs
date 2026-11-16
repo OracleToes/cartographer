@@ -943,19 +943,25 @@ test("consult: one plain chat completion, the answer in a file, shelved", async 
 	assert.equal(sent.messages[0].role, "user");
 	assert.ok(sent.messages[0].content.endsWith("What is the answer?"), "the question is last");
 	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
-	// The answer lands in the project as a file; the question stands in it for whoever reads it later.
-	const rel = result.details.file;
-	assert.match(rel, /^consult\/\d{8}-\d{6}\.md$/);
-	const file = readFileSync(join(root, rel), "utf8");
+	// The answer lands in the brain under a thread; the question stands in the story for whoever reads it later.
+	const thread = result.details.thread;
+	assert.match(thread, /^st-\d{8}-\d{6}-[a-z0-9]{4}$/);
+	assert.equal(result.details.rounds, 1);
+	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
 	assert.ok(file.includes("What is the answer?"));
 	assert.ok(file.includes("The answer is 42."));
 	assert.ok(file.includes("finish: stop"));
-	// Shelved for the main agent; the receipt names the placement, not the answer.
+	assert.equal(result.output[0].text.includes(".brain"), false, "the receipt never names a path");
+	assert.equal(result.output[0].text.includes("storyteller/"), false, "the receipt never names the file");
+	// Shelved for the main agent as a story reference; the receipt names the placement, not the answer.
 	const store = loadContext(brainDir);
 	assert.equal(store.shelf.length, 1);
-	assert.equal(store.shelf[0].path, rel);
+	assert.equal(store.shelf[0].ref.type, "story");
+	assert.equal(store.shelf[0].ref.id, thread);
 	assert.match(result.output[0].text, new RegExp(`shelved as placement ${store.shelf[0].id}`, "i"));
+	assert.match(result.output[0].text, new RegExp(`thread: "${thread}"`), "the receipt says how to ask on");
 	assert.doesNotMatch(result.output[0].text, /The answer is 42/, "the answer is not dumped into the context");
+	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance");
 });
 
 test("consult: a focus shelves the answer into its own shelf, not the main one", async (t) => {
@@ -967,7 +973,7 @@ test("consult: a focus shelves the answer into its own shelf, not the main one",
 	const store = loadContext(brainDir);
 	assert.equal(store.shelf.length, 0, "the main shelf is untouched");
 	assert.equal(taskState(store, "7777").shelf.length, 1, "the focus shelf holds it");
-	assert.equal(taskState(store, "7777").shelf[0].path, result.details.file);
+	assert.equal(taskState(store, "7777").shelf[0].ref.id, result.details.thread);
 });
 
 test("consult: the context is clipped to the cap, in prepareArguments and at send time", async (t) => {
@@ -1001,7 +1007,7 @@ test("consult: a cut-off answer says the ending is incomplete", async (t) => {
 	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, undefined, result.output[0].text);
 	assert.match(result.output[0].text, /ran out of room/);
-	assert.match(readFileSync(join(root, result.details.file), "utf8"), /finish: length/);
+	assert.match(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8"), /finish: length/);
 });
 
 test("consult: an empty consultModel switches the tool off and asks nothing", async (t) => {
@@ -1040,7 +1046,7 @@ test("consult: the stream is read the way llama.cpp frames it — pings, CRLF, a
 	const result = await tool.execute({ question: "q?" }, api, undefined);
 	assert.equal(result.isError, undefined, result.output[0].text);
 	assert.equal(chunks.join(""), "It is 42.", "the pieces are reassembled across chunk boundaries");
-	assert.ok(readFileSync(join(root, result.details.file), "utf8").includes("It is 42."));
+	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("It is 42."));
 });
 
 test("consult: a story that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
@@ -1062,10 +1068,10 @@ test("consult: a story that breaks mid-answer leaves the partial in the file, ma
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
 	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, true, "a broken story is an error");
-	assert.match(result.output[0].text, /broke mid-answer/);
-	const file = readFileSync(join(root, result.details.file), "utf8");
-	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the file");
-	assert.match(file, /cut off/, "and says it was cut off");
+	assert.match(result.output[0].text, /broke off mid-answer/);
+	const file = readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8");
+	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the story");
+	assert.match(file, /broke off mid-answer/, "and says it broke off");
 	const store = loadContext(brainDir);
 	assert.equal(store.shelf.length, 1, "the partial is shelved all the same");
 });
@@ -1092,7 +1098,7 @@ test("consult: a server that answers with one plain JSON body all the same reads
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
 	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.ok(readFileSync(join(root, result.details.file), "utf8").includes("42."));
+	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("42."));
 });
 
 test("consult: a timeout is reported as a timeout and writes nothing", async (t) => {
@@ -1101,5 +1107,139 @@ test("consult: a timeout is reported as a timeout and writes nothing", async (t)
 	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, true);
 	assert.match(result.output[0].text, /did not answer within 1800 seconds/);
-	assert.equal(existsSync(join(root, "consult")), false, "no file is written");
+	assert.equal(existsSync(join(brainDir, "storyteller")), false, "no story is written");
+});
+
+test("consult: a follow-up carries the whole story — the original question and the answer — and appends its round", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		calls.push(JSON.parse(init.body));
+		return okAnswer(calls.length === 1 ? "Roll twice, not once, or the die never lands on six." : "Once lands on six only half the time.");
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "Is the roller sound?", context: "It rolls one die." }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(first.isError, undefined, first.output[0].text);
+	const thread = first.details.thread;
+	assert.equal(first.details.rounds, 1);
+	const second = await tool.execute({ question: "Why twice?", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(second.isError, undefined, second.output[0].text);
+	assert.equal(second.details.thread, thread, "the follow-up keeps the same thread");
+	assert.equal(second.details.rounds, 2);
+	// The storyteller sees round one whole: the context, the question, the answer — then this question.
+	const sent = calls[1];
+	assert.equal(sent.messages.length, 3);
+	assert.equal(sent.messages[0].role, "user");
+	assert.ok(sent.messages[0].content.startsWith("It rolls one die."), "round one's context stands first");
+	assert.ok(sent.messages[0].content.endsWith("Is the roller sound?"), "and its question last within the round");
+	assert.equal(sent.messages[1].role, "assistant");
+	assert.equal(sent.messages[1].content, "Roll twice, not once, or the die never lands on six.");
+	assert.equal(sent.messages[2].role, "user");
+	assert.equal(sent.messages[2].content, "Why twice?");
+	// One story on disk, both rounds, in order.
+	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
+	assert.match(file, /## Round 1 — /);
+	assert.match(file, /## Round 2 — /);
+	assert.ok(file.indexOf("## Round 1") < file.indexOf("## Round 2"));
+	assert.ok(file.includes("Roll twice") && file.includes("Once lands on six"));
+	// One placement on the shelf, re-shelved with the whole exchange; no path and no model name in it.
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 1, "the story is one placement, re-shelved, not minted twice");
+	assert.equal(store.shelf[0].ref.type, "story");
+	assert.equal(store.shelf[0].ref.id, thread);
+	assert.ok(store.shelf[0].snapshot.includes("Is the roller sound?"));
+	assert.ok(store.shelf[0].snapshot.includes("Roll twice"));
+	assert.ok(store.shelf[0].snapshot.includes("Why twice?"));
+	assert.ok(store.shelf[0].snapshot.includes("Once lands on six"));
+	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance or the path");
+	// The round-two receipt says where in the story it stands, and never carries the answer.
+	assert.match(second.output[0].text, /^Round 2\./);
+	assert.ok(second.output[0].text.includes(`thread: "${thread}"`));
+	assert.doesNotMatch(second.output[0].text, /Once lands on six/);
+});
+
+test("consult: a fresh round-two of the same story re-uses the placement id", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let n = 0;
+	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const second = await tool.execute({ question: "q2", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const placement = loadContext(brainDir).shelf[0].id;
+	assert.equal(first.details.placement, second.details.placement, "the placement is re-used, not re-minted");
+	assert.equal(loadContext(brainDir).shelf[0].id, placement);
+	assert.ok(loadContext(brainDir).shelf[0].snapshot.includes("Answer 1.") && loadContext(brainDir).shelf[0].snapshot.includes("Answer 2."));
+});
+
+test("consult: a thread that is not a storyteller thread is refused before anything is asked", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	for (const bad of ["../etc/passwd", "st-20261115", "st-20261115-143022-XYZ!", "story:st-20261115-143022-k7q2", `/abs/path/st-20261115-143022-k7q2`]) {
+		const result = await tool.execute({ question: "q?", thread: bad }, consultApi(ROOT_CONVERSATION_ID), undefined);
+		assert.equal(result.isError, true, bad);
+		assert.match(result.output[0].text, /not a thread the storyteller minted/);
+	}
+	assert.equal(called, 0, "a bad thread never reaches the endpoint");
+});
+
+test("consult: a well-formed thread with no story behind it is refused before anything is asked", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	const result = await tool.execute({ question: "q?", thread: "st-20261115-000000-zzzz" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /No story stands under thread st-20261115-000000-zzzz/);
+	assert.equal(called, 0);
+});
+
+test("consult: a story file that does not parse is refused, never guessed at", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const id = "st-20261115-000000-a1b2";
+	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
+	writeFileSync(join(brainDir, "storyteller", `${id}.md`), "The storyteller — one long problem, kept whole\n\n## Round 1 — nope\n\nQuestion:\naaa\nAnswer:\nbbb\n");
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	const result = await tool.execute({ question: "follow up?", thread: id }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /cannot be read as a story/);
+	assert.equal(called, 0, "a broken story never reaches the endpoint");
+});
+
+test("consult: a follow-up whose story grows is sent the whole conversation — round one is not re-sent by the agent", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		calls.push(JSON.parse(init.body));
+		return okAnswer(`Answer ${calls.length}.`);
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "Round one question." }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const second = await tool.execute({ question: "Round two question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const third = await tool.execute({ question: "Round three question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(third.details.rounds, 3);
+	const sent = calls[2];
+	assert.deepEqual(sent.messages.map((m) => m.role), ["user", "assistant", "user", "assistant", "user"]);
+	assert.equal(sent.messages[0].content, "Round one question.");
+	assert.equal(sent.messages[1].content, "Answer 1.");
+	assert.equal(sent.messages[2].content, "Round two question.");
+	assert.equal(sent.messages[3].content, "Answer 2.");
+	assert.equal(sent.messages[4].content, "Round three question.");
+	assert.equal(second.details.rounds, 2);
+});
+
+test("consult: a story survives a question that carries its own fenced blocks and labels", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const tricky = "It failed with:\n\nQuestion:\n```text\nAnswer:\n```\n\n## Round 99 — fake\n\nWhat does it print?";
+	const fetchImpl = async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("The exit code is 1.\n```\nb ```\nDone."); };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: tricky }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(first.isError, undefined, first.output[0].text);
+	const second = await tool.execute({ question: "And the sign?", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(second.isError, undefined, second.output[0].text);
+	const sent = calls[1];
+	assert.equal(sent.messages.length, 3);
+	assert.equal(sent.messages[0].content, tricky, "the tricky round-one payload round-trips byte for byte");
+	assert.equal(sent.messages[1].content, "The exit code is 1.\n```\nb ```\nDone.");
 });

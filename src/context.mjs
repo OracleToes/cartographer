@@ -54,6 +54,7 @@ import { entryLine, loadLedger, salientNotes, saveLedger } from "./ledger.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { fileReference } from "./catalog.mjs";
 import { USER_NAME, USER_HEAD } from "./user.mjs";
+import { parseStory, readStory, renderStory, STORY_ID } from "./story.mjs";
 
 const OPEN = POLICY.markup.context.open;
 const CLOSE = POLICY.markup.context.close;
@@ -594,6 +595,17 @@ const pinnedText = (brainDir, ref) => {
 };
 const snapshotText = (brainDir, item) => readShelfSnapshot(brainDir, item);
 const SHELF_RESOLVERS = {
+	// A story stands in the brain whole; the shelf carries the exchange for whoever asked. The path is never shown.
+	story: (brainDir, ref, item) => {
+		if (!STORY_ID.test(String(ref.id))) return undefined;
+		const raw = readStory(brainDir, ref.id);
+		if (raw !== undefined) {
+			try {
+				return renderStory(parseStory(raw).rounds);
+			} catch { /* fall back to the shelf's own backing snapshot */ }
+		}
+		return snapshotText(brainDir, item);
+	},
 	report: (brainDir, ref, item) => {
 		const row = composedRows(loadContext(brainDir)).find((entry) => entry.id === ref.id);
 		if (row !== undefined) { const body = loadReport(brainDir, ref.id); if (body !== undefined) return body; }

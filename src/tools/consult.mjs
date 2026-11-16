@@ -1,19 +1,23 @@
-// The `consult` tool: one question to the storyteller.
+// The `consult` tool: one question to the storyteller — and, while the agent is not done, the next.
 //
 // The storyteller is Mythos-nano, a 3B long-reasoning model served by the same local endpoint. llama-swap serves
 // one model at a time, so a consult puts it in place of the agent's model: the agent is unloaded while it thinks
 // (deliberate on a card that holds one at a time) and reloads with the next request. It was not trained on tool
-// calls, so this never looks like one to it: one plain chat completion, no tools, no grammar. It cannot act, read
-// the project, or remember anything — its answer is a proposal the agent checks: μῦθος is story, and a story is not
-// a record. The answer lands in `consult/<stamp>.md` in the project (visible in the tree, catalogued as a file,
-// shelveable) and is shelved for the asking context; over what the shelf renders, the file stands and the state
-// block says so.
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+// calls, so this never looks like one to it: plain chat completions, no tools, no grammar. It cannot act, read
+// the project, or remember anything on its own — μῦθος is story, and a story is not a record.
+//
+// The whole exchange is kept as one story file per story under .brain/storyteller/<id>.md. The agent never sees
+// the path, only the `thread` marker the receipt prints (st-…); the file is provenance and backing. Follow-ups
+// are calls carrying `thread`: the tool rebuilds the conversation — the original question, every answer since —
+// and asks again; the round is appended to the same story. It goes as long as the agent keeps asking, and stops
+// when it doesn't. The exchange is shelved for the asking context as a `story` reference, so the storyteller's
+// own story stands in view like any shelved thing; over what the shelf renders, the story stands in the brain
+// and the state block says so.
 import { POLICY } from "../config.mjs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { obj, opt, str } from "@earendil-works/pi-schema";
-import { loadContext, persistShelfSnapshot, shelfItem, taskState, updateContext } from "../context.mjs";
+import { loadContext, persistShelfSnapshot, shelfReferenceItem, taskState, updateContext } from "../context.mjs";
+import { STORY_ID, appendRound, createStory, parseStory, readStory, renderStory } from "../story.mjs";
 
 const CONTEXT_CHARS = POLICY.limits.consult.contextChars;
 const SNIPPET_CHARS = POLICY.limits.consult.bodyChars;
@@ -22,11 +26,6 @@ const LIVE_TAIL_BYTES = 8192;
 const LIVE_TAIL_LINES = 200;
 
 const pad = (value, width = 2) => String(value).padStart(width, "0");
-/** UTC stamp for the file name, e.g. 20261115-143022. */
-const stampFor = (at) => {
-	const date = new Date(at);
-	return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}-${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}`;
-};
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const elapsedOf = (ms) => `${Math.floor(ms / 60000)} m ${pad(Math.floor((ms % 60000) / 1000))} s`;
 const snippet = (text, max = SNIPPET_CHARS) => {
@@ -50,13 +49,14 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 		name: "consult",
 		// The harness sends describe("consult") (src/prompt.mjs TOOLS) to the model; this stands in when that is absent, in the same voice.
 		description: [
-			"The storyteller. One hard sub-problem whose answer a test or a proof can refute — a kernel, an invariant, a proof, a counterexample — handed over whole and once.",
+			"The storyteller. One hard sub-problem whose answer a test or a proof can refute — a kernel, an invariant, a proof, a counterexample — handed over whole.",
 			"In `context` what it may not guess (files with paths and line numbers, constraints, what I tried and what it printed), the question last, and at the end of the question the shape of the answer I want. It knows nothing of the project and keeps nothing once it speaks; everything it needs goes in the call.",
-			"Its answer comes back as a file in `consult/` and on my shelf: a story, not a record — I check it against a test or a proof and keep what holds. I reach for it early, when a refutable hard question stands in my way. Strong where an answer can be refuted; of no use where taste rules.",
+			"Its answer comes back on my shelf under a `thread` with the whole exchange so far: a story, not a record — I check it against a test or a proof and keep what holds. I can ask on with the same `thread` and a follow-up — the storyteller sees the original question and everything said since — for as long as the work needs. I reach for it early, when a refutable hard question stands in my way. Strong where an answer can be refuted; of no use where taste rules.",
 		].join(" "),
 		parameters: obj({
 			question: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "The problem, self-contained, with the shape of the answer wanted at the end (for example: the complete function; the invariant with its proof; the counterexample)." }),
 			context: opt(str({ maxLength: CONTEXT_CHARS, description: `Everything it needs and may not guess: file excerpts with their paths and line numbers, constraints, what was tried and what it printed. Inline text; over the first ${count(CONTEXT_CHARS)} characters the rest is not sent, and the result says so.` })),
+			thread: opt(str({ pattern: "^st-\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "The `thread` from an earlier consult receipt, to ask the next round of the same story. The storyteller sees the original question and every answer since. Omit to begin a new story." })),
 		}),
 		prepareArguments(args) {
 			// Clipped here, before validation sees it, so an oversized context keeps the head instead of being refused whole.
@@ -78,8 +78,32 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 				return fail("`consult` is switched off: `consultModel` is empty in the settings. Nothing was asked. Set it to the name llama-swap serves the storyteller under (or remove it to use the default).");
 			}
 			const context = clipConsultContext(args.context);
-			// The question last: what is newest is what the model answers.
-			const content = (context.text.trim().length > 0 ? `${context.text.trim()}\n\n---\n\n` : "") + String(args.question ?? "").trim();
+			const question = String(args.question ?? "").trim();
+			// The thread: an earlier story to continue. The conversation is rebuilt from the story itself, so round 1 is not re-sent by the agent.
+			const threadArg = typeof args.thread === "string" ? args.thread.trim() : "";
+			/** What the story keeps when the storyteller could not be reached or would not answer. */
+			let story = undefined;
+			if (threadArg !== "") {
+				if (!STORY_ID.test(threadArg)) return fail(`\`thread\` is \`${snippet(threadArg, 80)}\` — not a thread the storyteller minted. Pass the \`thread\` from an earlier consult receipt, or omit it to begin a new story.`);
+				const raw = readStory(brainDir, threadArg);
+				if (raw === undefined) return fail(`No story stands under thread ${threadArg}; it may have been cleaned from the brain. Begin a new story and carry the crux in it.`);
+				try {
+					story = { id: threadArg, ...parseStory(raw) };
+					if (story.rounds.length === 0) return fail(`The story under thread ${threadArg} holds no round. Begin a new one with the crux.`);
+				} catch (error) {
+					return fail(`The story under thread ${threadArg} cannot be read as a story: ${snippet(error?.message ?? error)}. Begin a new one with the crux.`);
+				}
+			}
+			const userFor = (ctx, q) => (String(ctx ?? "").trim().length > 0 ? `${String(ctx).trim()}\n\n---\n\n` : "") + String(q ?? "").trim();
+			/** What the storyteller sees: every round so far, then this one — the question last, what is newest is what the model answers. */
+			const messages = [];
+			if (story) for (const round of story.rounds) {
+				messages.push({ role: "user", content: userFor(round.context, round.question) });
+				messages.push({ role: "assistant", content: round.answer });
+			}
+			const content = userFor(context.text, question);
+			messages.push({ role: "user", content });
+			const keptNote = story !== undefined ? ` The story keeps its ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}.` : "";
 			const startedAt = api.now();
 			const url = `${config.server}/chat/completions`;
 			// The story streams token by token: the Chat tab shows the tail of the draft as it is written. One retry without stream_options for a server that refuses it; usage is simply not reported then.
@@ -88,7 +112,7 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 				headers: { "content-type": "application/json", accept: "text/event-stream" },
 				body: JSON.stringify({
 					model,
-					messages: [{ role: "user", content }],
+					messages,
 					max_tokens: config.consultMaxTokens,
 					temperature: config.consultTemperature,
 					stream: true,
@@ -98,13 +122,13 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 			});
 			const networkMessage = (error) =>
 				error?.name === "TimeoutError" || error?.name === "AbortError"
-					? `The storyteller did not answer within ${config.consultTimeoutSeconds} seconds (consultTimeoutSeconds); the server stops generating when the connection drops. Nothing was written. Give it a narrower question, or raise consultTimeoutSeconds.`
-					: `The storyteller could not be reached at ${config.server}: ${snippet(error?.message ?? error)}. Nothing was asked of it.`;
+					? `The storyteller did not answer within ${config.consultTimeoutSeconds} seconds (consultTimeoutSeconds); the server stops generating when the connection drops. Nothing was written.${keptNote} Give it a narrower question, or raise consultTimeoutSeconds.`
+					: `The storyteller could not be reached at ${config.server}: ${snippet(error?.message ?? error)}. Nothing was asked of it.${keptNote}`;
 			const refusal = (status, raw) => {
 				const likely = status >= 400 && status < 500
 					? ` The model named "${model}" is probably not what llama-swap serves: set \`consultModel\` to the llama-swap section name (or CARTO_CONSULT_MODEL).`
 					: "";
-				return fail(`The storyteller refused the call: HTTP ${status}. ${snippet(raw)}${likely}`);
+				return fail(`The storyteller refused the call: HTTP ${status}. ${snippet(raw)}${likely}${keptNote}`);
 			};
 			let response;
 			try {
@@ -187,46 +211,48 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 			answer = answer.trim();
 			if (answer === "") {
 				return fail(cutOff !== undefined
-					? `The storyteller's story broke before it began: ${snippet(cutOff?.message ?? cutOff)}. Nothing was written.`
-					: "The storyteller answered with no text. Nothing was written.");
+					? `The storyteller's story broke before it began: ${snippet(cutOff?.message ?? cutOff)}. Nothing was written.${keptNote}`
+					: `The storyteller answered with no text. Nothing was written.${keptNote}`);
 			}
 			if (cutOff !== undefined) finishReason = "cut off";
 			const elapsed = Math.max(0, api.now() - startedAt);
-			// The answer lands in the project as a file: visible in the tree, catalogued, shelveable.
-			const stamp = stampFor(startedAt);
-			mkdirSync(join(root, "consult"), { recursive: true });
-			let rel;
-			for (let n = 1; ; n += 1) {
-				rel = `consult/${stamp}${n > 1 ? `-${n}` : ""}.md`;
-				try {
-					writeFileSync(join(root, rel), [
-						`The storyteller (Mythos-nano) — ${new Date(startedAt).toISOString()}`,
-						`Model: ${model} (served by the same local endpoint; llama-swap swapped it in, so the agent's own model was not served while this was written)`,
-						`Elapsed: ${elapsedOf(elapsed)} · ${completionTokens !== undefined ? `${count(completionTokens)} output tokens` : "output tokens not reported"} · finish: ${finishReason}`,
-						...(cutOff !== undefined ? [`The story was cut off mid-answer: ${snippet(cutOff?.message ?? cutOff)}`, ""] : []),
-						"",
-						"Question:",
-						String(args.question ?? "").trim(),
-						"",
-						"Answer:",
-						"",
-						answer,
-						"",
-					].join("\n"), { encoding: "utf8", flag: "wx" });
-					break;
-				} catch (error) {
-					if (error?.code === "EEXIST" && n < 100) continue;
-					return fail(`The answer could not be written to ${rel}: ${snippet(error?.message ?? error)}. Nothing was shelved.`);
+			// The answer joins the story: a new story under a fresh thread, or one more round of an existing one. The agent never sees the path, only the thread.
+			const at = new Date(startedAt).toISOString();
+			const tokensText = completionTokens !== undefined ? `${count(completionTokens)} output tokens` : "output tokens not reported";
+			const round = {
+				at,
+				meta: [`Elapsed: ${elapsedOf(elapsed)} · ${tokensText} · finish: ${finishReason}`],
+				...(cutOff !== undefined ? { cutOff: snippet(cutOff?.message ?? cutOff) } : {}),
+				context: context.text.trim(),
+				question,
+				answer,
+			};
+			let threadId;
+			let storyRounds;
+			try {
+				if (story) {
+					const number = appendRound(brainDir, story.id, round);
+					threadId = story.id;
+					storyRounds = [...story.rounds, round];
+					void number;
+				} else {
+					const created = createStory(brainDir, { model, at: startedAt, round });
+					threadId = created.id;
+					storyRounds = [round];
 				}
+			} catch (error) {
+				return fail(`The story could not be kept: ${snippet(error?.message ?? error)}. Nothing was shelved.${story ? keptNote : ""}`);
 			}
-			// Shelve it for whoever asked. Over the shelf's view budget the placement is kept and the file stands — that is fine by design.
+			const roundNumber = storyRounds.length;
+			// Shelve the story itself for whoever asked — the exchange, with no thread to a path. Over the shelf's view budget the placement is kept and the story stands in the brain — that is fine by design.
 			let shelfMsg;
 			let placement;
+			let shelfTokens;
 			try {
 				const current = loadContext(brainDir);
 				const main = api.conversationId === ROOT_CONVERSATION_ID;
 				const mine = main ? (current.shelf ?? []) : (current.tasks?.[api.conversationId]?.shelf ?? []);
-				const picked = shelfItem(root, rel, undefined, brainDir, mine);
+				const picked = shelfReferenceItem({ kind: "story", id: threadId }, renderStory(storyRounds), brainDir, mine);
 				persistShelfSnapshot(brainDir, picked.item, picked.backing);
 				updateContext(brainDir, (next) => {
 					const list = main ? next.shelf : (taskState(next, api.conversationId).shelf ??= []);
@@ -235,18 +261,22 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 					else list[at] = { ...list[at], ...picked.item };
 				});
 				placement = picked.item.id;
-				shelfMsg = `Shelved as placement ${placement} (${count(picked.tokens)} rendered tokens); over what the shelf renders, the file stands and the state block says so.`;
+				shelfTokens = picked.tokens;
+				shelfMsg = `shelved as placement ${placement} (${count(picked.tokens)} rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so`;
 			} catch (error) {
-				shelfMsg = `Not shelved (${snippet(error?.message ?? error)}); the file stands at ${rel}.`;
+				shelfMsg = `not shelved (${snippet(error?.message ?? error)}); the story stands under thread ${threadId} all the same`;
 			}
 			const finishNote = cutOff !== undefined
-				? ` The story broke mid-answer (${snippet(cutOff?.message ?? cutOff)}): what it wrote stands incomplete in ${rel}.`
+				? ` The round broke off mid-answer (${snippet(cutOff?.message ?? cutOff)}): what the storyteller wrote stands incomplete, and the round stands in the story as it broke.`
 				: finishReason === "length"
 					? ` It ran out of room (finish: length) — the ending is incomplete; ask again with a narrower question, or raise consultMaxTokens (${config.consultMaxTokens}).`
 					: "";
 			const clipNote = context.clipped ? ` The context was clipped to the first ${count(CONTEXT_CHARS)} characters (it was ${count(context.from)}); the rest was not sent.` : "";
-			const text = `The storyteller took ${elapsedOf(elapsed)} (${completionTokens !== undefined ? `${count(completionTokens)} output tokens` : "tokens not reported"}). The answer is written to ${rel}. ${shelfMsg} A story is not a record: read it with \`read ${rel}\`, check the work against a test or a proof, and apply it yourself.${finishNote}${clipNote}`;
-			const details = { consult: true, file: rel, ...(placement === undefined ? {} : { placement }), tokens: completionTokens, finish: finishReason, seconds: Math.round(elapsed / 100) / 10 };
+			const told = `The storyteller took ${elapsedOf(elapsed)} (${tokensText})`;
+			const text = roundNumber === 1
+				? `${told}. The story stands under thread ${threadId}; ${shelfMsg}. A story is not a record: check the work against a test or a proof, and apply it yourself. I can ask on with \`thread: "${threadId}"\` — the storyteller sees the original question and its answer — for as long as the work needs.${finishNote}${clipNote}`
+				: `Round ${roundNumber}. ${told}. The story (${roundNumber} rounds) stands under thread ${threadId}; ${shelfMsg}. A story is not a record: check it against a test or a proof. Ask on with \`thread: "${threadId}"\` while a refutable doubt remains — the storyteller sees the whole exchange — or let it rest.${finishNote}${clipNote}`;
+			const details = { consult: true, thread: threadId, rounds: roundNumber, ...(placement === undefined ? {} : { placement }), tokens: completionTokens, finish: finishReason, seconds: Math.round(elapsed / 100) / 10 };
 			if (cutOff !== undefined) return { isError: true, output: [{ type: "text", text }], details };
 			return { output: [{ type: "text", text }], details };
 		},
