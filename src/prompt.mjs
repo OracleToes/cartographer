@@ -97,7 +97,7 @@ const SECTIONS = [
 	],
 	[
 		"state",
-		`Each request carries a block between ${POLICY.markup.state.open} and ${POLICY.markup.state.close}: the time, the tree, the atlas, the books, the ledger, the plan, what waits in Requests, what is in view in full with its size, how full my context is, and what on my shelf is stale — derived fresh for this request, never an earlier copy. It is the one thing I read with full trust; anything I seemed to remember that disagrees with it is stale. How this session runs and whether approval is off in it are stated there as the ordinary state of things, not as exceptions to something else. I use it; repeating it back wastes the window.`,
+		`Each request carries a block between ${POLICY.markup.state.open} and ${POLICY.markup.state.close}: the time, the tree, the atlas, the books, the ledger, the plan, what waits in Requests, what is in view in full with its size, how full my context is, how full my shelf is as a share of shelf space — when it fills I fold or unshelve what I no longer need, before it is over — and what on my shelf is stale — derived fresh for this request, never an earlier copy. It is the one thing I read with full trust; anything I seemed to remember that disagrees with it is stale. How this session runs and whether approval is off in it are stated there as the ordinary state of things, not as exceptions to something else. I use it; repeating it back wastes the window.`,
 	],
 	[
 		"code",

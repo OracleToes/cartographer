@@ -4,7 +4,7 @@
 import { POLICY } from "../config.mjs";
 import { defineTool } from "@earendil-works/pi-durable";
 import { bool, obj, opt, str } from "@earendil-works/pi-schema";
-import { estimate, loadContext, persistShelfSnapshot, sameShelfItem, shelfItem, shelfLabel, shelfText, ShelfError, taskState, updateContext } from "../context.mjs";
+import { loadContext, persistShelfSnapshot, sameShelfItem, shelfItem, shelfLabel, ShelfError, taskState, updateContext } from "../context.mjs";
 
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 
@@ -26,9 +26,6 @@ function prepareHandoff(root, brainDir, config, conversationId, wanted) {
 		chosen.push(resolved.item);
 		if (resolved.backing !== undefined) backingById.set(resolved.item.id, resolved.backing);
 	}
-	const combined = [...current.filter((item) => !chosen.some((picked) => sameShelfItem(item, picked))), ...chosen];
-	const total = combined.reduce((sum, item) => sum + estimate(shelfText(root, item, brainDir)), 0);
-	if (total > config.shelfTokens) throw new ShelfError(`The requested shelf handoff would put about ${total} of at most ${config.shelfTokens} rendered tokens into my context. I choose fewer items or smaller file ranges.`);
 	for (const item of chosen) {
 		const backing = backingById.get(item.id);
 		if (backing !== undefined) persistShelfSnapshot(brainDir, item, backing);

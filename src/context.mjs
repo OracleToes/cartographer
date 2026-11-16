@@ -754,6 +754,24 @@ export function shelfReferenceItem(ref, content, brainDir, existing = []) {
 	return { item: { ...item, snapshot }, tokens: estimate(snapshot), backing: content };
 }
 
+/** The shelf's soft cap: half the window. Nothing refuses at it; the status block tells the agent to make room as it fills. */
+export const shelfSpace = (window) => Math.max(1, Math.floor((Number.isFinite(window) && window > 0 ? window : POLICY.validation.minimumTokenSetting * 2) / 2));
+
+/** The line the state block adds about the shelf: how full it is, in the agent's own words and as a share of shelf space. */
+function shelfFillLine(root, brainDir, items, window) {
+	const total = items.reduce((sum, item) => {
+		try { return sum + estimate(shelfText(root, item, brainDir)); } catch { return sum; }
+	}, 0);
+	const space = shelfSpace(window);
+	const percent = Math.round((total / space) * 100);
+	const files = items.length === 1 ? "My file is" : "My files are";
+	const filled = `${files} taking up ${percent}% of shelf space (about ${count(total)} of ${count(space)} tokens)`;
+	if (percent < 50) return `${filled}.`;
+	if (percent < 75) return `${filled} — I should leave room on it: fold or unshelve what I no longer need.`;
+	if (percent < 100) return `${filled} — I need to trim it now: fold or unshelve what I no longer need.`;
+	return `${filled} — I NEED to take something off it NOW; the shelf is over what it holds.`;
+}
+
 /** Resolve, refresh and render shelf items without discarding entries that do not currently fit. */
 function shelfBlock(root, items, max, brainDir) {
 	const shown = [];
@@ -830,7 +848,7 @@ export const withoutFront = (text) => text.replace(FRONT_BLOCK, "");
  * Write the front block for a collapse that happens now, and remember what it holds.
  * @param {string} brainDir
  * @param {string} root
- * @param {{ chatWindow: number, shelfTokens: number }} config
+ * @param {{ chatWindow: number, contextWindow: number }} config
  * @param {{ now: number, reason: string, midTurn?: { by: "user" | "note", reminded: boolean, note?: string, calls: { text: string, result: string }[] } }} input
  * @returns {{ text: string, kept: { tasks: number, shelf: number, talk: number }, tokens: { record: number, shelf: number, talk: number, now: number, total: number }, left: { item: object, why: string }[] }}
  */
@@ -838,7 +856,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 	return updateContext(brainDir, (store) => {
 		const record = recordText(composedRows(store));
 		const salient = salientFrom(brainDir);
-		const shelf = shelfBlock(root, store.shelf, config.shelfTokens, brainDir);
+		const shelf = shelfBlock(root, store.shelf, shelfSpace(config?.contextWindow), brainDir);
 		// Items that cannot be rendered right now remain shelved with their stable IDs and backing snapshots.
 		store.shelf = shelf.items;
 		store.chat = chatWindow(store.chat, config.chatWindow);
@@ -931,6 +949,7 @@ export function contextLines(brainDir, root, { used, window }) {
 	const store = loadContext(brainDir);
 	const lines = [];
 	if (Number.isFinite(used) && used > 0) lines.push(`My context holds about ${count(used)} of ${count(window)} tokens.`);
+	if (store.shelf.length > 0) lines.push(shelfFillLine(root, brainDir, store.shelf, window));
 	// Folding by the agent: it sees exactly which reports stand in view in full, with their size, so it can
 	// decide when each has had its bookkeeping done and fold it to its one-line record (recallable by id).
 	const visibleRows = store.front?.rows ?? composedRows(store).filter((record) => record.archived !== true);
@@ -962,7 +981,7 @@ export function contextLines(brainDir, root, { used, window }) {
 	}
 	if (leaving.length > 0) lines.push(`Taken off my shelf, gone from view at the next collapse: ${leaving.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	if (store.shelf.length > 0) lines.push(`Shelf items (stable ID; unshelve by ID or path): ${store.shelf.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
-	if (stillDeferred.length > 0) lines.push(`Shelved items not shown because they did not fit the context shelf budget remain available by ID: ${stillDeferred.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
+	if (stillDeferred.length > 0) lines.push(`Shelved items not shown because they did not fit the shelf's space remain available by ID: ${stillDeferred.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	const missingSources = store.shelf.filter((item) => item.ref === undefined && liveShelfSource(root, item)?.content === undefined);
 	const backedSources = missingSources.filter((item) => readShelfSnapshot(brainDir, item) !== undefined);
 	const unbackedSources = missingSources.filter((item) => !backedSources.includes(item));
@@ -1207,7 +1226,7 @@ export function supersededBy(steps, args, dropped = {}) {
 /**
  * The block that stands in for a task's collapsed steps.
  * @param {string} root
- * @param {{ shelfTokens: number }} config
+ * @param {{ contextWindow: number }} config
  * @param {NonNullable<ReturnType<typeof stepsOf>>} steps
  * @param {{ notes?: string[], shelf?: object[] }} state
  * @param {{ reason: string }} input
@@ -1223,7 +1242,7 @@ export function taskBlock(root, brainDir, config, steps, state, { reason }) {
 		keptNotes.unshift(note);
 	}
 	const done = steps.results.slice(-POLICY.limits.context.resultRows).map((result) => `${result.id} ${callWords(result.call)} → ${result.isError ? "failed: " : ""}${oneLine(result.first, POLICY.limits.context.resultFirstChars)}`);
-	const shelf = shelfBlock(root, state.shelf ?? [], config.shelfTokens, brainDir);
+	const shelf = shelfBlock(root, state.shelf ?? [], shelfSpace(config?.contextWindow), brainDir);
 	state.shelf = shelf.items;
 	return [
 		NOTE_OPEN,
@@ -1393,16 +1412,13 @@ export function shelveForUser(root, brainDir, config, path, lines) {
 	const { item, tokens, backing } = shelfItem(root, path, lines, brainDir, store.shelf);
 	const others = store.shelf.filter((entry) => !sameItem(entry, item));
 	const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0) + tokens;
-	if (total > config.shelfTokens) {
-		throw new ShelfError(`${shelfLabel(item)} is about ${count(tokens)} rendered tokens, and the shelf would then put ${count(total)} of at most ${count(config.shelfTokens)} into context. Shelve a smaller range or take something off first${others.length > 0 ? `: ${others.map(shelfLabel).join(", ")}` : ""}.`);
-	}
 	persistShelfSnapshot(brainDir, item, backing);
 	updateContext(brainDir, (next) => {
 		const at = next.shelf.findIndex((entry) => sameItem(entry, item));
 		if (at >= 0) next.shelf[at] = item;
 		else next.shelf.push(item);
 	});
-	return `${shelfLabel(item)} is on the shelf as ${item.id} (about ${count(tokens)} rendered tokens; the shelf then puts ${count(total)} of ${count(config.shelfTokens)} into context). For project files, the full backing snapshot is saved under .brain; the selected content is available now and after collapse, and every task begins with it read.\n\n${item.snapshot}`;
+	return `${shelfLabel(item)} is on the shelf as ${item.id} (about ${count(tokens)} rendered tokens; the shelf then holds about ${count(total)}). For project files, the full backing snapshot is saved under .brain; the selected content is available now and after collapse, and every task begins with it read.\n\n${item.snapshot}`;
 }
 
 /** The user takes a file, or everything, off the shelf. Throws ShelfError for a name that is not on it. */
@@ -1468,11 +1484,6 @@ export function endTaskContext(root, brainDir, config, conversationId) {
 			const adopted = { ...item, ...(existing ? { id: existing.id } : {}) };
 			if (typeof adopted.snapshot === "string") adopted.snapshot = shelfIdLine(adopted.snapshot, adopted);
 			const others = store.shelf.filter((entry) => !sameShelfItem(entry, item));
-			const total = [...others, adopted].reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0);
-			if (total > config.shelfTokens) {
-				refused.push(shelfLabel(item));
-				continue;
-			}
 			const backing = readShelfSnapshot(brainDir, item);
 			if (backing !== undefined) persistShelfSnapshot(brainDir, adopted, backing);
 			store.shelf = [...others, adopted];

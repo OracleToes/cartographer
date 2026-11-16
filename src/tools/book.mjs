@@ -699,9 +699,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }
 		}
 		const item = { ...picked.item, ...(ref ? { target: ref } : {}) };
-		const others = mine.filter((entry) => !sameItem(entry, item));
-		const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0) + picked.tokens;
-		if (total > config.shelfTokens) return fail(`${shelfLabel(item)} would put about ${count(total)} of ${count(config.shelfTokens)} shelf tokens into context. Choose a smaller range or remove a placement first.`);
 		persistShelfSnapshot(brainDir, item, picked.backing);
 		const handOn = !main && args.handOn === true;
 		updateContext(brainDir, (next) => {
@@ -935,11 +932,6 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 				const { item, tokens, backing } = shelfItem(root, op.path, op.lines, brainDir, mine);
 				const others = mine.filter((entry) => !sameItem(entry, item));
 				const total = others.reduce((sum, entry) => sum + estimate(shelfText(root, entry, brainDir)), 0) + tokens;
-				if (total > config.shelfTokens) {
-					return fail(
-						`${shelfLabel(item)} is about ${count(tokens)} rendered tokens, and the shelf would then put ${count(total)} of at most ${count(config.shelfTokens)} into context. Shelve a smaller range or take something off first${others.length > 0 ? `: ${others.map(shelfLabel).join(", ")}` : ""}.`,
-					);
-				}
 				persistShelfSnapshot(brainDir, item, backing);
 				const handOn = !main && op.hand_on === true;
 				updateContext(brainDir, (next) => {
@@ -950,7 +942,7 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 					else list.push(entry);
 				});
 				store = loadContext(brainDir);
-				const size = `about ${count(tokens)} rendered tokens; the shelf then puts ${count(total)} of ${count(config.shelfTokens)} into context`;
+				const size = `about ${count(tokens)} rendered tokens; the shelf then holds about ${count(total)}`;
 				shown.push(`shelved ${shelfLabel(item)} as ${item.id} · about ${count(tokens)} rendered tokens${handOn ? " · handed on to the main agent at the end" : ""}`);
 				lines.push(
 					main

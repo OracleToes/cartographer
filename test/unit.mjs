@@ -573,7 +573,7 @@ test("shelf add: the ID alone is enough, and it finds the file behind it", async
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\n");
 	const { ref } = observeFile(root, brainDir, "src/notes.txt");
-	const tool = bookTool({ root, brainDir, config: { shelfTokens: 2000 }, engine: {}, gate: { yolo: false } });
+	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	// Root conversation: the main shelf.
 	const focusApi = { conversationId: ROOT_CONVERSATION_ID, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
 

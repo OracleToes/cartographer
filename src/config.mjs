@@ -93,8 +93,6 @@ export const DEFAULTS = freezeTree({
 	handoffQuestion: false,
 	// How much of the talk between the user and the agent a collapse keeps word for word.
 	chatWindow: 8000,
-	// How much the shelf holds: files the agent keeps in view across collapses.
-	shelfTokens: 12000,
 	// While the agent rests, its context is collapsed once at least this much would go.
 	collapseTokens: 10000,
 	// And after the user has been away this many minutes, whatever would go. 0: never for that reason.
@@ -337,10 +335,10 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	for (const key of ["contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "treeDepth", "windowTail", "wakeMin", "wakesMax"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
 	}
-	for (const key of ["chatWindow", "shelfTokens", "collapseTokens"]) {
+	for (const key of ["chatWindow", "collapseTokens"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.minimumTokenSetting) throw new ConfigError(`config: ${key} must be a whole number of tokens, ${POLICY.validation.minimumTokenSetting} or more`);
 	}
-	if (config.chatWindow + config.shelfTokens > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow and shelfTokens together must not be more than half of contextWindow");
+	if (config.chatWindow > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
 	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);

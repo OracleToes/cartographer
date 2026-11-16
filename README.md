@@ -871,7 +871,7 @@ Your talk with the user, word for word; what was said before it is gone
 | `/collapse` | Now. Works while the agent is idle |
 | The agent calls `context` with `collapse` | When the calls of that reply are done |
 
-A collapse that would free next to nothing is not made, however full the context is. That case means the shelf, the talk and the fixed part fill the window by themselves; lower `shelfTokens` or `chatWindow`.
+A collapse that would free next to nothing is not made, however full the context is. That case means the shelf, the talk and the fixed part fill the window by themselves; lower `chatWindow`.
 
 **The question (opt-in, off by default).** With `"handoffQuestion": true`, before a collapse that the agent did not ask for itself, Cartographer asks it whether something in view is written down nowhere and will be needed. With the default `false` the collapse carries the last reply mechanically — the block quotes the calls of the last reply and what each returned, never asks — and nothing of that one request is spent on the question. The request is the last one again with the question added at its end, so the server has read all of it but the question; the reply is limited by a schema to `{"handoff": true}` or `{"handoff": false}`, with thinking switched off for that one request. `false` costs the reading of the last reply and of the question, a second or two as a rule, and the collapse follows at once. `true` gives the agent one turn to write down what it needs, in the ledger, the graph, the assessment or on the shelf, and then the collapse follows. If the server cannot answer such a request, the screen says so with the server's words and the collapse is made without the question.
 
@@ -881,7 +881,7 @@ A collapse that would free next to nothing is not made, however full the context
 
 A task reads a file, reports, and the file text is gone with the task. When the agent keeps sending tasks to the same file, it can put the file on its shelf: `{"action":"shelve","path":"src/roll.py"}`, or with `"lines":"1-80"`. Marking changes nothing at that moment, since putting text at the front of the context would make the server read everything again. From the next collapse on the file stands in the block, and since a task continues from the main agent's context, every task then starts with it already read.
 
-The shelf holds at most `shelfTokens` (12,000); a file that would not fit is refused, with the sizes. The block shows a shelved file as it was at the collapse. When the file changes afterwards the block is left as it is and the state block names the file as changed, one line with the line delta (read or re-shelve it to see the difference); the next collapse writes the current text. A file that was deleted leaves the shelf, and both you and the agent are told. `/context` shows what is on the shelf, what waits for the next collapse, and what was taken off.
+The shelf holds whatever you add; nothing refuses. Half the window (the shelf's soft cap) is its intended share, and as it fills the state block says so, in the agent's own words and as a share of shelf space, so the agent makes room itself (fold or unshelve) before it has to. The block shows a shelved file as it was at the collapse. When the file changes afterwards the block is left as it is and the state block names the file as changed, one line with the line delta (read or re-shelve it to see the difference); the next collapse writes the current text. A file that was deleted leaves the shelf, and both you and the agent are told. `/context` shows what is on the shelf, what waits for the next collapse, and what was taken off.
 
 ### Recalling and folding
 
@@ -999,7 +999,6 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `treeDepth` | 3 | Levels of the file tree the agent is shown, 1 to 6, until it sets a depth of its own |
 | `thinking` | true | Whether the terminal starts with the agent's own text shown. Ctrl-T and `/thinking` switch it while it runs |
 | `chatWindow` | 8000 | Tokens of your talk with the agent that a collapse keeps word for word. The newest message is kept whatever its size |
-| `shelfTokens` | 12000 | Tokens the agent's shelf may hold. Together with `chatWindow` at most half of `contextWindow` |
 | `collapseTokens` | 10000 | While the agent rests, its context is collapsed once at least this many tokens would go |
 | `collapseMinutes` | 5 | And after you have been away this many minutes, whatever would go. 0: never for that reason |
 | `collapseFull` | 80 | While the agent works, its context is collapsed when it is this full, in percent of `contextWindow`, 30 to 95. The same limit holds for a task's steps |
