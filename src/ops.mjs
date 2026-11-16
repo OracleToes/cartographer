@@ -12,7 +12,7 @@ import { applyContextRowAction, ContextRowError, foldReports, loadContext, recal
 import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "./atlas.mjs";
 import { applyOp, LedgerError, loadLedger, prune, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
-import { noteAssessed, pin } from "./top.mjs";
+import { pin } from "./top.mjs";
 
 /** The books an id might name, and the words for them in a line of refusal. */
 export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;

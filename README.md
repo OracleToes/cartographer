@@ -1033,7 +1033,7 @@ And smaller things, named where they belong above: the full screen does not repl
 
 ## Tests
 
-`npm test` runs `test/unit.mjs`, a fast, self-contained suite of unit checks for the shared operations the screen offers over a row, the shell tool's contract and the state block. It covers the ledger, plan and atlas operations and their refusals, the screen's settle/add/archive/drop paths (including the double-load regression), the shell tool's schema and its in-band notes, and the state block's command lines. It is not the former integration suite (the real `carto` command in throwaway project folders against a scripted stand-in for the model server), which asserted an earlier specification and has not been carried over; recovering it requires an explicit decision and an audit against this one. The unit suite takes seconds and is meant for the end of a piece of work, not for each step along the way. It covers:
+`npm test` runs `test/all.mjs`: the unit suite (`test/unit.mjs`) and the ported integration suite (`test/run.mjs`), both measured against a hard wall-clock budget. The unit suite is a fast, self-contained set of checks for the shared operations the screen offers over a row, the shell tool's contract and the state block. It covers:
 
 - the ledger: add/done and the errors an unknown id gets;
 - the plan: add/done and the file left consistent;
@@ -1043,7 +1043,7 @@ And smaller things, named where they belong above: the full screen does not repl
 - the shell tool: the parameter schema (missing required refused, `seconds` unified across run/wait/send), the in-band line that says which arguments mean nothing for the action, and the read-only lane's refusals with the sandbox off;
 - the state block: the command lines for the sandbox on, switched off, and unavailable, including that the switched-off line says the main agent cannot run commands at all.
 
-The former integration suite (the real `carto` command against a scripted stand-in server, plus a terminal emulator) asserted an earlier specification — it predates the inline reads, the salient-note ledger and the read-only lane — and is not in this branch. It is not run by `npm test`. Recovering it would need an explicit decision and an audit of every case against this specification, and a budget for its minutes.
+The integration suite runs the real `carto` command in throwaway project folders against a scripted stand-in for the model server (`test/stand-in.mjs`), so no model is needed. Both are seconds; both are meant for the end of a piece of work.
 
 ## Files
 
