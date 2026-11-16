@@ -54,7 +54,7 @@ In **default mode**, the user's silence means "not authorized yet," not "don't l
 
 **Settled** (user-confirmed 2026-11-15; shipped):
 
-- **Read-only is inline, for every context.** Project-file `inspect`/`read`/`search`/`list`, durable `list`/`inspect`/`read`, report reads, `shelf` operations — no nested conversation, no report journaled, no permanent composed row, no second-guessing. The bounds that already exist stay (file size cap, line clip, range cap).
+- **Read-only is inline, for every context.** Project-file `read`/`search`/`list`, durable `list`/`read`, report reads, `shelf` operations — no nested conversation, no report journaled, no permanent composed row, no second-guessing. The bounds that already exist stay (file size cap, line clip, range cap).
 - **Changes go through the one gate.** File create/edit and all command execution require an authorized change plan item carried by a change focus — checkpoints, sandbox, network policy, undo. Only the orchestrating context edits the plan. Default mode: items wait for the user. Yolo: items run.
 - **A `task` focus is a deliberate tool, never a toll booth.** Uses: (a) carrying out an authorized change item (isolation, checkpoint, undo); (b) a bounded attention firewall the agent *chooses* when the work is large ("read these 80 files, keep the shape of the answer") — an investment of context hygiene, not a tax on looking.
 - **A report is journaled for real tasks**, i.e. work the agent delegated with a brief (user-confirmed 2026-11-15) — never for one-shot reads or tool calls. Reports exist so delivered work can be recalled by id.

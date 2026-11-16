@@ -60,14 +60,13 @@ const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
  * local validator and the executor's dispatch all derive from this table; the tool description's capability
  * matrix is written to match it. Spec fields:
  *   ref: "required" → needs a ref with an `id`; the namespace and kind are inferred, the live version is used
- *   pathOk: a ref OR an explicit project-relative path locates the thing (file inspect/read; shelf add)
+ *   pathOk: a ref OR an explicit project-relative path locates the thing (file read; shelf add)
  *   operation: "required" → needs the target-specific payload object; operationFields lists required non-empty
  *             string fields inside it; hint overrides the "an operation payload" wording
  *   fields: required non-empty string arguments on the call itself
  */
 const CAPABILITIES = {
 	file: {
-		inspect: { pathOk: true },
 		read: { pathOk: true },
 		create: { fields: ["path", "content"] },
 		edit: { ref: "required", fields: ["oldText", "newText"] },
@@ -76,7 +75,6 @@ const CAPABILITIES = {
 	},
 	report: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		recall: { ref: "required" },
 		archive: { ref: "required" },
@@ -85,7 +83,6 @@ const CAPABILITIES = {
 	},
 	ledger: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
 		edit: { ref: "required", operation: "required" },
@@ -94,7 +91,6 @@ const CAPABILITIES = {
 	},
 	plan: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
 		edit: { ref: "required", operation: "required" },
@@ -104,7 +100,6 @@ const CAPABILITIES = {
 	},
 	atlas: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
 		edit: { ref: "required", operation: "required" },
@@ -118,7 +113,6 @@ const CAPABILITIES = {
 	},
 	assessment: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
 		edit: { ref: "required", operation: "required" },
@@ -128,7 +122,6 @@ const CAPABILITIES = {
 	},
 	practice: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		add: { operation: "required" },
 		edit: { ref: "required", operation: "required" },
@@ -138,7 +131,6 @@ const CAPABILITIES = {
 	},
 	context: {
 		list: {},
-		inspect: { ref: "required" },
 		read: { ref: "required" },
 		archive: { ref: "required" },
 		restore: { ref: "required" },
@@ -146,13 +138,13 @@ const CAPABILITIES = {
 		note: { operation: "required", operationFields: ["text"], hint: "operation { text }: what to keep, with file paths and line numbers" },
 		collapse: {},
 	},
-	conversation: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
-	message: { list: {}, inspect: { ref: "required" }, read: { ref: "required" }, edit: { ref: "required" } },
-	toolCall: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
-	toolResult: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
-	prompt: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
-	tool: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
-	schema: { list: {}, inspect: { ref: "required" }, read: { ref: "required" } },
+	conversation: { list: {}, read: { ref: "required" } },
+	message: { list: {}, read: { ref: "required" }, edit: { ref: "required" } },
+	toolCall: { list: {}, read: { ref: "required" } },
+	toolResult: { list: {}, read: { ref: "required" } },
+	prompt: { list: {}, read: { ref: "required" } },
+	tool: { list: {}, read: { ref: "required" } },
+	schema: { list: {}, read: { ref: "required" } },
 	shelf: {
 		list: {},
 		// The namespace and the kind are inferred from the ID alone (src/tools/book.mjs, inferShelfRef); a full reference is not needed.
@@ -164,7 +156,7 @@ const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
 const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
 const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
-	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`/`inspect`; a record's ID from any `list`." }),
+	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`; a record's ID from any `list`." }),
 	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
 	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred when omitted: from the target, or for target=shelf from what the ID is." })),
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
@@ -383,7 +375,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		const output = nested.structuredOutput;
 		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
 	}
-	if (target === "file" && ["inspect", "read"].includes(action)) {
+	if (target === "file" && action === "read") {
 		let ref = args.ref;
 		try {
 			if (ref === undefined) {
@@ -393,9 +385,8 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		} catch (error) { return fail(`Could not resolve the file reference: ${error.message}.`); }
 		if (!validateReference(ref) || ref.kind !== "file") return fail("Invalid file reference; expected at least an `id`.");
 		const result = resolveFile(root, brainDir, ref);
-		const readablePinned = action === "read" && ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
+		const readablePinned = ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
 		const record = result.record;
-		if (action === "inspect") return textResult(JSON.stringify({ ref: result.ref ?? ref, kind: "file", path: record?.path, status: result.status, requestedVersion: result.requestedVersion, currentVersion: result.currentVersion, bytes: result.bytes?.byteLength, error: result.error, actions: result.status === "live" ? ["inspect", "read", "edit", "remove", "rebind", "shelf.add"] : ["inspect"] }, null, 2), { ref: result.ref ?? ref, status: result.status });
 		if (result.status !== "live" && !readablePinned) return fail(`File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`);
 		if (result.bytes.byteLength > POLICY.limits.look.fileBytes) return fail(`The file is ${count(result.bytes.byteLength)} bytes, over the ${count(POLICY.limits.look.fileBytes)}-byte read limit. Ask for a smaller range with shelf.add.`);
 		if (result.bytes.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0)) return fail("This file appears to be binary and cannot be returned as text.");
@@ -405,13 +396,13 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		return textResult(`${selected}${readablePinned ? `\n(a pinned historical version; the current content differs)` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
 	}
 	if (DURABLE_TARGETS.has(target)) {
-		if (target === "schema" && ["inspect", "read"].includes(action) && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
+		if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
 			let current;
 			try { current = nativeReference(brainDir, "schema", args.ref.id); }
 			catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
 			if (args.ref.namespace !== current.namespace) return fail("Schema reference belongs to another brain-store namespace.");
 			const retained = readReferenceVersion(brainDir, args.ref);
-			if (retained !== undefined) return textResult(action === "inspect" ? JSON.stringify({ ref: args.ref, kind: "schema", status: "live", retained: true }, null, 2) : JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
+			if (retained !== undefined) return textResult(JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
 		}
 		if (action === "list") {
 			let records;
@@ -495,7 +486,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 				return textResult("Message updated.", { status: "soft_forgotten" });
 			} catch (error) { return fail(`Message edit refused: ${error.message}.`); }
 		}
-		if (!["inspect", "read"].includes(action)) return unsupported(target, action);
+		if (action !== "read") return unsupported(target, action);
 		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
 		let currentNamespace;
 		try { currentNamespace = nativeReference(brainDir, target, args.ref.id); }
@@ -508,15 +499,15 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			if (target === "message" && loadContext(brainDir).forgottenEntries?.includes(args.ref.id)) return fail("Message is no longer available through ordinary recall.");
 			const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
 			if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or inaccessible.`);
-			return textResult(action === "inspect" ? JSON.stringify({ ref: args.ref, kind: target, status: "stale", historical: true }, null, 2) : JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
+			return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
 		}
 		if (args.ref.version !== undefined && args.ref.version !== found.version) {
 			const historical = readReferenceVersion(brainDir, args.ref);
 			if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; the requested immutable version is unavailable.`);
-			return textResult(action === "inspect" ? JSON.stringify({ ref: args.ref, kind: target, status: "stale", currentVersion: found.version, historical: true }, null, 2) : JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
+			return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 		}
 		const ref = nativeReference(brainDir, target, found.id, found.version);
-		return textResult(action === "inspect" ? JSON.stringify({ ref, kind: target, status: "live", provenance: found.provenance, summary: found.value?.name ?? found.value?.message?.role ?? found.value?.call?.name }, null, 2) : JSON.stringify(found.value, null, 2), { ref, status: "live" });
+		return textResult(JSON.stringify(found.value, null, 2), { ref, status: "live" });
 	}
 	if (BRAIN_TARGETS.has(target)) {
 		if (action === "list") {
@@ -535,7 +526,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
 			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 		}
-		if (["inspect", "read"].includes(action)) {
+		if (action === "read") {
 			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
 			let current;
 			try { current = nativeReference(brainDir, target, args.ref.id); }
@@ -547,22 +538,14 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			if (found === undefined) {
 				const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
 				if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
-				return action === "inspect"
-					? textResult(JSON.stringify({ ref: args.ref, target, status: "stale", historical: true }, null, 2), { ref: args.ref, status: "stale" })
-					: textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
+				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
 			}
 			if (args.ref.version !== undefined && args.ref.version !== found.version) {
 				const historical = readReferenceVersion(brainDir, args.ref);
 				if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; historical content is unavailable.`);
-				return action === "inspect"
-					? textResult(JSON.stringify({ ref: args.ref, target, status: "stale", currentVersion: found.version, historical: true }, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version })
-					: textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
+				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 			}
 			const ref = nativeReference(brainDir, target, args.ref.id, found.version);
-			if (action === "inspect") {
-				const { text, gist, detail, outcome, doneWhen, ...metadata } = found.record;
-				return textResult(JSON.stringify({ ref, target, status: "live", metadata, actions: ["inspect", "read", ...(BRAIN_MUTATIONS[target] ?? [])] }, null, 2), { ref, status: "live" });
-			}
 			return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
 		}
 		if (target === "context" && (action === "fold" || action === "note" || action === "collapse")) {
@@ -638,7 +621,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		try { paged = listPage(reports, args, "report"); } catch (error) { return fail(`Could not list reports: ${error.message}.`); }
 		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 	}
-	if (target === "report" && ["inspect", "read", "recall", "archive", "restore", "remove"].includes(action)) {
+	if (target === "report" && ["read", "recall", "archive", "restore", "remove"].includes(action)) {
 		const ref = args.ref;
 		if (!validateReference(ref) || ref.kind !== "report") return fail("Invalid report reference; expected at least an `id`.");
 		let current;
@@ -652,7 +635,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		if (body === undefined) return fail(`Report ${ref.id} is deleted or unavailable.`);
 		const version = reportVersion(body);
 		if (ref.version !== undefined && ref.version !== version) return fail(`Report version is stale: requested ${ref.version}, current ${version}.`);
-		if (action === "inspect") return textResult(JSON.stringify({ ref: { ...current, version }, kind: "report", status: "live", archived: row.archived === true, actions: ["inspect", "read", "recall", "archive", "restore", "remove", "shelf.add"] }, null, 2), { status: "live", ref: { ...current, version } });
 		if (action === "read") return textResult(body, { status: "live", ref: { ...current, version } });
 		if (action === "recall") return runContext({ root, brainDir, config, engine }, { ops: [{ action: POLICY.enums.actions.recall, id: ref.id }] }, api);
 		const expected = args.expectedVersion ?? ref.version ?? version;

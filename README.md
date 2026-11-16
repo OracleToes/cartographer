@@ -448,7 +448,7 @@ An approval covers the item as it stood when you gave it. When the agent rewords
 
 **A standing item** is a change item for a duty rather than a piece of work: "keep the server running", "restart the worker when it stops". The agent marks it `standing`, and it shows as `[change, standing]`. It needs your approval like any change item, and the line that asks says how many items are standing. Once it is approved, the agent may start a task for it as often as its text calls for it, until it marks the item done, which ends the duty. An ordinary item is for work that is done once. Together with a wake (see [Waking up](#waking-up)), a standing item is how the agent looks after something while you are away, without approval being switched off.
 
-**A change task** is a task started for a change item you approved (or while approval is switched off). It has `book` file create/edit/remove and `shell` besides search/list and `book` inspect/read, and may type into a shell window with `window`. The implementation keeps checked file-write primitives behind `book`. Who may write is decided when the call is made, by the program:
+**A change task** is a task started for a change item you approved (or while approval is switched off). It has `book` file create/edit/remove and `shell` besides search/list and `book` read, and may type into a shell window with `window`. The implementation keeps checked file-write primitives behind `book`. Who may write is decided when the call is made, by the program:
 
 - The main agent never writes. Neither does a task without an item, or a task for a look item.
 - A path outside the project is refused, also through a symlinked folder, and so is a symlink itself.
@@ -650,7 +650,7 @@ carto --no-bwrap        for the whole session
 Commands then run directly on the machine, as you, with your environment and the network. They can read, change and delete whatever you can, anywhere. What stays the same:
 
 - A plan still needs `/approve` before a task's command runs. With the sandbox off, tasks' commands run directly on your machine; the main agent's commands still run in a read-only window while bubblewrap works, and not at all when it does not.
-- `book` file create/edit/remove and `book` file inspect/read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
+- `book` file create/edit/remove and `book` file read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
 - The windows work the same, with bounded output, and every process of a window ends with it: on `/kill`, when you leave, and within about a second of Cartographer being killed. A process that detaches itself into a session of its own escapes this.
 
 What you give up:
