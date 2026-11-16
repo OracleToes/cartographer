@@ -363,7 +363,7 @@ Cartographer can hand one hard, verifiable sub-problem — a kernel, an invarian
 **To set it up**, add a section to your llama-swap config next to ByteShape's (names match `consultModel`):
 
 ```yaml
-  MythosNano:
+  Mythos-nano:
     cmd: >
       /home/momo/git/llama.cpp/build/bin/llama-server
       --port ${PORT}
@@ -1010,7 +1010,7 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
 | `contextWindow` | 100000 | Context size the server was started with (`-c`) |
 | `maxTokens` | 32768 | Longest single reply, thinking included |
-| `consultModel` | `"MythosNano"` | Model name as llama-swap serves the consult model (the optional hard-problem solver, see [The storyteller](#the-storyteller-mythos-nano)). `""` switches it off. `CARTO_CONSULT_MODEL` overrides both settings files |
+| `consultModel` | `"Mythos-nano"` | Model name as llama-swap serves the consult model (the optional hard-problem solver, see [The storyteller](#the-storyteller-mythos-nano)). `""` switches it off. `CARTO_CONSULT_MODEL` overrides both settings files |
 | `consultMaxTokens` | 40960 | Longest answer a `consult` call may write — the model card's ceiling for hard problems |
 | `consultTemperature` | 0.6 | Sampling temperature for `consult` calls — the model card's recommendation for single-shot reasoning |
 | `consultTimeoutSeconds` | 1800 | How long a `consult` call may wait before giving up. Generation at the ceiling can alone take that long |
