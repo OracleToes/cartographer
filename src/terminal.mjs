@@ -1971,7 +1971,13 @@ export async function runTerminal(session, options) {
 				// Their words carry the approval: an unambiguous yes while change items wait approves them (the gate reads it, not the agent).
 				if (gate.yolo !== true) {
 					const approved = approvalWords(options.brainDir, text);
-					if (approved !== undefined) line(`${bold("●")} approved from your words: ${approved.join(", ")}`);
+					if (approved !== undefined) {
+						// An item marked network is never approved by bare words — say so when that is what is left.
+						const named = /p\d+/i.test(text);
+						let held = [];
+						if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((item) => item.network === true).map((item) => item.id); } catch { held = []; }
+						line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+					}
 				}
 				const wasBusy = busy;
 				userSpoke();

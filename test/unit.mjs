@@ -154,12 +154,12 @@ test("approval words: a bare affirmative authorizes the waiting change items", (
 		{ id: "p2", mode: "change", text: "Change the schema.", network: true, status: "open", added: 1 },
 		{ id: "p3", mode: "look", text: "Look first.", status: "open", added: 1 },
 	] });
-	assert.equal(approvalWords(brainDir, "yes") !== undefined, true);
+	assert.deepEqual(approvalWords(brainDir, "yes"), ["p1"]);
 	const { plan } = loadPlan(brainDir);
 	assert.equal(plan.items.find((item) => item.id === "p1").approved !== undefined, true, "the change item is approved");
-	assert.equal(plan.items.find((item) => item.id === "p2").approved !== undefined, true, "a network item waits for the same word — the words are the user's own, and the receipt says what was approved");
-	// Already approved: the same word approves nothing new.
-	assert.equal(approvalWords(brainDir, "yes"), undefined);
+	assert.equal(plan.items.find((item) => item.id === "p2").approved, undefined, "a network item never rides a bare word — name it or /approve it");
+	// Naming the network item approves it: deliberate, item by item.
+	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
 });
 
 test("approval words: only the named items are approved; look items never wait", (t) => {

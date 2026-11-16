@@ -269,7 +269,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `● atlas  + component roller …` | The main agent changed the graph itself: `+` written, `~` rewritten, `-` removed, `✓` confirmed. Also where it moved the tree |
 | `● top of the context rewritten` | The copy of the assessment and the graph at the start of the agent's context was replaced with the current ones. The next answer reads the whole context again |
 | `atlas: 3 nodes · assessment written 2 h ago` | At the start: what the atlas holds |
-| `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2` |
+| `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2`, or say so in your own words — a plain "yes" approves the waiting change items that do not reach the network; name the item (`approved p2`) to authorize a network one |
 | `requests  4 requests wait for you` | `/requests` lists them: change items and questions of taste |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: change items run without `/approve` |
 | `● model  model-a → model-b · context 65536 tokens` | You switched the model with `/model`: the conversation goes on where it was, a task forked after runs on the new one, and the context window follows the new model (never above the settings' `contextWindow`) |
@@ -443,7 +443,7 @@ You see them in the Requests view of the full screen (or `/requests`), and in th
   /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question
 ```
 
-Saying yes in the chat is not an approval; the agent is told to put the work in the plan so that you can approve it there. `/approve` with no ids still works the old way: it approves the plan as it stands, every open change item at once. If you type `/approve` while the plan holds no open change item, nothing is approved and the agent is told so in a message sent for you: a model sometimes describes its plan in the chat without writing it, and this gives it the turn to write it.
+A plain affirmative in the chat — “yes”, “looks good”, “approved p1” — is an approval of the waiting change items that do not reach the network (naming the item is required for a network one); the screen prints what it approved and says so when a network item is left waiting. Anything less clear ("maybe", "yes, but not p1") goes to the agent as an ordinary message, not an approval. The agent is told to put the work in the plan so that you can approve it there; `/approve` remains the slash door, and `/approve` with no ids still approves the plan as it stands, every open change item at once. If you type `/approve` while the plan holds no open change item, nothing is approved and the agent is told so in a message sent for you: a model sometimes describes its plan in the chat without writing it, and this gives it the turn to write it.
 
 An approval covers the item as it stood when you gave it. When the agent rewords an approved item, turns a look item into a change item, or gives an item the network, that item waits again — the screen says so, and the agent is told to explain the change and ask you again. Other items keep their approvals: adding work never cancels what you already agreed to.
 
