@@ -555,7 +555,7 @@ export async function runTerminal(session, options) {
 	let busy = false;
 	let stopped = false;
 	let closing = false;
-	let paused = false; // the user's pause: the agent finishes what it is doing and gets nothing new until it is lifted
+	let paused = false; // the user's pause: the agent is interrupted at once and gets nothing new until it is lifted
 	const heldInputs = []; // what the user wrote while it was paused, sent when it is lifted
 	/** Lines the user wrote while the agent worked, sent to join its run. A run that ends without reading them —
 	 * stopped, or failed — withdraws them unread; they are sent again when the run is over, so nothing said is lost. */
@@ -971,7 +971,7 @@ export async function runTerminal(session, options) {
 		// Paused, nothing new reaches the agent: what the user writes waits here, and goes when the pause is lifted.
 		if (paused && options.interactive && options.oneShot === undefined) {
 			heldInputs.push(content);
-			line(dim(`  (held: the agent is paused, ${plural(heldInputs.length, "line")} wait${heldInputs.length === 1 ? "s" : ""} · /pause or Ctrl-V lets them go)`));
+			line(dim(`  (held: the agent is paused — ${plural(heldInputs.length, "line")} wait${heldInputs.length === 1 ? "s" : ""} · /pause or Ctrl-V sends ${heldInputs.length === 1 ? "it" : "them"})`));
 			return undefined;
 		}
 		// A new turn: what the last one held back is no longer the newest thinking.
@@ -1097,7 +1097,7 @@ export async function runTerminal(session, options) {
 						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
 						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
-						"  /pause    hold everything new back from the agent while it finishes what it is doing; /pause or Ctrl-V again lets it go on",
+						"  /pause    interrupt the agent at once (a run in flight is aborted) and hold everything new back; /pause or Ctrl-V again lets it go on",
 						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
 						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
 						"  /initiate /initiate off keeps the agent waiting for you at the start; /initiate on lets it start on its own again",
@@ -1519,8 +1519,7 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "pause": {
-				// The agent is not interrupted: it finishes the round it is on, and until the pause is lifted nothing
-				// new reaches it — no line the user writes (they wait below), no wake of its own, no auto-collapse.
+				// The pause interrupts at once: a run in flight is aborted here (the same abort /stop uses), whatever it is doing; nothing of the answer it was writing stands after. Until the pause is lifted nothing new reaches the agent: no line the user writes (they wait below), no wake of its own, no auto-collapse.
 				const to = argument === "on" ? true : argument === "off" ? false : !paused;
 				if (to === paused) {
 					line(to ? "  already paused. /pause or Ctrl-V lets it go on." : "  nothing is paused.");
@@ -1529,7 +1528,10 @@ export async function runTerminal(session, options) {
 				paused = to;
 				setPrompt();
 				if (paused) {
-					line(`${bold("●")} paused: the agent finishes what it is doing and gets nothing new · /pause or Ctrl-V lets it go on`);
+					line(busy
+						? `${bold("●")} paused: the agent is interrupted where it stands · /pause or Ctrl-V lets it go on`
+						: `${bold("●")} paused: nothing new reaches the agent · /pause or Ctrl-V lets it go on`);
+					if (busy) await main.abort(context);
 					return true;
 				}
 				const held = heldInputs.splice(0);
@@ -1540,7 +1542,11 @@ export async function runTerminal(session, options) {
 					if (submission === undefined) {
 						busy = wasBusy;
 						if (!busy) reader.prompt();
-					} else if (wasBusy) line(dim("  (sent; the agent reads it after its current step)"));
+						continue;
+					}
+					// busy may still say true until the stopped run's ending is seen; the submission's own status says what happened to the line.
+					const record = await submission.status(context).catch(() => undefined);
+					if (record?.status === "queued") line(dim("  (sent; the agent reads it after its current step)"));
 				}
 				await wake();
 				return true;
@@ -2004,7 +2010,7 @@ export async function runTerminal(session, options) {
 			});
 		});
 		// Bash-like: Ctrl-C clears what is typed on the line. With the line already clear, Ctrl-C twice in a row
-		// leaves the way /quit does; Ctrl-X stops the agent instead, and Ctrl-V pauses it.
+		// leaves the way /quit does; Ctrl-X stops the agent instead, and Ctrl-V interrupts it and holds what you write.
 		let armedQuit = 0;
 		reader.on("SIGINT", () => {
 			const typed = typeof reader.line === "string" ? reader.line : "";
@@ -2034,7 +2040,7 @@ export async function runTerminal(session, options) {
 				if (!busy) reader.prompt(true);
 			});
 		});
-		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V pauses it; Ctrl-T hides and shows its thinking."));
+		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V interrupts it and holds what you write." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V interrupts it and holds what you write; Ctrl-T hides and shows its thinking."));
 		// A context left large by the last session is collapsed before the first message has to carry it. Then,
 		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.
 		enqueue(async () => {

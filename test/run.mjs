@@ -1194,6 +1194,34 @@ test("thinking: Ctrl-T hides and shows it on a terminal, and leaves what is bein
 	}
 });
 
+test("pause: Ctrl-V interrupts the agent at once, and what you write waits until you unpause", async () => {
+	const root = makeProject("pause-key", { git: false });
+	configure(root, { initiate: false });
+	// The stand-in holds the first reply open (after the role chunk) until the test releases it; only the newest
+	// message "hold this please" triggers the hold, so the turn started by the held line after the unpause flows.
+	const server = await startStandIn({ holdWhen: (body) => JSON.stringify(body.messages.at(-1)).includes("hold this please") });
+	try {
+		const result = await cartoOnTerminal(root, server, [], [
+			["Set one up in", ""],
+			["Type a message", "hold this please"],
+			[3, "\x16", false],
+			["paused: the agent is interrupted", "did you get that?"],
+			["(held: the agent is paused", "\x16", false],
+			["on again: what you wrote is sent now", "/quit"],
+		]);
+		if (result === undefined) return "python3 is needed for a terminal";
+		has(result.screen, "paused: the agent is interrupted where it stands", "Ctrl-V interrupts the run at once");
+		has(result.screen, "(held: the agent is paused — 1 line waits", "what is written while paused waits, and says so");
+		has(result.screen, "on again: what you wrote is sent now (1 line)", "unpausing sends the held line");
+		const sent = server.requests.map((request) => JSON.stringify(request.messages.at(-1)));
+		assert.ok(sent.some((entry) => entry.includes("hold this please")), "the first message started a turn");
+		assert.ok(sent.some((entry) => entry.includes("did you get that?")), "the held line reached the agent after the unpause");
+		assert.equal(sent.filter((entry) => entry.includes("did you get that?")).length, 1, "the held line was sent once");
+	} finally {
+		await server.close();
+	}
+});
+
 test("context: what the engine works with: line ranges, what a collapse would free, what a re-read replaces", () => {
 	assert.deepEqual(parseLines(undefined), {});
 	assert.deepEqual(parseLines("10-80"), { from: 10, to: 80 });
