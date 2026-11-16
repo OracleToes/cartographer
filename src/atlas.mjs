@@ -20,7 +20,7 @@ import { ago, since } from "./time.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { cleanAnchor, DEPTH_MAX, isFolder } from "./tree.mjs";
 import { USER_NAME } from "./user.mjs";
-import { warn } from "./warnings.mjs";
+import { clipNote, warn } from "./warnings.mjs";
 
 /** A node without a kind is a plain node. */
 export const KINDS = POLICY.enums.atlasKinds;
@@ -229,8 +229,9 @@ function checkedGist(value) {
 	if (typeof value !== "string" || value.trim() === "") throw new AtlasError("`gist` (one line that says what this is) is required and was left out or empty.");
 	const text = flat(value);
 	if (text.length > GIST_MAX) {
-		warn(`\`gist\` was clipped from ${text.length} to ${GIST_MAX} characters; put the rest into \`detail\` if you still want it kept.`);
-		return `${text.slice(0, GIST_MAX - 1).trimEnd()}…`;
+		const clipped = `${text.slice(0, GIST_MAX - 1).trimEnd()}…`;
+		warn(clipNote("`gist`", text, clipped, GIST_MAX, { extra: "Put the rest into `detail` if you still want it kept.", remedy: "the edit action for the node (`book` atlas edit)" }));
+		return clipped;
 	}
 	return text;
 }
@@ -353,9 +354,13 @@ export function applyAtlasOp(atlas, op, who) {
 		case POLICY.enums.atlasActions.add:
 		case POLICY.enums.atlasActions.edit: {
 			const byId = findNode(atlas, op.name);
-			const name = byId?.name ?? normName(op.name);
+			let name = byId?.name ?? normName(op.name);
 			if (name === "") throw new AtlasError("`name` is required: a short name for the node, such as dice_roll.");
-			if (name.length > NAME_MAX) throw new AtlasError(`The name is ${name.length} characters; the limit is ${NAME_MAX}.`);
+			if (name.length > NAME_MAX) {
+				const original = name;
+				name = name.slice(0, NAME_MAX);
+				warn(clipNote("The name of the node", original, name, NAME_MAX, { remedy: "the rename action for the node (`book` atlas rename)" }));
+			}
 			const gist = checkedGist(op.gist);
 			if (op.kind !== undefined && op.kind !== null && op.kind !== "" && op.kind !== "node" && !KINDS.includes(op.kind)) {
 				throw new AtlasError(`\`kind\` is ${JSON.stringify(op.kind)}; it is one of ${KINDS.join(", ")}, or left out for a plain node.`);
@@ -364,8 +369,9 @@ export function applyAtlasOp(atlas, op, who) {
 			if (op.detail !== undefined && op.detail !== null) {
 				detail = String(op.detail).trim();
 				if (detail.length > DETAIL_MAX) {
-					warn(`\`detail\` was clipped from ${detail.length} to ${DETAIL_MAX} characters; the rest is dropped. Split it over two nodes if you still want it kept.`);
-					detail = `${detail.slice(0, DETAIL_MAX - 1).trimEnd()}…`;
+					const clipped = `${detail.slice(0, DETAIL_MAX - 1).trimEnd()}…`;
+					warn(clipNote("`detail`", detail, clipped, DETAIL_MAX, { extra: "Split it over two nodes if you still want it kept.", remedy: "the edit action for the node (`book` atlas edit)" }));
+					detail = clipped;
 				}
 			}
 			const files = checkedFiles(root, op.files, who.created, who.mayCreate === true);
@@ -455,10 +461,14 @@ export function applyAtlasOp(atlas, op, who) {
 		case POLICY.enums.atlasActions.rename: {
 			const existing = findNode(atlas, op.name);
 			const from = existing?.name ?? normName(op.name);
-			const to = normName(op.to);
+			let to = normName(op.to);
 			if (from === "") throw new AtlasError("`name` is the node as it is.");
 			if (to === "") throw new AtlasError("`to` is the name the node should have: lowercase letters, digits and underscores.");
-			if (to.length > NAME_MAX) throw new AtlasError(`The name is ${to.length} characters; the limit is ${NAME_MAX}.`);
+			if (to.length > NAME_MAX) {
+				const original = to;
+				to = to.slice(0, NAME_MAX);
+				warn(clipNote("`to` (the name the node should have)", original, to, NAME_MAX, { remedy: "the rename action for the node (`book` atlas rename)" }));
+			}
 			if (from === to) return { line: `${from} is its name already.`, changed: false };
 			if (atlas.nodes.some((entry) => entry.name === to)) throw new AtlasError(`There is a node ${to} already; pick another name.`);
 			const node = find(atlas, from);

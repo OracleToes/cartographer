@@ -18,6 +18,7 @@ import { DEFAULTS, POLICY } from "./config.mjs";
 import { readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ago, took } from "./time.mjs";
+import { clipNote, warn } from "./warnings.mjs";
 
 /** Seconds between two firings of one trigger, at least. A wake costs a whole turn; reading alone can take that long. */
 export const WAKE_MIN = DEFAULTS.wakeMin;
@@ -230,9 +231,13 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = POL
 		 * @param {{ note: string, every?: number, times?: number, path?: string, window?: string, match?: string }} wanted
 		 */
 		set(wanted) {
-			const note = flat(wanted.note);
+			let note = flat(wanted.note);
 			if (note === "") throw new WakeError("A wake needs a `note`: what I want to look at or do when it fires, written for myself.");
-			if (note.length > NOTE_MAX) throw new WakeError(`\`note\` is ${note.length} characters; ${NOTE_MAX} is the limit.`);
+			if (note.length > NOTE_MAX) {
+				const original = note;
+				note = note.slice(0, NOTE_MAX);
+				warn(clipNote("`note`", original, note, NOTE_MAX, { remedy: "`wake` with remove and the wake's id, then set it again with the shorter note (a wake is not edited)" }));
+			}
 			if (wakes.length >= most) throw new WakeError(`${plural(most, "wake")} are set, which is the limit: ${wakes.map((wake) => wake.id).join(", ")}. Remove one first.`);
 			const hasPath = typeof wanted.path === "string" && wanted.path.trim() !== "";
 			const hasWindow = typeof wanted.window === "string" && wanted.window.trim() !== "";

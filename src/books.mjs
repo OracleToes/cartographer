@@ -17,7 +17,7 @@ import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAssessment } from "./assessment.mjs";
 import { applyEntryOp, flat } from "./rows.mjs";
-import { warn } from "./warnings.mjs";
+import { clipNote, warn } from "./warnings.mjs";
 
 export const BOOK_KINDS = POLICY.enums.bookKinds;
 export const BOOK_ACTIONS = POLICY.enums.bookActions;
@@ -51,7 +51,7 @@ const BOOK_SPEC = {
 	show: bookLine,
 	closedWord: "settled",
 	alreadyText: (id) => `${id} was already settled.`,
-	outcome: (op) => { if (op.text === undefined || flat(op.text) === "") return undefined; const text = flat(op.text); if (text.length <= POLICY.limits.books.outcomeChars) return text; warn(`\`text\` (how it ended) was clipped from ${text.length} to ${POLICY.limits.books.outcomeChars} characters; the rest is dropped. Edit if the cut lost the point.`); return `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…`; },
+	outcome: (op) => { if (op.text === undefined || flat(op.text) === "") return undefined; const text = flat(op.text); if (text.length <= POLICY.limits.books.outcomeChars) return text; const clipped = `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…`; warn(clipNote("`text` (how it ended)", text, clipped, POLICY.limits.books.outcomeChars, { remedy: "the edit action for the entry (`book` books edit)" })); return clipped; },
 	markClosed: false,
 	addBefore: true,
 	editFields: (item, op, hasText, checked) => {
@@ -62,8 +62,9 @@ const BOOK_SPEC = {
 		const text = flat(op.outcome);
 		if (text === "") throw new BookError("`outcome` is empty: say how it ended, or leave it out.");
 		if (text.length > POLICY.limits.books.outcomeChars) {
-			warn(`\`outcome\` was clipped from ${text.length} to ${POLICY.limits.books.outcomeChars} characters; the rest is dropped. Edit if the cut lost the point.`);
-			return { outcome: `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…` };
+			const clipped = `${text.slice(0, POLICY.limits.books.outcomeChars - 1).trimEnd()}…`;
+			warn(clipNote("`outcome`", text, clipped, POLICY.limits.books.outcomeChars, { remedy: "the edit action for the entry (`book` books edit)" }));
+			return { outcome: clipped };
 		}
 		return { outcome: text };
 	},

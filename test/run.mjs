@@ -950,7 +950,6 @@ test("wakes: what cannot be set", () => {
 	const { open } = wakesAt("wakes-refused");
 	const wakes = open();
 	refusedWake(wakes, { note: " ", every: 60 }, "A wake needs a `note`");
-	refusedWake(wakes, { note: "x".repeat(NOTE_MAX + 1), every: 60 }, `${NOTE_MAX} is the limit`);
 	refusedWake(wakes, { note: "n" }, "Say what wakes me: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
 	refusedWake(wakes, { note: "n", every: 59 }, "`every` is 59; it is a whole number of seconds from 60 to 604800. A wake costs a whole turn, so 1 m is the least.");
 	refusedWake(wakes, { note: "n", every: 90.5 }, "`every` is 90.5");
@@ -968,6 +967,9 @@ test("wakes: what cannot be set", () => {
 	for (let i = 0; i < WAKES_MAX; i++) wakes.set({ note: `number ${i}`, every: 60 });
 	refusedWake(wakes, { note: "one more", every: 60 }, `${WAKES_MAX} wakes are set, which is the limit: w1, w2, w3, w4, w5, w6, w7, w8. Remove one first.`);
 	assert.throws(() => wakes.remove("w99"), (error) => error instanceof WakeError && error.message === 'There is no wake "w99". Set: w1, w2, w3, w4, w5, w6, w7, w8.');
+	// The note is clipped to the limit when it is too long, and the wake is set all the same.
+	const clip = wakesAt("wakes-clip").open();
+	assert.equal(clip.set({ note: "x".repeat(NOTE_MAX + 50), every: 60 }).note.length, NOTE_MAX, "the note clipped to the limit; the wake is set");
 	// The least interval is a setting.
 	const quick = wakesAt("wakes-refused-quick", { config: { wakeMin: 5, wakesMax: 1 } }).open();
 	assert.equal(quick.set({ note: "n", every: 5 }).every, 5);

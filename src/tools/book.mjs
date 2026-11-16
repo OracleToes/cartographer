@@ -21,7 +21,7 @@ import { charsPerTokenNow } from "../calibrate.mjs";
 import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
 import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 import { USER_NAME } from "../user.mjs";
-import { takeWarnings, warn } from "../warnings.mjs";
+import { clipNote, takeWarnings, warn } from "../warnings.mjs";
 
 const count = (n) => Math.round(n).toLocaleString("en-US");
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
@@ -832,8 +832,9 @@ function runBooks({ brainDir }, args, api) {
 		let text = typeof args.text === "string" ? args.text.trim() : "";
 		if (text === "") return fail("`text` is empty and `ops` holds nothing. Write an entry with `ops`, or the whole assessment with `text`.");
 		if (text.length > ASSESSMENT_MAX) {
-			warn(`The assessment was clipped from ${text.length} to ${ASSESSMENT_MAX} characters; the rest is dropped. Keep what I would need first with an empty context, and put the details in nodes of the atlas.`);
-			text = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
+			const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
+			warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
+			text = clipped;
 		}
 		saveAssessment(brainDir, text);
 		noteAssessed(brainDir, text);
@@ -1016,12 +1017,18 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 
 			if (action === POLICY.enums.actions.note) {
 				if (main) return fail(REFUSALS.mainNotes);
-				const text = String(op.text ?? "").trim();
-				if (text === "") return fail("note needs `text`: what to keep, with file paths and line numbers.");
+				const raw = String(op.text ?? "").trim();
+				if (raw === "") return fail("note needs `text`: what to keep, with file paths and line numbers.");
+				const noteMax = POLICY.limits.task.noteChars;
+				const note = raw.length > noteMax ? (() => {
+					const clipped = `${raw.slice(0, noteMax - 1).trimEnd()}…`;
+					warn(clipNote("`text` (the note)", raw, clipped, noteMax, { remedy: "nothing edits a note; put the substance in the ledger and keep the note short" }));
+					return clipped;
+				})() : raw;
 				updateContext(brainDir, (next) => {
-					(taskState(next, api.conversationId).notes ??= []).push(text);
+					(taskState(next, api.conversationId).notes ??= []).push(note);
 				});
-				shown.push(`noted · ${count(text.length)} characters`);
+				shown.push(`noted · ${count(note.length)} characters`);
 				lines.push("Noted. It stays when my steps are collapsed.");
 				continue;
 			}

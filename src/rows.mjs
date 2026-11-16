@@ -24,7 +24,7 @@
 //   findText       what is said when no entry carries that id; `where` says which field misspelled it
 //   show           one line for an entry, as the agent and the user see it, after the verb's sign
 import { POLICY } from "./config.mjs";
-import { warn } from "./warnings.mjs";
+import { clipNote, warn } from "./warnings.mjs";
 //   closedWord     "closed" (ledger) or "settled" (books)
 //   alreadyText    what is said when `done` reaches an entry that is done already
 //   outcome        for `done`: the entry's outcome from `op.text`, or undefined to leave it out
@@ -55,8 +55,9 @@ export function applyEntryOp(store, op, spec, now) {
 		if (typeof value !== "string" || value.trim() === "") throw new BookError(spec.textRequired(what));
 		const text = flat(value);
 		if (text.length > spec.textMax) {
-			warn(`${what} was clipped from ${text.length} to ${spec.textMax} characters; the rest is dropped. Edit if the cut lost the point.`);
-			return `${text.slice(0, spec.textMax - 1).trimEnd()}…`;
+			const clipped = `${text.slice(0, spec.textMax - 1).trimEnd()}…`;
+			warn(clipNote(what, text, clipped, spec.textMax, { remedy: "the edit action for the entry (`book` with that target and action=edit)" }));
+			return clipped;
 		}
 		return text;
 	};

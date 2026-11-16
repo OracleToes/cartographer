@@ -4,6 +4,7 @@ import { defineTool } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { took } from "../time.mjs";
 import { EVERY_MAX, NOTE_MAX, wakeAbout, WakeError, wakeRepeats } from "../wakes.mjs";
+import { takeWarnings } from "../warnings.mjs";
 import { USER_NAME } from "../user.mjs";
 
 /** @param {{ wakes: ReturnType<typeof import("../wakes.mjs").createWakes>, config: { wakeMin: number, wakesMax: number } }} input */
@@ -14,7 +15,7 @@ export function wakeTool({ wakes, config }) {
 	const Parameters = obj(
 		{
 			action: oneOf(POLICY.enums.wakeActions, { description: "set: set a wake, with `note` and exactly one trigger. remove: take one back, with `id`." }),
-			note: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: NOTE_MAX, pattern: "\\S", description: `For set, required: what to look at or do when it fires, written for myself. One line, at most ${NOTE_MAX} characters.` })),
+			note: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: `For set, required: what to look at or do when it fires, written for myself. One line, at most ${NOTE_MAX} characters (an over-long note is clipped, and the result says so).` })),
 			every: opt(int({ minimum: config.wakeMin, maximum: EVERY_MAX, description: `For set: a number of seconds, ${config.wakeMin} or more. Alone: wake after this long, and again each time it passes. With path or window: the least time between two wakes, default ${config.wakeMin}.` })),
 			times: opt(int({ minimum: POLICY.limits.wake.timesMin, description: `For set: how often it fires before it is removed. Default ${POLICY.limits.wake.timesDefault}. ${POLICY.limits.wake.timesMin}: until I remove it.` })),
 			path: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, description: "For set: wake when this file changes, or any file under this folder. A path inside the project; one that does not exist yet wakes me when it appears." })),
@@ -64,11 +65,14 @@ export function wakeTool({ wakes, config }) {
 			const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 			try {
 				if (args.action === POLICY.enums.actions.set) {
+					takeWarnings(); // drop anything raised before this call started
 					const wake = wakes.set(args);
 					const about = `${wakeAbout(wake)}, ${wakeRepeats(wake)}`;
 					const first = wake.kind === POLICY.enums.wakeKinds.time ? ` It first fires in ${took(wake.every * 1000)}.` : "";
+					const notes = takeWarnings();
+					const said = `${wake.id} set: ${about}.${first} I am not waiting for it: I go on with other work, or end my turn. \`wake\` with remove and ${wake.id} takes it back.${notes.length > 0 ? `\n\n${notes.map((note) => `note: ${note}`).join("\n")}` : ""}`;
 					return {
-						output: [{ type: "text", text: `${wake.id} set: ${about}.${first} I am not waiting for it: I go on with other work, or end my turn. \`wake\` with remove and ${wake.id} takes it back.` }],
+						output: [{ type: "text", text: said }],
 						details: { shown: [`+ ${wake.id} ${about} · ${wake.note}`] },
 					};
 				}
