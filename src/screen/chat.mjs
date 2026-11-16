@@ -17,31 +17,47 @@
 // This file is the model: items in, lines out. A line is { spans, bg?, styled?, … }: `bg` names the block it
 // belongs to, and `styled` is the line with its escape sequences when a Markdown renderer made it. It draws
 // nothing and knows no terminal (src/screen/app.mjs does).
+import { POLICY } from "../config.mjs";
 import { describeCall, describeResult } from "../terminal.mjs";
+import { isFront } from "../context.mjs";
+import { splitTop } from "../top.mjs";
+import { parseStory, STORY_ID } from "../story.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
-const LIVE_ROWS = 5;
+const LIVE_ROWS = POLICY.limits.screen.chatLiveRows;
 /** How many rows of the reply that is being written are shown. */
-const LIVE_TEXT_ROWS = 8;
+const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
+/** The most of the context sent to the storyteller that an opened consult row shows; the question always shows in full. */
+const CONTEXT_MAX = Math.floor(POLICY.limits.screen.chatDetailChars / 2);
 /** The most of one result that is kept for opening it in place. */
-const DETAIL_MAX = 20_000;
+const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
 /** The most rows an opened result shows; the rest is in the tab it leads to, or in /report. */
-const DETAIL_ROWS = 40;
+const DETAIL_ROWS = POLICY.limits.screen.chatDetailRows;
+/** The most rows an opened request block shows (the state block and the copy at the top of the context). */
+const BLOCK_ROWS = DETAIL_ROWS * 2;
 /** Items kept; older ones leave the tab (they stay in the session and in the export of what is left). */
-const ITEMS_MAX = 1500;
+const ITEMS_MAX = POLICY.limits.screen.chatItems;
 
 /** An empty row between two blocks. One for all of them, so that it is painted once. */
 const BLANK = { spans: [] };
 
 /** The tab a call's work lives in, and the view inside it. */
-export function homeOf(name) {
+export function homeOf(name, args = {}) {
+	if (name === "book") {
+		const target = args?.target;
+		if (target === "file" && (args?.action === "create" || args?.action === "edit" || args?.action === "remove")) return { tab: "diff" };
+		if (target === "ledger" || target === "plan" || target === "atlas") return { tab: "carto", view: target };
+		// The assessment rides in the context tab's copied top block; it has no view of its own.
+		if (target === "assessment") return { tab: "context", view: "window" };
+		if (target === "context") return { tab: "context" };
+		return undefined;
+	}
 	if (name === "write" || name === "edit") return { tab: "diff" };
-	if (name === "shell" || name === "window") return { tab: "shells" };
+	if (name === "shell") return { tab: "shells" };
 	if (name === "plan") return { tab: "carto", view: "plan" };
 	if (name === "ledger") return { tab: "carto", view: "ledger" };
-	if (name === "atlas") return { tab: "carto", view: "atlas" };
-	if (name === "assess") return { tab: "carto", view: "assessment" };
+	if (name === "assess") return { tab: "context", view: "window" };
 	if (name === "context") return { tab: "context" };
 	return undefined;
 }
@@ -54,20 +70,24 @@ const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (To
 function bodyOf(call) {
 	const args = call.arguments ?? {};
 	let best = "";
-	for (const key of ["content", "new_text", "command", "brief", "report", "text", "input"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
-	if (best === "" && Array.isArray(args.ops)) best = args.ops.map((op) => JSON.stringify(op)).join("\n");
+	for (const key of ["content", "newText", "new_text", "oldText", "old_text", "command", "brief", "report", "text", "input", "context", "question"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
+	if (best === "" && args.operation !== null && typeof args.operation === "object") best = JSON.stringify(args.operation, null, 1);
 	return best;
 }
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[] }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
+ *   readStory: reads the story under a thread (st1, st2, …); for a consult row, so the whole exchange can be shown from
+ *   the story itself, without keeping that text in the session. Without it, a consult row
+ *   opens to the call and its outcome only.
  */
-export function createChat({ now = () => Date.now(), markdown } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readStory } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
 	const live = new Map(); // depth -> the reply being written there
+	const toolTails = new Map(); // call id -> the tail of a running tool's output, as the harness keeps it
 	let thinking = true;
 	// Counted up when the colours change: what was rendered with the old ones is made again.
 	let styleRev = 0;
@@ -102,6 +122,33 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		return push({ at: now(), ...item });
 	};
 
+	/**
+	 * What a consult row holds, assembled once and kept: the rounds from the story the call belongs to (never from
+	 * the session — the exchange is large and belongs in the brain exactly once), the thread marker from the call's
+	 * details, and the call's own ask as the fallback when no story stands behind it (a failed call, or a thread the
+	 * brain no longer holds).
+	 */
+	const shortWhen = (at) => `${String(at ?? "").slice(0, 16).replace("T", " ")} UTC`;
+	const storyOf = (row) => {
+		if (row.story !== undefined) return row.story;
+		const args = row.args ?? {};
+		const question = String(args.question ?? "").trim();
+		const context = typeof args.context === "string" ? args.context.trim() : "";
+		const thread = typeof row.details?.thread === "string" && STORY_ID.test(row.details.thread) ? row.details.thread : undefined;
+		const raw = thread !== undefined && typeof readStory === "function" ? readStory(thread) : undefined;
+		let rounds;
+		let unparsable = false;
+		if (raw !== undefined) {
+			try {
+				rounds = parseStory(raw).rounds;
+			} catch {
+				unparsable = true;
+			}
+		}
+		row.story = { thread, rounds, question, context, unparsable, missing: thread !== undefined && raw === undefined };
+		return row.story;
+	};
+
 	const api = {
 		get version() {
 			return version;
@@ -115,19 +162,39 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		user(text) {
 			say({ type: "user", text });
 		},
-		/** Text from Cartographer itself: what a command printed, a notice. Consecutive pieces are one block. */
-		print(text) {
+		/** Text from Cartographer itself: what a command printed, a notice. Consecutive pieces are one block. `{ keep: true }`: survives a collapse of the conversation. */
+		print(text, options = {}) {
 			const cleaned = String(text).replace(/\r\x1b\[2?K/g, "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
 			if (cleaned === "") return;
 			const last = items.at(-1);
-			if (last?.type === "console" && !last.sealed) last.text += cleaned;
-			else say({ type: "console", text: cleaned });
+			if (last?.type === "console" && !last.sealed) {
+				last.text += cleaned;
+				if (options.keep === true) last.keep = true;
+			} else say({ type: "console", text: cleaned, ...(options.keep === true ? { keep: true } : {}) });
 			touch();
 		},
 		/** The block of printed text is complete: what is printed next starts a new one. */
 		seal() {
 			const last = items.at(-1);
 			if (last?.type === "console") last.sealed = true;
+		},
+		/**
+		 * A collapse of the main context: everything the agent could see before it is out of the tab, so only the
+		 * marker of the collapse stands. Items flagged `keep` (what was said before the screen opened) survive.
+		 */
+		collapse() {
+			for (let index = items.length - 1; index >= 0; index--) if (items[index].keep !== true) items.splice(index, 1);
+			rows.clear();
+			live.clear();
+			touch();
+		},
+		/**
+		 * A block the agent sees at the start or the end of its request — the copy at the top of the context, the
+		 * state block, the shell windows block, the newest read. One line until opened, the way a run of calls folds.
+		 */
+		block(label, text) {
+			closeGroup();
+			push({ type: "block", label: String(label).replace(/\s+/g, " ").trim(), text: String(text), open: false, at: now() });
 		},
 		/**
 		 * One new entry of a conversation: depth 0 is the main agent, 1 a task. `printed` is what the plain
@@ -156,7 +223,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 							rows.set(call.id, { quiet: true, name: call.name });
 							continue;
 						}
-						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call), args: call.arguments ?? {}, state: "running", started: now() };
+						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now() };
 						rows.set(call.id, row);
 						group().rows.push(row);
 					}
@@ -165,13 +232,15 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					const row = rows.get(message.toolCallId);
 					const text = textOf(message);
 					if (row === undefined || row.quiet) {
-						if (message.isError && row?.quiet) say({ type: "console", text: `! ${row.name ?? "chat"}: ${cut(plain(text).replace(/\n/g, " "), 300)}\n`, sealed: true });
+						if (message.isError && row?.quiet) say({ type: "console", text: `! ${row.name ?? "chat"}: ${cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.consoleErrorChars)}\n`, sealed: true });
 						continue;
 					}
 					row.state = message.isError ? "failed" : "done";
 					row.ended = now();
-					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), 200) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message);
-					row.detail = text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
+					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.taskErrorChars) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message) || undefined;
+					// The consult's answer is not in the result (the receipt keeps the session lean); no detail to show.
+					row.receipt = row.name === "consult" ? text : undefined;
+					row.detail = row.name === "consult" ? undefined : text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
 					row.details = message.details;
 					// What a task leaves behind is said in full: the report line, the files it changed, the plan item.
 					if (depth === 0 && row.name === "task" && printed.trim() !== "") {
@@ -179,8 +248,12 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 						say({ type: "console", text: outcome.endsWith("\n") ? outcome : `${outcome}\n`, sealed: true, of: row.id });
 					}
 					touch();
-				} else if (message.role === "user" && depth === 0 && printed.trim() !== "" && /context collapsed/.test(printed)) {
-					say({ type: "console", text: printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, ""), sealed: true });
+				} else if (message.role === "user" && depth === 0 && isFront({ role: "user", content: [{ type: "text", text: splitTop(textOf(message)).text }] })) {
+					// The front block of a collapse, whenever it reached the tab — live or replayed: everything the
+					// agent could see before it is out of view, so only the marker stands.
+					api.collapse();
+					const said = printed.trim() !== "" ? printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "") : "◆ the context was collapsed; /context shows it\n";
+					say({ type: "console", text: said, sealed: true });
 				}
 			}
 		},
@@ -193,6 +266,27 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 			const before = live.get(depth);
 			live.set(depth, { message, since: before?.message.timestamp === message.timestamp ? before.since : now() });
 			touch();
+		},
+		/** What the running tools at this depth are saying, as far as the harness keeps it: a bounded tail of each. */
+		liveTools(depth, slots) {
+			void depth;
+			const next = new Map();
+			for (const slot of slots ?? []) {
+				if (slot?.callId === undefined || slot?.status !== "running") continue;
+				if (typeof slot.output !== "string" || slot.output === "") continue;
+				next.set(slot.callId, { text: slot.output, clipped: (slot.droppedBytes ?? 0) > 0 });
+			}
+			let same = next.size === toolTails.size;
+			if (same) for (const [id, entry] of next) {
+				const previous = toolTails.get(id);
+				if (previous === undefined || previous.text !== entry.text || previous.clipped !== entry.clipped) {
+					same = false;
+					break;
+				}
+			}
+			toolTails.clear();
+			for (const [id, entry] of next) toolTails.set(id, entry);
+			if (!same) touch();
 		},
 		/** Whether the end of what is being written is the same thing over and over (src/screen/text.mjs). */
 		stuck() {
@@ -222,13 +316,14 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 				const { message } = live.get(deepest);
 				const call = callsOf(message).at(-1);
 				if (call?.name === "chat" || call?.name === "ask") return { what: "writing to you", depth: deepest, task };
-				if (call !== undefined) return { what: `writing ${cut(describeCall(call).replace(/\s+/g, " "), 50)}`, depth: deepest, task };
+				if (call !== undefined) return { what: `writing ${cut(describeCall(call, describeRef).replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars)}`, depth: deepest, task };
 				if (textOf(message).trim() !== "") return { what: "writing a note", depth: deepest, task };
 				return { what: "thinking", depth: deepest, task };
 			}
 			// The call that runs now: inside a task, the task's own call and not the task.
 			const row = running.filter((entry) => entry !== taskRow).at(-1);
-			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), 50), depth: row.depth, task };
+			if (row?.name === "consult") return { what: "the storyteller is writing", depth: row.depth, task };
+			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars), depth: row.depth, task };
 			if (taskRow !== undefined) return { what: "between two steps", depth: 1, task };
 			return undefined;
 		},
@@ -236,7 +331,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		lastAgent: () => items.findLast((item) => item.type === "agent")?.text,
 		toggle(key, to) {
 			const item = items.find((entry) => entry.key === key);
-			if (item?.type === "group") item.open = to ?? !item.open;
+			if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
 			touch();
 		},
 		/** Open every run of calls, or fold them all with what was opened inside them. */
@@ -257,6 +352,33 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		},
 		/** The reply that is being written at a depth, as far as it has come. */
 		liveMessage: (depth) => live.get(depth)?.message,
+		/**
+		 * Whether a message as it shows can be edited with e: the words of the user and of the agent. Tool work
+		 * (a run of calls, a call with what it returned) cannot, nor what Cartographer printed.
+		 */
+		editable(key) {
+			const item = items.find((entry) => entry.key === key);
+			return item?.type === "user" || item?.type === "agent" || item?.type === "note";
+		},
+	/** A message said anew, as it shows. The conversation's stored entries cannot change; this changes the tab. */
+	revise(key, text) {
+		const item = items.find((entry) => entry.key === key);
+		if (item === undefined || (item.type !== "user" && item.type !== "agent" && item.type !== "note")) return false;
+		const said = String(text ?? "").replace(/\s+$/, "");
+		if (said === "" || said === item.text) return false;
+		item.text = said;
+		delete item.md;
+		touch();
+		return true;
+	},
+	/** A message taken out of the tab (deleted in the Context window): gone where it stood. */
+	forget(key) {
+		const at = items.findIndex((entry) => entry.key === key);
+		if (at < 0) return false;
+		items.splice(at, 1);
+		touch();
+		return true;
+	},
 		toggleRow(key, index, to) {
 			const item = items.find((entry) => entry.key === key);
 			const row = item?.rows?.[index];
@@ -314,8 +436,67 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					if (!thinking) return;
 					const indent = row.depth > 0 ? "  │ ┊ " : "  ┊ ";
 					const text = wrap(row.text, inner - width(indent));
-					for (const piece of row.open ? text : text.slice(0, 2)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: "note" });
-					if (!row.open && text.length > 2) add([[indent, "faint"], [`… ${text.length - 2} more lines`, "faint"]], { ...ref, kind: "note" });
+					for (const piece of row.open ? text : text.slice(0, POLICY.limits.screen.notePreviewLines)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: "note" });
+					if (!row.open && text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [`… ${text.length - POLICY.limits.screen.notePreviewLines} more lines`, "faint"]], { ...ref, kind: "note" });
+					return;
+				}
+				if (row.name === "consult") {
+					// The storyteller: the call opens to the whole exchange — what I asked, and what it answered.
+					add(callLine(row), { ...ref, kind: "call" });
+					if (row.state === "running") {
+						// Its words as they come: the tail the harness keeps, not the story (the round lands in the brain when it finishes).
+						const tail = toolTails.get(row.id);
+						if (tail !== undefined) {
+							const indentLive = row.depth > 0 ? "  │   " : "    ";
+							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the story is on its way to the brain", "faint"]], { ...ref, kind: "detail" });
+							const shown = wrap(tail.text.replace(/\s+$/, ""), inner - width(indentLive));
+							for (const piece of shown.slice(-POLICY.limits.screen.chatLiveTextRows)) add([[indentLive, "faint"], [piece, "muted"]], { ...ref, kind: "detail" });
+						}
+					}
+					if (row.open) {
+						const indent = row.depth > 0 ? "  │   " : "    ";
+						const section = (title) => add([[indent, "faint"], [title, "faint"]], { ...ref, kind: "detail" });
+						const body = (text, style = "muted") => {
+							for (const piece of wrap(text, inner - width(indent))) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : style]], { ...ref, kind: "detail" });
+						};
+						const story = storyOf(row);
+						const clippedContext = (text) => (text.length > CONTEXT_MAX ? `${text.slice(0, CONTEXT_MAX)}\n… (${text.length - CONTEXT_MAX} more characters of context)` : text);
+						if (story.thread !== undefined) add([[indent, "faint"], [`the story stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
+						if (story.rounds !== undefined) {
+							for (const [index, round] of story.rounds.entries()) {
+								section(`round ${index + 1} · ${shortWhen(round.at)}`);
+								if (round.context !== "") {
+									section("what I sent — the context");
+									body(clippedContext(round.context));
+								}
+								section("what I asked — the question");
+								body(round.question === "" ? "(the question is not in the call)" : round.question);
+								section("what the storyteller answered");
+								body(round.answer);
+							}
+							if (row.state === "failed") {
+								section("why it failed");
+								body(plain(row.receipt ?? ""));
+							}
+							return;
+						}
+						if (story.context !== "") {
+							section("what I sent — the context");
+							body(clippedContext(story.context));
+						}
+						section("what I asked — the question");
+						body(story.question === "" ? "(the question is not in the call)" : story.question);
+						if (row.state === "failed") {
+							section("why it failed");
+							body(plain(row.receipt ?? ""));
+							return;
+						}
+						section("what the storyteller answered");
+						if (row.state === "running") body("(the storyteller is still writing; the answer lands in the story when it finishes)", "faint");
+						else if (story.unparsable) body(`(the story under thread ${story.thread} cannot be read as a story; the answer stood there)`, "faint");
+						else if (story.missing) body(story.thread === undefined ? "(the answer is not in the session, and no thread was named)" : `(the story under thread ${story.thread} is gone from the brain; the answer stood there)`, "faint");
+						else body("(no answer stands behind this call)", "faint");
+					}
 					return;
 				}
 				add(callLine(row), { ...ref, kind: "call" });
@@ -342,6 +523,15 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					for (const [index, piece] of wrap(item.text, inner - 2).entries()) add([[index === 0 ? "› " : "  ", "user bold"], [piece, "bold"]], { item: item.key, kind: "user", bg: "bgUser" });
 				} else if (item.type === "agent") {
 					said(item.text, { item: item.key, kind: "agent" }, item);
+				} else if (item.type === "block") {
+					const ref = { item: item.key, kind: "block", bg: "bgTool" };
+					add([[item.open ? "▾ " : "▸ ", "carto"], [cut(item.label, inner - 2), "muted"]], ref);
+					if (item.open) {
+						const indent = "  ";
+						const pieces = wrap(item.text, inner - width(indent));
+						for (const piece of pieces.slice(0, BLOCK_ROWS)) add([[indent, "faint"], [piece, "muted"]], ref);
+						if (pieces.length > BLOCK_ROWS) add([[indent, "faint"], [`… ${pieces.length - BLOCK_ROWS} more lines (y copies it)`, "faint"]], ref);
+					}
 				} else if (item.type === "note") {
 					if (!thinking) return;
 					for (const piece of wrap(item.text, cols - 2)) add([["┊ ", "faint"], [piece, "note italic"]], { item: item.key, kind: "note" });
@@ -361,8 +551,9 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 					const open = item.open || running;
 					const failed = calls.filter((row) => row.state === "failed").length;
 					const tasks = calls.filter((row) => row.name === "task").map((row) => row.details?.report ?? (row.args?.item ? `task ${row.args.item}` : "task"));
+					const consults = calls.filter((row) => row.name === "consult").map((row) => cut(String(row.args?.question ?? "").replace(/\s+/g, " "), 48)).filter((text) => text !== "");
 					const took = span((item.ended ?? now()) - item.started);
-					const head = [`${calls.length === 1 ? "1 call" : `${calls.length} calls`}`, ...new Set(tasks), took].join(" · ");
+					const head = [`${calls.length === 1 ? "1 call" : `${calls.length} calls`}`, ...new Set([...tasks, ...consults]), took].join(" · ");
 					add([[open ? "▾ " : "▸ ", running ? "warn" : "tool"], [head, running ? "" : "muted"], [failed > 0 ? ` · ${failed} failed` : "", "err"]], { item: item.key, kind: "group", bg: "bgTool" });
 					if (open) {
 						// A run that is going on shows its newest rows; opened by hand, it shows all of them.
@@ -378,7 +569,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 			const base = `${cols}|${thinking}|${styleRev}`;
 			const linesOf = (item) => {
 				const still = item.type !== "group" || (item.closed && !item.rows.some((row) => row.kind === "call" && row.state === "running"));
-				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : `${base}|${item.text.length}`;
+				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : item.type === "block" ? `${base}|${item.text.length}|${item.open ?? ""}` : `${base}|${item.text.length}`;
 				if (sign !== undefined && item.made?.sign === sign) return item.made.lines;
 				sink = [];
 				make(item);
@@ -416,7 +607,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 						said(String(call.arguments?.text ?? ""), { kind: "live" });
 						continue;
 					}
-					add([[`${indent}✎ `, "warn"], [cut(describeCall(call).replace(/\n/g, " "), inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
+					add([[`${indent}✎ `, "warn"], [cut(describeCall(call, describeRef).replace(/\n/g, " "), inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
 					const body = bodyOf(call);
 					if (body !== "") {
 						const text = wrap(body, inner - width(indent) - 4);
@@ -431,9 +622,26 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 		textOf(key, rowIndex) {
 			const item = items.find((entry) => entry.key === key);
 			if (item === undefined) return "";
+			if (item.type === "block") return item.text;
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note") return row.text;
+				if (row?.name === "consult") {
+					const story = storyOf(row);
+					const parts = [row.label];
+					if (story.thread !== undefined) parts.push(`The story stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`);
+					if (story.rounds !== undefined) {
+						for (const [index, round] of story.rounds.entries()) {
+							parts.push("", `Round ${index + 1} — ${shortWhen(round.at)}`);
+							if (round.context !== "") parts.push("", "What I sent — the context", "", round.context);
+							parts.push("", "What I asked — the question", "", round.question === "" ? "(the question is not in the call)" : round.question, "", "What the storyteller answered", "", round.answer);
+						}
+						return parts.join("\n");
+					}
+					if (story.context !== "") parts.push("", "What I sent — the context", "", story.context);
+					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the storyteller answered", "", story.unparsable ? `(the story under thread ${story.thread} cannot be read as a story; the answer stood there)` : story.missing ? `(the story under thread ${story.thread} is gone from the brain; the answer stood there)` : "(the answer is not in the session)");
+					return parts.join("\n");
+				}
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
 				return item.rows.map((entry) => (entry.kind === "note" ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
 			}
@@ -446,6 +654,7 @@ export function createChat({ now = () => Date.now(), markdown } = {}) {
 				if (item.type === "user") parts.push("## You", "", item.text, "");
 				else if (item.type === "agent") parts.push(`## Cartographer${item.task ? " (from a task)" : ""}`, "", item.text, "");
 				else if (item.type === "note") parts.push(...item.text.split("\n").map((line) => `> ${line}`), "");
+				else if (item.type === "block") parts.push("```text", `// ${item.label}`, item.text.replace(/\n+$/, ""), "```", "");
 				else if (item.type === "console") parts.push("```text", item.text.replace(/\n+$/, ""), "```", "");
 				else if (item.type === "group" && item.rows.length > 0) {
 					for (const row of item.rows) {

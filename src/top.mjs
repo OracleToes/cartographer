@@ -15,19 +15,25 @@
 // Between those moments the copy stays as it is, and the state block at the end
 // of each request (src/state.mjs) lists what was written since.
 //
-// The copy is kept in <project>/.atlas/carto-top.json and added to the first
+// The copy is kept in <project>/.brain/carto-top.json and added to the first
 // message of every request, for the main agent and for tasks alike: a task's
 // prompt must begin exactly as the main agent's does. It is never stored in the
 // conversation.
+import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { loadAssessment, textHash } from "./assessment.mjs";
 import { loadAtlas, nodeChanges, nodeHashes, renderOutline } from "./atlas.mjs";
 import { stamp } from "./time.mjs";
+import { RECORD } from "./voice.mjs";
 
-const OPEN = "<project>";
-const CLOSE = "</project>";
-const HEAD = "Written by Cartographer from your own records of this project";
+/** The stable anchor every block written by me starts with; the regex below is built from it so the marker cannot drift. */
+const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const OPEN = POLICY.markup.project.open;
+const CLOSE = POLICY.markup.project.close;
+const TOP_BLOCK = new RegExp(`${OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${CLOSE}\\n*`, "g");
+const HEAD = `${RECORD} My own records of this project`;
 
 export const topPath = (brainDir) => join(brainDir, "carto-top.json");
 
@@ -58,18 +64,17 @@ export function pin(brainDir, { now = Date.now(), reason }) {
 	const assessment = loadAssessment(brainDir).text;
 	const nodes = nodeHashes(atlas);
 	const old = loadTop(brainDir);
+	// Byte-for-byte stable when nothing changed: the server keeps what it already read.
 	if (old !== undefined && old.assessment === textHash(assessment) && JSON.stringify(old.nodes) === JSON.stringify(nodes)) return { changed: false };
-	const text = [
+	const parts = [
 		OPEN,
 		`${HEAD}, as they stood on ${stamp(now)} (${reason}). What was written since is listed in the state block at the end of the request.`,
 		"",
-		"Your assessment",
+		"My assessment",
 		assessment === "" ? "None written yet." : assessment,
-		"",
-		`Your graph (${atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`})`,
-		renderOutline(atlas),
-		CLOSE,
-	].join("\n");
+	];
+	parts.push("", `My graph (${atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`})`, renderOutline(atlas), CLOSE);
+	const text = parts.join("\n");
 	const path = topPath(brainDir);
 	const temp = `${path}.${process.pid}.tmp`;
 	writeFileSync(temp, `${JSON.stringify({ version: 1, at: new Date(now).toISOString(), reason, assessment: textHash(assessment), nodes, text }, null, "\t")}\n`);
@@ -117,5 +122,19 @@ export function withTop(messages, block) {
 
 /** Text with the copy removed (for the tests' stand-in, which obeys what the user wrote). */
 export function withoutTop(text) {
-	return text.replace(/<project>\nWritten by Cartographer[\s\S]*?\n<\/project>\n*/g, "");
+	return text.replace(TOP_BLOCK, "");
+}
+
+const TOP_BLOCK_ONE = new RegExp(`${OPEN}\\n${ANCHOR}[\\s\\S]*?\\n${CLOSE}\\n*`);
+
+/**
+ * Text with the copy split off: what stands behind it, and the copy as its own text. For display (the Chat tab
+ * shows the copy folded, apart from the message it was glued to).
+ * @returns {{ text: string, top?: string }}
+ */
+export function splitTop(text) {
+	const body = String(text ?? "");
+	const m = TOP_BLOCK_ONE.exec(body);
+	if (m === null) return { text: body };
+	return { text: body.replace(m[0], "").replace(/^\n+/, ""), top: m[0].replace(/\n+$/, "") };
 }

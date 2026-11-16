@@ -15,8 +15,12 @@
 // Both are plain requests to the model server, sent from here and not through the
 // conversation: they need what the conversation's requests must never have, a fixed
 // reply shape and a different end.
+import { POLICY } from "./config.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { describeCall, describeResult } from "./terminal.mjs";
+import { createRefDescriber } from "./refs.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
+import { calibrate } from "./calibrate.mjs";
 import { ASK_MAIN, ASK_TASK, HANDOFF_IN_TURN, TASK_HANDOFF } from "./prompt.mjs";
 import { withTimes } from "./request.mjs";
 import { loadTop, pin, withTop } from "./top.mjs";
@@ -26,7 +30,8 @@ const SCHEMA = {
 	json_schema: { name: "handoff", strict: true, schema: { type: "object", properties: { handoff: { type: "boolean" } }, required: ["handoff"], additionalProperties: false } },
 };
 /** Seconds the question may take. More than this means the server is reading the whole context again. */
-const ASK_SECONDS = 90;
+const ASK_SECONDS = POLICY.timing.context.handoffQuestionSeconds;
+const NOTE_TAG = new RegExp(`(?:${POLICY.markup.note.open}|${POLICY.markup.note.close})\\n?`, "g");
 
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
 
@@ -43,6 +48,7 @@ function replyForServer(message, results) {
  * @param {{ root: string, brainDir: string, config: any }} input
  */
 export function createEngine({ root, brainDir, config }) {
+	const describeRef = createRefDescriber({ brainDir });
 	// Per conversation: the body of the last request as it was sent, the reply to it, what its calls returned so
 	// far, the stored messages that request was made from, and the server's count of tokens.
 	const sent = new Map();
@@ -80,7 +86,7 @@ export function createEngine({ root, brainDir, config }) {
 				signal: signal === undefined ? timer : AbortSignal.any([timer, signal]),
 			});
 			const text = await response.text();
-			if (!response.ok) return { error: `the server answered ${response.status}: ${text.replace(/\s+/g, " ").slice(0, 300)}`, ms: Date.now() - began };
+			if (!response.ok) return { error: `the server answered ${response.status}: ${text.replace(/\s+/g, " ").slice(0, POLICY.limits.engine.serverErrorChars)}`, ms: Date.now() - began };
 			return { json: JSON.parse(text), ms: Date.now() - began };
 		} catch (error) {
 			const aborted = signal?.aborted === true;
@@ -105,16 +111,16 @@ export function createEngine({ root, brainDir, config }) {
 		const body = {
 			...base,
 			messages: [...state.payload.messages, ...(state.reply === undefined ? [] : replyForServer(state.reply, returned)), { role: "user", content: task ? ASK_TASK(reason) : ASK_MAIN(reason) }],
-			stream: false,
-			max_tokens: 16,
-			temperature: 0,
+			stream: POLICY.protocol.askStream,
+			max_tokens: POLICY.limits.engine.askMaxTokens,
+			temperature: POLICY.protocol.askTemperature,
 			// Thinking off for this one request: the answer is one word.
-			chat_template_kwargs: { enable_thinking: false },
+			chat_template_kwargs: { enable_thinking: POLICY.protocol.askThinking },
 			// The tools stay in the request, because the server has read them as part of the prompt. But no call can
 			// be the answer, and with some chat templates llama.cpp cannot build the grammar for "this JSON or a call
 			// of any of these tools" at all: it answers 400 "failed to parse grammar" (seen with the Qwen3.8 template
 			// on build 11913; with tool_choice none the same request is accepted and the prompt is not read again).
-			...(Array.isArray(base.tools) && base.tools.length > 0 ? { tool_choice: "none" } : {}),
+			...(Array.isArray(base.tools) && base.tools.length > 0 ? { tool_choice: POLICY.protocol.noToolChoice } : {}),
 		};
 		// A server that will not take the schema is asked the same question without it, from then on.
 		let answer = noSchema ? undefined : await post({ ...body, response_format: SCHEMA }, { seconds: config.askSeconds ?? ASK_SECONDS });
@@ -133,7 +139,7 @@ export function createEngine({ root, brainDir, config }) {
 		} catch {
 			handoff = /"handoff"\s*:\s*true/.test(said) ? true : /"handoff"\s*:\s*false/.test(said) ? false : undefined;
 		}
-		if (typeof handoff !== "boolean") return { handoff: false, error: `the answer was not the JSON asked for: ${JSON.stringify(String(said).slice(0, 120))}`, ms: answer.ms, ...also };
+		if (typeof handoff !== "boolean") return { handoff: false, error: `the answer was not the JSON asked for: ${JSON.stringify(String(said).slice(0, POLICY.limits.engine.handoffErrorChars))}`, ms: answer.ms, ...also };
 		return { handoff, ms: answer.ms, ...also };
 	}
 
@@ -141,6 +147,33 @@ export function createEngine({ root, brainDir, config }) {
 	 * Collapse the main context now: bring the top up to date, write the front block.
 	 * @returns {{ text: string }} the front block, to be stored as the start of the new context
 	 */
+	/**
+	 * The calls of the stretch a collapse drops: one entry per call, oldest first, with what the call came to.
+	 * Derived from the stored messages, not from a live tally, so it is exactly what was in view.
+	 * The reply the collapse may come with is not included — it is not stored yet at the time of a mid-turn
+	 * collapse, and its calls are the ones the mid-turn section keeps verbatim for the rest of the turn.
+	 * The reset that follows the collapse starts the context at the block, so a later collapse never sees them
+	 * either.
+	 * @param {readonly any[]} stored
+	 */
+	function callsOfStretch(stored) {
+		const byResult = new Map();
+		for (const message of stored) if (message.role === "toolResult") byResult.set(message.toolCallId, message);
+		const calls = [];
+		for (const message of stored) {
+			if (message.role !== "assistant") continue;
+			for (const call of callsOf(message)) {
+				const result = byResult.get(call.id);
+				calls.push({
+					at: Number.isFinite(message.timestamp) ? message.timestamp : undefined,
+					text: describeCall(call, describeRef),
+					outcome: result === undefined ? "no result" : describeResult(result),
+				});
+			}
+		}
+		return calls;
+	}
+
 	function collapse({ reason, midTurn, now = Date.now(), before }) {
 		// Everything is read again anyway: the moment to bring the copy of assessment and graph up to date.
 		try {
@@ -148,7 +181,8 @@ export function createEngine({ root, brainDir, config }) {
 		} catch {
 			// The old copy stays.
 		}
-		const front = writeFront(brainDir, root, config, { now, reason, midTurn });
+		const calls = callsOfStretch(of(ROOT_CONVERSATION_ID).messages ?? []);
+		const front = writeFront(brainDir, root, config, { now, reason, midTurn, calls });
 		const state = of(ROOT_CONVERSATION_ID);
 		const fixed = state.payload === undefined ? undefined : estimate(JSON.stringify(state.payload.tools ?? [])) + estimate(state.payload.messages?.[0]?.role === "system" ? state.payload.messages[0].content : "");
 		const info = { at: now, reason, before: before ?? state.used, after: fixed === undefined ? undefined : fixed + estimate(loadTop(brainDir)?.text ?? "") + front.tokens.total, kept: front.kept, left: front.left, midTurn: midTurn !== undefined };
@@ -167,7 +201,17 @@ export function createEngine({ root, brainDir, config }) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		/** The stored messages a request is made from. */
+		/**
+	 * Whether the last-known server count sits at the collapse threshold — the hard ceiling a stretch of plain
+	 * replies (which never reaches a tool round) could otherwise grow past. The mid-turn collapse is decided
+	 * in `afterMainCall`; this is the same line on the plain-reply path.
+	 */
+	overCeiling(conversationId) {
+		const used = of(conversationId).used;
+		return Number.isFinite(used) && used >= full();
+	},
+
+	/** The stored messages a request is made from. */
 		seen(conversationId, messages) {
 			of(conversationId).messages = messages;
 		},
@@ -189,6 +233,8 @@ export function createEngine({ root, brainDir, config }) {
 			state.results = new Map();
 			const used = (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.output ?? 0);
 			if (used > 0) state.used = used;
+			// Re-learn the chars-per-token ratio from what the server actually counted for this exact payload.
+			try { calibrate(JSON.stringify(state.payload ?? "").length, (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.cacheWrite ?? 0)); } catch { /* an unserializable payload teaches nothing */ }
 		},
 		/** What one call of that reply returned. */
 		returned(conversationId, call, result) {
@@ -241,9 +287,9 @@ export function createEngine({ root, brainDir, config }) {
 			}
 			// A collapse that waits for the end of the turn it was given (the agent was resting when it was asked).
 			if (due === undefined || due.atRest) return undefined;
-			// A reply that ends the turn (nothing but `chat` or `sleep`): the collapse waits for the rest that follows,
-			// where the server can read the result ahead. Here it would tell the agent that its turn goes on.
-			if (callsOf(state.reply).every((call) => call.name === "chat" || call.name === "sleep")) return undefined;
+			// A reply that rests (nothing but `sleep`): the collapse waits for the next wake, where the server can
+			// read the result ahead. `chat` is informational; the agent keeps working after it.
+			if (callsOf(state.reply).length > 0 && callsOf(state.reply).every((call) => call.name === "sleep")) return undefined;
 			const stored = state.messages ?? [];
 			const would = droppable(stored) + (state.reply === undefined ? 0 : messageTokens(state.reply)) + [...state.results.values()].reduce((sum, text) => sum + estimate(text), 0);
 			// Almost nothing would go (a goal that closes early; a context that is full of what a collapse keeps):
@@ -255,11 +301,14 @@ export function createEngine({ root, brainDir, config }) {
 			let note;
 			if (!due.asked) {
 				due.asked = true;
-				const choice = await ask(ROOT_CONVERSATION_ID, { reason: due.reason });
-				emit({ type: "asked", reason: due.reason, ...choice });
-				if (choice.handoff) {
-					due.round = at.round;
-					note = HANDOFF_IN_TURN(due.reason);
+				// O1: the metacognition question before a collapse is opt-in (config handoffQuestion). Off: the collapse carries the last reply mechanically, with no ask.
+				if (config.handoffQuestion === true) {
+					const choice = await ask(ROOT_CONVERSATION_ID, { reason: due.reason });
+					emit({ type: "asked", reason: due.reason, ...choice });
+					if (choice.handoff) {
+						due.round = at.round;
+						note = HANDOFF_IN_TURN(due.reason);
+					}
 				}
 			}
 			// The reply that was told gets its turn: the collapse comes with a later one.
@@ -273,8 +322,8 @@ export function createEngine({ root, brainDir, config }) {
 				midTurn: {
 					by: at.turn?.by ?? "user",
 					reminded: at.turn?.reminded ?? false,
-					...(at.turn?.by === "note" && turnStart !== undefined ? { note: textOf(turnStart).replace(/<\/?cartographer>\n?/g, "").trim().slice(0, 2000) } : {}),
-					calls: callsOf(reply).map((call) => ({ text: `${call.name} ${JSON.stringify(call.arguments ?? {}).slice(0, 300)}`, result: state.results.get(call.id) ?? "(no result)" })),
+					...(at.turn?.by === "note" && turnStart !== undefined ? { note: textOf(turnStart).replace(NOTE_TAG, "").trim().slice(0, POLICY.limits.engine.noteChars) } : {}),
+					calls: callsOf(reply).map((call) => ({ text: describeCall(call, describeRef), result: state.results.get(call.id) ?? "(no result)" })),
 				},
 			});
 			return { handoff: text };
@@ -291,28 +340,29 @@ export function createEngine({ root, brainDir, config }) {
 			if (steps === undefined) return undefined;
 			const state = of(conversationId);
 			const mine = loadContext(brainDir).tasks[conversationId] ?? {};
-			const hidden = mine.cut?.steps ?? 0;
-			const visible = messages.slice(steps.start + hidden).reduce((sum, message) => sum + messageTokens(message), 0);
-			const nearlyFull = Number.isFinite(state.used) && state.used >= full() && visible >= FLOOR;
+			const nearlyFull = Number.isFinite(state.used) && state.used >= full();
 			let why;
-			if (mine.pending === "now" || mine.pending === "told") why = mine.reason ?? "You asked for it";
+			if (mine.pending === "now" || mine.pending === "told") why = mine.reason ?? "I asked for it";
 			else if (nearlyFull) {
-				why = `Your context held about ${Math.round((state.used / config.contextWindow) * 100)}% of what fits`;
-				const results = messages.slice(messages.findLastIndex((message) => message.role === "assistant") + 1).filter((message) => message.role === "toolResult");
-				const choice = await ask(conversationId, { reason: why, task: true, results });
-				emit({ type: "asked", task: true, reason: why, ...choice });
-				if (choice.handoff) {
-					updateContext(brainDir, (store) => {
-						Object.assign(taskState(store, conversationId), { pending: "told", reason: why });
-					});
-					return TASK_HANDOFF;
+				why = `My context held about ${Math.round((state.used / config.contextWindow) * 100)}% of what fits`;
+				// O1: opt-in (config handoffQuestion). Off: the task's steps are cut with the mechanical carry, no ask.
+				if (config.handoffQuestion === true) {
+					const results = messages.slice(messages.findLastIndex((message) => message.role === "assistant") + 1).filter((message) => message.role === "toolResult");
+					const choice = await ask(conversationId, { reason: why, task: true, results });
+					emit({ type: "asked", task: true, reason: why, ...choice });
+					if (choice.handoff) {
+						updateContext(brainDir, (store) => {
+							Object.assign(taskState(store, conversationId), { pending: "told", reason: why });
+						});
+						return TASK_HANDOFF;
+					}
 				}
 			}
 			if (why === undefined) return undefined;
 			const before = state.used;
 			updateContext(brainDir, (store) => {
 				const task = taskState(store, conversationId);
-				task.cut = { steps: messages.length - steps.start, block: taskBlock(root, config, steps, task, { reason: why }), at: Date.now() };
+				task.cut = { steps: messages.length - steps.start, block: taskBlock(root, brainDir, config, steps, task, { reason: why }), at: Date.now() };
 				task.pending = undefined;
 				task.reason = undefined;
 			});
@@ -356,7 +406,7 @@ export function createEngine({ root, brainDir, config }) {
 			const [dressed] = withTop(withTimes([{ role: "user", content: [{ type: "text", text: front }], timestamp: at }]), loadTop(brainDir)?.text);
 			const body = { ...base, messages: [...system, { role: "user", content: textOf(dressed) }], stream: false, max_tokens: 1 };
 			const controller = new AbortController();
-			const done = post(body, { seconds: config.readAheadSeconds ?? 600, signal: controller.signal }).then((answer) => ({
+			const done = post(body, { seconds: config.readAheadSeconds ?? POLICY.timing.engine.readAheadSeconds, signal: controller.signal }).then((answer) => ({
 				ms: answer.ms,
 				...(answer.error !== undefined ? { error: answer.error, aborted: answer.aborted === true } : { tokens: answer.json?.usage?.prompt_tokens }),
 			}));

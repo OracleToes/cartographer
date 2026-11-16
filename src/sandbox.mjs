@@ -6,10 +6,10 @@
 //
 //   the system (/usr, /etc, ...)   read-only
 //   the project directory          writable
-//   <project>/.atlas               read-only: the brain is Cartographer's
+//   <project>/.brain               read-only: the brain is Cartographer's
 //   <project>/.git                 read-only: commits are the user's
 //   the user's home folder         not there. In its place is a home of the sandbox's own,
-//                                  <project>/.atlas/home, which keeps what tools store there
+//                                  <project>/.brain/home, which keeps what tools store there
 //                                  (package caches, settings) from one window to the next
 //   /tmp, /var/tmp                 empty, gone when the window closes
 //   /run, /mnt, /media             empty: no sockets of the user's session, no other drives
@@ -23,6 +23,7 @@
 // bubblewrap does not work, tasks cannot run commands at all, until the user switches
 // the sandbox off (--no-bwrap at launch, /bwrap off while running). Commands then run
 // on the machine itself, as the user.
+import { POLICY } from "./config.mjs";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
@@ -31,10 +32,10 @@ import { delimiter, dirname, join, sep } from "node:path";
 export class SandboxError extends Error {}
 
 /** The sandbox's own home folder, inside the brain. */
-export const SANDBOX_HOME = "home";
+export const SANDBOX_HOME = POLICY.sentinels.sandboxHome;
 
 /** Places that hold other people's business: each is covered by an empty folder. */
-const HIDDEN = ["/tmp", "/var/tmp", "/run", "/mnt", "/media"];
+const HIDDEN = POLICY.enums.sandboxHiddenDirs;
 
 /**
  * Folders in the home directory where language toolchains keep their programs. Bound read-only when they exist.
@@ -64,11 +65,11 @@ const TOOLCHAINS = [
  * What one result may hold: the start of the output and, when it is longer, its end, each bounded in characters
  * and in lines. The end gets the larger share, because that is where a failure is reported.
  */
-export const HEAD_MAX = 2000;
-export const TAIL_MAX = 8000;
-export const HEAD_LINES = 40;
-export const TAIL_LINES = 160;
-export const LINE_MAX = 1000;
+export const HEAD_MAX = POLICY.limits.sandboxOutput.headChars;
+export const TAIL_MAX = POLICY.limits.sandboxOutput.tailChars;
+export const HEAD_LINES = POLICY.limits.sandboxOutput.headLines;
+export const TAIL_LINES = POLICY.limits.sandboxOutput.tailLines;
+export const LINE_MAX = POLICY.limits.sandboxOutput.lineChars;
 
 const inside = (path, dir) => path === dir || path.startsWith(dir + sep);
 /** A real folder, not a symlink to one: bubblewrap mounts over the path as given. */
@@ -94,7 +95,7 @@ let found;
  */
 export function findSandbox() {
 	if (found !== undefined) return found;
-	const options = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 };
+	const options = { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: POLICY.timing.sandbox.toolchainProbeMs };
 	let version;
 	try {
 		version = execFileSync("bwrap", ["--version"], options).trim().replace(/^bubblewrap\s+/, "");
@@ -120,11 +121,12 @@ const firstLine = (text) =>
 
 /**
  * The bubblewrap arguments and the environment for one command.
- * @param {{ root: string, brainDir: string, cwd?: string, network?: boolean, read?: string[], env?: NodeJS.ProcessEnv }} input
+ * @param {{ root: string, brainDir: string, cwd?: string, network?: boolean, read?: string[], env?: NodeJS.ProcessEnv, readOnly?: boolean }} input
  *   root: real path of the project; cwd: a folder inside it; read: more folders to show read-only (settings)
+ *   readOnly: the project and the brain are bound read-only and the network is never reachable (the orchestrating context's command lane)
  * @returns {{ args: string[], env: Record<string, string>, home: string }}
  */
-export function sandboxArgs({ root, brainDir, cwd = root, network = false, read = [], env = process.env }) {
+export function sandboxArgs({ root, brainDir, cwd = root, network = false, read = [], env = process.env, readOnly = false }) {
 	const home = real(homedir());
 	if (home === undefined) throw new SandboxError("the home folder cannot be found");
 	// The project is bound writable after the home folder is covered; a project that contains the home folder
@@ -157,13 +159,14 @@ export function sandboxArgs({ root, brainDir, cwd = root, network = false, read 
 	}
 	for (const path of keep) args.push("--ro-bind", path, path);
 
-	args.push("--bind", root, root);
+	// A read-only window sees the project, the brain and .git read-only; the sandbox home stays writable for scratch.
+	args.push(readOnly ? "--ro-bind" : "--bind", root, root);
 	args.push("--ro-bind", brainDir, brainDir);
 	// The sandbox home lies inside the brain, which was just made read-only there; at the home path it stays writable.
 	const dotGit = join(root, ".git");
 	if (existsSync(dotGit)) args.push("--ro-bind", dotGit, dotGit);
 	args.push("--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try");
-	if (!network) args.push("--unshare-net");
+	if (!network || readOnly) args.push("--unshare-net"); // a read-only window never reaches the network
 	args.push("--die-with-parent", "--new-session", "--chdir", cwd);
 
 	let user = "user";
@@ -208,7 +211,7 @@ export class Output {
 		this.#pending = parts.pop();
 		for (const part of parts) this.#line(part);
 		// A line that never ends must not grow without bound.
-		if (this.#pending.length > 64_000) {
+		if (this.#pending.length > POLICY.limits.shellOutput.pendingChars) {
 			this.#line(this.#pending);
 			this.#pending = "";
 		}
@@ -251,7 +254,7 @@ export class Output {
 			this.#pending = "";
 		}
 		if (this.omittedLines === 0) return [...this.#head, ...this.#tail].join("\n");
-		const gap = `[${this.omittedLines} lines left out here: the output was ${this.lines} lines. To see them, run the command again through grep, head or tail, or send its output to a file and read the part you need.]`;
+		const gap = `[${this.omittedLines} lines left out here: the output was ${this.lines} lines. To see them, run the command again through grep, head or tail, or send its output to a file and read the part I need.]`;
 		return [...this.#head, gap, ...this.#tail].join("\n");
 	}
 }
@@ -292,7 +295,7 @@ export function createRunner({ off = false } = {}) {
 
 /** One line for the user on how commands run now. */
 export function sandboxLine(runner) {
-	if (runner.mode === "direct") return "sandbox: OFF · tasks run commands directly on this machine, as you: they reach whatever you can, and the network";
+	if (runner.mode === "direct") return "sandbox: OFF · tasks run commands directly on this machine, as you: they reach whatever you can, and the network; the main agent's commands still run in a read-only window when bubblewrap works";
 	if (runner.mode === "sandbox") return `sandbox: bubblewrap ${runner.available.version} · tasks run commands inside the project only, without network`;
 	return `no sandbox: ${runner.available.why} · tasks cannot run commands (carto --no-bwrap, or /bwrap off, runs them without one)`;
 }

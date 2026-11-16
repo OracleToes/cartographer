@@ -9,12 +9,81 @@
 // Every row is the margin, the cells between the margins, and the margin again. A row of content has its block's
 // background between the margins; a row of chrome (the tabs, the strip, the place to type) has it edge to edge.
 import { CURSOR_MARKER, Editor, renderFakeCursor, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { POLICY } from "../config.mjs";
 import { cut, paint, paintStyled, sgr, width as cells, wrap } from "./text.mjs";
 
 /** Empty cells at the left and right edge of the screen; none on a screen too narrow to spare them. */
 export const marginOf = (width) => (width >= 30 ? 2 : 0);
 /** From how many rows on the screen has an empty row under the tabs, above the strip and under what is typed. */
-export const AIRY_ROWS = 16;
+export const AIRY_ROWS = POLICY.limits.screen.airyRows;
+
+
+const widthOf = (text) => visibleWidth(text);
+const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+/** The code-unit offset where the grapheme before `at` starts: edits never cut a sign in two. */
+const beforeAt = (text, at) => {
+	let prev = 0;
+	for (const { index } of SEGMENTER.segment(text)) {
+		if (index >= at) break;
+		prev = index;
+	}
+	return prev;
+};
+/** The code-unit offset where the grapheme at `at` ends. */
+const afterAt = (text, at) => {
+	for (const { index } of SEGMENTER.segment(text)) if (index > at) return index;
+	return text.length;
+};
+/** Rows of at most `columns` cells: broken at a space where one fits, else hard-broken. Ranges are offsets into `text`. */
+const rowsOf = (text, columns) => {
+	const rows = [];
+	let rowStart = 0;
+	let cells = 0;
+	let breakAt = -1;
+	let breakCells = 0;
+	for (const { index, segment } of SEGMENTER.segment(text)) {
+		if (segment === "\n") {
+			rows.push({ start: rowStart, end: index });
+			rowStart = index + 1;
+			cells = 0;
+			breakAt = -1;
+			continue;
+		}
+		const w = widthOf(segment);
+		if (cells !== 0 && cells + w > columns) {
+			if (breakAt > rowStart) {
+				rows.push({ start: rowStart, end: breakAt });
+				cells -= breakCells;
+				rowStart = breakAt;
+			} else {
+				rows.push({ start: rowStart, end: index });
+				cells = 0;
+				rowStart = index;
+			}
+			breakAt = -1;
+		}
+		cells += w;
+		if (segment === " ") {
+			breakAt = index + 1;
+			breakCells = cells;
+		}
+	}
+	rows.push({ start: rowStart, end: text.length });
+	return rows;
+};
+/** The code-unit offset in `text` that sits `want` cells into the row starting at `start`. */
+const offsetAtCells = (text, start, want) => {
+	let at = start;
+	let cells = 0;
+	for (const { index, segment } of SEGMENTER.segment(text.slice(start))) {
+		const w = widthOf(segment);
+		if (cells + w > want) break;
+		cells += w;
+		at = start + index + segment.length;
+		if (cells === want) break;
+	}
+	return at;
+};
 
 const edge = (width, bg = "") => paint([], marginOf(width), bg);
 /** A row of chrome: its background runs over the margins. */
@@ -29,7 +98,7 @@ export function contentRow(line, width, chosen = false) {
 	return `${edge(width)}${paint([...lead, ...line.spans], inner, chosen ? "bgSel" : (line.bg ?? ""))}${edge(width)}`;
 }
 /** A line that pi-tui will take: never wider than it was asked for, whatever went into it. */
-const safe = (line, width) => (visibleWidth(line) > width ? truncateToWidth(line, width, "") : line);
+const safe = (line, width) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line);
 /**
  * A part's lines, or one line that says what went wrong: a part that throws would take the screen with it. With
  * `exact`, the part answers for the width of its lines itself (it fits each line once, when it paints it).
@@ -63,9 +132,6 @@ export class TabBar {
 				spans.push([label, tab.id === ui.state.tab ? "bgTab" : "muted"]);
 				x += label.length;
 			}
-			const hint = ui.hint();
-			const room = inner - x - 1;
-			if (room > 8) spans.push([" ".repeat(Math.max(0, room - cells(cut(hint, room)) + 1)), ""], [cut(hint, room), "faint"]);
 			return [barRow(spans, width, "bgBar")];
 		});
 	}
@@ -77,7 +143,7 @@ export class TabBar {
 	}
 }
 
-/** The row of views inside a tab, and the file that `e` opens. */
+/** The row of views inside a tab, and the file the editor door opens, when it fits. */
 export class ViewBar {
 	constructor(ui) {
 		this.ui = ui;
@@ -98,7 +164,10 @@ export class ViewBar {
 				x += label.length;
 			}
 			const file = ui.fileHint();
-			spans.push(["   [ ] change view", "faint"], [file !== undefined ? ` · e opens ${file}` : "", "faint"]);
+			spans.push(["   [ ] change view", "faint"]);
+			x += widthOf("   [ ] change view");
+			// The file goes in only whole; a hint cut in half says where e goes nowhere.
+			if (file !== undefined && x + widthOf(` · ${file}`) <= width - 2 * marginOf(width)) spans.push([` · ${file}`, "faint"]);
 			return [barRow(spans, width, "bgPanel")];
 		});
 	}
@@ -363,6 +432,208 @@ export class Sheet {
 			return { handled: true };
 		}
 		return { handled: true };
+	}
+}
+
+/**
+ * The small box a field of a book or of the graph is edited in: the field's label, how much of it is used — live,
+ * `n / limit` — and the most it may hold. Nothing past the limit goes in, typed or pasted. `Enter` saves a one-line
+ * field; a field that holds a long text lets `Enter` end a line and `Ctrl-Enter` save. `Tab` moves through the fields
+ * of the row and the drafts ride along until `Esc`. The screen is one more client of the same operations the
+ * agent uses: `save(drafts)` flashes what was saved or the refusal, and says whether it was saved.
+ */
+export class Box {
+	static VISIBLE = 6;
+	/**
+	 * @param {{ title: string, fields: { id: string, label: string, limit: number, multiline?: boolean, value?: string }[],
+	 *   keyOf: (data: string) => string | undefined, save: (drafts: Map<string, string>) => boolean, close: () => void, flash: (text: string) => void }} given
+	 *   `save` flashes the outcome itself and says whether the drafts were kept; a false means the box stays open.
+	 */
+	constructor(given) {
+		this.given = given;
+		this.capturesViewportInput = true;
+		this.index = 0;
+		this.drafts = given.fields.map((field) => field.value ?? "");
+		this.cursors = given.fields.map((_, at) => given.fields[at].value?.length ?? 0);
+		this.scrolls = given.fields.map(() => 0);
+		this.inner = 60;
+	}
+	get field() {
+		return this.given.fields[this.index];
+	}
+	get text() {
+		return this.drafts[this.index];
+	}
+	set text(value) {
+		this.drafts[this.index] = value;
+	}
+	get cursor() {
+		return this.cursors[this.index];
+	}
+	set cursor(value) {
+		this.cursors[this.index] = value;
+	}
+	invalidate() {}
+	/** What is pasted is text; what a terminal acts on is taken out. A line that ends a person's sentence stays a space on a one-line field. */
+	insert(raw) {
+		const field = this.field;
+		let text = String(raw)
+			.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
+			.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "")
+			.replace(/\x1b[^[\]]/g, "")
+			.replace(/\t/g, "    ")
+			.replace(/\r\n|\r/g, "\n");
+		text = field.multiline ? text.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "") : text.replace(/[\x00-\x1f\x7f]+/g, " ").replace(/ {2,}/g, " ");
+		const room = field.limit - this.text.length;
+		if (room <= 0) return void this.given.flash(`${field.limit} characters is the limit of this field`);
+		const take = text.slice(0, room);
+		if (take.length < text.length) this.given.flash(`only ${room} more character${room === 1 ? "" : "s"} fit${room === 1 ? "s" : ""} in this field; the rest was left out`);
+		this.text = this.text.slice(0, this.cursor) + take + this.text.slice(this.cursor);
+		this.cursor += take.length;
+		this.follow();
+	}
+	backspace() {
+		if (this.cursor === 0) return;
+		const at = beforeAt(this.text, this.cursor);
+		this.text = this.text.slice(0, at) + this.text.slice(this.cursor);
+		this.cursor = at;
+		this.follow();
+	}
+	eraseForward() {
+		if (this.cursor >= this.text.length) return;
+		const at = afterAt(this.text, this.cursor);
+		this.text = this.text.slice(0, this.cursor) + this.text.slice(at);
+		this.follow();
+	}
+	moveTo(at) {
+		this.cursor = Math.max(0, Math.min(this.text.length, at));
+		this.follow();
+	}
+	cursorRow(rows) {
+		for (let i = 0; i < rows.length; i++) if (this.cursor <= rows[i].end) return i;
+		return rows.length - 1;
+	}
+	follow() {
+		if (!this.field.multiline) return;
+		const rows = rowsOf(this.text, this.inner - 2);
+		const at = this.cursorRow(rows);
+		if (at < this.scrolls[this.index]) this.scrolls[this.index] = at;
+		else if (at >= this.scrolls[this.index] + Box.VISIBLE) this.scrolls[this.index] = at - Box.VISIBLE + 1;
+	}
+	moveByLine(delta) {
+		if (!this.field.multiline) return;
+		const rows = rowsOf(this.text, this.inner - 2);
+		const at = this.cursorRow(rows);
+		const target = rows[at + delta];
+		if (target === undefined) return void this.moveTo(delta < 0 ? 0 : this.text.length);
+		const cells = widthOf(this.text.slice(rows[at].start, this.cursor));
+		this.moveTo(offsetAtCells(this.text, target.start, cells));
+	}
+	save() {
+		const drafts = new Map(this.given.fields.map((field, at) => [field.id, this.drafts[at]]));
+		if (this.given.save(drafts)) this.given.close();
+	}
+	handleInput(data) {
+		// A read that is several lines and holds no escape sequence is pasted text, line ends and all.
+		if (typeof data === "string" && data.length > 1 && !data.includes("\x1b") && /[\r\n]/.test(data)) return void this.insert(data);
+		const bracketed = /^\x1b\[200~([\s\S]*?)\x1b\[201~$/.exec(String(data));
+		if (bracketed) return void this.insert(bracketed[1]);
+		const key = this.given.keyOf(data);
+		if (key === "escape") return void this.given.close();
+		const fields = this.given.fields;
+		if (fields.length > 1 && (key === "tab" || key === "shift+tab")) {
+			const by = key === "tab" ? 1 : fields.length - 1;
+			this.index = (this.index + by) % fields.length;
+			this.follow();
+			return;
+		}
+		const field = this.field;
+		if (key === "enter") {
+			if (field.multiline) return void this.insert("\n");
+			return void this.save();
+		}
+		if (key === "ctrl+enter") return void this.save();
+		if (key === "backspace") return void this.backspace();
+		if (key === "delete") return void this.eraseForward();
+		if (key === "left") return void this.moveTo(beforeAt(this.text, this.cursor));
+		if (key === "right") return void this.moveTo(afterAt(this.text, this.cursor));
+		if (key === "home") return void this.moveTo(0);
+		if (key === "end") return void this.moveTo(this.text.length);
+		if (key === "up") return void this.moveByLine(-1);
+		if (key === "down") return void this.moveByLine(1);
+		// The rest is a modified key the box has no use for; or it is what was typed.
+		const SPECIAL = new Set(["escape", "enter", "tab", "backspace", "delete", "insert", "home", "end", "pageUp", "pageDown", "up", "down", "left", "right", "space", ...Array.from({ length: 12 }, (_, at) => `f${at + 1}`)]);
+		if (typeof key === "string" && key !== "" && !SPECIAL.has(key) && !key.includes("+")) return void this.insert(key);
+	}
+	handleMouse(event) {
+		if (event.type === "wheel" && this.field.multiline) {
+			const rows = rowsOf(this.text, this.inner - 2);
+			const most = Math.max(0, rows.length - Box.VISIBLE);
+			this.scrolls[this.index] = Math.max(0, Math.min(most, this.scrolls[this.index] + (event.wheelDelta ?? 0)));
+		}
+		return { handled: true };
+	}
+	/** The row the editor's own cursor stands on: one inverse cell over the sign under it, or over a blank one at the end. */
+	rowSpans(slice, cursor) {
+		const bar = ["▎", "user"];
+		if (cursor < 0) return [bar, [` ${slice}`, ""]];
+		const before = slice.slice(0, cursor);
+		const end = cursor < slice.length ? afterAt(slice, cursor) : cursor;
+		const cursorChar = cursor < slice.length ? slice.slice(cursor, end) : " ";
+		const after = cursor < slice.length ? slice.slice(end) : "";
+		return [bar, [` ${before}`, ""], [cursorChar, "inverse"], [after, ""]];
+	}
+	footer() {
+		const field = this.field;
+		const parts = [field.multiline ? "Enter newline · Ctrl-Enter save" : "Enter save"];
+		if (this.given.fields.length > 1) parts.push(`Tab ${this.given.fields[(this.index + 1) % this.given.fields.length].label}`);
+		parts.push("Esc cancel");
+		return parts.join("  ·  ");
+	}
+	render(width) {
+		return guarded(width, () => {
+			const field = this.field;
+			this.inner = Math.max(10, width - 6);
+			const used = this.text.length;
+			const counter = `${used} / ${field.limit}`;
+			const atCap = used >= field.limit;
+			const fields = this.given.fields;
+			const left = [[` ${field.label}`, "user bold"], [` · ${field.id}${fields.length > 1 ? ` · ${this.index + 1} of ${fields.length}` : ""}`, "faint"]];
+			const leftWidth = left.reduce((sum, [text]) => sum + widthOf(text), 0);
+			const counterWidth = widthOf(counter);
+			const room = Math.max(1, this.inner - leftWidth - counterWidth);
+			const row = (spans) => paint([["   ", ""], ...spans], width, "bgPanel");
+			const lines = [paint([], width, "bgPanel"), row([...left, [" ".repeat(room), ""], [counter, atCap ? "warn" : "faint"]]), paint([], width, "bgPanel")];
+			if (!field.multiline) {
+				// A one-line field: the text rides with the cursor, so it is never cut away from it.
+				const inner = this.inner - 2;
+				let start = 0;
+				while (start < this.cursor && widthOf(this.text.slice(start, this.cursor)) > inner - 1) start = afterAt(this.text, start);
+				let cells = 0;
+				let end = start;
+				for (const { index, segment } of SEGMENTER.segment(this.text.slice(start))) {
+					const w = widthOf(segment);
+					if (cells + w > inner) break;
+					cells += w;
+					end = start + index + segment.length;
+				}
+				lines.push(row(this.rowSpans(this.text.slice(start, end), this.cursor - start)));
+			} else {
+				const rows = rowsOf(this.text, this.inner - 2);
+				const at = this.cursorRow(rows);
+				const scroll = Math.min(this.scrolls[this.index], Math.max(0, rows.length - Box.VISIBLE));
+				this.scrolls[this.index] = scroll;
+				for (let i = scroll; i < scroll + Box.VISIBLE; i++) {
+					const range = rows[i];
+					if (range === undefined) lines.push(row([["▎", "user"], ["", ""]]));
+					else lines.push(row(this.rowSpans(this.text.slice(range.start, range.end), i === at ? this.cursor - range.start : -1)));
+				}
+			}
+			lines.push(paint([], width, "bgPanel"));
+			lines.push(row([[this.footer(), "faint"]]));
+			lines.push(paint([], width, "bgPanel"));
+			return lines;
+		});
 	}
 }
 

@@ -1,44 +1,48 @@
-// Opens one project's session: the Durable harness over `.atlas/session.sqlite`,
+// Opens one project's session: the Durable harness over `.brain/session.sqlite`,
 // the model provider, and the tools with the rule of who may call what.
+import { POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { createRegistry, defineExtension, GenerationTask, Harness, hook, ROOT_CONVERSATION_ID, section, ToolTask } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { LOOP_MAX, LOOP_STOP, MAIN_TOOLS, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+import { describe, LOOP_MAX, LOOP_STOP, REFUSALS, REPLIES_LEFT, STILL_TASK, systemPrompt } from "./prompt.mjs";
+
 import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
+import { loadPrepend } from "./prepend.mjs";
+import { bookTool } from "./tools/book.mjs";
 import { returnTool } from "./tools/return.mjs";
 import { stamp } from "./time.mjs";
 import { chatTool } from "./tools/chat.mjs";
-import { contextTool } from "./tools/context.mjs";
 import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs";
 import { createEngine } from "./engine.mjs";
-import { isNoChat, isNote, noted } from "./wake.mjs";
+import { isNoChat, isNote, noted, noteKey } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
+import { beginShelfGate, readGateCheck, settleShelfAsk, takeShelfAsk } from "./shelf-ask.mjs";
 import { loadTop, pin } from "./top.mjs";
-import { assessTool } from "./tools/assess.mjs";
-import { atlasTool } from "./tools/atlas.mjs";
 import { changeTools } from "./tools/change.mjs";
-import { ledgerTool } from "./tools/ledger.mjs";
 import { lookTools } from "./tools/look.mjs";
-import { planTool } from "./tools/plan.mjs";
-import { shellTool, windowTool } from "./tools/shell.mjs";
+import { shellTool } from "./tools/shell.mjs";
+import { consultTool } from "./tools/consult.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
+import { traceFile, watchTrace } from "./trace.mjs";
+import { createStreamFreeze } from "./stream.mjs";
+import { USER_NAME, USER_HEAD } from "./user.mjs";
 
 const PROVIDER = "local";
-const LOOK = new Set(["read", "search", "list"]);
-const CHANGE = new Set(["write", "edit"]);
+const CHANGE = new Set(["write", "edit", "rm"]);
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
-const types = (call) => call.name === "shell" || (call.name === "window" && call.arguments?.action === "send");
+const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run || call.arguments?.action === POLICY.enums.shellAction.send);
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
-const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, ledger: REFUSALS.taskWritesLedger, plan: REFUSALS.taskWritesPlan, assess: REFUSALS.taskAssesses, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
-const MAIN_ONLY = Object.fromEntries(MAIN_TOOLS.map((name) => [name, MAIN_ONLY_TEXT[name]]));
-for (const name of MAIN_TOOLS) if (MAIN_ONLY[name] === undefined) throw new Error(`no refusal text for ${name}`);
+// The book tool guards its own books inside the tool (a task may use its context operations);
+// the rest of the main agent's tools are wrapped here.
+const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
+const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
@@ -49,15 +53,15 @@ for (const name of MAIN_TOOLS) if (MAIN_ONLY[name] === undefined) throw new Erro
 async function runOf(runs, api, context) {
 	const known = runs.get(api.conversationId);
 	if (known !== undefined) return known;
-	let run = { mode: "look" };
+	let run = { mode: POLICY.enums.planMode.look };
 	let cursor;
-	search: for (let page = 0; page < 50; page++) {
-		const result = await api.entries({}, 100, cursor, context);
+	search: for (let page = 0; page < POLICY.limits.taskHistory.apiMaxPages; page++) {
+		const result = await api.entries({}, POLICY.limits.taskHistory.apiEntryPage, cursor, context);
 		for (const entry of result.items) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
 			if (entry.kind === "carto.brief") {
-				if (entry.data?.mode === "change") run = { mode: "change", network: entry.data.network === true };
+				if (entry.data?.mode === POLICY.enums.planMode.change) run = { mode: POLICY.enums.planMode.change, network: entry.data.network === true };
 				break search;
 			}
 		}
@@ -73,8 +77,11 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false } }) {
+export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
+	// What the settings asked for, whatever the server said at the start. /model re-applies it per model: the
+	// effective window is never more than this, and never more than what the model's server reports (meta.n_ctx).
+	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
 	const model = {
 		id: config.model,
 		name: config.model,
@@ -91,18 +98,28 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			supportsStore: false,
 			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
-			supportsStrictMode: false,
+			// This OpenAI-compatible endpoint must accept strict function JSON Schemas; selected calls fail closed otherwise.
+			supportsStrictMode: true,
 			supportsUsageInStreaming: true,
 			maxTokensField: "max_tokens",
 		},
 	};
 	const models = createModels();
+	// The provider knows every model the server serves, not only the configured one: a session stored under
+	// an older model must still start (the conversation keeps the model it began with until /model changes
+	// it), and /model can switch to any of the others without a restart.
+	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
+	// One record per served model, kept by reference: a record's contextWindow is what pi-ai sizes the reply
+	// budget from, and /model updates the record it switches to (per request, not at conversation creation).
+	// A model that was never switched to starts at the ceiling; the configured one at the (possibly lowered)
+	// window the session opened with.
+	const providerModels = known.map((id) => (id === config.model ? model : { ...model, id, name: id, contextWindow: windowCeiling }));
 	const provider = createProvider({
 		id: PROVIDER,
 		name: "local model server",
 		baseUrl: config.server,
 		auth: { apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "local" } }) } },
-		models: [model],
+		models: providerModels,
 		api: openAICompletionsApi(),
 	});
 	// What the session tells the screen that is not in any conversation: how far the server is with reading a
@@ -118,6 +135,14 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		}
 	};
 	if (config.prefill !== false) watchPrefill(provider, notify);
+	// CARTO_TRACE: one JSON line per model call, appended as it is answered. After the prefill watcher,
+	// whose fetch is then the one the trace records around. The health check in cli.mjs is not traced.
+	const tracePath = trace ?? traceFile({ root, brainDir });
+	if (tracePath !== undefined) watchTrace(provider, tracePath);
+	// The resume behind Ctrl-V: the response body of every model call goes through this gate, outside the other
+	// watchers, last of all — what it declines to read, the server does not write.
+	const streamFreeze = createStreamFreeze();
+	streamFreeze.watchProvider(provider);
 	models.setProvider(provider);
 
 	const runs = new Map();
@@ -172,8 +197,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// `heard` is all of it, for the task's result (src/tools/task.mjs).
 	const active = { id: undefined, said: [], heard: [] };
 	const takeSaid = () => {
-		const lines = active.said.splice(0).map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`);
-		return lines.length === 0 ? undefined : ["Cartographer: the user wrote this while you work. Take it into account, and put into your report what you could not act on.", ...lines].join("\n");
+		const lines = active.said.splice(0).map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
+		return lines.length === 0 ? undefined : [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });
 	const textOfAnswer = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();
@@ -212,46 +237,56 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		const error = [...(result.output ?? []).map((part) => part.text ?? ""), ...(result.diagnostics ?? []).filter((entry) => entry.severity === "error").map((entry) => entry.message)].join("\n").trim();
 		// The turn ends with this reply when every call in it is part of such a run.
 		const ends = [...pending.keys()].every((other) => (seen.get(other) ?? 0) + Math.max(0, pending.get(other) ?? 0) >= LOOP_MAX);
-		const loop = { total, ends, call: key.length > 200 ? `${key.slice(0, 200)}…` : key, error: error.length > 400 ? `${error.slice(0, 400)}…` : error };
+		const loop = { total, ends, call: key.length > POLICY.limits.loops.callKeyChars ? `${key.slice(0, POLICY.limits.loops.callKeyChars)}…` : key, error: error.length > POLICY.limits.loops.errorChars ? `${error.slice(0, POLICY.limits.loops.errorChars)}…` : error };
 		loops.set(api.conversationId, loop);
 		return {
 			...result,
 			diagnostics: [...(result.diagnostics ?? []), { severity: "warn", code: "carto_loop", message: LOOP_STOP(total) }],
 			details: { ...(result.details !== null && typeof result.details === "object" && !Array.isArray(result.details) ? result.details : {}), loop },
-			control: { terminate: true },
+			control: { ...POLICY.control.terminate },
 		};
 	};
+	// One flat list of tools for the main agent and every task: a fork shares the main conversation's
+	// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
+	// Tool descriptions are built into the tool definitions.
+	const sessionTools = [
+		chatTool({ brainDir }),
+		askTool({ brainDir, asks }),
+		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
+		returnTool({ root, brainDir, config }),
+		bookTool({ root, brainDir, config, engine, gate }),
+		...lookTools(root),
+		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
+		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		consultTool({ root, brainDir, config }),
+		forMain(wakeTool({ wakes, config })),
+		forMain(sleepTool({ wakes })),
+		// For the main agent and for a task, each about its own part of the context.
+	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
 	const core = defineExtension({
 		name: "cartographer",
-		// One section that never changes within a project: a change here makes the server read the whole prompt again.
-		sections: [section("preamble", () => systemPrompt({ root }), { tag: false })],
-		tools: [
-			chatTool({ brainDir }),
-			askTool({ brainDir, asks }),
-			forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
-			returnTool({ brainDir }),
-			forMain(ledgerTool({ brainDir, engine })),
-			forMain(planTool({ brainDir, gate })),
-			atlasTool({ root, brainDir, gate }),
-			forMain(assessTool({ brainDir })),
-			...lookTools(root),
-			...changeTools({ root, brainDir }),
-			shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-			windowTool({ config, windows, runOf: (conversationId) => runs.get(conversationId) }),
-			forMain(wakeTool({ wakes, config })),
-			forMain(sleepTool({ wakes })),
-			// For the main agent and for a task, each about its own part of the context.
-			contextTool({ root, brainDir, config, engine }),
-		],
+		// The preamble never changes within a project; a change here makes the server read the whole prompt again.
+		// It is built from the named sections of src/prompt.mjs. The prepend stands before it: the user's own
+		// markdown (src/prepend.mjs), read fresh each request — a file read per request, and a new prompt section
+		// only when its bytes change.
+		sections: [section("prepend", () => loadPrepend(brainDir), { tag: false }), section("preamble", () => systemPrompt({ root, handoffQuestion: config.handoffQuestion === true }), { tag: false })],
+		// One flat list of tools for the main agent and every task: a fork shares the main conversation's
+		// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
+		// Tool descriptions are built into the tool definitions.
+		tools: sessionTools,
 		hooks: [
 			hook(ToolTask, {
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
+					// One read comes back per reply. A further file read of the same reply is refused with no content; the question that follows asks whether to shelf the lot (src/shelf-ask.mjs).
+					const readRefused = readGateCheck(api.conversationId, call);
+					if (readRefused !== undefined) return { block: readRefused };
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
-						if (LOOK.has(call.name)) return { block: REFUSALS.mainLooks };
-						if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
-						if (types(call)) return { block: REFUSALS.mainRuns };
+					if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
+						// Running a command as a read is open to the main conversation (it executes in a read-only window); typing into a running program is not a read.
+						const mainRun = call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run);
+						if (types(call) && !mainRun) return { block: REFUSALS.mainRuns };
 						if (call.name === "return") return { block: REFUSALS.mainReturns };
 						// A turn that a wake started is quiet until the agent does something in it; `sleep` is not something.
 						if (call.name !== "sleep") wakes.acted();
@@ -261,7 +296,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
 					// Writing is for a task that carries out a change item of the authorized plan, and for no one else.
 					// So is running a command. The answer is kept in `runs`, where the shell tool finds it.
-					if ((CHANGE.has(call.name) || types(call)) && (await runOf(runs, api, hookContext)).mode !== "change") {
+					if ((CHANGE.has(call.name) || types(call)) && (await runOf(runs, api, hookContext)).mode !== POLICY.enums.planMode.change) {
 						return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
 					}
 					return undefined;
@@ -269,7 +304,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				afterTool: async (call, result, api) => {
 					if (call.parent !== undefined) return undefined;
 					const looped = loopCheck(call, result, api);
-					const out = looped ?? result;
+					// The reply's reads are being answered one by one; the question, when it is asked, rides the read that came back.
+					const shelfAsk = takeShelfAsk(api.conversationId, call, result);
+					const out = shelfAsk === undefined ? (looped ?? result) : withText(looped ?? result, shelfAsk);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
 						const id = api.conversationId;
@@ -281,25 +318,25 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 						// A round that holds `return` ends the task, whatever else it called. A `return` that was refused does not.
 						if (returning.has(id)) {
 							if (call.name === "return" && out.isError === true) returning.delete(id);
-							else return { ...told, control: { ...(told.control ?? {}), terminate: true } };
+							else return { ...told, control: { ...(told.control ?? {}), ...POLICY.control.terminate } };
 						}
 						if (lastOfRound) {
 							// What the user typed since the task's last reply.
 							const said = takeSaid();
 							if (said !== undefined) told = withText(told, said);
-							if (left >= 1 && left <= 3) told = withText(told, REPLIES_LEFT(left));
+							if (left >= 1 && left <= POLICY.limits.loops.warningReplies) told = withText(told, REPLIES_LEFT(left));
 						}
 						// The task has used its replies: this round is its last.
 						if (left <= 0 && told.control?.terminate !== true) {
 							ends.set(id, { why: "limit", replies: steps.get(id)?.n ?? 0 });
-							told = { ...told, control: { ...(told.control ?? {}), terminate: true } };
+							told = { ...told, control: { ...(told.control ?? {}), ...POLICY.control.terminate } };
 						}
 						return told === result ? undefined : told;
 					}
 					// Whether the main agent's context collapses with this round of calls.
 					const pending = waiting.get(api.conversationId) ?? new Map();
 					const decided = await engine.afterMainCall({ last: [...pending.values()].every((left) => left <= 0), round: rounds.get(api.conversationId) ?? 0, turn: turns.get(api.conversationId) });
-					if (decided === undefined) return looped;
+					if (decided === undefined) return shelfAsk === undefined ? looped : out;
 					return {
 						...out,
 						...(decided.note !== undefined ? { output: [...(out.output ?? []), { type: "text", text: `${(out.output ?? []).length > 0 ? "\n\n" : ""}${decided.note}` }] } : {}),
@@ -331,11 +368,15 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) }) };
 				},
 				// The request as it is sent: the question before a collapse is put behind exactly this.
-				beforeProviderRequest: ({ payload }, api) => {
+				beforeProviderRequest: ({ payload, model }, api) => {
+					// The declaration is static and flat; there is nothing to re-route here. `sending` keeps the collapse accounting honest.
 					engine.sending(api.conversationId, payload);
-					return undefined;
+					return { payload, model };
 				},
-				afterResponse: (message, api) => {
+				afterResponse: async (message, api) => {
+					// A question about the shelf asked with the last round of calls is answered by this reply: carry it out, if it said yes. Then plan this reply's reads for the gate.
+					settleShelfAsk(api.conversationId, message, { root, brainDir });
+					beginShelfGate(api.conversationId, message);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);
@@ -344,22 +385,31 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (api.conversationId !== ROOT_CONVERSATION_ID && (message.content ?? []).some((part) => part.type === "toolCall" && part.name === "return")) returning.add(api.conversationId);
 				},
 				// A reply with no tool call is a note the agent wrote to itself: it is followed by one line and the run
-				// goes on. A turn of the main agent ends with `chat` or `sleep`, a task with `return`. What bounds this
-				// is the count of replies in the stretch, and the same note written again and again.
+				// goes on. The main agent rests only with `sleep`; a task ends with `return`. What bounds this is the
+				// count of replies in the stretch, and the same note written again and again.
 				onYield: (answer, api) => {
 					const id = api.conversationId;
 					const main = id === ROOT_CONVERSATION_ID;
 					// A reply cut off at the output limit: the screen tells the user, who decides. For a task it is the end.
 					if (answer.stopReason === "length") return undefined;
+					// At the ceiling the plain-reply path never reaches the tool round where a collapse is normally
+					// decided (src/engine.mjs overCeiling). End the stretch here; the rest path collapses it mechanically.
+					if (main && engine.overCeiling(id)) {
+						const used = engine.usedBy(id) ?? 0;
+						engine.want(`it held about ${Math.round((used / config.contextWindow) * 100)}% of what fits`, { forced: true, atRest: true });
+						return undefined;
+					}
 					const turn = turns.get(id);
 					// A turn that a wake started and in which nothing was done is a rest already.
 					if (main && (turn === undefined || (turn.by === "note" && turn.calls === 0))) return undefined;
 					const step = steps.get(id) ?? { key: undefined, n: 0 };
 					const limit = main ? config.mainTurns : config.taskTurns;
 					const text = textOfAnswer(answer);
+					// The same note, word for word (ignoring layout and case), written again and again: the run ends.
+					const key = noteKey(text);
 					const last = lastNote.get(id);
-					const times = last?.text === text ? last.times + 1 : 1;
-					lastNote.set(id, { text, times });
+					const times = last?.key === key ? last.times + 1 : 1;
+					lastNote.set(id, { key, times, text });
 					if (times >= LOOP_MAX) {
 						ends.set(id, { why: "same-note", times, empty: text === "" });
 						notify({ type: "same-note", conversationId: id, main, times, empty: text === "" });
@@ -373,7 +423,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					const first = notedIn.get(id) !== step.key || step.key === undefined;
 					notedIn.set(id, step.key);
 					const left = limit - step.n;
-					const extra = main ? undefined : [takeSaid(), left <= 3 ? REPLIES_LEFT(left) : undefined].filter((line) => line !== undefined).join("\n\n");
+					const extra = main ? undefined : [takeSaid(), left <= POLICY.limits.loops.warningReplies ? REPLIES_LEFT(left) : undefined].filter((line) => line !== undefined).join("\n\n");
 					return { continue: noted({ main, first, extra: extra === "" ? undefined : extra }) };
 				},
 			}),
@@ -386,14 +436,49 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 
 	const storage = await openNodeSqliteStorage(join(brainDir, "session.sqlite"));
 	// The Harness would summarize a long context with a request of its own. Cartographer collapses it instead.
-	const harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false } } }, context);
+	// A burst of user messages sent while a provider request or focus is busy belongs in the very next context
+	// boundary. The Durable default takes only one steer per boundary, needlessly leaving the rest queued for a
+	// later tool round (or even the next user turn) when the current response ends without more tools.
+	const harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
 	const main = await harness.root(context, {
 		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
 	});
+	// The settings say which model this session is on. A conversation keeps the model it began with, so a change
+	// in the settings would otherwise never take hold (the stored one won, or, if the server had dropped it, the
+	// run stopped with no_model). At the start, then, the conversation is set to the configured model; /model
+	// switches it for the rest of the run, and every model the server serves is registered so any of them resolves.
+	const held = (await main.agent(context)).model;
+	if (held === undefined || (held.provider === PROVIDER && held.modelId !== config.model)) {
+		await main.configure({ model: { provider: PROVIDER, modelId: config.model } }, context);
+	}
 	return {
 		harness,
 		main,
 		context,
+		/** The gate the model's response body passes through; /pause holds it mid-stream and lets it go on. */
+		streamFreeze,
+		/** The model the main conversation is on, as { provider, modelId }. */
+		model: async () => (await main.agent(context)).model,
+		/**
+		 * Switch the model of the main conversation, and so of every task forked after.
+		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
+		 * @param {number} [limits.contextWindow]  its meta.n_ctx, when it says one
+		 * @returns {false | number} false when the name is not served; otherwise the effective context window it switches to
+		 *   (the smaller of the settings' ceiling and the model's own limit), which is also what the engine, the
+		 *   state block, the shelf's soft cap (half of it) and the display now use.
+		 */
+		setModel: async (modelId, ctx = context, limits = {}) => {
+			if (!known.includes(modelId)) return false;
+			const reported = limits?.contextWindow;
+			const effective = Number.isInteger(reported) && reported > 0 ? Math.min(windowCeiling, reported) : windowCeiling;
+			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
+			config.contextWindow = effective;
+			const target = providerModels.find((entry) => entry.id === modelId);
+			if (target) target.contextWindow = effective;
+			return effective;
+		},
+		/** The model names the server was serving when the session opened. */
+		servedModels: [...known],
 		windows,
 		wakes,
 		engine,

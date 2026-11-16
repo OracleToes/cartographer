@@ -22,24 +22,34 @@
 // And it is a face, not a second program. The session is run by the plain terminal (src/terminal.mjs), which is
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
 // everything Cartographer has to say, exactly as it does line by line.
+import { DEFAULTS, POLICY } from "../config.mjs";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { accessSync, constants, existsSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
+import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
+import { readStory } from "../story.mjs";
+import { charsPerTokenNow } from "../calibrate.mjs";
+import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
-import { atlasPath } from "../atlas.mjs";
+import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
-import { isAuthorized, loadPlan, openItems, planPath } from "../plan.mjs";
+import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mjs";
+import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
+import { createRefDescriber } from "../refs.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
-import { Air, AIRY_ROWS, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
+import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { assessmentView, atlasView, contextView, diffView, editorCommand, ledgerView, planView, shellsView, textView, treeView } from "./views.mjs";
+import { atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
+import { USER_NAME } from "../user.mjs";
+
+const USER_SPEAKER = `${USER_NAME}: `;
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
@@ -54,45 +64,66 @@ const VIEWS = {
 		{ id: "atlas", name: "Atlas" },
 		{ id: "ledger", name: "Ledger" },
 		{ id: "plan", name: "Plan" },
+		{ id: "requests", name: "Requests" },
 		{ id: "tree", name: "Tree" },
-		{ id: "assessment", name: "Assessment" },
 	],
 	diff: [
 		{ id: "last", name: "Last step" },
 		{ id: "session", name: "This session" },
 		{ id: "git", name: "git HEAD" },
 	],
+	shells: [
+		{ id: "list", name: "List" },
+		{ id: "out", name: "Output" },
+	],
 	context: [
 		{ id: "window", name: "Window" },
 		{ id: "main", name: "Main agent" },
 		{ id: "parts", name: "Parts" },
+		{ id: "hands", name: "Hands" },
 	],
 };
 /** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.tree", "carto.assessment", "diff.last", "diff.session", "diff.git", "shells", "context.window", "context.main", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
 /** How often a view is read again while it shows, in milliseconds. */
-const EVERY = { carto: 2000, diff: 5000, shells: 700, context: 700 };
+const EVERY = POLICY.timing.screenRefreshMs;
+const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 /** The marks of the spinner that turns while the agent works, and how long each stands. */
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPIN_MS = 80;
+const SPIN_MS = POLICY.timing.spinnerMs;
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
-	["approve", "authorize the plan as it stands: its change items may then run"],
+	["requests", "what waits for you: change items, questions of taste, "],
+	["approve", "approve requests by id, or the whole plan as it stands"],
+	["deny", "turn a request down: /deny ID [why]"],
+	["answer", "answer a question of taste: /answer ID words"],
 	["plan", "the plan, whether it is authorized, and where the file is"],
 	["ledger", "goals, questions and notes, open and closed"],
 	["atlas", "the tree as the agent sees it, and the graph's nodes"],
 	["assessment", "the agent's summary of the project"],
-	["diff", "what the last change task did to the files", ["all"]],
+		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["stop", "stop what the agent is doing; shell windows keep running"],
+	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
+	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
+	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
+	["fold", "take a kept report out of the context's view, leaving its one line"],
+	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, or node"],
+	["unarchive", "bring an archived row back into what the agent reads"],
+	["done", "settle a row the way the agent does: a ledger entry, a plan item, a node of the graph"],
+	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, or node"],
+	["recall", "bring a kept report back into view in full"],
+	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
+	["unshelve", "take a shelved file off the shelf, or all of them"],
+	["send", "type a line into a shell window: /send NAME line"],
 	["collapse", "collapse the context now"],
 	["new", "start a fresh context with nothing kept in view"],
 	["pin", "rewrite the copy of assessment and graph at the top of the context"],
 	["yolo", "let change items run without /approve while you watch", ["on", "off"]],
+	["initiate", "whether the agent starts working on its own when carto starts; default on", ["on", "off"]],
 	["bwrap", "how tasks' commands run: with the sandbox or without", ["on", "off"]],
 	["shells", "the shell windows: what runs in each, and its newest lines"],
 	["kill", "close a shell window and end what runs in it", ["all"]],
@@ -108,7 +139,7 @@ const COMMANDS = [
 // sheet that shows this (src/screen/parts.mjs) breaks a long entry and keeps its second column.
 export const KEYS_HELP = [
 	"Two modes",
-	"  Esc goes from one to the other, and the bottom of the screen shows which you are in.",
+	"  Esc goes from one to the other. The strip at the bottom shows the keys the tab that shows takes; this sheet and F1 show all of them.",
 	"",
 	"Typing",
 	"  Enter            send. Alt-Enter, Shift-Enter or Ctrl-J breaks the line; so does a backslash before Enter",
@@ -123,11 +154,15 @@ export const KEYS_HELP = [
 	"  1 to 5           go to a tab",
 	"  [ and ]          the previous and the next view inside Carto, Diff and Context (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter on a call goes to the tab where that work lives",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter on a call goes to the tab where that work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	"  e                open what is selected in $EDITOR: a file of the tree, a changed file at its first change, a ledger entry, a plan item or a node where it stands in its file",
+	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Context), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
+	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a plan item done, a book entry settled, a node confirmed); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	"  n                a new ledger entry, plan item, book entry or node: the small box on a template, and what you save goes in through the same operations the agent uses (E opens the template in $EDITOR instead)",
+	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
 	"  :                type a command",
@@ -139,8 +174,10 @@ export const KEYS_HELP = [
 	"  PgUp, PgDn       scroll; so does the wheel. Ctrl-Home and Ctrl-End go to the top and the end",
 	"  Ctrl-Shift-F     search the tab that shows, where the terminal can send that key (else: Esc, then /)",
 	"  Ctrl-T           show or hide the agent's notes and thinking",
-	"  Ctrl-C           copy what is selected with the mouse; else stop the agent; with the agent at rest, leave",
+	"  Ctrl-C           clear what you have typed; with the line empty, again (soon after) leaves, the way /quit does",
+	"  Ctrl-X           stop the agent; Ctrl-V pauses it: holds the agent in its stream mid-reply; until you unpause, it starts nothing of its own (a line or command you write ends the held stream)",
 	"  Ctrl-L           draw the screen again",
+	"  Ctrl-O           the $EDITOR door, in every tab and mode, including while typing",
 	"  F1               this sheet",
 	"",
 	"The mouse",
@@ -153,7 +190,7 @@ export const KEYS_HELP = [
 	"  /copy session    the whole session as Markdown",
 	"  /copy report     the last task's report",
 	"  /copy tab        the tab that is showing",
-	"  Each goes to the clipboard and to a file under .atlas/export/.",
+	"  Each goes to the clipboard and to a file under .brain/export/.",
 ].join("\n");
 
 /**
@@ -193,7 +230,7 @@ export async function runScreen(session, options, runTerminal) {
 	const { root, brainDir, config = {} } = options;
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
-	let core = { busy: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
+	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
 
 	// ─── The terminal, in pi-tui's hands ─────────────────────────────────────
 	// The lines that break in what is typed, and the keys that bring back what was sent before.
@@ -211,7 +248,7 @@ export async function runScreen(session, options, runTerminal) {
 	const terminal = new Term();
 	const tui = new TuiAltScreen(terminal, false, undefined, {
 		mouse: true,
-		wheelScrollLines: 3,
+		wheelScrollLines: POLICY.limits.screen.wheelScrollLines,
 		// What is selected with the mouse is copied when the button is let go, every way there is.
 		copySelection: async (text) => (toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) }).length > 0 ? true : "no way to the clipboard was found"),
 		scrollToEndIndicator: () => `${sgr("bgSel")} ↓ the newest · G or End \x1b[0m`,
@@ -237,7 +274,10 @@ export async function runScreen(session, options, runTerminal) {
 		const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
-	const chat = createChat({ markdown });
+	const describeRef = createRefDescriber({ brainDir });
+	// For a consult row in the Chat tab: the story is read from the brain under its thread, never from the session.
+	const readStoryRaw = (thread) => readStory(brainDir, thread);
+	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -251,12 +291,14 @@ export async function runScreen(session, options, runTerminal) {
 			tui.invalidate();
 			tui.requestRender(true);
 		};
-		tui.queryTerminalColors({ timeoutMs: 500, onLateReply: take }).then(take, () => {});
+		tui.queryTerminalColors({ timeoutMs: POLICY.timing.screen.colorQueryMs, onLateReply: take }).then(take, () => {});
 	};
 
 	const state = {
 		tab: "chat",
-		view: { carto: "atlas", diff: "last", context: "window" },
+		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
+		shell: undefined, // the shell window whose output the Output view shows
+		deleteArm: undefined, // a report marked for deleting in Hands, waiting for the second d
 		mode: "type",
 		selected: undefined, // a stop of the Chat tab
 		pending: "", // the first key of a command of two (z, then R)
@@ -283,7 +325,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** Something to say in passing, which is not worth a line of the conversation. */
 	const flash = (text) => {
-		if (!state.closed) tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, 4000);
+		if (!state.closed) tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, POLICY.timing.screen.flashMs);
 	};
 
 	// ─── The terminal core's side ────────────────────────────────────────────
@@ -306,6 +348,14 @@ export async function runScreen(session, options, runTerminal) {
 			chat.print(text);
 			draw();
 		},
+		user(text) {
+			chat.user(text);
+			draw();
+		},
+		block(label, text) {
+			chat.block(label, text);
+			draw();
+		},
 		entry(depth, entry, printed) {
 			chat.seal();
 			chat.entry(depth, entry, printed);
@@ -313,6 +363,10 @@ export async function runScreen(session, options, runTerminal) {
 		},
 		live(depth, message) {
 			chat.live(depth, message);
+			draw();
+		},
+		liveTools(depth, slots) {
+			chat.liveTools(depth, slots);
 			draw();
 		},
 		attach(given) {
@@ -323,7 +377,7 @@ export async function runScreen(session, options, runTerminal) {
 			flash(text);
 		},
 	};
-	for (const line of options.intro ?? []) chat.print(`${line}\n`);
+	for (const line of options.intro ?? []) chat.print(`${line}\n`, { keep: true });
 	chat.seal();
 
 	// ─── What the status strip is made of ───────────────────────────────────
@@ -335,7 +389,7 @@ export async function runScreen(session, options, runTerminal) {
 			const done = Math.max(0, event.processed - event.cache);
 			state.prefill = { ...state.prefill, phase: "reading", fresh, done, total: event.total, ms: event.time_ms };
 		} else if ((event.phase === "writing" || event.phase === "done") && state.prefill?.id === event.id) {
-			if (state.prefill.fresh >= (config.prefillTokens ?? 1000)) state.lastPrefill = { fresh: state.prefill.fresh, ms: state.prefill.ms ?? event.at - event.began, at: event.at };
+			if (state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens)) state.lastPrefill = { fresh: state.prefill.fresh, ms: state.prefill.ms ?? event.at - event.began, at: event.at };
 			state.prefill = undefined;
 		}
 		draw();
@@ -346,29 +400,30 @@ export async function runScreen(session, options, runTerminal) {
 		const size = chat.liveSize();
 		const now = Date.now();
 		if (size < rateMark.size) rateMark = { at: now, size };
-		else if (now - rateMark.at >= 1500) {
+		else if (now - rateMark.at >= POLICY.timing.screen.rateWindowMs) {
 			const grown = size - rateMark.size;
-			state.rate = grown > 0 ? grown / 4 / ((now - rateMark.at) / 1000) : undefined;
+			state.rate = grown > 0 ? grown / charsPerTokenNow() / ((now - rateMark.at) / 1000) : undefined;
 			rateMark = { at: now, size };
 		}
 	};
 	let brain = { at: 0 };
 	const readBrain = () => {
-		if (Date.now() - brain.at < 1000) return brain;
+		if (Date.now() - brain.at < POLICY.timing.screen.stateCacheMs) return brain;
 		const next = { at: Date.now() };
 		try {
+			const requests = listRequests(brainDir, { yolo: options.gate?.yolo === true });
+			next.requests = requests.length;
+			next.waits = requests.some((request) => request.kind === "approval");
 			const { plan } = loadPlan(brainDir);
 			if (plan !== undefined && plan.items.length > 0) {
 				const open = openItems(plan).length;
-				const waits = openItems(plan, "change").length > 0 && !isAuthorized(plan) && options.gate?.yolo !== true;
-				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${waits ? " · needs /approve" : isAuthorized(plan) ? " · approved" : ""}`;
-				next.waits = waits;
+				const awaiting = waiting(plan).length;
+				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${isAuthorized(plan) || awaiting === 0 ? " · approved" : ` · ${awaiting} awaiting`}`;
 			}
 			const { ledger } = loadLedger(brainDir);
 			if (ledger !== undefined) {
-				const goals = openEntries(ledger, "goal").length;
-				const questions = openEntries(ledger, "question").length;
-				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}${questions > 0 ? ` · ${questions === 1 ? "1 question" : `${questions} questions`} for you` : ""}`;
+				const goals = openEntries(ledger, POLICY.enums.ledgerKind.goal).length;
+				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}`;
 			}
 		} catch {
 			// A file edited into something unreadable is said by its tab, not by the strip.
@@ -395,7 +450,7 @@ export async function runScreen(session, options, runTerminal) {
 			const doing = chat.doing();
 			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
 			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
-			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? 1000);
+			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
 			if (reading) {
 				const { fresh, done, ms } = state.prefill;
 				const rate = ms > 0 ? done / (ms / 1000) : 0;
@@ -404,20 +459,23 @@ export async function runScreen(session, options, runTerminal) {
 			} else if (doing !== undefined) first.push([` · ${doing.what}`, ""]);
 			else if (state.prefill?.phase === "sent") first.push([" · waiting for the model", "muted"]);
 			first.push([` · ${span(Date.now() - state.busySince)}`, "muted"]);
-			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < 10 ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
-			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < 20_000 && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
+			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < POLICY.limits.format.rateDecimalBelow ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
+			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < POLICY.timing.screen.prefillRecentMs && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
 		} else first.push(["○ ", "muted"], ["resting", ""], [` · ${span(Date.now() - state.restSince)}`, "muted"]);
+		if (core.paused?.()) first.push([" · paused: held · /pause or Ctrl-V lets it go on", "warn"]);
 
 		const second = [];
 		const size = core.contextSize();
-		const windowSize = options.contextWindow;
-		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > 0.8 ? "warn" : ""]);
-		const { plan, ledger, waits } = readBrain();
+		// /model re-fits the window while running; options.config is the shared object that follows it.
+		const windowSize = options.config?.contextWindow ?? options.contextWindow;
+		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
+		const { plan, ledger, waits, requests } = readBrain();
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
-		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone");
+		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
+		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (windows.length > 0) {
-			const running = windows.filter((win) => win.state === "busy").length;
+			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
 			second.push([` · ${windows.length === 1 ? "1 window" : `${windows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
 		}
 		const wakes = session.wakes?.list() ?? [];
@@ -425,9 +483,32 @@ export async function runScreen(session, options, runTerminal) {
 		if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 		if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
 		if (!core.thinking()) second.push([" · notes hidden", "muted"]);
-		return [first, second];
+		return [first, second, [[` ${legend()}`, "faint"]]];
 	};
 
+	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
+	const LEGEND = {
+		chat: "j k move · Enter open · e edit · d forget · y copy",
+		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
+		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
+		"carto.plan": "t done · n new · v archive · d delete · e edit",
+		"carto.requests": "a approve · n deny · d forget · e edit",
+		"carto.tree": "Enter fold · y copy · e edit",
+		"diff.last": "Enter open · y copy · e edit",
+		"diff.session": "Enter open · y copy · e edit",
+		"diff.git": "Enter open · y copy · e edit",
+		"shells.list": "Enter output · y copy",
+		"shells.out": "Enter back",
+		"context.window": "Enter open · d delete · e edit · y copy",
+		"context.main": "Enter open · d delete · e edit · y copy",
+		"context.parts": "Enter open · + all · e edit",
+		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
+	};
+	const legend = () => {
+		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
+		const id = state.tab === "chat" ? "chat" : viewId();
+		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
+	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = (tab = state.tab) => (VIEWS[tab] !== undefined ? `${tab}.${state.view[tab]}` : tab);
 	/** The file a view comes from, for `e` when no item names one. */
@@ -436,7 +517,6 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.atlas": atlasPath(brainDir),
 			"carto.ledger": join(brainDir, "carto-ledger.json"),
 			"carto.plan": planPath(brainDir),
-			"carto.assessment": assessmentPath(brainDir),
 		})[id];
 	const env = { root, brainDir, session, started };
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
@@ -446,15 +526,17 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.atlas") return atlasView(env);
 		if (id === "carto.ledger") return ledgerView(env);
 		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
+		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
 		if (id === "carto.tree") return treeView(env, isOpen);
-		if (id === "carto.assessment") return assessmentView(env);
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
-		if (id === "shells") return shellsView(env);
+		if (id === "shells.list") return shellsView(env);
+		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0) });
+			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted, root, brainDir });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
+		if (id === "context.hands") return handsView({ root, brainDir });
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -470,7 +552,7 @@ export async function runScreen(session, options, runTerminal) {
 	const refresh = (id = viewId(), force = false) => {
 		const page = pageOf(id);
 		if (page === undefined) return;
-		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? 2000)) return;
+		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
 		if (id === "context.parts") {
 			Promise.resolve(core.capture("/context"))
@@ -596,22 +678,344 @@ export async function runScreen(session, options, runTerminal) {
 			tui.requestRender(true);
 		}
 	};
-	const edit = () => {
-		if (state.tab === "chat") return flash("nothing to open here: e opens an item of tabs 2 and 3 in the editor");
+	/** Hand the terminal to the editor over `file`; false when the editor could not be run. */
+	const runEditor = (file, line) => {
+		const editor = process.env.VISUAL || process.env.EDITOR || "vi";
+		const done = lend(() => spawnSync(editorCommand(editor, file, line), { stdio: "inherit", shell: true }));
+		if (done.error !== undefined || (done.status !== 0 && done.status !== null)) {
+			const why = done.error?.message ?? `it ended with exit ${done.status}`;
+			chat.print(`! The editor could not be run (${editor}): ${why}. Set $EDITOR to the editor you use.\n`);
+			flash(`the editor could not be run: ${why}`);
+			return false;
+		}
+		return true;
+	};
+	/** A file to edit a thing in, under the brain's scratch folder. */
+	const scratch = (name, text) => {
+		const dir = join(brainDir, "scratch");
+		mkdirSync(dir, { recursive: true });
+		const file = join(dir, name);
+		writeFileSync(file, `${text}\n`);
+		return file;
+	};
+	/** e in the Chat tab: the words of the user and of the agent can be said anew; tool work cannot. */
+	const editChat = () => {
+		const line = chatBody.lines()[selectedRow()];
+		if (line === undefined) return flash("nothing is selected: j and k select");
+		if (!chat.editable(line.item)) {
+			return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : `tool work cannot be edited: e opens a message of ${USER_NAME} or the agent`);
+		}
+		const item = chat.items.find((entry) => entry.key === line.item);
+		const file = scratch("message.md", item.text);
+		if (!runEditor(file)) return;
+		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
+		if (now === item.text || now === "") return flash("the message stands as it was");
+		const was = item.text;
+		inPlace(() => chat.revise(item.key, now));
+		// What the talk keeps is rewritten to match, so what comes after reads the edited words. A note of the
+		// agent stands nowhere in the talk, so for one the edit is in the tab only.
+		if (item.type !== "note") reviseNote(brainDir, was, now);
+		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the agent's words are edited · the talk the context keeps says the same");
+	};
+	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
+	/** What the user has said anew in the editor, by the text it was sent with. The tab shows the new words where the old stood; the sizes stay those of what was sent. */
+	const messageEdits = new Map();
+	/** What the user has deleted in the Context window, by the text it was sent with: the parts stand out of the list. */
+	const messageDeleted = new Set();
+	/** A message edited here is also edited in the Chat tab, when it stands there by the same words. */
+	const syncChat = (base, now, type) => {
+		const item = chat.items.findLast((entry) => (type === undefined || entry.type === type) && entry.text === base);
+		if (item !== undefined) chat.revise(item.key, now);
+	};
+	/** The Context tab's messages: surgery on what shows and on the talk the collapse keeps; the stored conversation is never rewritten. */
+	const editMessage = (item) => {
+		const full = item.copy ?? item.body;
+		if (typeof full !== "string" || full === "") return flash("nothing to edit here");
+		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to edit.
+		let base = full;
+		let prefix = "";
+		let suffix = "";
+		if (item.editKind === "chat-you") {
+			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) {
+				prefix = USER_SPEAKER;
+				base = base.slice(USER_SPEAKER.length);
+			}
+			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
+			if (found !== null) {
+				suffix = found[0];
+				base = base.slice(0, found.index);
+			}
+		}
+		// What the agent said to you, where the part is its words: the saying is edited, not the rendering of the call.
+		if (typeof item.chat === "string") base = item.chat;
+		const file = scratch("message.md", base);
+		if (!runEditor(file)) return;
+		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
+		if (now === base || now === "") return flash("the message stands as it was");
+		const shown = typeof item.chat === "string" ? full.split(base).join(now) : prefix + now + suffix;
+		messageEdits.set(full, shown);
+		reviseNote(brainDir, base, now);
+		syncChat(base, now, item.editKind === "chat-you" ? "user" : item.editKind === "chat-agent" ? "agent" : undefined);
+		refresh(viewId(), true);
+		flash(item.editKind === "chat-you" ? "your message is edited · what follows reads the edited words" : "edited where it shows, and in the talk the collapse keeps · what was sent stays as it was");
+	};
+	/** d on a message of the Context window, yours or the agent's: it leaves the talk the collapse keeps, and the views. What was sent stays stored, and the agent reads it until the next collapse. */
+	const deleteChat = (item) => {
+		const full = item.copy ?? item.body;
+		if (typeof full !== "string" || full === "") return flash("nothing to delete here");
+		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to delete.
+		let base = full;
+		if (item.editKind === "chat-you") {
+			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) base = base.slice(USER_SPEAKER.length);
+			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
+			if (found !== null) base = base.slice(0, found.index);
+		}
+		if (typeof item.chat === "string") base = item.chat;
+		if (!forgetChat(brainDir, base)) return flash("the talk the collapse keeps does not hold it: a collapse may have dropped it already");
+		messageDeleted.add(full);
+		messageDeleted.add(base);
+		// Where the same words stand in the Chat tab, they go too.
+		const twin = chat.items.findLast((entry) => entry.text === base || entry.text === full);
+		if (twin !== undefined) inPlace(() => chat.forget(twin.key));
+		refresh(viewId(), true);
+		flash("deleted from the talk the collapse keeps, and from view · what was sent stays stored, and the agent reads it until the next collapse");
+	};
+	/** n in a book view: an editor opens on a template; on save the entry goes in through the same operations the agent uses. */
+	const newEntry = (book) => {
+		const template = addTemplate(book);
+		if (template === undefined) return flash("this view has no add");
+		const file = scratch(`new-${book}.json`, template);
+		if (!runEditor(file)) return;
+		const said = applyAdd(brainDir, book, readFileSync(file, "utf8"), root);
+		flash(said);
+		refresh(viewId(), true);
+	};
+	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
+	const editContext = () => {
+		const item = pageOf().list.selected();
+		if (item === undefined) return flash("nothing is selected");
+		switch (item.editKind) {
+			case "prompt": {
+				const file = promptSource();
+				if (file === undefined) return flash("the source of the prompt is not here");
+				if (!runEditor(file)) return;
+				return flash("the prompt's wording is code: the next run of carto reads it as it is now");
+			}
+			case "tool": {
+				const name = String(item.key).startsWith("tool:") ? String(item.key).slice(5) : String(item.key);
+				const found = toolSource(name);
+				if (found === undefined) return flash(`no source file defines the ${name} tool`);
+				if (!runEditor(found.file, found.line)) return;
+				return flash(`${name}'s description is code: the next run of carto reads it as it is now`);
+			}
+			case "tools":
+				return flash("the tools are one block; Enter opens it to a line per tool, and e on one opens where it is defined");
+			case "assessment": {
+				const file = assessmentPath(brainDir);
+				if (!runEditor(file)) return;
+				refresh(viewId(), true);
+				return flash("edited; the copy at the top of the context is rewritten at the next collapse, or /pin now");
+			}
+			case "store": {
+				if (!runEditor(contextPath(brainDir))) return;
+				refresh(viewId(), true);
+				return flash("the store of what the collapse keeps, edited by hand · take care: a file that does not parse falls back to a fresh one");
+			}
+			case "chat-you":
+			case "chat-agent":
+				return editMessage(item);
+			case "reply":
+				return flash("the reply is being written; e on it works once it is done");
+			case "result":
+				return flash(`tool work cannot be edited: e opens a message of ${USER_NAME} or the agent`);
+			case "state":
+				return flash("the state block is written anew for every request; what it reads is editable: e on Atlas, Ledger, Plan or Assessment in the Carto tab");
+			case "windows":
+				return flash("the windows block is written anew for every request, from the windows themselves");
+			case "carto":
+				return flash("what Cartographer writes into a message cannot be edited");
+			default: {
+				// A kept row that is a ledger entry opens the small box on its fields, as in the Ledger view.
+				if (typeof item.key === "string" && item.key.startsWith("entry:")) return void openFieldBox(viewId(), item.key);
+				// Hands: a shelved file is its file; a report is its file in .brain/reports.
+				if (typeof item.path === "string" && item.path !== "") {
+					if (!existsSync(item.path)) return flash("the shelved file is not there");
+					if (!runEditor(item.path)) return;
+					refresh(viewId(), true);
+					return flash("edited; the shelf reads it anew at the next collapse");
+				}
+				if (typeof item.key === "string" && item.key.startsWith("report:")) {
+					const file = join(brainDir, "reports", `${item.key.slice(7)}.md`);
+					if (!existsSync(file)) return flash("the report's file is not there");
+					if (!runEditor(file)) return;
+					return flash("the report's file is edited; the record line keeps the summary it was written with");
+				}
+				return flash("that is what was sent, and what was sent cannot be changed");
+			}
+		}
+	};
+	// ─── The fields the small box edits ───────────────────────────────────────
+	// The book views open one of these on e; E keeps the editor on the entry's own JSON. The limits are the books'
+	// own, so the box never holds more than the book would; the counter shows how much of the field is used.
+	const ROW_KEY = /^(?:entry|item|node):/;
+	const boxWidth = (fields, cols) => {
+		const longest = Math.max(...fields.map((field) => Math.min(field.limit, 80)));
+		const single = !fields.some((field) => field.multiline);
+		return Math.max(46, Math.min(cols - 4, single ? longest + 14 : 78));
+	};
+	/** The fields of the row the list has selected, with their current values; undefined when the row is not an entry. */
+	const editFieldsFor = (viewId_, rowKey) => {
+		const id = rowKey.slice(rowKey.indexOf(":") + 1);
+		if (viewId_ === "carto.ledger" || (viewId_ === "context.main" || viewId_ === "context.window") && rowKey.startsWith("entry:")) {
+			const { ledger } = loadLedger(brainDir);
+			const item = ledger?.items.find((entry) => entry.id === id);
+			if (item === undefined) return undefined;
+			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.ledger.textChars, value: item.text }];
+			if (item.kind === POLICY.enums.ledgerKind.goal) fields.push({ id: "doneWhen", label: "Done when", limit: POLICY.limits.ledger.textChars, multiline: true, value: item.doneWhen ?? "" });
+			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.ledger.textChars, value: item.outcome ?? "" });
+			return { id, fields };
+		}
+		if (viewId_ === "carto.plan") {
+			const { plan } = loadPlan(brainDir);
+			const item = plan?.items.find((entry) => entry.id === id);
+			if (item === undefined) return undefined;
+			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: item.text }];
+			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
+			return { id, fields };
+		}
+		if (viewId_ === "carto.atlas") {
+			const { atlas } = loadAtlas(brainDir);
+			const node = atlas?.nodes.find((entry) => entry.name === id);
+			if (node === undefined) return undefined;
+			return {
+				id,
+				fields: [
+					{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: node.gist },
+					{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: node.detail ?? "" },
+					{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: node.name },
+				],
+			};
+		}
+		return undefined;
+	};
+	// Snapshot of what the box opens with, so a save knows which fields were edited.
+	const openFieldBox = (viewId_, rowKey) => {
+		const found = editFieldsFor(viewId_, rowKey);
+		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
+		const { id, fields } = found;
+		const handle = tui.showOverlay(new Box({
+			title: id,
+			fields,
+			keyOf,
+			flash,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				/** @type {Record<string, string>} */
+				const changes = {};
+				for (const field of fields) if (drafts.get(field.id) !== field.value) changes[field.id] = drafts.get(field.id);
+				if (Object.keys(changes).length === 0) {
+					flash("nothing was changed");
+					return true;
+				}
+				const said = editRow(brainDir, id, changes, root);
+				flash(said.replace(/\n+/g, " "));
+				if (said.startsWith("! ")) return false;
+				brain.at = 0;
+				refresh(viewId(), true);
+				return true;
+			},
+		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
+	};
+	/** The fields of a new entry of `book`, from the same template n used to open in the editor. */
+	const ADD_FIELDS = {
+		ledger: () => [
+			{ id: "kind", label: "Kind", limit: 8, value: "note" },
+			{ id: "text", label: "Text", limit: POLICY.limits.ledger.textChars, value: "" },
+			{ id: "doneWhen", label: "Done when", limit: POLICY.limits.ledger.textChars, multiline: true, value: "" },
+			{ id: "salient", label: "Salient", limit: 5, value: "false" },
+		],
+		plan: () => [
+			{ id: "mode", label: "Mode", limit: 6, value: "look" },
+			{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "network", label: "Network", limit: 5, value: "false" },
+			{ id: "standing", label: "Standing", limit: 5, value: "false" },
+		],
+		atlas: () => [
+			{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: "" },
+			{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: "" },
+			{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: "" },
+		],
+	};
+	/** true/false as a boolean; anything else goes to the book as it was said, and the book refuses it in its own words. */
+	const boolOf = (raw) => {
+		const word = raw.trim().toLowerCase();
+		return word === "true" ? true : word === "false" ? false : raw.trim();
+	};
+	const addOpOf = (book, drafts) => {
+		const said = (key) => drafts.get(key) ?? "";
+		const bool = (key) => (said(key).trim() === "" ? undefined : boolOf(said(key)));
+		if (book === "ledger") {
+			return { kind: said("kind").trim(), text: said("text"), ...(said("doneWhen").trim() !== "" ? { done_when: said("doneWhen") } : {}), ...(bool("salient") !== undefined ? { salient: bool("salient") } : {}) };
+		}
+		if (book === "plan") {
+			return { mode: said("mode").trim(), text: said("text"), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
+		}
+		return { name: said("name"), gist: said("gist"), ...(said("detail").trim() !== "" ? { detail: said("detail") } : {}) };
+	};
+	const openAddBox = (book) => {
+		const template = ADD_FIELDS[book];
+		if (template === undefined) return flash("this view has no add");
+		const fields = template();
+		const handle = tui.showOverlay(new Box({
+			title: `new ${book}`,
+			fields,
+			keyOf,
+			flash,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				const said = applyAdd(brainDir, book, JSON.stringify(addOpOf(book, drafts)), root);
+				flash(said.replace(/\n+/g, " "));
+				if (said.startsWith("! ")) return false;
+				brain.at = 0;
+				refresh(viewId(), true);
+				return true;
+			},
+		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
+	};
+	/** The $EDITOR on the file of the row, or on the whole book by the row's line: the door Ctrl-O keeps open everywhere. */
+	const editTarget = () => {
 		const item = pageOf().list.selected();
 		const target = item?.target ?? (fileOf(viewId()) !== undefined ? { file: fileOf(viewId()) } : undefined);
 		if (target === undefined) return flash("this line has no file to open");
 		if (target.folder) return flash("that is a folder: open it with Enter, and press e on a file");
 		if (!existsSync(target.file)) return flash(`${relative(root, target.file)} does not exist`);
-		const editor = process.env.VISUAL || process.env.EDITOR || "vi";
-		const done = lend(() => spawnSync(editorCommand(editor, target.file, target.line), { stdio: "inherit", shell: true }));
-		if (done.error !== undefined || (done.status !== 0 && done.status !== null)) {
-			const why = done.error?.message ?? `it ended with exit ${done.status}`;
-			chat.print(`! The editor could not be run (${editor}): ${why}. Set $EDITOR to the editor you use.\n`);
-			flash(`the editor could not be run: ${why}`);
-		}
+		if (!runEditor(target.file, target.line)) return;
 		brain.at = 0;
 		refresh(viewId(), true);
+	};
+	const edit = () => {
+		if (state.tab === "chat") return editChat();
+		if (state.tab === "context") return editContext();
+		if (BOOK_VIEWS[viewId()] !== undefined) {
+			const item = pageOf().list.selected();
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			if (rowKey !== undefined && ROW_KEY.test(rowKey)) return void openFieldBox(viewId(), rowKey);
+			// Not an entry (the book could not be read, or it is empty): the editor door is what is left.
+			return void editTarget();
+		}
+		editTarget();
+	};
+	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
+	const editInEditor = () => {
+		if (state.tab === "chat") return editChat();
+		if (state.tab === "context") return editContext();
+		const book = BOOK_VIEWS[viewId()];
+		if (book !== undefined) {
+			const item = pageOf().list.selected();
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			if (rowKey === undefined || !ROW_KEY.test(rowKey)) return newEntry(book);
+		}
+		editTarget();
 	};
 
 	// ─── Selecting in Chat ───────────────────────────────────────────────────
@@ -657,11 +1061,11 @@ export async function runScreen(session, options, runTerminal) {
 	const activate = ({ to, jump = false } = {}) => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
-		if (line.kind === "group") inPlace(() => chat.toggle(line.item, to));
-		else if (line.kind === "call" || line.kind === "note" || line.kind === "detail") {
+		if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
+		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
-			const home = row?.kind === "call" ? homeOf(row.name) : undefined;
+			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
 			// Work that lives in a tab is shown there; anything else opens where it stands.
 			if (jump && home !== undefined && line.kind === "call" && !row.open && row.state !== "failed") {
 				if (home.view !== undefined) state.view[home.tab] = home.view;
@@ -704,6 +1108,77 @@ export async function runScreen(session, options, runTerminal) {
 			return second === undefined ? undefined : command(second);
 		}
 		if (key === "z") return void (state.pending = "z");
+		// The rows of the views, in every tab but Chat: the same keys do everywhere what they do in Hands — f
+		// folds a report, v archives a row out of what the agent reads, d deletes it for good, t settles it, x unshelves a file.
+		// They stand on whatever the view shows: a report or a shelved file in Hands, a node of the graph, a
+		// ledger entry, a plan item in Carto, a request in Requests, a message of the user or the agent in the
+		// Context window. The operations themselves are in src/ops.mjs, the same code the commands run.
+		if (!inChat) {
+			const item = pageOf().list.selected();
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
+			const deletable = rowKey !== undefined && (/^(?:report|entry|item|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
+			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
+				const said = foldRow(brainDir, bookId);
+				flash(said.replace(/\n+/g, " "));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+				flash(settleRow(brainDir, bookId, root));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) {
+				try {
+					flash(unshelveRow(brainDir, bookId));
+				} catch (error) {
+					flash(error.message);
+				}
+				refresh(viewId(), true);
+				return;
+			}
+			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
+			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
+			if (key === "d" && deletable) {
+				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
+					state.deleteArm = undefined;
+					if (item.editKind === "chat-you" || item.editKind === "chat-agent") deleteChat(item);
+					else flash(dropRow(brainDir, bookId));
+					refresh(viewId(), true);
+					return;
+				}
+				state.deleteArm = { id: rowKey, at: Date.now() };
+				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : item.editKind === "chat-you" || item.editKind === "chat-agent" ? "Press d again: the message goes for good" : `Press d again: ${bookId} goes for good`);
+				return;
+			}
+			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
+			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
+			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
+				if (key === "a") {
+					if (QUESTION_ID.test(bookId)) return flash("a question is answered with words: /answer " + bookId + " words");
+					setMode("type");
+					return void submit(`/approve ${bookId}`);
+				}
+				if (key === "n") {
+					setMode("type");
+					return void submit(`/deny ${bookId}`);
+				}
+			}
+			// In a book view, n opens the box on a template for a new entry; E keeps the editor.
+			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void openAddBox(BOOK_VIEWS[viewId()]);
+			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
+			if (key === "a" && viewId() === "context.hands") {
+				setMode("type");
+				prompt.insertTextAtCursor("/shelve ");
+				return;
+			}
+		}
 		if (key === "escape" || key === "i" || key === "a") return void setMode("type");
 		// As in vi: a colon starts a command, a slash a search.
 		if (key === ":") {
@@ -719,6 +1194,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "y") return void copySelected();
 		if (key === "Y") return void copyTab();
 		if (key === "e") return void edit();
+		if (key === "E") return void editInEditor();
 		if (key === "r") {
 			brain.at = 0;
 			refresh(viewId(), true);
@@ -745,6 +1221,16 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "-") return void inPlace(() => chat.setAll(false));
 			// A key that is no command says so, once it is a key that types: the screen heard it.
 			if (key !== undefined && [...key].length === 1) flash(`${key === " " ? "Space" : key} is not a command · ? lists them`);
+			return;
+		}
+		// In Shells: Enter opens the selected window's output as a terminal emulator sees it, and goes back.
+		if (state.tab === "shells" && (key === "enter" || key === " " || key === "o")) {
+			if (state.view.shells === "out") return void setView("list");
+			const item = pageOf().list.selected();
+			if (typeof item?.key === "string" && item.key.startsWith("window:")) {
+				state.shell = item.key.slice(7);
+				setView("out");
+			}
 			return;
 		}
 		const cols = innerCols();
@@ -820,11 +1306,16 @@ export async function runScreen(session, options, runTerminal) {
 		status,
 		views: () => VIEWS[state.tab] ?? [],
 		view: () => state.view[state.tab],
-		hint: () => (state.mode === "type" ? "Esc: commands · F1: keys" : state.tab === "chat" ? "j k move · Enter open · y copy · ? keys" : "j k · Enter open · + all · e edit · ? keys"),
 		fileHint() {
 			if (state.tab === "context") return undefined;
-			const file = pageOf()?.list.selected()?.target?.file ?? fileOf(viewId());
-			return file === undefined ? undefined : relative(root, file) || ".";
+			const item = pageOf()?.list.selected();
+			const file = item?.target?.file ?? fileOf(viewId());
+			if (file === undefined) return undefined;
+			const rel = relative(root, file) || ".";
+			// Where e opens the small box on the row's fields (said in the strip below), the editor is E; anywhere else, e is the editor.
+			const rowKey = typeof item?.key === "string" ? item.key : undefined;
+			const smallBox = BOOK_VIEWS[viewId()] !== undefined && rowKey !== undefined && ROW_KEY.test(rowKey);
+			return smallBox ? `E opens ${rel}` : `e opens ${rel}`;
 		},
 		/** A click on a row of Chat: select it, and open or fold it. */
 		clickChat(row) {
@@ -845,7 +1336,7 @@ export async function runScreen(session, options, runTerminal) {
 		commandLine() {
 			const question = session.asks?.pending();
 			const typed = prompt.getText();
-			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), 40)})`;
+			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
 			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to type";
 			return [[" COMMANDS ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
@@ -875,7 +1366,7 @@ export async function runScreen(session, options, runTerminal) {
 			chat.print(`! ${error?.message ?? error}\n`);
 		}
 	};
-	const windowNames = () => (session.windows?.list(0) ?? []).filter((win) => win.state !== "gone").map((win) => win.name);
+	const windowNames = () => (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone).map((win) => win.name);
 	prompt.setAutocompleteProvider(
 		new CombinedAutocompleteProvider(
 			COMMANDS.map(([name, description, words]) => ({
@@ -937,9 +1428,20 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const key = keyOf(data);
 		const done = { consume: true };
-		if (key === "ctrl+c") reader.emit("SIGINT");
+		if (key === "ctrl+c") {
+			// Bash-like: first Ctrl-C clears what is typed. With the line standing empty, the terminal core hears
+			// it, and a second Ctrl-C soon after leaves the way /quit does.
+			if (prompt.getText() !== "") {
+				prompt.setText("");
+				return done;
+			}
+			reader.emit("SIGINT");
+		}
+		else if (key === "ctrl+x") keys.emit("keypress", "", { ctrl: true, name: "x" });
+		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
+		else if (key === "ctrl+o") editInEditor();
 		else if (key === "f1") showKeys();
 		else if (key === "shift+tab") stepTab(-1);
 		// While something is typed, Tab completes it; otherwise it goes to the next tab.
@@ -974,7 +1476,7 @@ export async function runScreen(session, options, runTerminal) {
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
 		const busy = core.busy();
-		if (Date.now() - lastFrame >= (busy ? SPIN_MS : 1000)) {
+		if (Date.now() - lastFrame >= (busy ? SPIN_MS : POLICY.timing.screen.idleFrameMs)) {
 			lastFrame = Date.now();
 			draw();
 		}

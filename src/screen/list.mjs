@@ -17,10 +17,11 @@
 //   target    { file, line? }: what `e` opens in the editor
 //   copy      what `y` copies; a function is called when it is needed. Default: the head and the body
 //   plain     true: a line that is only read, never selected (a heading)
-import { cut, lineText, width, wrap } from "./text.mjs";
+import { POLICY } from "../config.mjs";
+import { cut, fit, lineText, width, wrap } from "./text.mjs";
 
 /** The most rows one opened body shows before it says how many more there are; opening everything lifts this. */
-const BODY_ROWS = 400;
+const BODY_ROWS = POLICY.limits.screen.listBodyRows;
 
 export function createList() {
 	/** What is open: in "some" mode the keys in `opened`; in "all" mode everything but the keys in `closed`. */
@@ -115,16 +116,27 @@ export function createList() {
 				const can = item.body !== undefined || item.folder === true;
 				const open = can && isOpen(item.key);
 				const mark = can ? (open ? "▾ " : "▸ ") : "  ";
-				// The head is one row: what does not fit is in the body, or one unfold away.
+				// The head is one row: what does not fit is in the body, or one unfold away. A cut never vanishes:
+				// what does not fit leaves a faint marker at the end of the row.
 				const room = Math.max(4, cols - width(indent) - 2);
 				let used = 0;
+				let dropped = false;
 				const head = [];
 				for (const [text, style] of item.head) {
-					if (used >= room) break;
-					const piece = cut(String(text).replace(/[\n\t]+/g, " "), room - used);
+					if (used >= room) {
+					dropped = true;
+					break;
+				}
+					const flatText = String(text).replace(/[\n\t]+/g, " ");
+					const piece = cut(flatText, room - used);
+					if (piece !== flatText) dropped = true;
 					used += width(piece);
 					head.push([piece, style]);
 				}
+				if (dropped && head.length > 0 && width(head.at(-1)[0]) > 1 && !String(head.at(-1)[0]).endsWith("…")) {
+					const last = head.at(-1);
+					head[head.length - 1] = [`${fit(last[0], Math.max(1, width(last[0]) - 1))}…`, last[1]];
+				} else if (dropped) head.push(["…", "faint"]);
 				out.push({ spans: [[indent, ""], [mark, open ? "user" : "faint"], ...head], key: item.key, head: true });
 				if (!open || item.folder === true) continue;
 				const pad = `${indent}    `;
@@ -163,7 +175,7 @@ export function createList() {
 			return true;
 		},
 		/** Everything the tab shows now, as text. */
-		text(cols = 200) {
+		text(cols = POLICY.limits.screen.listColumns) {
 			return api.lines(cols).map((line) => lineText(line.spans).trimEnd()).join("\n");
 		},
 		/** What `y` copies for the selected item. */

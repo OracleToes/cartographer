@@ -4,9 +4,18 @@
 // the state block, the time of each of the user's messages and task reports, and
 // how old a record is where that matters. All of it is written the same way, so
 // the model can compare one with another.
+import { POLICY } from "./config.mjs";
+
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const two = (n) => String(n).padStart(2, "0");
+
+/** A point in time, hour and minute only, in the machine's own time zone: "14:32". For the collapsed block, where a date on every line would say nothing new. */
+export function clock(ms) {
+	const date = new Date(ms);
+	if (!Number.isFinite(date.getTime())) return "--:--";
+	return `${two(date.getHours())}:${two(date.getMinutes())}`;
+}
 
 /** A point in time, in the machine's own time zone: "Tue 10 Nov 2026, 14:32". */
 export function stamp(ms) {
@@ -24,7 +33,7 @@ export function took(ms) {
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return seconds % 60 === 0 ? `${minutes} m` : `${minutes} m ${seconds % 60} s`;
 	const hours = Math.floor(minutes / 60);
-	if (hours < 48) return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} m`;
+	if (hours < POLICY.limits.format.hoursBeforeDays) return minutes % 60 === 0 ? `${hours} h` : `${hours} h ${minutes % 60} m`;
 	const days = Math.floor(hours / 24);
 	return hours % 24 === 0 ? `${days} d` : `${days} d ${hours % 24} h`;
 }
@@ -35,7 +44,7 @@ export function ago(ms) {
 	if (minutes < 1) return "just now";
 	if (minutes < 60) return `${minutes} m ago`;
 	const hours = Math.floor(minutes / 60);
-	if (hours < 48) return `${hours} h ago`;
+	if (hours < POLICY.limits.format.hoursBeforeDays) return `${hours} h ago`;
 	return `${Math.floor(hours / 24)} d ago`;
 }
 

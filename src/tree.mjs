@@ -4,18 +4,19 @@
 // be out of date. The main agent has no tools that look at files; the tree is how
 // it sees where things are. It shows a few levels below an anchor folder: the
 // agent moves the anchor into a folder to look around there, and back to the
-// project root, and sets how many levels are drawn (the `atlas` tool, src/tools/atlas.mjs).
+// project root, and sets how many levels are drawn (`book` with target=atlas, action=tree).
 //
 // A file or folder that a node of the graph links to carries the node's name, so
 // the agent sees what it has written something about and what is blank.
+import { DEFAULTS, POLICY } from "./config.mjs";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 import { projectFiles } from "./tools/look.mjs";
 
-export const DEPTH_DEFAULT = 3;
-export const DEPTH_MAX = 6;
+export const DEPTH_DEFAULT = DEFAULTS.treeDepth;
+export const DEPTH_MAX = POLICY.limits.tree.maxDepth;
 /** Lines the tree may take in the state block; beyond that it is drawn smaller. */
-export const TREE_LINES = 60;
+export const TREE_LINES = POLICY.limits.tree.lines;
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
@@ -63,7 +64,7 @@ function draw(node, path, level, depth, cap, marks, lines) {
 	const mark = (rel) => {
 		const names = marks.get(rel);
 		if (names === undefined || names.length === 0) return "";
-		return `  [${names.slice(0, 3).join(", ")}${names.length > 3 ? `, +${names.length - 3}` : ""}]`;
+		return `  [${names.slice(0, POLICY.limits.tree.pathExamples).join(", ")}${names.length > POLICY.limits.tree.pathExamples ? `, +${names.length - POLICY.limits.tree.pathExamples}` : ""}]`;
 	};
 	for (const [index, entry] of entries.entries()) {
 		if (index >= cap) {
@@ -93,7 +94,7 @@ export function drawTree(files, { anchor = ".", depth = DEPTH_DEFAULT, marks = n
 	const base = anchor === "." ? "" : anchor;
 	let last;
 	for (let levels = depth; levels >= 1; levels--) {
-		for (const cap of [Number.POSITIVE_INFINITY, 30, 12, 6]) {
+		for (const cap of [Number.POSITIVE_INFINITY, ...POLICY.limits.tree.branchCaps]) {
 			const lines = [];
 			draw(top, base, 1, levels, cap, marks, lines);
 			last = { lines, depth: levels, cap, under: top.count };
@@ -120,7 +121,7 @@ export function treeSection(root, view = {}, options = {}) {
 	const asked = Number.isInteger(view.depth) ? Math.min(DEPTH_MAX, Math.max(1, view.depth)) : Math.min(DEPTH_MAX, options.depth ?? DEPTH_DEFAULT);
 	if (files.length === 0) return { text: `The project directory holds no files yet.${lost}`, anchor, depth: asked, files };
 	const drawn = drawTree(files, { anchor, depth: asked, marks: options.marks, maxLines: options.maxLines });
-	const where = anchor === "." ? `From the project root, ${plural(asked, "level")} deep: ${plural(files.length, "file")} in all.` : `From ${anchor}/ (the anchor you set), ${plural(asked, "level")} deep: ${drawn.under} of the project's ${plural(files.length, "file")} are under it. \`atlas\` with a tree operation and anchor "." returns to the project root.`;
+	const where = anchor === "." ? `From the project root, ${plural(asked, "level")} deep: ${plural(files.length, "file")} in all.` : `From ${anchor}/ (the anchor I set), ${plural(asked, "level")} deep: ${drawn.under} of the project's ${plural(files.length, "file")} are under it. \`atlas\` with a tree operation and anchor "." returns to the project root.`;
 	const smaller = [];
 	if (drawn.depth < asked) smaller.push(`${plural(drawn.depth, "level")} deep`);
 	if (Number.isFinite(drawn.cap)) smaller.push(`at most ${drawn.cap} entries of a folder`);

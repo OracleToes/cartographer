@@ -11,7 +11,7 @@
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
 //   atlas: [OPS]         the same with `atlas`
-//   assess: TEXT         call `assess` with TEXT
+//   assess: TEXT         call `book` with target=assessment, action=write, operation { text: TEXT }
 //   cut                  start a `task` call and run into the output limit in the middle of it
 //   context: {JSON}      call `context` with these arguments (a task can, too)
 //   ON COLLAPSE: DIRECTIVE   planted: asked before a collapse, it answers that it wants a turn first, and in that
@@ -52,22 +52,31 @@
 //
 // Every request is kept in `requests`, so a test can check what the server was sent.
 import { createServer } from "node:http";
+import { RECORD } from "../src/voice.mjs";
+import { USER_NAME } from "../src/user.mjs";
+
+/** The first line of every block the harness writes to the model; the anchor the strip patterns match. */
+const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * A message's text as it was written, without what Cartographer adds to a request (src/request.mjs): the state block
- * at the end, the copy of the assessment and the graph in front, and the times in square brackets.
+ * at the end, the copy of the assessment and the graph in front, the times in square brackets, and the speaker label.
  */
 const rawOf = (message) => (typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.map((part) => part.text ?? "").join("") : "");
+const withoutSpeaker = (text) => {
+	const speaker = `${USER_NAME}: `;
+	return text.startsWith(speaker) ? text.slice(speaker.length) : text;
+};
 const textOf = (message) => {
 	const text = rawOf(message);
-	return text
-		.replace(/<context>\nWritten by Cartographer[\s\S]*?\n<\/context>\n*/g, "")
+	return withoutSpeaker(text
+		.replace(new RegExp(`<context>\n${ESC}[\\s\\S]*?\n</context>\n*`, "g"), "")
 		.replace(/\n\n\[s\d+ · about [\d,]+ tokens\]$/g, "")
 		.replace(/\n\nThis report is kept as t\d+\./g, "")
-		.replace(/\n*<windows>\nWritten by Cartographer[\s\S]*?\n<\/windows>/g, "")
-		.replace(/\n*<state>\nWritten by Cartographer[\s\S]*?\n<\/state>/g, "")
-		.replace(/<project>\nWritten by Cartographer[\s\S]*?\n<\/project>\n*/g, "")
-		.replace(/\n\n\[(sent|noted|task ended) [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}[^\]\n]*\]/g, "");
+		.replace(new RegExp(`\n*<windows>\n${ESC}[\\s\\S]*?\n</windows>`, "g"), "")
+		.replace(new RegExp(`\n*<state>\n${ESC}[\\s\\S]*?\n</state>`, "g"), "")
+		.replace(new RegExp(`<project>\n${ESC}[\\s\\S]*?\n</project>\n*`, "g"), "")
+		.replace(/\n\n\[(sent|noted|task ended) [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}[^\]\n]*\]/g, ""));
 };
 
 function lookCall(directive) {
@@ -106,7 +115,7 @@ function lookCall(directive) {
 		return { name: "edit", args: { path: path.trim(), old_text: breaks(oldText), new_text: breaks(newText) } };
 	}
 	if (name === "plan" || name === "atlas") return { name, args: { ops: JSON.parse(rest) } };
-	if (name === "assess") return { name: "assess", args: { text: breaks(rest) } };
+	if (name === "assess") return { name: "book", args: { target: "assessment", action: "write", operation: { text: breaks(rest) } } };
 	// wake: {"action":"set","note":"look at the log","every":60}
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
 	// context: {"action":"shelve","path":"a.txt"}
@@ -151,7 +160,7 @@ function mainCalls(text) {
 }
 
 /** How the line begins that follows a reply without a tool call (src/wake.mjs). */
-const NOTED = "<cartographer>\nWritten by Cartographer, not by the user. Your last message had no tool call.";
+const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
 export function decide(messages) {
@@ -201,7 +210,7 @@ export function decide(messages) {
 			const chat = (said) => ({ calls: [{ name: "chat", args: { text: said } }] });
 			const results = later.filter((entry) => entry.role === "tool");
 			// A collapse in the middle of the turn: the context begins with the front block and nothing follows it yet.
-			if (raw.includes("<context>\nWritten by Cartographer") && text.trim() === "" && results.length === 0) {
+			if (raw.includes(`<context>\n${RECORD}`) && text.trim() === "" && results.length === 0) {
 				const [, after] = /AFTER COLLAPSE: (.*?)(?:\s+ON COLLAPSE:|$)/m.exec(raw) ?? [];
 				if (after?.startsWith("chat:")) return chat(after.slice(5).trim());
 				const calls = after === undefined ? [] : mainCalls(after);
@@ -284,7 +293,9 @@ export function decide(messages) {
 }
 
 /**
- * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, asideDelayMs?: number }} options
+ * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
+ *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
+ *   releaseAfterMs: a held reply lets itself go after this many milliseconds, without anyone calling `release()`.
  *   progress: { total, cache, steps, stepMs }: before each reply, say in `steps` steps how far the prompt is read.
  *   refuseSchema: answer 400 to a request that names the shape of its answer, as llama.cpp does with some chat templates.
  *   refuseAsides: answer Cartographer's own requests with an error, as a server would that cannot take them.
@@ -354,7 +365,10 @@ export async function startStandIn(options = {}) {
 			}
 		}
 		send({ role: "assistant", content: null });
-		if (options.holdWhen?.(body)) await new Promise((resolve) => held.push(resolve));
+		if (options.holdWhen?.(body)) {
+			if (options.releaseAfterMs !== undefined) setTimeout(() => { for (const release of held.splice(0)) release(); }, options.releaseAfterMs);
+			await new Promise((resolve) => held.push(resolve));
+		}
 		let generated = 0;
 		for (const piece of decision.reason?.match(/\S+\s*/g) ?? []) {
 			await pause();

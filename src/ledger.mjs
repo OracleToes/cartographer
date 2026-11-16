@@ -5,27 +5,39 @@
 //   note      anything else worth keeping: a decision, a preference, a finding
 //
 // It is a notebook, not a gate: nothing here stops the agent from working. It lives
-// in <project>/.atlas/carto-ledger.json as plain JSON so the user can read and edit it;
+// in <project>/.brain/carto-ledger.json as plain JSON so the user can read and edit it;
 // the file is read again every time it is needed, so an edit made by hand takes
 // effect at the agent's next step.
+import { POLICY } from "./config.mjs";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ago, since } from "./time.mjs";
+import { applyEntryOp, flat } from "./rows.mjs";
+import { USER_NAME } from "./user.mjs";
 
-export const KINDS = ["goal", "question", "note"];
-const PREFIX = { goal: "g", question: "q", note: "n" };
+export const KINDS = POLICY.enums.ledgerKinds;
+const ENTRY_ID = new RegExp(POLICY.patterns.ledgerId);
+const PREFIX = POLICY.idPrefixes.ledger;
 /** One entry is one line of thought; the open entries ride along with every request, so they stay short. */
-export const TEXT_MAX = 400;
-export const OPEN_MAX = 40;
+export const TEXT_MAX = POLICY.limits.ledger.textChars;
+export const OPEN_MAX = POLICY.limits.ledger.openEntries;
 /** Closed entries kept; beyond this the oldest are dropped. Open entries are never dropped. */
-export const DONE_KEPT = 50;
+export const DONE_KEPT = POLICY.limits.ledger.closedEntriesKept;
+
+/** Salience is the flag that keeps a note in view: the state block and the collapse block both carry a salient note. Only a note carries it. */
+const salientOf = (value, kind) => {
+	if (value === undefined) return undefined;
+	if (typeof value !== "boolean") throw new LedgerError("`salient` is true or false.");
+	if (value === false) return undefined;
+	if (kind !== POLICY.enums.ledgerKind.note) throw new LedgerError("Only a note carries salience. A goal or a question is already in view; say what should stand out and why in the text.");
+	return true;
+};
 
 export class LedgerError extends Error {}
 
 const ledgerPath = (brainDir) => join(brainDir, "carto-ledger.json");
 const empty = () => ({ version: 1, next: 1, items: [] });
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-const flat = (text) => String(text).replace(/\s+/g, " ").trim();
 
 /**
  * Before the file had its own name, Cartographer kept its ledger in `ledger.json`, a name the Orchestrator
@@ -67,14 +79,14 @@ export function loadLedger(brainDir) {
 		const where = `${path}, entry ${index + 1}`;
 		if (item === null || typeof item !== "object") return { error: `${where} is not an object` };
 		if (!KINDS.includes(item.kind)) return { error: `${where}: "kind" must be one of ${KINDS.join(", ")}` };
-		if (typeof item.id !== "string" || !/^[gqn]\d+$/.test(item.id)) return { error: `${where}: "id" must look like g1, q2 or n3` };
+		if (typeof item.id !== "string" || !ENTRY_ID.test(item.id)) return { error: `${where}: "id" must look like g1, q2 or n3` };
 		if (seen.has(item.id)) return { error: `${where}: the id ${item.id} is used twice` };
 		if (typeof item.text !== "string" || item.text.trim() === "") return { error: `${where} (${item.id}): "text" is missing` };
 		seen.add(item.id);
-		items.push({ ...item, status: item.status === "done" ? "done" : "open" });
+		items.push({ ...item, status: item.status === POLICY.enums.entryStatus.done ? POLICY.enums.entryStatus.done : POLICY.enums.entryStatus.open, salient: item.salient === true ? true : undefined });
 	}
 	// Ids are never reused, also after entries were removed or added by hand.
-	const highest = Math.max(0, ...items.map((item) => Number(item.id.slice(1))));
+	const highest = Math.max(0, ...items.map((item) => Number(item.id.slice(POLICY.idPrefixes.ledger[item.kind].length))));
 	return { ledger: { ...raw, version: 1, next: Math.max(Number.isInteger(raw.next) ? raw.next : 1, highest + 1), items } };
 }
 
@@ -86,95 +98,88 @@ export function saveLedger(brainDir, ledger) {
 	renameSync(temp, path);
 }
 
-export const open = (ledger, kind) => ledger.items.filter((item) => item.status === "open" && (kind === undefined || item.kind === kind));
-
-function find(ledger, id) {
-	const wanted = flat(id ?? "");
-	const item = ledger.items.find((entry) => entry.id === wanted);
-	if (item === undefined) {
-		const ids = open(ledger).map((entry) => entry.id);
-		throw new LedgerError(`There is no entry ${wanted || "(no id given)"}. Open entries: ${ids.length > 0 ? ids.join(", ") : "none"}.`);
-	}
-	return item;
-}
-
-function checked(value, what) {
-	if (typeof value !== "string" || value.trim() === "") throw new LedgerError(`${what} is required and was left out or empty.`);
-	const text = flat(value);
-	if (text.length > TEXT_MAX) throw new LedgerError(`${what} is ${text.length} characters; the limit is ${TEXT_MAX}. Say it in one line, or split it into two entries.`);
-	return text;
-}
+export const open = (ledger, kind) => ledger.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && (kind === undefined || item.kind === kind));
 
 /** An entry's age is said once it is an hour old: before that it tells the agent nothing. */
-const AGE_FROM = 3_600_000;
+const AGE_FROM = POLICY.timing.ledgerAgeMs;
 
 /**
- * One line for an entry, as the agent and the user see it.
+ * One line for an entry, as the agent and the user see it. A salient open note is marked ● and stands in the
+ * state block and in the collapse block; the mark is deterministic, so it is stable from one request to the next.
  * @param {number} [now]  given, an open entry that is an hour old or more says how old it is
  */
 export function entryLine(item, now) {
-	const doneWhen = item.kind === "goal" && item.doneWhen ? ` (done when: ${item.doneWhen})` : "";
-	const outcome = item.status === "done" && item.outcome ? ` → ${item.outcome}` : "";
-	const age = now === undefined || item.status === "done" ? undefined : since(item.added, now);
-	return `${item.id}  ${item.text}${doneWhen}${outcome}${age !== undefined && age >= AGE_FROM ? ` · added ${ago(age)}` : ""}`;
+	const doneWhen = item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? ` (done when: ${item.doneWhen})` : "";
+	const outcome = item.status === POLICY.enums.entryStatus.done && item.outcome ? ` → ${item.outcome}` : "";
+	const age = now === undefined || item.status === POLICY.enums.entryStatus.done ? undefined : since(item.added, now);
+	const mark = item.salient === true && item.status !== POLICY.enums.entryStatus.done ? "● " : "";
+	return `${mark}${item.id}  ${item.text}${doneWhen}${outcome}${age !== undefined && age >= AGE_FROM ? ` · added ${ago(age)}` : ""}`;
 }
 
+/** The salient open notes, in the order the ledger holds them. These stand in every request and survive a collapse. */
+export const salientNotes = (ledger) => open(ledger, POLICY.enums.ledgerKind.note).filter((item) => item.salient === true);
+
+/** How this book speaks: see src/rows.mjs. */
+const LEDGER_SPEC = {
+	Error: LedgerError,
+	kinds: KINDS,
+	prefix: PREFIX,
+	textMax: TEXT_MAX,
+	addTextLabel: "`text` (the entry itself, one line in my words)",
+	textRequired: (what) => `${what} is required and was left out or empty.`,
+	itemsMax: OPEN_MAX,
+	limitCount: (ledger) => open(ledger).length,
+	limitText: () => `The ledger has ${OPEN_MAX} open entries, which is its limit. Close or remove some before adding more.`,
+	findId: (id) => flat(id ?? ""),
+	findIds: (ledger) => open(ledger).map((entry) => entry.id),
+	findText: (wanted, ids) => `There is no entry ${wanted || "(no id given)"}. Open entries: ${ids.length > 0 ? ids.join(", ") : "none"}.`,
+	show: (item) => `${item.kind} ${entryLine(item)}`,
+	closedWord: "closed",
+	alreadyText: (id) => `${id} was already closed.`,
+	outcome: (op, checked) => (op.text !== undefined && flat(op.text) !== "" ? checked(op.text, "`text` (how it ended)") : undefined),
+	markClosed: true,
+	doneFollow: (item) =>
+		item.kind === POLICY.enums.ledgerKind.goal ? ` Tell ${USER_NAME} what was achieved against its done-when line, and ask whether that is what they wanted.` : "",
+	addFields: (op, kind, checked) => {
+		const fields = kind === POLICY.enums.ledgerKind.goal ? { doneWhen: checked(op.done_when, `\`done_when\` (how ${USER_NAME} and I will know the goal is reached)`) } : {};
+		const salient = salientOf(op.salient, kind);
+		if (salient !== undefined) fields.salient = true;
+		return fields;
+	},
+	addBefore: false,
+	editFields: (item, op, hasText, checked) => {
+		const hasDoneWhen = op.done_when !== undefined && flat(op.done_when) !== "";
+		const hasSalient = op.salient !== undefined;
+		const hasOutcome = op.outcome !== undefined;
+		if (!hasText && !hasDoneWhen && !hasSalient && !hasOutcome) throw new LedgerError("An edit needs `text`, `done_when`, `salient` or `outcome`: what changes.");
+		if (hasDoneWhen && item.kind !== POLICY.enums.ledgerKind.goal) throw new LedgerError(`${item.id} is a ${item.kind}; only a goal has a done-when line.`);
+		if (hasSalient) salientOf(op.salient, item.kind);
+		if (hasOutcome && item.status !== POLICY.enums.entryStatus.done) throw new LedgerError(`${item.id} is open; an outcome is what it ended with, and is set when it closes.`);
+		return {
+			...(hasDoneWhen ? { doneWhen: checked(op.done_when, "`done_when`") } : {}),
+			...(hasOutcome ? { outcome: checked(op.outcome, "`outcome`") } : {}),
+		};
+	},
+	afterEdit: (item, op) => {
+		if (op.salient === true) item.salient = true;
+		else if (op.salient === false) delete item.salient;
+	},
+	editTextRequired: false,
+	reorder: false,
+	unknownAction: (op) => `Unknown action ${JSON.stringify(op?.action)}; the actions are add, done, edit, remove.`,
+};
+
 /**
- * Apply one operation to `ledger` (changed in place).
- * @returns {{ line: string, shown: string }} what the agent is told, and what the user is shown
+ * Apply one operation to the ledger (changed in place).
+ * @returns {{ line: string, shown: string }} what the agent is told and what the user is shown
  */
 export function applyOp(ledger, op, now) {
-	switch (op?.action) {
-		case "add": {
-			if (!KINDS.includes(op.kind)) throw new LedgerError(`\`kind\` is ${JSON.stringify(op.kind)}; it is one of ${KINDS.join(", ")}.`);
-			const text = checked(op.text, "`text` (the entry itself, one line in your words)");
-			const item = { id: `${PREFIX[op.kind]}${ledger.next}`, kind: op.kind, text };
-			if (op.kind === "goal") {
-				item.doneWhen = checked(op.done_when, "`done_when` (how you and the user will know the goal is reached)");
-			}
-			Object.assign(item, { status: "open", added: now });
-			if (open(ledger).length >= OPEN_MAX) {
-				throw new LedgerError(`The ledger has ${OPEN_MAX} open entries, which is its limit. Close or remove some before adding more.`);
-			}
-			ledger.next++;
-			ledger.items.push(item);
-			return { line: `${item.id} added.`, shown: `+ ${op.kind} ${entryLine(item)}` };
-		}
-		case "done": {
-			const item = find(ledger, op.id);
-			if (item.status === "done") return { line: `${item.id} was already closed.`, shown: `✓ ${item.kind} ${entryLine(item)}` };
-			item.status = "done";
-			item.closed = now;
-			if (op.text !== undefined && flat(op.text) !== "") item.outcome = checked(op.text, "`text` (how it ended)");
-			const follow =
-				item.kind === "goal"
-					? " Tell the user what was achieved against its done-when line, and ask whether that is what they wanted."
-					: "";
-			return { line: `${item.id} closed.${follow}`, shown: `✓ ${item.kind} ${entryLine(item)}` };
-		}
-		case "edit": {
-			const item = find(ledger, op.id);
-			const hasText = op.text !== undefined && flat(op.text) !== "";
-			const hasDoneWhen = op.done_when !== undefined && flat(op.done_when) !== "";
-			if (!hasText && !hasDoneWhen) throw new LedgerError("An edit needs `text`, `done_when`, or both: the new wording.");
-			if (hasDoneWhen && item.kind !== "goal") throw new LedgerError(`${item.id} is a ${item.kind}; only a goal has a done-when line.`);
-			if (hasText) item.text = checked(op.text, "`text`");
-			if (hasDoneWhen) item.doneWhen = checked(op.done_when, "`done_when`");
-			return { line: `${item.id} reworded.`, shown: `~ ${item.kind} ${entryLine(item)}` };
-		}
-		case "remove": {
-			const item = find(ledger, op.id);
-			ledger.items.splice(ledger.items.indexOf(item), 1);
-			return { line: `${item.id} removed.`, shown: `- ${item.kind} ${entryLine(item)}` };
-		}
-		default:
-			throw new LedgerError(`Unknown action ${JSON.stringify(op?.action)}; the actions are add, done, edit, remove.`);
-	}
+	return applyEntryOp(ledger, op, LEDGER_SPEC, now);
 }
 
 /** Drop the oldest closed entries beyond the number kept. */
 export function prune(ledger) {
-	const closed = ledger.items.filter((item) => item.status === "done");
+	const closed = ledger.items.filter((item) => item.status === POLICY.enums.entryStatus.done);
 	if (closed.length <= DONE_KEPT) return;
 	const drop = new Set(closed.slice(0, closed.length - DONE_KEPT));
 	ledger.items = ledger.items.filter((item) => !drop.has(item));
@@ -188,7 +193,7 @@ export function openCounts(ledger) {
 	}).join(", ");
 }
 
-const HEADINGS = { goal: "Goals", question: "Questions for the user", note: "Notes" };
+const HEADINGS = { goal: "Goals", question: `Questions for ${USER_NAME}`, note: "Notes" };
 
 /**
  * The open entries as text, grouped by kind.
@@ -196,16 +201,19 @@ const HEADINGS = { goal: "Goals", question: "Questions for the user", note: "Not
  */
 export function renderLedger(ledger, options = {}) {
 	const lines = [];
+	const shown = ledger.items.filter((item) => item.archived !== true);
+	const archived = ledger.items.length - shown.length;
 	for (const kind of KINDS) {
-		const entries = open(ledger, kind);
+		const entries = shown.filter((item) => item.kind === kind && item.status === POLICY.enums.entryStatus.open);
 		if (entries.length === 0) continue;
 		lines.push(`${HEADINGS[kind]}:`);
 		for (const item of entries) lines.push(`  ${entryLine(item, options.now)}`);
 	}
-	const closed = ledger.items.filter((item) => item.status === "done");
+	const closed = shown.filter((item) => item.status === POLICY.enums.entryStatus.done);
 	if (options.closed && closed.length > 0) {
 		lines.push("Closed:");
 		for (const item of closed) lines.push(`  ${entryLine(item)}`);
 	} else if (closed.length > 0) lines.push(`(${closed.length} closed ${closed.length === 1 ? "entry" : "entries"} not shown)`);
+	if (archived > 0) lines.push(`(${archived} archived ${archived === 1 ? "entry" : "entries"} not shown; /unarchive ID brings one back)`);
 	return lines.length > 0 ? lines.join("\n") : "The ledger is empty.";
 }

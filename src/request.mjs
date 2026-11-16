@@ -4,22 +4,29 @@
 // time it is made (so the server need not read it again), or sits at the very end:
 //
 //   the first message   the copy of the assessment and the graph (src/top.mjs)
-//   the user's messages and task reports   when they came (src/time.mjs)
+//   the user's messages   named for the model; messages and task reports marked with when they came (src/time.mjs)
 //   quiet wake turns    left out once a later wake has overtaken them (src/wake.mjs)
 //   replies without a call   marked as notes the agent wrote to itself
-//   the last message    the state block, for the main agent only, and after it the shell windows as they
-//                       are now, for the main agent and every task (src/state.mjs)
+//   the last message    the state block, with a task-purpose line for focused contexts, and after it the shell
+//                       windows as they are now, for the orchestrator and every focus (src/state.mjs)
 //
 // And what the context engine changes in what is sent, again without touching what is stored (src/context.mjs):
 //
 //   reports the main agent dropped      one line each
 //   a task's own steps                  collapsed steps as one block, dropped results as one line, large results
 //                                       marked with their id and size
-import { contextLines, dressMain, dressTask, isFront, loadContext, withoutFront, withoutTags } from "./context.mjs";
+//   read results                        ephemeral: every read but the newest as one line, the newest's content at
+//                                       the very end of the request, after the state and windows blocks
+import { POLICY } from "./config.mjs";
+import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, textOf, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
+import { dressShelfAsk } from "./shelf-ask.mjs";
 import { isNote, withoutQuietWakes } from "./wake.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "./state.mjs";
 import { STAMP, stamp, took } from "./time.mjs";
 import { loadTop, withoutTop, withTop } from "./top.mjs";
+import { USER_NAME } from "./user.mjs";
+
+const USER_SPEAKER = `${USER_NAME}: `;
 
 /** `message` with `addition` after its last piece of text. */
 function append(message, addition) {
@@ -27,6 +34,15 @@ function append(message, addition) {
 	const tail = message.content.at(-1);
 	if (tail?.type !== "text") return { ...message, content: [...message.content, { type: "text", text: addition.trimStart() }] };
 	return { ...message, content: [...message.content.slice(0, -1), { ...tail, text: tail.text + addition }] };
+}
+
+/** Prefix the first text part, or add one before non-text parts. */
+function prepend(message, addition) {
+	if (typeof message.content === "string") return { ...message, content: addition + message.content };
+	const content = Array.isArray(message.content) ? message.content : [];
+	const head = content[0];
+	if (head?.type !== "text") return { ...message, content: [{ type: "text", text: addition }, ...content] };
+	return { ...message, content: [{ ...head, text: addition + head.text }, ...content.slice(1)] };
 }
 
 /**
@@ -63,11 +79,22 @@ export function withNotes(messages) {
 	});
 }
 
+/** Label user-role chat messages in the request without changing stored history or Cartographer's own notes. */
+function withSpeaker(messages) {
+	return messages.map((message) => {
+		if (message.role !== "user" || isFront(message) || isNote(message)) return message;
+		const text = textOf(message);
+		if (text.startsWith(USER_SPEAKER) || text.startsWith(`${POLICY.markup.note.open}\n`)) return message;
+		return prepend(message, USER_SPEAKER);
+	});
+}
+
 const TIMES = new RegExp(`\\n\\n\\[((?:sent|noted) ${STAMP}|task ended ${STAMP}, after [0-9a-z ]+)\\]`, "g");
 
 /** Text as it is stored: without anything this file adds. */
 export function withoutAdditions(text) {
-	return withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(text)))).replace(TIMES, ""));
+	const stripped = withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, ""));
+	return stripped.startsWith(USER_SPEAKER) ? stripped.slice(USER_SPEAKER.length) : stripped;
 }
 
 /**
@@ -76,35 +103,57 @@ export function withoutAdditions(text) {
  *   conversationId: whose request it is; note: for a task, a note for this one request; used: the server's count
  *   of tokens for the last reply
  *   main: the main agent's request; windows: the session's shell windows (src/windows.mjs); wakes: its wake
- *   triggers (src/wakes.mjs); gate: whether the user has switched approval off
+ *   triggers (src/wakes.mjs); gate: whether approval is off in this session
+ *   replay: rebuilding the stored view for the screen (the Chat tab); nothing is consumed, so the next real
+ *   request is built from the same state
  */
-export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used }) {
+export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, replay }) {
 	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike (src/wake.mjs).
 	let kept = withoutQuietWakes(messages);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
+	// A one-shot question about shelving rides the results of a round of reads; once the agent has answered it, it is dressed out.
+	kept = dressShelfAsk(kept);
+	// Read results are ephemeral: every read but the newest as one line here, the newest's content at the very end.
+	const ephemeral = dressReads(kept);
+	kept = ephemeral.messages;
+	let focus;
 	if (!main) {
-		kept = dressTask(kept, conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId]);
-		// Said once, at the end of this request only (src/engine.mjs).
-		if (note !== undefined) kept = [...kept, { role: "user", content: [{ type: "text", text: note }] }];
+		focus = conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId];
+		kept = dressTask(kept, focus);
 	}
-	let dressed = withTop(withTimes(withNotes(kept)), loadTop(brainDir)?.text);
+	// Only chat the person sent gets the speaker label. The task's one-request note is appended afterward.
+	let requestMessages = withSpeaker(withNotes(kept));
+	if (!main && note !== undefined) {
+		const taskNote = { role: "user", content: [{ type: "text", text: note }] };
+		kept = [...kept, taskNote];
+		requestMessages = [...requestMessages, taskNote];
+	}
+	let dressed = withTop(withTimes(requestMessages), loadTop(brainDir)?.text);
 	if (main) {
 		// What fired while the agent worked is told in the block, so it needs no turn of its own.
-		try {
-			wakes?.check();
-		} catch {
-			// A look that failed is taken again at the next tick.
+		let fired = [];
+		if (!replay) {
+			try {
+				wakes?.check();
+			} catch {
+				// A look that failed is taken again at the next tick.
+			}
+			fired = wakes?.noteShown() ?? [];
 		}
-		const fired = wakes?.noteShown() ?? [];
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+	} else {
+		// A focus is a live agent too: it gets the lines about the context itself (how full it is, the shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
+		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
 	}
-	// The windows come last of all, in a task's request too: they change from one request to the next, and a
-	// task that left a command running sees how it is doing each time it thinks.
+	// The windows come before the newest read of all, in a task's request too: they change from one request to
+	// the next, and a task that left a command running sees how it is doing each time it thinks.
 	const tail = config?.windowTail;
 	const block = windowsBlock(windows?.list(tail), { tail });
 	if (block !== "") dressed = withState(dressed, block);
 	// What the windows did up to now is in that block, so it is no longer news the main agent must be woken for.
-	if (main) windows?.noteShown();
+	if (main && !replay) windows?.noteShown();
+	// The newest read, at the very end of the request: after everything else, the blocks included.
+	if (ephemeral.tail !== undefined) dressed = withReadTail(dressed, ephemeral.tail);
 	return dressed;
 }
