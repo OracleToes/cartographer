@@ -810,7 +810,7 @@ export async function runTerminal(session, options) {
 		let reason;
 		let asked = false;
 		if (user) reason = `${USER_NAME} asked for it`;
-		else if (due !== undefined && (due.asked || would >= FLOOR)) {
+		else if (due !== undefined && (due.asked || due.forced === true || would >= FLOOR)) {
 			reason = due.reason;
 			asked = due.asked === true;
 		} else if (would >= config.collapseTokens) reason = `about ${tokens(would)} tokens of finished work were in view while you rested`;

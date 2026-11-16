@@ -392,6 +392,13 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					const main = id === ROOT_CONVERSATION_ID;
 					// A reply cut off at the output limit: the screen tells the user, who decides. For a task it is the end.
 					if (answer.stopReason === "length") return undefined;
+					// At the ceiling the plain-reply path never reaches the tool round where a collapse is normally
+					// decided (src/engine.mjs overCeiling). End the stretch here; the rest path collapses it mechanically.
+					if (main && engine.overCeiling(id)) {
+						const used = engine.usedBy(id) ?? 0;
+						engine.want(`it held about ${Math.round((used / config.contextWindow) * 100)}% of what fits`, { forced: true, atRest: true });
+						return undefined;
+					}
 					const turn = turns.get(id);
 					// A turn that a wake started and in which nothing was done is a rest already.
 					if (main && (turn === undefined || (turn.by === "note" && turn.calls === 0))) return undefined;

@@ -201,7 +201,17 @@ export function createEngine({ root, brainDir, config }) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		/** The stored messages a request is made from. */
+		/**
+	 * Whether the last-known server count sits at the collapse threshold — the hard ceiling a stretch of plain
+	 * replies (which never reaches a tool round) could otherwise grow past. The mid-turn collapse is decided
+	 * in `afterMainCall`; this is the same line on the plain-reply path.
+	 */
+	overCeiling(conversationId) {
+		const used = of(conversationId).used;
+		return Number.isFinite(used) && used >= full();
+	},
+
+	/** The stored messages a request is made from. */
 		seen(conversationId, messages) {
 			of(conversationId).messages = messages;
 		},
@@ -330,9 +340,7 @@ export function createEngine({ root, brainDir, config }) {
 			if (steps === undefined) return undefined;
 			const state = of(conversationId);
 			const mine = loadContext(brainDir).tasks[conversationId] ?? {};
-			const hidden = mine.cut?.steps ?? 0;
-			const visible = messages.slice(steps.start + hidden).reduce((sum, message) => sum + messageTokens(message), 0);
-			const nearlyFull = Number.isFinite(state.used) && state.used >= full() && visible >= FLOOR;
+			const nearlyFull = Number.isFinite(state.used) && state.used >= full();
 			let why;
 			if (mine.pending === "now" || mine.pending === "told") why = mine.reason ?? "I asked for it";
 			else if (nearlyFull) {
