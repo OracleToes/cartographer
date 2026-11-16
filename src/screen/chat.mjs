@@ -77,7 +77,7 @@ function bodyOf(call) {
 /**
  * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readStory: reads the story under a thread (st-…); for a consult row, so the whole exchange can be shown from
+ *   readStory: reads the story under a thread (st1, st2, …); for a consult row, so the whole exchange can be shown from
  *   the story itself, without keeping that text in the session. Without it, a consult row
  *   opens to the call and its outcome only.
  */

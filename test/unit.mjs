@@ -977,7 +977,7 @@ test("consult: one plain chat completion, the answer in a file, shelved", async 
 	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
 	// The answer lands in the brain under a thread; the question stands in the story for whoever reads it later.
 	const thread = result.details.thread;
-	assert.match(thread, /^st-\d{8}-\d{6}-[a-z0-9]{4}$/);
+	assert.match(thread, /^st\d+$/, "a fresh story mints the short thread marker, like every other id");
 	assert.equal(result.details.rounds, 1);
 	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
 	assert.ok(file.includes("What is the answer?"));
@@ -1213,6 +1213,28 @@ test("consult: a thread that is not a storyteller thread is refused before anyth
 		assert.match(result.output[0].text, /not a thread the storyteller minted/);
 	}
 	assert.equal(called, 0, "a bad thread never reaches the endpoint");
+});
+
+test("consult: fresh stories mint short thread markers from the folder, and legacy markers stay valid", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let n = 0;
+	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	// Two new stories in a fresh brain: st1, then st2.
+	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const second = await tool.execute({ question: "q2" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(first.details.thread, "st1");
+	assert.equal(second.details.thread, "st2");
+	// A follow-up to the legacy story minted before the short markers: the marker stays as it was.
+	const legacy = "st-20261115-143022-k7q2";
+	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
+	writeFileSync(join(brainDir, "storyteller", `${legacy}.md`), "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: MythosNano\nStarted: 2026-11-15T14:30:22.000Z\n\n## Round 1 — 2026-11-15T14:30:22.000Z\n\nQuestion:\n```text\nlegacy question?\n```\n\nAnswer:\n```text\nlegacy answer.\n```\n");
+	const third = await tool.execute({ question: "and then?", thread: legacy }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(third.isError, undefined, third.output[0].text);
+	assert.equal(third.details.thread, legacy, "a legacy thread keeps its marker");
+	// The next fresh story after legacy files still mints the short form from the short ids in the folder — st3.
+	const fourth = await tool.execute({ question: "q4" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(fourth.details.thread, "st3");
 });
 
 test("consult: a well-formed thread with no story behind it is refused before anything is asked", async (t) => {

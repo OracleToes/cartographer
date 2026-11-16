@@ -7,7 +7,7 @@
 // the project, or remember anything on its own — μῦθος is story, and a story is not a record.
 //
 // The whole exchange is kept as one story file per story under .brain/storyteller/<id>.md. The agent never sees
-// the path, only the `thread` marker the receipt prints (st-…); the file is provenance and backing. Follow-ups
+// the path, only the `thread` marker the receipt prints (st1, st2, …); the file is provenance and backing. Follow-ups
 // are calls carrying `thread`: the tool rebuilds the conversation — the original question, every answer since —
 // and asks again; the round is appended to the same story. It goes as long as the agent keeps asking, and stops
 // when it doesn't. The exchange is shelved for the asking context as a `story` reference, so the storyteller's
@@ -17,7 +17,7 @@ import { POLICY } from "../config.mjs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { obj, opt, str } from "@earendil-works/pi-schema";
 import { loadContext, persistShelfSnapshot, shelfReferenceItem, taskState, updateContext } from "../context.mjs";
-import { STORY_ID, appendRound, createStory, parseStory, readStory, renderStory } from "../story.mjs";
+import { STORY_ID, STORY_ID_PATTERN, appendRound, createStory, parseStory, readStory, renderStory } from "../story.mjs";
 
 const CONTEXT_CHARS = POLICY.limits.consult.contextChars;
 const SNIPPET_CHARS = POLICY.limits.consult.bodyChars;
@@ -56,7 +56,7 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 		parameters: obj({
 			question: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "The problem, self-contained, with the shape of the answer wanted at the end (for example: the complete function; the invariant with its proof; the counterexample)." }),
 			context: opt(str({ maxLength: CONTEXT_CHARS, description: `Everything it needs and may not guess: file excerpts with their paths and line numbers, constraints, what was tried and what it printed. Inline text; over the first ${count(CONTEXT_CHARS)} characters the rest is not sent, and the result says so.` })),
-			thread: opt(str({ pattern: "^st-\\d{8}-\\d{6}-[a-z0-9]{4}$", description: "The `thread` from an earlier consult receipt, to ask the next round of the same story. The storyteller sees the original question and every answer since. Omit to begin a new story." })),
+			thread: opt(str({ pattern: `^${STORY_ID_PATTERN}$`, description: "The `thread` from an earlier consult receipt, to ask the next round of the same story. The storyteller sees the original question and every answer since. Omit to begin a new story." })),
 		}),
 		prepareArguments(args) {
 			// Clipped here, before validation sees it, so an oversized context keeps the head instead of being refused whole.

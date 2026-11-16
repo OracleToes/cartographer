@@ -2,29 +2,34 @@
 //
 // A story is the whole exchange between the agent and the storyteller: round after round of
 // question and answer, kept whole in one file so a follow-up carries everything that was said.
-// The agent never sees the path — only the `thread` marker (st-…); the file is provenance and
-// backing, and the shelf carries the exchange itself. The format is strict on purpose: the
+// The agent never sees the path — only the `thread` marker (st1, st2, …); the file is provenance
+// and backing, and the shelf carries the exchange itself. The format is strict on purpose: the
 // writer and the reader below are the same code path, and a file that does not parse is a story
 // that cannot be continued, said as such — never guessed at.
-import { randomInt } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-/** The marker the agent passes as `thread`. It carries no path and no meaning beyond identity. */
-export const STORY_ID = /^st-\d{8}-\d{6}-[a-z0-9]{4}$/;
+/** The marker the agent passes as `thread`, as both a regex and the source of it (the `consult` parameter builds its schema pattern from it). It carries no path and no meaning beyond identity.
+ *  New stories mint the short, standard marker — `st1`, `st2`, … — from the next free number in the folder, like every other id here. Markers minted before 2026-11-16 (`st-20261115-143022-k7q2`) stay valid. */
+export const STORY_ID_PATTERN = "st(\\d+|-\\d{8}-\\d{6}-[a-z0-9]{4})";
+export const STORY_ID = new RegExp(`^${STORY_ID_PATTERN}$`);
 const SCHEMA_LINE = "<!-- storyteller v1 -->";
 const TITLE = "The storyteller — one long problem, kept whole";
 
 export class StoryError extends Error {}
 
-const pad = (value, width = 2) => String(value).padStart(width, "0");
-const stampFor = (at) => {
-	const date = new Date(at);
-	return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}-${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}`;
+const SHORT = /^st([0-9]+)$/;
+/** The next free short marker: the folder's highest short number plus one, or st1 when none stands. */
+const nextStoryId = (dir) => {
+	let highest = 0;
+	try {
+		for (const file of readdirSync(dir)) {
+			const match = SHORT.exec(file.replace(/\.md$/, ""));
+			if (match) highest = Math.max(highest, Number(match[1]));
+		}
+	} catch { /* the folder does not exist yet */ }
+	return `st${highest + 1}`;
 };
-
-/** A fresh thread marker for a new story, e.g. st-20261115-143022-k7q2. */
-export const newStoryId = (at) => `st-${stampFor(at)}-${randomInt(0, 36 ** 4).toString(36).padStart(4, "0")}`;
 
 /** Where the story lives. Never handed to the agent: the thread is the address. */
 export const storyPath = (brainDir, id) => {
@@ -161,8 +166,8 @@ export function createStory(brainDir, { model, at, round }) {
 		renderRounds([round]),
 		"",
 	].join("\n");
-	for (let attempt = 0; attempt < 5; attempt += 1) {
-		const id = newStoryId(at);
+	for (let attempt = 0; attempt < 10; attempt += 1) {
+		const id = nextStoryId(dir);
 		const path = storyPath(brainDir, id);
 		try {
 			writeFileSync(path, full(id), { encoding: "utf8", flag: "wx" });
