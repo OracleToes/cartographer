@@ -956,12 +956,12 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	const pEdit = await run({ target: "plan", action: "edit", id: "p2", text: "Fix the dice roller." });
 	assert.ok(!pEdit.isError, pEdit.output[0].text);
 	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
-	assert.ok(!pDone.isError && /p1 marked done/.test(pDone.output[0].text), pDone.output[0].text);
+	assert.ok(!pDone.isError && /p1 done\./.test(pDone.output[0].text), pDone.output[0].text);
 	const pRemove = await run({ target: "plan", action: "remove", id: "p2" });
 	assert.ok(!pRemove.isError && /p2 removed/.test(pRemove.output[0].text), pRemove.output[0].text);
 	await run({ target: "plan", action: "add", mode: "look", text: "Leftover item." });
 	const cleared = await run({ target: "plan", action: "clear" });
-	assert.ok(!cleared.isError && /Plan cleared/.test(cleared.output[0].text), cleared.output[0].text);
+	assert.ok(!cleared.isError && /The plan is empty now\./.test(cleared.output[0].text), cleared.output[0].text);
 	assert.equal(loadPlan(brainDir).plan.items.length, 0);
 
 	// Ledger: flat goal add, salient note add/edit, done, remove.

@@ -868,9 +868,9 @@ test("time: each of the user's messages and each task report says when it came, 
 });
 
 test("terminal: one line per call to the atlas and the assessment", () => {
-	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", operation: { name: "dice" } } }), "book atlas add dice");
-	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: "a" } } }), "book atlas confirm a");
-	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "write", operation: { text: "x".repeat(1200) } } }), `book assessment write ${"x".repeat(69)}…`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", name: "dice" } }), "book atlas add dice");
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", id: "a" } }), "book atlas confirm a");
+	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "write", text: "x".repeat(1200) } }), `book assessment write ${"x".repeat(69)}…`);
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "book", isError: false, details: { target: "atlas", ...details }, content: [{ type: "text", text }] });
 	assert.equal(result({ shown: ["+ node a  what a is", "✓ confirmed b"] }, "a written.\nb confirmed."), "+ node a what a is · ✓ confirmed b");
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");
