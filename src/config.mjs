@@ -42,7 +42,7 @@ export const DEFAULTS = freezeTree({
 	maxTokens: 32768,
 	// One question to the storyteller (Mythos-nano), a small long-reasoning model served by the same endpoint. llama-swap
 	// swaps it in for the agent's model for the duration; the call itself takes as long as the story takes. Empty switches it off.
-	consultModel: "MythosNano",
+	consultModel: "Mythos-nano",
 	// The most Mythos-nano is asked to write: the model card's own ceiling for hard problems.
 	consultMaxTokens: 40960,
 	// The model card's recommended sampling for single-shot reasoning.
