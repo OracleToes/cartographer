@@ -8,6 +8,7 @@ import { POLICY } from "../config.mjs";
 import { projectFiles } from "./look.mjs";
 import { ChangeError, confineWrite } from "./change.mjs";
 import { noFileRecord, runFileRead } from "./read.mjs";
+import { readBatchAllowance } from "../read-batch.mjs";
 import { runShelf } from "./shelf.mjs";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -339,7 +340,8 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 	}
 	// Unadvertised transcript-replay fallback: new calls go through the top-level `read` tool.
 	if (target === "file" && action === "read") {
-		return runFileRead({ root, brainDir }, args);
+		const tokenCeiling = readBatchAllowance(api?.conversationId, api?.callId);
+		return runFileRead({ root, brainDir }, args, tokenCeiling === undefined ? undefined : { tokenCeiling });
 	}
 	if (DURABLE_TARGETS.has(target)) {
 		if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
@@ -735,7 +737,7 @@ function runPlan({ brainDir, gate }, args, api) {
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-/** The context operations' run: see the `context` tool this replaces (src/tools/context.mjs in the last release). */
+/** The context operations' run, now carried by flat `book` target=context actions. */
 function runContext({ root, brainDir, config, engine }, args, api) {
 	const main = api.conversationId === ROOT_CONVERSATION_ID;
 	const ops = Array.isArray(args.ops) ? args.ops : [];

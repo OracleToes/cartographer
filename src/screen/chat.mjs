@@ -191,7 +191,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		},
 		/**
 		 * A block the agent sees at the start or the end of its request — the copy at the top of the context, the
-		 * state block, the shell windows block, the newest read. One line until opened, the way a run of calls folds.
+		 * state block, the shell windows block, the current read batch. One line until opened, the way a run of calls folds.
 		 */
 		block(label, text) {
 			closeGroup();

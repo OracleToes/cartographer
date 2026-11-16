@@ -15,11 +15,11 @@
 //   reports the main agent dropped      one line each
 //   a task's own steps                  collapsed steps as one block, dropped results as one line, large results
 //                                       marked with their id and size
-//   read results                        ephemeral: every read but the newest as one line, the newest's content at
-//                                       the very end of the request, after the state and windows blocks
+//   read results                        ephemeral: the newest successful reply's read batch at the very end of the
+//                                       request, after the state and windows blocks; every earlier batch as one line
 import { POLICY } from "./config.mjs";
 import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, textOf, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
-import { withoutShelfAsk } from "./read-gate.mjs";
+import { withoutShelfAsk } from "./read-batch.mjs";
 import { isNote, withoutQuietWakes } from "./wake.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "./state.mjs";
 import { STAMP, stamp, took } from "./time.mjs";
@@ -112,7 +112,8 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 	let kept = withoutQuietWakes(messages);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
-	// File-read results are ephemeral: every successful read but the newest as one line here, the newest's content at the very end.
+	// File-read results are ephemeral: the newest successful reply's read batch is at the very end; earlier batches are one line.
+	// Dressing that tail is request-only and never asks the context engine to collapse.
 	const ephemeral = dressReads(kept);
 	kept = ephemeral.messages;
 	let focus;
@@ -144,14 +145,14 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 		// A focus is a live agent too: it gets the lines about the context itself (how full it is, its own + inherited shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
 		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: false, conversationId }) }));
 	}
-	// The windows come before the newest read of all, in a task's request too: they change from one request to
+	// The windows come before the current read batch, in a task's request too: they change from one request to
 	// the next, and a task that left a command running sees how it is doing each time it thinks.
 	const tail = config?.windowTail;
 	const block = windowsBlock(windows?.list(tail), { tail });
 	if (block !== "") dressed = withState(dressed, block);
 	// What the windows did up to now is in that block, so it is no longer news the main agent must be woken for.
 	if (main && !replay) windows?.noteShown();
-	// The newest read, at the very end of the request: after everything else, the blocks included.
+	// The current read batch, at the very end of the request: after everything else, the blocks included.
 	if (ephemeral.tail !== undefined) dressed = withReadTail(dressed, ephemeral.tail);
 	return dressed;
 }

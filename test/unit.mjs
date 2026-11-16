@@ -31,7 +31,8 @@ import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest, withoutAdditions } from "../src/request.mjs";
-import { TOOLS, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
+import { createEngine } from "../src/engine.mjs";
+import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
@@ -1068,7 +1069,12 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 		TASK_HANDOFF,
 	].join("\n");
 	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`|target=shelf|target="shelf"|`file read`|target\s*=\s*"?file"?[^.\n]*action\s*=\s*"?read"?|Should I shelf|asked when I read|asked whether to shelf/);
-	assert.match(TOOLS.read, /shelf/);
+	assert.match(TOOLS.read, /read batch/);
+	assert.match(TOOLS.read, /next successful read batch replaces/);
+	assert.match(TOOLS.read, /shared ledger, atlas or assessment/);
+	assert.match(LOOK_NOTE, /retain lasting conclusions in the shared ledger, atlas or assessment/);
+	assert.match(CHANGE_NOTE("p1", "Edit file"), /retain lasting conclusions in the shared ledger, atlas or assessment/);
+	assert.doesNotMatch(TOOLS.read, /one `read` comes back per reply/);
 	assert.match(TOOLS.shelf, /action/);
 });
 
@@ -1103,27 +1109,73 @@ test("prepend: the user's own markdown is read before the prompt — core first,
 	assert.equal(crlf.includes("\r"), false);
 });
 
-// ─── The read gate: one transient read per reply, directed at `shelf` ────────
+// ─── Read batches: bounded transient groups, with legacy cleanup ────────────
 
-import { beginReadGate, readGateCheck, withoutShelfAsk } from "../src/read-gate.mjs";
+import { beginReadBatch, readBatchAllowance, readBatchCheck, withoutShelfAsk } from "../src/read-batch.mjs";
 
 const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c-${path}`, name: "read", arguments: { path } });
 const shelfCall = (path, id) => ({ type: "toolCall", id: id ?? `s-${path}`, name: "shelf", arguments: { action: "add", path } });
 
-test("read gate: first `read` in a reply passes, further `read` calls point at `shelf`, and parallel `shelf` calls are never gated", () => {
-	const id = "gate-first";
-	const message = { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md"), shelfCall("c.md"), shelfCall("d.md"), readCall("e.md")] };
-	beginReadGate(id, message);
-	assert.equal(readGateCheck(id, readCall("a.md")), undefined, "the first file read runs");
-	assert.equal(readGateCheck(id, shelfCall("c.md")), undefined, "shelf calls are never gated");
-	assert.equal(readGateCheck(id, shelfCall("d.md")), undefined, "multiple shelf calls in one reply all run");
-	const refusedB = readGateCheck(id, readCall("b.md"));
-	assert.match(refusedB, /b\.md was not read/);
-	assert.match(refusedB, /Call `shelf` \(action="add"\)/);
-	assert.match(readGateCheck(id, readCall("e.md")), /e\.md was not read/);
-	// A reply with no `read` clears the gate.
-	beginReadGate(id, { role: "assistant", timestamp: 2, content: [shelfCall("f.md")] });
-	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
+test("read batches: one reply admits a bounded group, splits the output allowance, and never gates shelf", () => {
+	const id = "batch-first";
+	const reads = Array.from({ length: POLICY.limits.look.readMaxFiles + 1 }, (_, index) => readCall(`file-${index + 1}.md`));
+	const message = { role: "assistant", timestamp: 1, content: [reads[0], shelfCall("c.md"), reads[1], shelfCall("d.md"), ...reads.slice(2)] };
+	beginReadBatch(id, message);
+	for (const call of reads.slice(0, POLICY.limits.look.readMaxFiles)) assert.equal(readBatchCheck(id, call), undefined, `${call.arguments.path} runs in the batch`);
+	assert.equal(readBatchCheck(id, shelfCall("c.md")), undefined, "shelf calls are never gated");
+	assert.equal(readBatchCheck(id, shelfCall("d.md")), undefined, "multiple shelf calls in one reply all run");
+	const refused = readBatchCheck(id, reads.at(-1));
+	assert.match(refused, new RegExp(`read batch already has ${POLICY.limits.look.readMaxFiles} files`));
+	assert.match(refused, /later read batch/);
+	assert.equal(readBatchAllowance(id, reads[0].id), Math.floor(POLICY.limits.look.readTokenCeiling / POLICY.limits.look.readMaxFiles), "each permitted file gets its planned share of the batch budget");
+	assert.equal(readBatchAllowance(id, reads.at(-1).id), undefined, "the refused file has no allowance");
+	const three = [readCall("one.md", "batch-one"), readCall("two.md", "batch-two"), readCall("three.md", "batch-three")];
+	beginReadBatch(id, { role: "assistant", timestamp: 2, content: three });
+	const shares = three.map((call) => readBatchAllowance(id, call.id));
+	assert.equal(shares.reduce((total, allowance) => total + allowance, 0), POLICY.limits.look.readTokenCeiling, "all planned shares add up to the one aggregate ceiling");
+	assert.ok(shares[0] >= shares[1] && shares[1] >= shares[2] && shares[0] - shares[2] <= 1, "whole-token remainder goes to earlier calls in reply order");
+	// A reply with no `read` clears the batch plan.
+	beginReadBatch(id, { role: "assistant", timestamp: 3, content: [shelfCall("f.md")] });
+	assert.equal(readBatchCheck(id, reads[0]), undefined);
+	assert.equal(readBatchAllowance(id, reads[0].id), undefined);
+});
+
+test("read tool: a batch share is the actual returned ceiling", async (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(root, "long.txt"), Array.from({ length: 1_024 }, () => "x".repeat(100)).join("\n"));
+	const id = "batch-ceiling";
+	const first = readCall("long.txt", "batch-long-a");
+	const second = readCall("other.txt", "batch-long-b");
+	beginReadBatch(id, { role: "assistant", content: [first, second] });
+	const reader = readTool({ root, brainDir });
+	const result = await reader.execute(reader.prepareArguments(first.arguments), { conversationId: id, callId: first.id }, undefined);
+	assert.equal(result.isError, undefined);
+	assert.match(result.output[0].text, /share of this read batch/, "the result says why it stopped early");
+	assert.match(result.output[0].text, /more lines; ask for range/, "and tells the next useful selection");
+	const failed = await reader.execute(reader.prepareArguments(second.arguments), { conversationId: id, callId: second.id }, undefined);
+	assert.equal(failed.isError, true, "an admitted missing file still fails inline");
+	assert.equal(readBatchAllowance(id, first.id), POLICY.limits.look.readTokenCeiling / 2, "that failure does not redistribute the first call's planned share");
+	assert.equal(readBatchAllowance(id, second.id), POLICY.limits.look.readTokenCeiling / 2, "or discard its own planned share");
+	const legacy = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const replay = await legacy.execute({ target: "file", action: "read", path: "long.txt" }, { conversationId: id, callId: first.id }, undefined);
+	assert.match(replay.output[0].text, /share of this read batch/, "a stored legacy book file read receives the same planned share");
+});
+
+test("engine: task read turnover drops only redundant task steps, never schedules a collapse", (t) => {
+	const { root, brainDir } = fresh(t);
+	const focus = "focus-read-turnover";
+	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
+	engine.seen(focus, [
+		{ role: "toolResult", content: [{ type: "text", text: TASK_HEADER }] },
+		{ role: "assistant", content: [readCall("a.js", "old-read")] },
+		{ role: "toolResult", toolCallId: "old-read", toolName: "read", content: [{ type: "text", text: "x".repeat(2_000) }] },
+		{ role: "assistant", content: [readCall("a.js", "new-read")] },
+	]);
+	assert.deepEqual(engine.afterTaskRead(focus, { path: "a.js" }), ["s1"], "the older same-file task step is the only change");
+	assert.equal(engine.due(), undefined, "a read turnover does not schedule the main-context collapse");
+	const task = loadContext(brainDir).tasks[focus];
+	assert.equal(task.cut, undefined, "and it does not write a task collapse block");
+	assert.equal(task.dropped.s1, "An earlier read of the same lines stood here; the newer one is further down.");
 });
 
 test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped cleanly", () => {

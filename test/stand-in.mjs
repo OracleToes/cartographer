@@ -13,7 +13,7 @@
 //   atlas: [OPS]         the same with `atlas`
 //   assess: TEXT         call `book` with target=assessment, action=write, text: TEXT
 //   cut                  start a `task` call and run into the output limit in the middle of it
-//   context: {JSON}      call `context` with these arguments (a task can, too)
+//   book: {JSON}         call flat `book` with these arguments; `book context: {JSON}` selects target=context
 //   ON COLLAPSE: DIRECTIVE   planted: asked before a collapse, it answers that it wants a turn first, and in that
 //                        turn it does DIRECTIVE. Without it the answer is no.
 //   AFTER COLLAPSE: DIRECTIVE  planted: what it does when a collapse came in the middle of its turn
@@ -21,9 +21,9 @@
 // A request that is not streamed is one of Cartographer's own (src/engine.mjs): the question before a collapse,
 // or the read-ahead after one. Those are kept in `asides`, not in `requests`.
 //
-// As a task (the newest message begins "You are now the task") it obeys the brief,
+// As a task (the newest message begins with TASK_HEADER) it obeys the brief,
 // one line per turn:
-//   read: a.js, b.js   |  read: a.js @40+20   (from line 40, 20 lines)
+//   read: a.js +++ read: b.js   |  read: a.js @40+20   (from line 40, 20 lines)
 //   search: PATTERN    |  search: PATTERN in src
 //   list: PATH
 //   write: PATH <<< TEXT           (a \n in TEXT, OLD and NEW stands for a line break)
@@ -54,6 +54,7 @@
 import { createServer } from "node:http";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
+import { TASK_HEADER } from "../src/prompt.mjs";
 
 /** The first line of every block the harness writes to the model; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -104,7 +105,7 @@ function lookCall(directive) {
 			},
 		};
 	}
-	const [, name, rest] = /^(read|shelf|search|list|write|edit|task|ledger|plan|atlas|assess|wake|sleep|chat|ask|return|context|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
+	const [, name, rest] = /^(read|shelf|search|list|write|edit|task|ledger|plan|atlas|assess|book|wake|sleep|chat|ask|return|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
 	const breaks = (text) => text.replaceAll("\\n", "\n");
 	if (name === "write") {
 		const [path, content = ""] = rest.split(" <<< ");
@@ -119,8 +120,11 @@ function lookCall(directive) {
 	if (name === "assess") return { name: "book", args: { target: "assessment", action: "write", text: breaks(rest) } };
 	// wake: {"action":"set","note":"look at the log","every":60}
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
-	// context: {"action":"shelve","path":"a.txt"}
-	if (name === "context") return { name: "context", args: JSON.parse(rest) };
+	// book: {"target":"context","action":"note","text":"finding"}, or book context: {"action":"note","text":"finding"}
+	if (name === "book") {
+		const context = /^context:\s*(.*)$/s.exec(rest);
+		return { name: "book", args: context ? { target: "context", ...JSON.parse(context[1]) } : JSON.parse(rest) };
+	}
 	if (name === "shelf") return { name: "shelf", args: JSON.parse(rest) };
 	if (name === "sleep") return { name: "sleep", args: {} };
 	if (name === "chat") return { name: "chat", args: { text: rest } };
@@ -158,7 +162,7 @@ function mainCalls(text) {
 		// A \n in the brief is a line break, a \\n stays a \n for the task's own directives.
 		if (task) calls.push({ name: "task", args: { brief: task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n"), ...(task[1] ? { item: task[1] } : {}) } });
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
-		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|context|ask|return)[:[]/.test(part)) calls.push(lookCall(part));
+		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));
 		else if (part === "sleep") calls.push({ name: "sleep", args: {} });
 	}
 	return calls.filter((call) => call !== undefined);
@@ -177,13 +181,13 @@ export function decide(messages) {
 		// A task that said yes to the question before its steps collapse: it notes what its results began with.
 		if (message.role === "user" && raw.includes("Your steps will be collapsed after this reply")) {
 			const found = messages.slice(0, i).filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "context", args: { action: "note", text: `NOTED ${found.slice(-3).join(" | ")}` } }] };
+			return { calls: [{ name: "book", args: { target: "context", action: "note", text: `NOTED ${found.slice(-3).join(" | ")}` } }] };
 		}
 		// What follows a note inside a task is not a message to obey: the brief goes on.
-		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith("You are now the task"))) continue;
+		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith(TASK_HEADER))) continue;
 		// The block that stands for a task's collapsed steps is not a message to obey.
 		if (message.role === "user" && /steps up to here \(\d+ repl/.test(raw)) continue;
-		if (message.role === "tool" && text.startsWith("You are now the task")) {
+		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
 			const given = text
 				.slice(text.indexOf("Brief:\n") + 7)
 				.split("\n")

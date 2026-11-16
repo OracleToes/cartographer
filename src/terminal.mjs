@@ -8,8 +8,9 @@
 //   ┊ what the main agent thinks and notes for itself, streamed (Ctrl-T hides and shows it)
 //   what the main agent says to you with `chat`, streamed
 //   ▸ task  first line of the brief
-//   │ read src/a.ts, src/b.ts          → 412 lines
-//   │ search /register/ in src          → 9 matches
+//   │ read src/a.ts                     → 212 lines
+//   │ read src/b.ts                     → 200 lines
+//   │ search /register/ in src           → 9 matches
 //   ◂ report  1.3k characters  (/report shows it)
 //
 // It is also where the user authorizes the plan (/approve) and takes a change task
@@ -100,6 +101,7 @@ export function describeCall(call, describeRef) {
 			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
 		}
 		case "read": {
+			// Older stored calls can have plural `paths`; new public reads are one-file `path` calls.
 			if (args.paths !== undefined) {
 				const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
 				const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
@@ -631,7 +633,7 @@ export async function runTerminal(session, options) {
 	const printBlocks = (state, windows, tail) => {
 		if (state !== undefined) ui.block("the state block — the time, the atlas, the ledger, the plan", state);
 		if (windows !== undefined) ui.block("the shell windows as they stand", windows);
-		if (tail !== undefined) ui.block("the newest read — its content stands at the end of the request", tail);
+		if (tail !== undefined) ui.block("the current read batch — its contents stand at the end of the request", tail);
 	};
 	/**
 	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in

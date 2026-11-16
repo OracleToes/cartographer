@@ -1280,9 +1280,9 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 		text("user", "do it"),
 		call("task", { brief: "b" }),
 		text("toolResult", `${TASK_HEADER}\n\nBrief:\nb`, { toolName: "task", toolCallId: "c" }),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: { paths: ["a.js"] } }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: { path: "a.js" } }] },
 		text("toolResult", big, { toolName: "read", toolCallId: "r1" }),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "read", arguments: { paths: ["b.js"] } }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "read", arguments: { path: "b.js" } }] },
 		text("toolResult", "== b.js (lines 1-2 of 2)\n1  x\n2  y", { toolName: "read", toolCallId: "r2" }),
 	];
 	assert.equal(stepsOf([text("user", "hi")]), undefined, "no brief, no task");
@@ -1291,13 +1291,13 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(steps.replies, 2);
 	assert.deepEqual(steps.results.map((result) => result.id), ["s1", "s2"]);
 	// A read of the same lines again: the older copy is replaced, when it is large and not much has come since.
-	assert.deepEqual(supersededBy(steps, { paths: ["a.js"] }), ["s1"]);
-	assert.deepEqual(supersededBy(steps, { paths: ["b.js"] }), [], "a small result is left alone: replacing it saves less than reading the rest again costs");
-	assert.deepEqual(supersededBy(steps, { paths: ["a.js"], offset: 5 }), [], "other lines are another read");
-	assert.deepEqual(supersededBy(steps, { paths: ["a.js"] }, { s1: "gone" }), [], "what is dropped already is not dropped again");
+	assert.deepEqual(supersededBy(steps, { path: "a.js" }), ["s1"]);
+	assert.deepEqual(supersededBy(steps, { path: "b.js" }), [], "a small result is left alone: replacing it saves less than reading the rest again costs");
+	assert.deepEqual(supersededBy(steps, { path: "a.js", offset: 5 }), [], "other lines are another read");
+	assert.deepEqual(supersededBy(steps, { path: "a.js" }, { s1: "gone" }), [], "what is dropped already is not dropped again");
 	// Far back, with much read since: left alone, since everything behind it would be read again.
-	const far = [...messages.slice(0, 5), ...Array.from({ length: 12 }, (_, i) => [{ role: "assistant", content: [{ type: "toolCall", id: `m${i}`, name: "read", arguments: { paths: [`f${i}.js`] } }] }, text("toolResult", big, { toolName: "read", toolCallId: `m${i}` })]).flat()];
-	assert.deepEqual(supersededBy(stepsOf(far), { paths: ["a.js"] }), [], "far back");
+	const far = [...messages.slice(0, 5), ...Array.from({ length: 12 }, (_, i) => [{ role: "assistant", content: [{ type: "toolCall", id: `m${i}`, name: "read", arguments: { path: `f${i}.js` } }] }, text("toolResult", big, { toolName: "read", toolCallId: `m${i}` })]).flat()];
+	assert.deepEqual(supersededBy(stepsOf(far), { path: "a.js" }), [], "far back");
 	// Dressed for the request: the mark at the end of a large result, a dropped one as one line.
 	const dressed = dressTask(messages, { dropped: {} });
 	assert.match(dressed[4].content[0].text, /\n\n\[s1 · about [\d,]+ tokens\]$/);
@@ -1308,7 +1308,7 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(messages[4].content[0].text, big, "the stored messages are not changed");
 });
 
-test("context: file-read results are ephemeral — successful reads collapse to the newest at <read-tail>, while failed reads and brain reads never evict it", async () => {
+test("context: file-read results are ephemeral — successful reply batches replace older batches, while failed reads and brain reads never evict one", async () => {
 	const { dressReads, splitReadTail, withReadTail, withoutReadTail } = await import("../src/context.mjs");
 	const { withoutAdditions } = await import("../src/request.mjs");
 	const rawText = (message) => message.content[0].text;
@@ -1327,13 +1327,16 @@ test("context: file-read results are ephemeral — successful reads collapse to 
 		text("toolResult", "{ \"id\": \"c1\" }", { toolName: "book", toolCallId: "r5" }),
 	];
 	const { messages, tail } = dressReads(convo);
-	// Earlier successful file reads leave one line; brain reads and failed file reads stay inline and never evict the newest file read.
+	// Earlier successful batches leave one line; brain reads and failed file reads stay inline and never evict the current batch.
 	assert.match(rawText(messages[2]), /no longer in view — read a\.js/);
 	assert.equal(rawText(messages[4]), "{ \"entries\": [] }", "ledger read stays inline");
-	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*read f9 lines 1-40/);
+	assert.match(rawText(messages[6]), /stands in the current read batch at the end of the request[^\n]*read f9 lines 1-40/);
 	assert.match(rawText(messages[8]), /No file at missing\.js/, "failed read stays inline");
 	assert.equal(rawText(messages[10]), "{ \"id\": \"c1\" }", "atlas read after the file read does not evict the file read");
-	assert.equal(tail, "== c.js (lines 1-40 of 300) · file f9 @1111\ngamma");
+	assert.match(tail, /^Current read batch: read f9 lines 1-40\. This is the only transient file content in view\./);
+	assert.match(tail, /next successful read batch replaces this whole batch\. That replaces only this transient tail; it is not a context collapse\./);
+	assert.match(tail, /shelf source material I need afterward or write lasting conclusions to the shared ledger, atlas or assessment\./);
+	assert.match(tail, /== c\.js \(lines 1-40 of 300\) · file f9 @1111\ngamma$/);
 	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2) · file f1 @0000\nalpha\nbeta", "the stored messages are not changed");
 	// Deterministic: the same request is dressed the same way.
 	assert.equal(dressReads(convo).tail, tail);
@@ -1342,7 +1345,7 @@ test("context: file-read results are ephemeral — successful reads collapse to 
 		{ role: "assistant", content: [{ type: "toolCall", id: "l1", name: "book", arguments: { target: "file", action: "read", path: "old.js" } }] },
 		text("toolResult", "== old.js (lines 1-1 of 1)\nconst x = 1;\n\n<shelf-ask>\nShould I shelf old.js? Yes or no.\n</shelf-ask>", { toolName: "book", toolCallId: "l1" }),
 	];
-	assert.equal(dressReads(legacy).tail, "== old.js (lines 1-1 of 1)\nconst x = 1;");
+	assert.match(dressReads(legacy).tail, /== old\.js \(lines 1-1 of 1\)\nconst x = 1;$/);
 	// A non-read action is not a read.
 	const noReads = [text("assistant", "thinking", {}), text("toolResult", "done", { toolName: "book", toolCallId: "x" })];
 	assert.equal(dressReads(noReads).tail, undefined, "no reads, no tail");
@@ -1357,7 +1360,7 @@ test("context: file-read results are ephemeral — successful reads collapse to 
 	// The tail is glued at the very end of the request, after everything else.
 	const ended = withReadTail(messages, tail);
 	const lastText = ended.at(-1).content.at(-1).text;
-	assert.match(lastText, /<read-tail>\n== c\.js/);
+	assert.match(lastText, /<read-tail>\nCurrent read batch: read f9 lines 1-40\./);
 	assert.deepEqual(splitReadTail(lastText), { text: rawText(messages.at(-1)), tail: `<read-tail>\n${tail}` });
 	assert.equal(withoutReadTail(lastText), rawText(messages.at(-1)));
 	assert.equal(withoutAdditions(lastText), withoutAdditions(rawText(messages.at(-1))), "and it comes off again like the other additions");
@@ -1365,6 +1368,65 @@ test("context: file-read results are ephemeral — successful reads collapse to 
 	const endedAssistant = withReadTail([...messages, text("assistant", "a note to myself")], tail);
 	assert.equal(endedAssistant.at(-1).role, "user");
 	assert.match(endedAssistant.at(-1).content[0].text, /<read-tail>/);
+});
+
+test("context: successful reads from one reply stay together in call order until another batch replaces them", async () => {
+	const { dressReads } = await import("../src/context.mjs");
+	const text = (words, more = {}) => ({ role: "toolResult", content: [{ type: "text", text: words }], ...more });
+	const call = (id, path) => ({ type: "toolCall", id, name: "read", arguments: { path } });
+	const index = call("r-index", "index.html");
+	const dice = call("r-dice", "dice.js");
+	const smoke = call("r-smoke", "smoke-p2.js");
+	const missing = call("r-missing", "gone.js");
+	const first = [
+		{ role: "user", content: [{ type: "text", text: "Why does the die not render?" }] },
+		{ role: "assistant", content: [index, dice, smoke, missing] },
+		text("== smoke-p2.js (lines 1-1 of 1) · file f3 @ccc\nsmoke", { toolName: "read", toolCallId: smoke.id }),
+		text("== index.html (lines 1-1 of 1) · file f1 @aaa\n<script>", { toolName: "read", toolCallId: index.id }),
+		text("== dice.js (lines 1-1 of 1) · file f2 @bbb\nexport const die = 6;", { toolName: "read", toolCallId: dice.id }),
+		text("<harness>[error] No file at gone.js.</harness>", { toolName: "read", toolCallId: missing.id, isError: true }),
+	];
+	const current = dressReads(first);
+	for (const at of [2, 3, 4]) assert.match(current.messages[at].content[0].text, /stands in the current read batch/, "each successful result points at the shared tail");
+	assert.equal(current.messages[5].content[0].text, "<harness>[error] No file at gone.js.</harness>", "a failed read remains inline");
+	assert.match(current.tail, /^Current read batch: read index\.html, read dice\.js, read smoke-p2\.js\./);
+	assert.ok(current.tail.indexOf("== index.html") < current.tail.indexOf("== dice.js") && current.tail.indexOf("== dice.js") < current.tail.indexOf("== smoke-p2.js"), "the tail follows call order, not completion order");
+
+	const later = call("r-later", "main.js");
+	const replaced = dressReads([...first, { role: "assistant", content: [later] }, text("== main.js (lines 1-1 of 1) · file f4 @ddd\nboot();", { toolName: "read", toolCallId: later.id })]);
+	for (const at of [2, 3, 4]) assert.match(replaced.messages[at].content[0].text, /later successful read batch replaced it/, "the entire earlier batch leaves together");
+	assert.match(replaced.tail, /^Current read batch: read main\.js\./);
+	assert.doesNotMatch(replaced.tail, /index\.html|dice\.js|smoke-p2\.js/, "only the new batch remains at the tail");
+});
+
+test("harness: one reply's admitted reads share a tail batch, the ninth is refused, and turnover does not collapse", async () => {
+	const root = makeProject("read-batch", { git: false });
+	configure(root, { initiate: false });
+	for (let index = 1; index <= 9; index++) writeFileSync(join(root, `batch-${index}.txt`), `batch file ${index}\n`);
+	const server = await startStandIn();
+	try {
+		const firstReply = Array.from({ length: 9 }, (_, index) => `read: batch-${index + 1}.txt`).join(" +++ ");
+		const result = await carto(root, server, ["-p", `task: ${firstReply}\nread: src/main.js || then think`]);
+		ok(result, "read-batch task");
+		const tailOf = (request) => {
+			const text = request.messages.map(rawText).join("\n");
+			const at = text.lastIndexOf("<read-tail>\n");
+			return at < 0 ? undefined : text.slice(at);
+		};
+		const tails = server.requests.map(tailOf).filter((tail) => tail !== undefined);
+		assert.equal(tails.length, 2, "one request follows each successful reply batch");
+		assert.match(tails[0], /^<read-tail>\nCurrent read batch: read batch-1\.txt, read batch-2\.txt, read batch-3\.txt, read batch-4\.txt, read batch-5\.txt, read batch-6\.txt, read batch-7\.txt, read batch-8\.txt\./);
+		for (let index = 1; index <= 8; index++) assert.match(tails[0], new RegExp(`== batch-${index}\\.txt`), `batch file ${index} is in the shared tail`);
+		assert.doesNotMatch(tails[0], /batch file 9/, "the ninth file did not run or enter the tail");
+		const firstBatchRequest = server.requests.find((request) => tailOf(request) === tails[0]);
+		assert.ok(firstBatchRequest, "the first tail came from a request");
+		assert.match(firstBatchRequest.messages.map(rawText).join("\n"), /read batch already has 8 files/, "the ninth call is refused before disk content returns");
+		assert.match(tails[1], /^<read-tail>\nCurrent read batch: read src\/main\.js\./);
+		assert.doesNotMatch(tails[1], /batch file [1-8]/, "the later successful batch replaces all earlier file content together");
+		assert.equal(server.asides.length, 0, "batch turnover does not create a collapse question or read-ahead request");
+	} finally {
+		await server.close();
+	}
 });
 
 test("screen: a collapse of the main context leaves only the marker, and the agent's blocks fold open", async () => {
@@ -1460,7 +1522,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 
 	chat.user("Look at the roller");
 	chat.entry(0, reply([{ type: "text", text: "I should look first." }, call("c1", "task", { brief: "Read the roller" })], 1));
-	chat.entry(1, reply([call("c2", "read", { paths: ["roll.py"] }), call("c3", "search", { pattern: "seed" })], 2));
+	chat.entry(1, reply([call("c2", "read", { path: "roll.py" }), call("c3", "search", { pattern: "seed" })], 2));
 	clock += 3000;
 	// The run that is going on is open by itself.
 	has(text(), "▾ 3 calls · task · 3s\n  ┊ I should look first.\n  … task  Read the roller  3s\n  │ … read roll.py  3s\n  │ … search /seed/", "while it runs, the run is open");
@@ -1853,7 +1915,7 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	const { contextBar, contextView } = await import("../src/screen/views.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
-		tools: [{ type: "function", function: { name: "read", description: "Read files.", parameters: { type: "object", properties: { paths: { type: "array" } } } } }],
+		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
 			{ role: "user", content: `<project>\n${RECORD} My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\n${RECORD} Kept.\nt1 · look · asked: x → y\n</context>\n\n${USER_NAME}: Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
@@ -1866,10 +1928,10 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
 	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them");
-	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    37  Tools · 1: read  "], "each is one line: its colour, its size, what it is, how it begins");
+	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each is one line: its colour, its size, what it is, how it begins");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
-	has(byKey("Tools · 1").body, '── read ──\nRead files.\nparameters: {\n  "type": "object"', "the tools as they are sent");
+	has(byKey("Tools · 1").body, '── read ──\nRead one file.\nparameters: {\n  "type": "object"', "the tools as they are sent");
 	assert.match(byKey("Assessment and graph").body, /^<project>\n[\s\S]*\n<\/project>$/, "the block Cartographer puts in front is a part of its own");
 	assert.match(byKey("What the last collapse kept").body, /^<context>\n[\s\S]*\n<\/context>$/, "so is what a collapse kept");
 	assert.equal(byKey("Chat · You").body, `${USER_NAME}: Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]`, "and the user's message is what is left");
@@ -1901,9 +1963,9 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
 });
 
-test("screen: a windows block followed by an ephemeral read tail is still a part of its own, and a request without a state block says so", async () => {
+test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
 	const { contextView } = await import("../src/screen/views.mjs");
-	// Exactly what dressRequest produces after a read: the blocks are glued to the result, and the newest read stands at the very end.
+	// Exactly what dressRequest produces after a read batch: the blocks are glued to the result, and the current batch stands at the very end.
 	const payload = {
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
@@ -1916,7 +1978,10 @@ test("screen: a windows block followed by an ephemeral read tail is still a part
 	const byKey = (key) => view.items.find((item) => item.key === key);
 	assert.ok(keys.some((key) => key.endsWith(".windows")), "the windows block stands as its own part even with the read tail after it");
 	assert.ok(keys.some((key) => key.endsWith(".state")), "and so does the state block");
-	hasNot(byKey("m0.0.result").body, "<windows>", "the result keeps only the result and the tail");
+	const readBatch = view.items.find((item) => item.head?.[2]?.[0]?.includes("Current read batch"));
+	assert.ok(readBatch, "the tail is named as the current transient batch, not as an ordinary read result");
+	assert.match(readBatch.body, /^<read-tail>\n== c\.js/, "the named part keeps the tail's bytes");
+	hasNot(byKey("m0.0.result").body, "<read-tail>", "the original result does not duplicate the tail");
 	// A request with no state block at all: a loud, visible marker, not silence.
 	const bare = { ...sent, payload: { messages: [{ role: "system", content: "You are Cartographer." }, { role: "tool", tool_call_id: "c1", content: "== a.js" }] } };
 	const bareView = contextView(bare, { windowSize: 20_000, cols: 40 });

@@ -22,7 +22,7 @@ import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs"
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted, noteKey } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
-import { beginReadGate, readGateCheck } from "./read-gate.mjs";
+import { beginReadBatch, readBatchCheck } from "./read-batch.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
@@ -283,8 +283,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
-					// One transient `read` comes back per reply; further `read` calls in the same reply are refused and directed to `shelf` (src/read-gate.mjs).
-					const readRefused = readGateCheck(api.conversationId, call);
+					// One reply may carry a bounded transient read batch; a ninth file is refused before disk is read (src/read-batch.mjs).
+					const readRefused = readBatchCheck(api.conversationId, call);
 					if (readRefused !== undefined) return { block: readRefused };
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
 					if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
@@ -376,7 +376,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					return { payload, model };
 				},
 				afterResponse: async (message, api) => {
-					beginReadGate(api.conversationId, message);
+					beginReadBatch(api.conversationId, message);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);

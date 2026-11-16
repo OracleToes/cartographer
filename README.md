@@ -190,7 +190,7 @@ The sizes of the parts are estimates, four characters to a token; the first line
 
 **Parts** is what `/context` prints: the sizes as the context engine counts them, the kept reports, and when the next collapse is due.
 
-**Hands** is yours: what the agent keeps with its `context` tool, with the same operations offered to you, and the ones only you may. It lists the shelf, in view from the next collapse on and read by every task at its start, and the reports of finished work, each with its record line and whether it stands in view or is folded. `f` on a report folds it out of view, leaving its record line, or brings it back; `v` archives it: the record line leaves what the collapse keeps for good — a project with a thousand finished tasks need not read a thousand one-liners — while the report stays on disk and recall by id still finds it; `d` deletes it, record line and report file, and nothing recalls it again, and because that cannot be undone it asks (press `d` again). `x` on a shelved file takes it off; `a` puts `/shelve` in the place to type. The typed commands `/fold`, `/recall`, `/archive`, `/unarchive`, `/delete`, `/shelve`, `/unshelve` and `/collapse` do the same things from any tab; `/context` shows the sizes behind them.
+**Hands** is yours: what the agent keeps with `shelf` and `book` context actions, with the same operations offered to you, and the ones only you may. It lists the shelf, in view now and across collapse and read by every task at its start, and the reports of finished work, each with its record line and whether it stands in view or is folded. `f` on a report folds it out of view, leaving its record line, or brings it back; `v` archives it: the record line leaves what the collapse keeps for good — a project with a thousand finished tasks need not read a thousand one-liners — while the report stays on disk and recall by id still finds it; `d` deletes it, record line and report file, and nothing recalls it again, and because that cannot be undone it asks (press `d` again). `x` on a shelved file takes it off; `a` puts `/shelve` in the place to type. The typed commands `/fold`, `/recall`, `/archive`, `/unarchive`, `/delete`, `/shelve`, `/unshelve` and `/collapse` do the same things from any tab; `/context` shows the sizes behind them.
 
 
 **Copying.** Drag over text to select it, and it is copied when you let go: the margin, the edge of a block and the spaces a row is filled with are left out. Whole things are copied with a command or a key:
@@ -225,7 +225,8 @@ Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl
 ┊ The user wants the place where configuration is read. I have no node for it yet, so I start a task (no item, only reading).
 ▸ task  Find where configuration is loaded. Report the file, the function and the line numbers…
 │ search /config/ in src                           → 14 matches in 5 files of src.
-│ read src/config.ts, src/main.ts                  → 212 lines
+│ read src/config.ts                               → 112 lines
+│ read src/main.ts                                 → 100 lines
 ◂ report  1.3k characters  (/report shows it)
 Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
   context 3.4k of 100k tokens · 412 read for this answer
@@ -260,7 +261,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `◆ asked before collapsing (…): does it need to write something down first? no · 1.2 s` | The one question before a collapse, the agent's answer, and how long the server took for it |
 | `read ahead by the server: 12k tokens in 16 s, so the next answer starts at once` | After a collapse at rest the server has read the new context already |
 | `│ ◆ the task's steps collapsed (…)` | A task's own steps became one block of notes, because its context was nearly full or because it asked |
-| `● context  shelved src/roll.py · about 310 tokens` | The agent used its `context` tool: recalled a report, marked a file for its shelf, dropped a result, or asked for a collapse |
+| `● context  folded report t12` | The agent used `book` with `target=context`: recalled or folded a report, kept a note, or asked for a collapse. `shelf` add/remove has its own call and receipt |
 | `◂ Cartographer ended the task: …` | The task used all its replies without calling `return`, wrote the same note three times, or sent the same failing call three times. The main agent gets what the task had noted, and nothing is marked done |
 | `◂ changed 2 files (+37 −1)` | What a change task did to the files, taken from the checkpoints and not from its report. The files are listed below it |
 | `● ledger  + goal g1 …` | The agent changed its ledger: `+` added, `✓` closed, `~` reworded, `-` removed |
@@ -389,18 +390,18 @@ Going up from the folder you are in, the first folder that has a Cartographer br
 
 ## How it works
 
-The orchestrating context talks with you and decides what focused work to do. It cannot call project file or command tools itself, so it starts one `task` focus with a brief; a change focus must name an open, user-authorized plan item. A task is a forked working conversation of this same agent. It receives a fresh state block, shares the durable ledger, atlas and assessment, and may keep findings there while it works. Only the orchestrating context changes the plan.
+The orchestrating context talks with you and decides what focused work to do. It reads project files, searches, lists, tends its shelf, and may run read-only commands inline; project changes and commands that can write go through one focused task carrying an open, user-authorized plan item. A task is a forked working conversation of this same agent. It receives a fresh state block, shares the durable ledger, atlas and assessment, and may keep findings there while it works. Only the orchestrating context changes the plan.
 
-The focus is temporary, not a second mind: when it returns, the orchestrating context receives its report and shared-memory updates, while its detailed working conversation may leave active context. This soft-forget does not erase the underlying Durable transcript. The focus should know this and keep the facts needed later in the ledger, the atlas, the context shelf, or the report. The active state block gives it a one-line `I am ...` purpose and current project/brain state. Project file text and command output stay in that working context unless kept or reported.
+The focus is temporary, not a second mind: when it returns, the orchestrating context receives its report and shared-memory updates, while its detailed working conversation may leave active context. This soft-forget does not erase the underlying Durable transcript. The focus should know this and keep the facts needed later in the ledger, atlas, shelf, or report. The active state block gives it a one-line `I am ...` purpose and current project/brain state. Project file text and command output stay in that working context unless kept or reported.
 
 | Tool | Who | What |
 |---|---|---|
 | `task` | orchestrating context | Enter one bounded focus context. A change focus names an open plan item and runs only when authorized |
-| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. Resolves project files, reports, ledger/plan/atlas/assessment, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
-| `atlas` | orchestrating and focused contexts | Write, link, confirm, remove and read graph nodes. The orchestrating context also moves the tree with it |
-| `search` | any focus | A regular expression over project files; returns `path:line: text` |
-| `list` | any focus | Project files as a tree with sizes |
-| `write`, `edit`, `read` | internal book primitives, not model-callable | Retained behind `book` for checked file operations; callers use target-specific actions instead |
+| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. It tends reports, ledger, plan, atlas, assessment, Durable conversations/messages/tool calls/results, prompts, tools, exact local schemas, and authorized project-file changes; plan edits remain orchestrator-only |
+| `read` | orchestrating and focused contexts | Inspect one project file by path or file ID. Successful calls from one reply are one transient batch; a later successful batch replaces it |
+| `shelf` | orchestrating and focused contexts | Add, remove or list explicit working-memory placements that survive later read batches and collapse |
+| `search` | orchestrating and focused contexts | A regular expression over project files; returns `path:line: text` |
+| `list` | orchestrating and focused contexts | Project files as a tree with sizes |
 | `shell` | change task | Type a command into a shell window; returns what it printed and its exit status, or that it is still running |
 | `window` | orchestrating and focused contexts | Read a window, wait for its command, stop it, close it. Typing into a running program (`send`) requires an authorized change focus |
 | `wake` | orchestrating context | Set or remove a wake: after a time, when a file changes, when a shell window prints something |
@@ -408,9 +409,8 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | `chat` | orchestrating and focused contexts | Say something to you. Does not wait |
 | `ask` | orchestrating and focused contexts | Put a question to you, with optional choices, and wait for the answer |
 | `return` | focused context | End this focus and hand over its report and any shelf items; shared-book updates already persist |
-| `context` | orchestrating and focused contexts | Recall a kept report, keep a file on the shelf, fold a report after its bookkeeping, or collapse the current context |
 
-`book` project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches to an authorized change focus and retains the plan, approval, sandbox, network, and root protections; `file remove` deletes a project file the same way (a checkpoint records the deletion, so `/undo` brings it back). A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. Chat-message `edit` is soft-forget from future context/ordinary recall; the raw Durable transcript remains append-only. The old `read`, `write`, `rm`, and `edit` executors are internal primitives and are not model-callable.
+Project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches to an authorized change focus and retains the plan, approval, sandbox, network, and root protections; `file remove` deletes a project file the same way (a checkpoint records the deletion, so `/undo` brings it back). A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. Chat-message `edit` is soft-forget from future context/ordinary recall; the raw Durable transcript remains append-only. Top-level `read` is model-callable; the `write`, `rm`, and `edit` executors behind authorized `book` file operations are internal primitives.
 
 **References.** New `book` calls pass `{ id, namespace?, kind?, version? }` — the ID alone is enough; the namespace and kind are inferred and the live version is used unless one is pinned. Paths are locators, not identities. File versions are SHA-256 digests and exact bytes are kept under `.brain/catalog/versions/`; retained non-file versions are under `.brain/catalog/entities/`. Durable-owned transcript/task IDs remain their native IDs. App-managed catalog file IDs and shelf placement IDs count up within the brain — `f1`, `f2`, … and `sh1`, `sh2`, … — because they only ever need to be unique per project directory; ids written before 2026-11-15 (`f-`/`sh-<uuid>`) stay valid. An explicit `carto --fork-brain` rotates the namespace, transactionally rebinds saved internal references, and records its source namespace; backups/restores keep their namespace. Tool schemas are static and flat in every request; there is no provider-side schema expansion to verify.
 
@@ -422,7 +422,7 @@ A focus begins with its one-line purpose in the state block, the current shared 
 
 - Text without a call is a note to itself and never ends the focus.
 - `chat` and `ask` reach you from inside a focus.
-- `book` can update the shared ledger (including salient notes), the assessment (one whole-text write), reports, and shelf. The only book operation reserved for the orchestrating context is changing the plan. `task`, `wake`, and `sleep` remain orchestration-only; a focus cannot nest another focus.
+- `book` can update the shared ledger (including salient notes), the assessment (one whole-text write), reports, and atlas. `shelf` tends the focus's working set. The only book operation reserved for the orchestrating context is changing the plan. `task`, `wake`, and `sleep` remain orchestration-only; a focus cannot nest another focus.
 - **`return` ends the focus**, and nothing else does. `report` carries the outcome not already represented in shared memory. `done` says whether the assigned work is carried out: for a plan item, `true` marks it done and `false` leaves it open. `summary` is the line kept for the focus after collapse; without it, the start of the report is used. `shelf` names files or references to add if needed, then hand to the shared context.
 - A focus has `taskTurns` replies, notes included. From three before the end, each result says how many remain and asks for return. If it uses them all, the orchestrating context receives the notes marked as not a report, and nothing is marked done.
 - What you type while a focus runs goes to it with its next result; the orchestrating context is told with the report.
@@ -678,7 +678,7 @@ carto --no-bwrap        for the whole session
 Commands then run directly on the machine, as you, with your environment and the network. They can read, change and delete whatever you can, anywhere. What stays the same:
 
 - A plan still needs `/approve` before a task's command runs. With the sandbox off, tasks' commands run directly on your machine; the main agent's commands still run in a read-only window while bubblewrap works, and not at all when it does not.
-- `book` file create/edit/remove and `book` file read, `search` and `list` still reach the project folder only. The way out of it is `shell`.
+- `book` file create/edit/remove, top-level `read`, `shelf`, `search` and `list` still reach the project folder only. The way out of it is `shell`.
 - The windows work the same, with bounded output, and every process of a window ends with it: on `/kill`, when you leave, and within about a second of Cartographer being killed. A process that detaches itself into a session of its own escapes this.
 
 What you give up:
@@ -899,7 +899,7 @@ Calls of the stretch before the collapse (the minute, the call, its outcome; the
 | The agent rests and you have been away `collapseMinutes` (5) | The same, whatever the amount above 1,500 tokens |
 | The agent works and the context is `collapseFull` (80) percent full | In the middle of the turn, as at a closed goal. A reply that ends the turn is left alone, and the collapse follows at the rest |
 | `/collapse` | Now. Works while the agent is idle |
-| The agent calls `context` with `collapse` | When the calls of that reply are done |
+| The agent calls `book` with `target=context`, `action=collapse` | When the calls of that reply are done |
 
 A collapse that would free next to nothing is not made, however full the context is. That case means the shelf, the talk and the fixed part fill the window by themselves; lower `chatWindow`.
 
@@ -909,19 +909,19 @@ A collapse that would free next to nothing is not made, however full the context
 
 ### The shelf
 
-One file read comes back per reply, in every turn, in the main agent and in a focus alike: a further `file` read in the same reply is refused with no content. Whenever the agent reads, the result carries a question — `Should I shelf …? Yes or no` — naming the file it read and, when more than one was asked for, the declined ones by number. A yes is carried out by Cartographer: one file is shelved at a word, several by their numbers (`yes` shelves them all; `no` shelves none). The question rides the conversation until the agent answers it, then leaves what it sees (the record keeps it, as it keeps the notes). The shelf is how several files stay in view: a read's content is ephemeral, a shelved file is not.
+One `read` call inspects one project file. Up to eight `read` calls made by the same agent reply are admitted as one transient batch and divide about 8,192 output tokens before they run. Their successful raw-line results stand together at the very end of the next request; a failed read stays inline and does not displace the preceding successful batch. The next successful batch replaces the whole previous batch. This is not a context collapse and writes nothing to the brain: the Durable transcript still holds every tool result, while the request simply carries the current batch at its tail. The agent reads every file it needs to compare in the same reply. Before a later batch, it shelves source material it needs afterward or records lasting conclusions in the ledger, atlas or assessment.
 
-A task reads a file, reports, and the file text is gone with the task. When the agent keeps sending tasks to the same file, it can put the file on its shelf: `{"action":"shelve","path":"src/roll.py"}`, or with `"lines":"1-80"`. Marking changes nothing at that moment, since putting text at the front of the context would make the server read everything again. From the next collapse on the file stands in the block, and since a task continues from the main agent's context, every task then starts with it already read.
+`shelf` is the explicit durable working set. `shelf` with `action:"add"` takes a project `path` or `id` (and optional `range:"1-80"`), a report, storyteller thread, pinned record, or an existing placement to refresh; `action:"remove"` takes it off, and `action:"list"` shows placements. An add returns a one-line receipt and the snapshot appears immediately in the state block, then survives collapse. A focus has its own shelf; `handOn: true` passes a placement to the main shelf when that focus returns. There is no shelf question or automatic promotion from `read`.
 
-The shelf holds whatever you add; nothing refuses. Half the window (the shelf's soft cap) is its intended share, and as it fills the state block says so, in the agent's own words and as a share of shelf space, so the agent makes room itself (fold or unshelve) before it has to. The block shows a shelved file as it was at the collapse. When the file changes afterwards the block is left as it is and the state block names the file as changed, one line with the line delta (read or re-shelve it to see the difference); the next collapse writes the current text. A file that was deleted leaves the shelf, and both you and the agent are told. `/context` shows what is on the shelf, what waits for the next collapse, and what was taken off.
+The shelf holds whatever the agent or you add; nothing refuses. Half the window (the shelf's soft cap) is its intended share, and as it fills the state block says so, in the agent's own words and as a share of shelf space, so the agent makes room itself (fold or unshelve) before it has to. When a shelved file changes, the state block names it with a line delta; read it or re-add its placement to refresh the snapshot. `/context` shows what is on the shelf, what is currently rendered, and what was taken off.
 
 ### Recalling and folding
 
 The state block lists every report that stands in view, with its size, so the agent sees what it is carrying. A report stays in view until **the agent decides** it has done the bookkeeping for it — updated the assessment, the graph, the ledger and the plan from it — and folds it itself; the automatic collapse is only the backstop.
 
-`{"action":"fold","id":"t12"}` replaces a report that stands in the context by its one line. This changes the context in its middle, so the server reads everything behind that place again; the answer to the call says how many tokens that is. A folded report comes back to its place with `{"action":"recall","id":"t12"}`, which returns it in full; it stays in view until the next collapse or until it is folded again. (`drop` does the same as `fold`, for habits carried over.)
+`{"target":"context","action":"fold","id":"t12"}` replaces a report that stands in the context by its one line. This changes the context in its middle, so the server reads everything behind that place again; the answer to the call says how many tokens that is. A folded report comes back to its place with `{"target":"context","action":"recall","id":"t12"}`, which returns it in full; it stays in view until the next collapse or until it is folded again. (`drop` does the same as `fold`, for habits carried over.)
 
-The main agent has no notes of its own that survive a collapse, on purpose: a `note` action is refused for it with a pointer to the ledger, the graph and the assessment.
+The main agent has no notes of its own that survive a collapse, on purpose: `book` with `target=context`, `action=note` is refused for it with a pointer to the ledger, the graph and the assessment.
 
 ### Inside a task
 
@@ -929,9 +929,9 @@ A focus has its own collapsible working conversation, but it is the same agent a
 
 - A large result ends with a mark like `[s3 · about 2,100 tokens]`. `{"action":"drop","id":"s3"}` replaces that result by one line.
 - When a task reads the same lines of a file again, the older copy is replaced by one line without being asked. This is done only where it pays: the copy is at least about 400 tokens, and what follows it, which the server then reads again, is at most eight times its size.
-- `{"action":"note","text":"…"}` writes down a finding. Notes stay when the steps are collapsed.
-- A focus has a shelf. Its items stay in view when its steps collapse. With `"hand_on": true`, or by naming a path/reference in `return.shelf`, the item is handed to the shared shelf when the focus ends; `return.shelf` adds it first if it is not already there.
-- When the context is `collapseFull` percent full during a task, the task's steps become one block: its notes, one line per call, and its shelf. With `handoffQuestion` on, the task is first asked the question, with the same two answers; with the default off the cut is mechanical. The task goes on with its brief. It can ask for this itself with `collapse`.
+- `{"target":"context","action":"note","text":"…"}` writes down a finding. Notes stay when the steps are collapsed.
+- A focus has a shelf. Its items stay in view when its steps collapse. With `handOn: true` on `shelf` add, or by naming a path/reference in `return.shelf`, the item is handed to the shared shelf when the focus ends; `return.shelf` adds it first if it is not already there.
+- When the context is `collapseFull` percent full during a task, the task's steps become one block: its notes, one line per call, and its shelf. With `handoffQuestion` on, the task is first asked the question, with the same two answers; with the default off the cut is mechanical. The task goes on with its brief. It can ask for this itself with `book` (`target=context`, `action=collapse`).
 
 ### What `/context` shows
 
@@ -1086,6 +1086,7 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/project.mjs` | Which folder is the project; creating and locking `.brain/` |
 | `src/config.mjs` | Settings and where they come from |
 | `src/harness.mjs` | Opens the session: model provider, tools, and who may call which |
+| `src/read-batch.mjs` | Plans the bounded transient file-read batch and its shared output ceiling |
 | `src/prompt.mjs` | The built-in system prompt, tool descriptions, the task's role line and refusals |
 | `src/requests.mjs` | The one list of what waits for the user, and carrying a decision out |
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |
@@ -1105,18 +1106,17 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/time.mjs` | How times, durations and ages are written |
 | `src/request.mjs` | What is added to a request as it is sent: the copy at the front, the times, the state block, the windows block |
 | `src/state.mjs` | The state block added to the end of each request — the main agent's and a task's — and the windows block added after it and to each task request |
-| `src/tools/ledger.mjs` | The `ledger` tool |
-| `src/tools/plan.mjs` | The `plan` tool |
-| `src/tools/atlas.mjs`, `src/tools/assess.mjs` | The `atlas` and `assess` tools |
+| `src/tools/book.mjs` | The flat `book` interface: ledger, plan, atlas, assessment, reports, context actions and authorized file changes |
 | `src/tools/task.mjs` | The `task` tool: fork, brief, checkpoints, report |
-| `src/tools/look.mjs` | `read`, `search`, `list` and the confinement to the project |
-| `src/tools/change.mjs` | `write`, `edit` and the paths a task may write to |
+| `src/tools/read.mjs` | One-file transient `read`, including the per-batch output ceiling |
+| `src/tools/shelf.mjs` | Explicit durable shelf placements |
+| `src/tools/look.mjs` | `search`, `list` and the confinement to the project |
+| `src/tools/change.mjs` | Internal `write`, `edit`, `rm` primitives and the paths a task may write to |
 | `src/tools/shell.mjs` | `shell` and `window`: who may do what, and what the caller is told |
 | `src/tools/wake.mjs` | The `wake` and `sleep` tools |
 | `src/tools/chat.mjs` | The `chat` tool: how the agent tells you something |
 | `src/tools/ask.mjs`, `src/asks.mjs` | The `ask` tool, and the question that waits for your answer |
 | `src/tools/return.mjs` | The `return` tool: the one way a task ends |
-| `src/tools/context.mjs` | The `context` tool: recall, shelf, drop, note, collapse |
 | `src/ops.mjs` | The operations the screen offers you over a row (archive, unarchive, delete, fold, settle, add), the same code the commands run and the same operations the agent uses |
 | `src/terminal.mjs` | The plain terminal: input, and printing what happens. It also runs the session behind the full screen |
 | `src/screen/app.mjs` | The full screen: pi-tui's terminal and layout, the tabs, the two modes and their keys, the strip |

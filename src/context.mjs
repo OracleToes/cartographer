@@ -1091,23 +1091,34 @@ export function reportsInView(messages) {
 const withText = (message, text) => ({ ...message, content: [{ type: "text", text }] });
 
 // ─── Read results are ephemeral ───────────────────────────────────────────
-// Each new successful file read takes the content of every earlier file read out of view: what an earlier read leaves
-// in its place is one line saying what was read, so it stays one read away. Failed or blocked reads stay inline and
-// never evict the file in view; `book` reads of brain records stay inline too. The newest file read stands at the very
-// end of the request, after everything else including the state and windows blocks. Keeping several files in view
-// together is the `shelf` tool's job (`shelf` with action="add"), not the conversation's.
+// Successful project-file reads made by one assistant reply are one transient batch: their content stands together at
+// the end of the request. A later successful batch takes the whole earlier batch out of view, leaving one line per
+// read. Failed or blocked reads stay inline and never replace the current batch; `book` reads of brain records stay
+// inline too. The batch is deliberately not a collapse: the Durable transcript retains every result, and `shelf` is
+// the explicit place for files that must survive another batch or a collapse.
 
-/** The tag that opens the tail block of a request: the newest read, moved to the end. */
+/** The tag that opens the tail block of a request: the current read batch, moved to the end. */
 const READ_TAIL = "<read-tail>";
 const LEGACY_SHELF_ASK_BLOCK = /\n*<shelf-ask>[\s\S]*?<\/shelf-ask>\n?/g;
 
 const flatWords = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
-/** The one line a read leaves in its place, saying it is no longer in view. */
-const evictedReadLine = (call) => `[the result of this read is no longer in view — ${flatWords(callWords(call))}. Call \`read\` to see it again, or \`shelf\` (action="add") to keep it in view.]`;
+/** The one line a read leaves in its place when a later successful batch replaced it. */
+const evictedReadLine = (call) => `[the result of this read is no longer in view — ${flatWords(callWords(call))}. A later successful read batch replaced it. Call \`read\` in a later batch to see it again, or \`shelf\` (action="add") it before that.]`;
 
 /** The one line a read leaves in its place, saying where its content stands instead. */
-const movedReadLine = (call) => `[the result of this read stands at the end of the request, after everything else — ${flatWords(callWords(call))}.]`;
+const movedReadLine = (call) => `[the result of this read stands in the current read batch at the end of the request — ${flatWords(callWords(call))}.]`;
+
+/** The fixed, explicit reminder that precedes every transient batch. */
+const readBatchTail = (entries) => {
+	const listed = entries.map(({ call }) => flatWords(callWords(call))).join(", ");
+	return [
+		`Current read batch: ${listed}. This is the only transient file content in view.`,
+		"The next successful read batch replaces this whole batch. That replaces only this transient tail; it is not a context collapse. Before that, I shelf source material I need afterward or write lasting conclusions to the shared ledger, atlas or assessment.",
+		"",
+		...entries.map(({ message }) => textOf(message)),
+	].join("\n");
+};
 
 /** Text with the tail block split off: what stands before it, and the block as its own text. The block runs to the end of the text. */
 export function splitReadTail(text) {
@@ -1128,11 +1139,11 @@ const appendText = (message, addition) => {
 };
 
 /**
- * The messages with the newest read's content moved to the very end, as a block opening with `<read-tail>`: after
- * everything else, the state and windows blocks included. What cannot take more text (a message that is not the
- * user's and not a tool result) gets a message of its own at the end. The input is not changed.
+ * The newest successful reply's read-batch content moved to the very end, as a block opening with `<read-tail>`:
+ * after everything else, the state and windows blocks included. What cannot take more text (a message that is not
+ * the user's and not a tool result) gets a message of its own at the end. The input is not changed.
  * @param {readonly any[]} messages
- * @param {string} tail  the newest read's content, as it stood in its place
+ * @param {string} tail  the newest batch's content, as it stood in its place
  */
 export function withReadTail(messages, tail) {
 	const block = `\n\n${READ_TAIL}\n${tail}`;
@@ -1149,18 +1160,18 @@ const isErrorToolResult = (message) =>
 	message?.isError === true || /^(?:<harness>\s*)?\[error\]/i.test(textOf(message).trim());
 
 /**
- * File-read results, dressed for one request: every successful file read but the newest becomes one line saying what
- * was read (a result already folded keeps its id and is left alone), and the newest stands at the tail of the request
- * instead of where it was made. Failed or blocked file reads stay inline where they failed and never evict an earlier
- * read; `book` reads of brain records stay inline as well. The stored messages are not changed.
+ * File-read results, dressed for one request: successful project-file reads from the newest assistant reply stand
+ * together as one tail batch. Every earlier successful batch becomes one line per read. Failed or blocked file reads
+ * stay inline and never replace the current batch; `book` reads of brain records stay inline as well. The stored
+ * messages are not changed.
  * @param {readonly any[]} messages
- * @returns {{ messages: any[], tail?: string }} the dressed messages, and the newest read's content to move to the end
+ * @returns {{ messages: any[], tail?: string }} the dressed messages, and the current batch content to move to the end
  */
 export function dressReads(messages) {
 	const calls = new Map();
-	for (const message of messages) {
+	for (const [reply, message] of messages.entries()) {
 		if (message.role !== "assistant") continue;
-		for (const call of callsOf(message)) calls.set(call.id, call);
+		for (const [order, call] of callsOf(message).entries()) calls.set(call.id, { call, reply, order });
 	}
 	const cleaned = messages.map((message) => {
 		if (message.role !== "toolResult") return message;
@@ -1168,27 +1179,28 @@ export function dressReads(messages) {
 		if (!raw.includes("<shelf-ask>")) return message;
 		return withText(message, raw.replace(LEGACY_SHELF_ASK_BLOCK, ""));
 	});
-	const readAt = [];
+	const reads = [];
 	for (const [index, message] of cleaned.entries()) {
 		if (message.role !== "toolResult") continue;
-		const call = calls.get(message.toolCallId);
-		if (call === undefined || !isEphemeralFileReadCall(call)) continue;
+		const source = calls.get(message.toolCallId);
+		if (source === undefined || !isEphemeralFileReadCall(source.call)) continue;
 		if (isErrorToolResult(message)) continue;
-		readAt.push(index);
+		reads.push({ index, message, ...source });
 	}
-	if (readAt.length === 0) return { messages: cleaned };
-	const newest = readAt.at(-1);
-	const reads = new Set(readAt);
-	// A result already folded by a task keeps the line it was folded under (that line carries its id).
+	if (reads.length === 0) return { messages: cleaned };
+	// A result already folded by a task keeps the line it was folded under (it carries its id).
 	const folded = (message) => /^\[s\d+: /.test(textOf(message));
+	const newestReply = Math.max(...reads.map((entry) => entry.reply));
+	const current = reads.filter((entry) => entry.reply === newestReply && !folded(entry.message)).sort((a, b) => a.order - b.order);
+	const indexes = new Set(reads.map((entry) => entry.index));
+	const currentIndexes = new Set(current.map((entry) => entry.index));
 	const out = cleaned.map((message, index) => {
-		if (!reads.has(index)) return message;
-		if (folded(message)) return message;
-		return withText(message, index === newest ? movedReadLine(calls.get(message.toolCallId)) : evictedReadLine(calls.get(message.toolCallId)));
+		if (!indexes.has(index) || folded(message)) return message;
+		const call = calls.get(message.toolCallId)?.call;
+		return withText(message, currentIndexes.has(index) ? movedReadLine(call) : evictedReadLine(call));
 	});
-	const newestMessage = cleaned[newest];
-	if (folded(newestMessage)) return { messages: out };
-	return { messages: out, tail: textOf(newestMessage) };
+	if (current.length === 0) return { messages: out };
+	return { messages: out, tail: readBatchTail(current) };
 }
 
 /** Reconcile the front block's salient-notes section with the ledger, and its record section with the report rows. */
@@ -1268,6 +1280,7 @@ export function callWords(call) {
 	if (call === undefined) return "a call";
 	const args = call.arguments ?? {};
 	if (call.name === "read") {
+		// Older stored transcripts used plural `paths`; replay them without exposing that retired call shape.
 		if (args.paths !== undefined) return `read ${[].concat(args.paths ?? []).join(", ")}${args.offset !== undefined ? ` from line ${args.offset}` : ""}`;
 		const target = args.path ?? args.id ?? args.ref?.id ?? "";
 		return `read ${oneLine(String(target), POLICY.limits.context.bookWordsChars)}${args.range ? ` lines ${args.range}` : ""}`.trim();
@@ -1294,7 +1307,7 @@ export function callWords(call) {
  * The earlier reads that a new read makes pointless: the same files, and the new one shows at least the same lines.
  * Only where it pays: the old copy is large, and what the server must read again for it is not much more.
  * @param {ReturnType<typeof stepsOf>} steps  the steps before the new read
- * @param {{ path?: string, id?: string, range?: string, paths?: string[] | string, offset?: number, limit?: number }} args  the new read's arguments
+ * @param {{ path?: string, id?: string, range?: string, paths?: string[] | string, offset?: number, limit?: number }} args  a one-file read's arguments (`paths` is legacy stored-call compatibility)
  * @param {Record<string, string>} dropped  what is replaced already
  * @returns {string[]} step ids
  */

@@ -371,7 +371,7 @@ export function createEngine({ root, brainDir, config }) {
 			return undefined;
 		},
 
-		/** After a task's `read`: earlier copies of the same lines become one line each. Returns their ids. */
+		/** After a task's `read`: earlier copies of the same lines become one line each. It only drops redundant task steps; it never schedules a collapse. Returns their ids. */
 		afterTaskRead(conversationId, args) {
 			const messages = of(conversationId).messages;
 			const steps = messages === undefined ? undefined : stepsOf(messages);

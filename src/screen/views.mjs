@@ -8,14 +8,14 @@
 // The Context tab is the one that is not read from a file. It shows the request the agent was last sent, exactly
 // as the server got it and in the order the model reads it: the system prompt, the tools, then every message, with
 // the blocks Cartographer adds (the copy of the assessment and the graph, what a collapse kept, the state block,
-// the windows block) as parts of their own. Then what has come since: the reply and what its calls returned.
+// the windows block, and the transient read batch tail) as parts of their own. Then what has come since: the reply and what its calls returned.
 import { POLICY } from "../config.mjs";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { chatLine, estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
+import { chatLine, estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, splitReadTail } from "../context.mjs";
 import { entryLine, loadLedger, salientNotes } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
@@ -430,7 +430,9 @@ function partsOfMessage(message, toolNames) {
 	take(CONTEXT_BLOCK, "kept", "What the last collapse kept", parts);
 	take(STATE_BLOCK, "state", "State block: the time, the tree, the ledger, the plan", tail);
 	take(WINDOWS_BLOCK, "windows", "Windows block: the shell windows as they are", tail);
-	text = text.trim();
+	const readTail = splitReadTail(text);
+	text = readTail.text.trim();
+	if (readTail.tail !== undefined) tail.push({ cat: "result", title: "Current read batch: transient file content", text: readTail.tail });
 	if (message.role === "assistant") {
 		const calls = message.tool_calls ?? [];
 		const body = [typeof message.reasoning_content === "string" && message.reasoning_content.trim() !== "" ? `(thinking)\n${message.reasoning_content.trim()}` : "", text, ...calls.map((call) => callText(call.function?.name ?? "?", call.function?.arguments))].filter((part) => part !== "").join("\n\n");
@@ -788,7 +790,7 @@ export const isFolder = (path) => {
 // ─── The user's hands on the context ────────────────────────────────────────
 
 /**
- * The Context tab's fourth view: what the agent keeps with its `context` tool — the shelf and the reports —
+ * The Context tab's fourth view: what the agent keeps with `shelf` and `book` context actions — the shelf and reports —
  * with the same operations offered to the user: a report folds out of view or comes back (f), a file comes off
  * the shelf (x), a file is shelved (a, which puts /shelve in the prompt). The typed commands /fold, /recall,
  * /shelve, /unshelve and /collapse do the same things from the prompt.
