@@ -53,25 +53,30 @@
 // Every request is kept in `requests`, so a test can check what the server was sent.
 import { createServer } from "node:http";
 import { RECORD } from "../src/voice.mjs";
+import { USER_NAME } from "../src/user.mjs";
 
 /** The first line of every block the harness writes to the model; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * A message's text as it was written, without what Cartographer adds to a request (src/request.mjs): the state block
- * at the end, the copy of the assessment and the graph in front, and the times in square brackets.
+ * at the end, the copy of the assessment and the graph in front, the times in square brackets, and the speaker label.
  */
 const rawOf = (message) => (typeof message.content === "string" ? message.content : Array.isArray(message.content) ? message.content.map((part) => part.text ?? "").join("") : "");
+const withoutSpeaker = (text) => {
+	const speaker = `${USER_NAME}: `;
+	return text.startsWith(speaker) ? text.slice(speaker.length) : text;
+};
 const textOf = (message) => {
 	const text = rawOf(message);
-	return text
+	return withoutSpeaker(text
 		.replace(new RegExp(`<context>\n${ESC}[\\s\\S]*?\n</context>\n*`, "g"), "")
 		.replace(/\n\n\[s\d+ · about [\d,]+ tokens\]$/g, "")
 		.replace(/\n\nThis report is kept as t\d+\./g, "")
 		.replace(new RegExp(`\n*<windows>\n${ESC}[\\s\\S]*?\n</windows>`, "g"), "")
 		.replace(new RegExp(`\n*<state>\n${ESC}[\\s\\S]*?\n</state>`, "g"), "")
 		.replace(new RegExp(`<project>\n${ESC}[\\s\\S]*?\n</project>\n*`, "g"), "")
-		.replace(/\n\n\[(sent|noted|task ended) [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}[^\]\n]*\]/g, "");
+		.replace(/\n\n\[(sent|noted|task ended) [A-Z][a-z]{2} \d{1,2} [A-Z][a-z]{2} \d{4}, \d{2}:\d{2}[^\]\n]*\]/g, ""));
 };
 
 function lookCall(directive) {

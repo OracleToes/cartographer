@@ -24,6 +24,7 @@ import { ago, clock, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
 import { short, width } from "./text.mjs";
 import { RECORD } from "../voice.mjs";
+import { USER_NAME } from "../user.mjs";
 
 const PROJECT_BLOCK = new RegExp(`^${POLICY.markup.project.open}\\n[\\s\\S]*?\\n${POLICY.markup.project.close}\\n*`);
 const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -443,7 +444,7 @@ function partsOfMessage(message, toolNames) {
 		else if (text !== "") parts.push({ cat: "result", title: `Result of ${toolNames.get(message.tool_call_id) ?? "a call"}`, text });
 	} else if (text !== "") {
 		if (text.startsWith(POLICY.markup.note.open)) parts.push({ cat: "carto", title: "Cartographer's note", text });
-		else if (text.startsWith(POLICY.markup.context.open) || /^Cartographer: /.test(text)) parts.push({ cat: "carto", title: "Cartographer", text });
+		else if (text.startsWith(POLICY.markup.context.open) || (/^Cartographer: /.test(text) && !text.startsWith(`${USER_NAME}: `))) parts.push({ cat: "carto", title: "Cartographer", text });
 		else parts.push({ cat: "you", title: "Chat · You", text });
 	}
 	return [...parts, ...tail];
@@ -567,7 +568,7 @@ function keptChildren(part, { root, brainDir, edits, deleted }) {
 			editKind: entry.who === "user" ? "chat-you" : "chat-agent",
 			head: [
 				[`${clock(entry.at)}  `, "muted"],
-				[entry.who === "user" ? "user" : "me", styleOf(entry.who === "user" ? "you" : "agent")],
+				[entry.who === "user" ? USER_NAME : "me", styleOf(entry.who === "user" ? "you" : "agent")],
 				[`: ${firstWords(entry.text)}`, "faint"],
 			],
 			body: shown === "" ? "(empty)" : shown,

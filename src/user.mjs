@@ -62,12 +62,12 @@ const osUser = (env) => {
 /**
  * The name to use. Precedence, the more specific winning: CARTO_USER in the environment, then the
  * project's .brain/config.json, then the install's config.json (CARTO_CONFIG names another file),
- * then the OS user that launched the process. "the user" is the last resort there is none.
+ * then the OS user that launched the process; "human" is used when none is available.
  * @param {NodeJS.ProcessEnv} [env]
  */
 export const resolveUser = (env = process.env, cwd = process.cwd()) => {
 	const corePath = env.CARTO_CONFIG ? env.CARTO_CONFIG : join(CORE_DIR, "config.json");
-	return clean(env.CARTO_USER) ?? fromProject(cwd, env) ?? fromConfig(corePath) ?? osUser(env) ?? "the user";
+	return clean(env.CARTO_USER) ?? fromProject(cwd, env) ?? fromConfig(corePath) ?? osUser(env) ?? "human";
 };
 
 /** The name, as it was resolved at import. */

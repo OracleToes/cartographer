@@ -18,7 +18,7 @@ import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
-import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront } from "../src/context.mjs";
+import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine } from "../src/context.mjs";
 import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
@@ -27,12 +27,13 @@ import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
-import { dressRequest } from "../src/request.mjs";
-import { TOOLS } from "../src/prompt.mjs";
+import { dressRequest, withoutAdditions } from "../src/request.mjs";
+import { TOOLS, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
+import { RECORD } from "../src/voice.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -42,6 +43,13 @@ const fresh = (t) => {
 	return { root, brainDir };
 };
 const NOW = "2026-11-15T00:00:00.000Z";
+
+test("prompt: the sleep checklist names the person whose message may be waiting", () => {
+	const prompt = systemPrompt({ root: "/project" });
+	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
+	assert.ok(!prompt.includes("no user message waiting"));
+	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
+});
 
 // ─── The wake notes ──────────────────────────────────────────────────────────
 
@@ -471,12 +479,13 @@ test("collapse: the front block reads as typed, minute-stamped clusters; the cal
 	assert.match(front.text, /^== shelf\.txt/m);
 	assert.match(front.text, /the shelf keeps this/);
 	// The talk: word for word, in order, each saying with its minute.
-	const user = front.text.indexOf("user: please add the wrist throw");
+	const user = front.text.indexOf(`${USER_NAME}: please add the wrist throw`);
 	const me = front.text.indexOf("me: on it");
 	assert.ok(user >= 0 && me >= 0, "both sayings stand");
 	assert.ok(user < me, "in the order they were said");
-	assert.match(front.text, /^13:10  user: please add the wrist throw$/m);
-	assert.match(front.text, /^13:12  me: on it$/m);
+	assert.ok(front.text.split("\n").includes(`13:10  ${USER_NAME}: please add the wrist throw`));
+	assert.ok(front.text.split("\n").includes("13:12  me: on it"));
+	assert.equal(chatLine({ who: "user", at: at(13, 10), text: "please add the wrist throw" }), `13:10  ${USER_NAME}: please add the wrist throw`);
 	// The calls: the newest fit the budget, the oldest are counted, and the section reads in order.
 	assert.match(front.text, /^Calls of the stretch before the collapse/m);
 	assert.match(front.text, /\(\d+ earlier calls? are not listed\.\)/);
@@ -642,6 +651,31 @@ test("dressRequest: a task carries the context lines and the requests, as the li
 	const main = dressRequest(messages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID, used: 1234 });
 	const mainBlock = new RegExp(`<state>\\n[\\s\\S]*\\n</state>`).exec(textOf(main.at(-1)))?.[0];
 	assert.match(mainBlock, /Requests\nThese wait for /, "the main agent's block keeps the same list");
+});
+
+test("dressRequest: only human chat gets the configured speaker label, which replay strips", (t) => {
+	const { brainDir, root } = fresh(t);
+	const front = `${POLICY.markup.context.open}\n${RECORD} My context was collapsed.\n${POLICY.markup.context.close}`;
+	const note = `${POLICY.markup.note.open}\n${RECORD} Nobody typed this.\n${POLICY.markup.note.close}`;
+	const collapsed = `${POLICY.markup.note.open}\nEarlier task steps were collapsed.\n${POLICY.markup.note.close}`;
+	const messages = [
+		{ role: "user", content: "Hello" },
+		{ role: "user", content: front },
+		{ role: "user", content: note },
+		{ role: "user", content: collapsed },
+		{ role: "user", content: `${USER_NAME}: already labeled` },
+	];
+	const dressed = dressRequest(messages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: false, conversationId: "task-1", note: "One-request task note" });
+	const userTexts = dressed.filter((message) => message.role === "user").map((message) => (typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("")));
+	assert.equal(userTexts[0], `${USER_NAME}: Hello`);
+	assert.equal(userTexts[1], front, "the front block is not a person speaking");
+	assert.equal(userTexts[2], note, "Cartographer's notes are not a person speaking");
+	assert.equal(userTexts[3], collapsed, "a collapsed task-steps block is not a person speaking");
+	assert.equal(userTexts[4], `${USER_NAME}: already labeled`, "an existing label is not repeated");
+	assert.ok(userTexts[5].startsWith("One-request task note"), "the task's ephemeral note is appended after speaker dressing");
+	assert.equal(messages[0].content, "Hello", "stored messages are not changed");
+	assert.equal(withoutAdditions(userTexts[0]), "Hello", "the request-only label comes off for display and replay");
+	assert.equal(withoutAdditions(`${USER_NAME}: Hello\n\n[sent Thu 12 Nov 2026, 14:02]`), "Hello", "the label and timestamp both come off");
 });
 
 // ─── The trace ─────────────────────────────────────────────────────────────
@@ -865,7 +899,7 @@ test("prepend: the user's own markdown is read before the prompt — core first,
 	writeFileSync(core, "Be brief.\n");
 	const coreOnly = loadPrepend(brainDir, core);
 	assert.match(coreOnly, /PREPEND\.md \(the installation/);
-	assert.match(coreOnly, /written by the user/);
+	assert.ok(coreOnly.includes(`written by ${USER_NAME}`));
 	assert.match(coreOnly, /Be brief\./);
 	assert.equal(coreOnly.includes("this project's brain"), false, "only what exists is read");
 	// Both: the core is read before the brain (the closer one said last, so it wins).

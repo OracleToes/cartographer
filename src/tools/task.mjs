@@ -110,7 +110,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			let text = textOf({ content: result.output });
 			if (handed.added.length > 0) text += `\n\nThe task put on my shelf; these snapshots are in view now and will stand at the next collapse: ${handed.added.join(", ")}.\n\n${handed.snapshots.join("\n\n")}`;
 			if (handed.refused.length > 0) text += `\n\nThe task wanted on my shelf, but it would not fit: ${handed.refused.join(", ")}.`;
-			text += "\n\nInternal checkpoint for the orchestrating context: yes or no—should this outcome add or change anything in the shared atlas, ledger, or assessment? If yes, perform only those brain-scoped book operations now; if no, continue with the outcome. This does not bypass user approval or project safety gates.";
+			text += `\n\nInternal checkpoint for the orchestrating context: yes or no—should this outcome add or change anything in the shared atlas, ledger, or assessment? If yes, perform only those brain-scoped book operations now; if no, continue with the outcome. This does not bypass ${USER_NAME}'s approval or project safety gates.`;
 			// The report is kept under an id, and one line of it goes into the record a collapse keeps
 			// (src/context.mjs). The id is taken once, also when this call runs again after a restart.
 			const id = (await api.memo("record", callContext)) ?? (await api.memo("record", reserveId(brainDir), callContext));
@@ -251,7 +251,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			if (heard.length > 0) {
 				details.heard = heard.length;
 				const missed = unread.length > 0 ? ` The task did not get to read ${unread.length === heard.length ? "it" : `the last ${unread.length === 1 ? "one" : unread.length}`}.` : "";
-				spoken = `\n\nWhile this task ran, ${USER_NAME} wrote to it:${missed}\n${heard.map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`).join("\n")}`;
+				spoken = `\n\nWhile this task ran, ${USER_NAME} wrote to it:${missed}\n${heard.map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`).join("\n")}`;
 			}
 
 			// What the task changed, from the record. Told to the main agent whether or not the task finished.

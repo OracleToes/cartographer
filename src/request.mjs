@@ -4,7 +4,7 @@
 // time it is made (so the server need not read it again), or sits at the very end:
 //
 //   the first message   the copy of the assessment and the graph (src/top.mjs)
-//   the user's messages and task reports   when they came (src/time.mjs)
+//   the user's messages   named for the model; messages and task reports marked with when they came (src/time.mjs)
 //   quiet wake turns    left out once a later wake has overtaken them (src/wake.mjs)
 //   replies without a call   marked as notes the agent wrote to itself
 //   the last message    the state block, with a task-purpose line for focused contexts, and after it the shell
@@ -17,12 +17,16 @@
 //                                       marked with their id and size
 //   read results                        ephemeral: every read but the newest as one line, the newest's content at
 //                                       the very end of the request, after the state and windows blocks
-import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
+import { POLICY } from "./config.mjs";
+import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, textOf, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
 import { dressShelfAsk } from "./shelf-ask.mjs";
 import { isNote, withoutQuietWakes } from "./wake.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "./state.mjs";
 import { STAMP, stamp, took } from "./time.mjs";
 import { loadTop, withoutTop, withTop } from "./top.mjs";
+import { USER_NAME } from "./user.mjs";
+
+const USER_SPEAKER = `${USER_NAME}: `;
 
 /** `message` with `addition` after its last piece of text. */
 function append(message, addition) {
@@ -30,6 +34,15 @@ function append(message, addition) {
 	const tail = message.content.at(-1);
 	if (tail?.type !== "text") return { ...message, content: [...message.content, { type: "text", text: addition.trimStart() }] };
 	return { ...message, content: [...message.content.slice(0, -1), { ...tail, text: tail.text + addition }] };
+}
+
+/** Prefix the first text part, or add one before non-text parts. */
+function prepend(message, addition) {
+	if (typeof message.content === "string") return { ...message, content: addition + message.content };
+	const content = Array.isArray(message.content) ? message.content : [];
+	const head = content[0];
+	if (head?.type !== "text") return { ...message, content: [{ type: "text", text: addition }, ...content] };
+	return { ...message, content: [{ ...head, text: addition + head.text }, ...content.slice(1)] };
 }
 
 /**
@@ -66,11 +79,22 @@ export function withNotes(messages) {
 	});
 }
 
+/** Label user-role chat messages in the request without changing stored history or Cartographer's own notes. */
+function withSpeaker(messages) {
+	return messages.map((message) => {
+		if (message.role !== "user" || isFront(message) || isNote(message)) return message;
+		const text = textOf(message);
+		if (text.startsWith(USER_SPEAKER) || text.startsWith(`${POLICY.markup.note.open}\n`)) return message;
+		return prepend(message, USER_SPEAKER);
+	});
+}
+
 const TIMES = new RegExp(`\\n\\n\\[((?:sent|noted) ${STAMP}|task ended ${STAMP}, after [0-9a-z ]+)\\]`, "g");
 
 /** Text as it is stored: without anything this file adds. */
 export function withoutAdditions(text) {
-	return withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, ""));
+	const stripped = withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, ""));
+	return stripped.startsWith(USER_SPEAKER) ? stripped.slice(USER_SPEAKER.length) : stripped;
 }
 
 /**
@@ -97,10 +121,15 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 	if (!main) {
 		focus = conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId];
 		kept = dressTask(kept, focus);
-		// Said once, at the end of this request only (src/engine.mjs).
-		if (note !== undefined) kept = [...kept, { role: "user", content: [{ type: "text", text: note }] }];
 	}
-	let dressed = withTop(withTimes(withNotes(kept)), loadTop(brainDir)?.text);
+	// Only chat the person sent gets the speaker label. The task's one-request note is appended afterward.
+	let requestMessages = withSpeaker(withNotes(kept));
+	if (!main && note !== undefined) {
+		const taskNote = { role: "user", content: [{ type: "text", text: note }] };
+		kept = [...kept, taskNote];
+		requestMessages = [...requestMessages, taskNote];
+	}
+	let dressed = withTop(withTimes(requestMessages), loadTop(brainDir)?.text);
 	if (main) {
 		// What fired while the agent worked is told in the block, so it needs no turn of its own.
 		let fired = [];

@@ -49,6 +49,8 @@ import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs"
 import { atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
+const USER_SPEAKER = `${USER_NAME}: `;
+
 export const TABS = [
 	{ id: "chat", name: "Chat" },
 	{ id: "carto", name: "Carto" },
@@ -729,14 +731,19 @@ export async function runScreen(session, options, runTerminal) {
 	const editMessage = (item) => {
 		const full = item.copy ?? item.body;
 		if (typeof full !== "string" || full === "") return flash("nothing to edit here");
-		// A message of yours was sent with a stamp of its own; the words are what stands without it, and that is what is edited.
+		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to edit.
 		let base = full;
+		let prefix = "";
 		let suffix = "";
 		if (item.editKind === "chat-you") {
-			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(full);
+			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) {
+				prefix = USER_SPEAKER;
+				base = base.slice(USER_SPEAKER.length);
+			}
+			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
 			if (found !== null) {
 				suffix = found[0];
-				base = full.slice(0, found.index);
+				base = base.slice(0, found.index);
 			}
 		}
 		// What the agent said to you, where the part is its words: the saying is edited, not the rendering of the call.
@@ -745,7 +752,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (!runEditor(file)) return;
 		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
 		if (now === base || now === "") return flash("the message stands as it was");
-		const shown = typeof item.chat === "string" ? full.split(base).join(now) : now + suffix;
+		const shown = typeof item.chat === "string" ? full.split(base).join(now) : prefix + now + suffix;
 		messageEdits.set(full, shown);
 		reviseNote(brainDir, base, now);
 		syncChat(base, now, item.editKind === "chat-you" ? "user" : item.editKind === "chat-agent" ? "agent" : undefined);
@@ -756,11 +763,12 @@ export async function runScreen(session, options, runTerminal) {
 	const deleteChat = (item) => {
 		const full = item.copy ?? item.body;
 		if (typeof full !== "string" || full === "") return flash("nothing to delete here");
-		// A message of yours was sent with a stamp of its own; the words are what stands without it, and that is what is deleted.
+		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to delete.
 		let base = full;
 		if (item.editKind === "chat-you") {
-			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(full);
-			if (found !== null) base = full.slice(0, found.index);
+			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) base = base.slice(USER_SPEAKER.length);
+			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
+			if (found !== null) base = base.slice(0, found.index);
 		}
 		if (typeof item.chat === "string") base = item.chat;
 		if (!forgetChat(brainDir, base)) return flash("the talk the collapse keeps does not hold it: a collapse may have dropped it already");

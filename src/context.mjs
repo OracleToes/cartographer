@@ -511,7 +511,7 @@ export function noteUserMessages(brainDir, messages) {
 }
 
 const isNoteText = (text) => text.startsWith(`${NOTE_OPEN}\n${HEAD}`);
-export const chatLine = (entry) => `${clock(entry.at)}  ${entry.who === "user" ? "user" : "me"}: ${entry.text}`;
+export const chatLine = (entry) => `${clock(entry.at)}  ${entry.who === "user" ? USER_NAME : "me"}: ${entry.text}`;
 
 /** The newest sayings that fit into `max` tokens; the newest one is kept whatever its size. */
 function chatWindow(chat, max) {

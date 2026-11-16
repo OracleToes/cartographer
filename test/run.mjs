@@ -1269,6 +1269,7 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 
 	// What Cartographer adds to a request is not part of the stored message.
 	assert.equal(withoutAdditions("<context>\n" + RECORD + " x\n</context>\n\nhello"), "hello");
+	assert.equal(withoutAdditions(`${USER_NAME}: hello\n\n[sent Thu 12 Nov 2026, 14:02]`), "hello", "the request-only speaker label and time come off");
 	assert.equal(withoutAdditions("a result\n\n[s3 · about 2,100 tokens]"), "a result");
 	assert.equal(withoutTags("a result\n\n[s12 · about 900 tokens]"), "a result");
 	assert.equal(withoutTags("a result [s3 · about 2,100 tokens] in the middle"), "a result [s3 · about 2,100 tokens] in the middle", "only the mark at the end");
@@ -1843,7 +1844,7 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 		tools: [{ type: "function", function: { name: "read", description: "Read files.", parameters: { type: "object", properties: { paths: { type: "array" } } } } }],
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
-			{ role: "user", content: `<project>\n${RECORD} My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\n${RECORD} Kept.\nt1 · look · asked: x → y\n</context>\n\nWhere is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
+			{ role: "user", content: `<project>\n${RECORD} My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\n${RECORD} Kept.\nt1 · look · asked: x → y\n</context>\n\n${USER_NAME}: Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
 			{ role: "assistant", content: "I should look.", tool_calls: [{ id: "c1", type: "function", function: { name: "task", arguments: JSON.stringify({ brief: "Find the config\nand say where" }) } }] },
 			{ role: "tool", tool_call_id: "c1", content: `${big}\n\n<state>\n${RECORD} This is the current state.\nNow: Thu 12 Nov 2026, 14:03\n</state>\n\n<windows>\n${RECORD} The shell windows as they are at this moment:\n  main · free\n</windows>` },
 		],
@@ -1859,7 +1860,7 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	has(byKey("Tools · 1").body, '── read ──\nRead files.\nparameters: {\n  "type": "object"', "the tools as they are sent");
 	assert.match(byKey("Assessment and graph").body, /^<project>\n[\s\S]*\n<\/project>$/, "the block Cartographer puts in front is a part of its own");
 	assert.match(byKey("What the last collapse kept").body, /^<context>\n[\s\S]*\n<\/context>$/, "so is what a collapse kept");
-	assert.equal(byKey("Chat · You").body, "Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]", "and the user's message is what is left");
+	assert.equal(byKey("Chat · You").body, `${USER_NAME}: Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]`, "and the user's message is what is left");
 	assert.equal(byKey("Chat · Agent · note and call: task").body, "I should look.\n\ncall task\n  brief:\n    Find the config\n    and say where", "a call reads as a call: its arguments one by one, long text as text");
 	assert.match(byKey("State block").body, /^<state>\n[\s\S]*\n<\/state>$/, "the state block is cut off the result it was added to");
 	assert.match(byKey("Windows block").body, /^<windows>\n[\s\S]*\n<\/windows>$/, "and the windows block");
@@ -1953,6 +1954,7 @@ test("screen: the Context tab unfolds the collapse block into one row per kept o
 		assert.equal(talk.length, 2, "both sayings stand inside the block");
 		assert.deepEqual([talk[0].editKind, talk[1].editKind], ["chat-you", "chat-agent"]);
 		assert.equal(talk[0].chat, "please add the wrist throw", "the row carries the words, for the edit machinery");
+		assert.equal(talk[0].head[1][0], USER_NAME, "the kept-talk row uses the configured speaker");
 		// The calls rows are the block's history: visible, copyable, not editable.
 		const calls = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("call:"));
 		assert.equal(calls.length, 2);

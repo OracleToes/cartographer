@@ -32,7 +32,7 @@ import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
 import { traceFile, watchTrace } from "./trace.mjs";
 import { createStreamFreeze } from "./stream.mjs";
-import { USER_HEAD } from "./user.mjs";
+import { USER_NAME, USER_HEAD } from "./user.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit", "rm"]);
@@ -197,7 +197,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// `heard` is all of it, for the task's result (src/tools/task.mjs).
 	const active = { id: undefined, said: [], heard: [] };
 	const takeSaid = () => {
-		const lines = active.said.splice(0).map((entry) => `[user · ${stamp(entry.at)}] ${entry.text}`);
+		const lines = active.said.splice(0).map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
 		return lines.length === 0 ? undefined : [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });

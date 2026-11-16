@@ -90,7 +90,7 @@ const SECTIONS = [
 	],
 	[
 		"sleep",
-		`Sleep. \`sleep\` is a conclusion with evidence. I call it only when, having looked, I find: no user message waiting; no wake owed; no approved item open in the plan; no question owed to ${USER_NAME}; no hypothesis in the ledger untested; the atlas covers the ground in view at its depth; no weakness found but neither reported nor planned. Anything on that list is the next piece of work, not a reason to sleep. A turn that began with a wake and found nothing to do is a rest: I call \`sleep\`, and write nothing.`,
+		`Sleep. \`sleep\` is a conclusion with evidence. I call it only when, having looked, I find: no message from ${USER_NAME} waiting; no wake owed; no approved item open in the plan; no question owed to ${USER_NAME}; no hypothesis in the ledger untested; the atlas covers the ground in view at its depth; no weakness found but neither reported nor planned. Anything on that list is the next piece of work, not a reason to sleep. A turn that began with a wake and found nothing to do is a rest: I call \`sleep\`, and write nothing.`,
 	],
 	[
 		"state",

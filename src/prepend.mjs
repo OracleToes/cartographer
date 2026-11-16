@@ -10,6 +10,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CORE_DIR } from "./config.mjs";
+import { USER_NAME } from "./user.mjs";
 
 /**
  * One text before the system prompt, or undefined when there is no PREPEND.md to read.
@@ -33,7 +34,7 @@ export function loadPrepend(brainDir, core = join(CORE_DIR, "PREPEND.md")) {
 		}
 		const body = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\s+$/, "");
 		if (body.trim() === "") continue;
-		parts.push(`PREPEND.md (${label}, ${path}), written by the user, read before the rest of this prompt.\n\n${body}`);
+		parts.push(`PREPEND.md (${label}, ${path}), written by ${USER_NAME}, read before the rest of this prompt.\n\n${body}`);
 	}
 	return parts.length === 0 ? undefined : parts.join("\n\n");
 }
