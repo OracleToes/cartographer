@@ -26,7 +26,7 @@ import { DEFAULTS, POLICY } from "../config.mjs";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, delimiter, join, relative } from "node:path";
+import { basename, delimiter, join, relative, resolve } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
@@ -272,7 +272,17 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	const chat = createChat({ markdown, describeRef });
+	// For a consult row in the Chat tab: the answer is read from the file the tool wrote, never from the session.
+	const readProjectFile = (rel) => {
+		try {
+			const clean = String(rel ?? "");
+			if (clean === "" || clean.split("/").includes("..")) return undefined;
+			return readFileSync(resolve(root, clean), "utf8");
+		} catch {
+			return undefined;
+		}
+	};
+	const chat = createChat({ markdown, describeRef, readFile: readProjectFile });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {

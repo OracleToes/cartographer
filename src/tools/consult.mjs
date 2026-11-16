@@ -161,7 +161,7 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 				: "";
 			const clipNote = context.clipped ? ` The context was clipped to the first ${count(CONTEXT_CHARS)} characters (it was ${count(context.from)}); the rest was not sent.` : "";
 			const text = `The storyteller took ${elapsedOf(elapsed)} (${completionTokens !== undefined ? `${count(completionTokens)} output tokens` : "tokens not reported"}). The answer is written to ${rel}. ${shelfMsg} A story is not a record: read it with \`read ${rel}\`, check the work against a test or a proof, and apply it yourself.${finishNote}${clipNote}`;
-			return { output: [{ type: "text", text }], details: { consult: true, file: rel, ...(placement === undefined ? {} : { placement }), tokens: completionTokens, finish: finishReason } };
+			return { output: [{ type: "text", text }], details: { consult: true, file: rel, ...(placement === undefined ? {} : { placement }), tokens: completionTokens, finish: finishReason, seconds: Math.round(elapsed / 100) / 10 } };
 		},
 	});
 }

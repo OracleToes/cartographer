@@ -151,7 +151,7 @@ export const POLICY = freezeTree({
 			callSummary: {
 				taskBrief: 100, sendText: 60, waitUntil: 50, windowName: 30, shellCommand: 100,
 				writePath: 90, contextOp: 70, lineRange: 20, readPaths: 90, searchPattern: 50,
-				atlasCall: 100, wakeCall: 80, genericCall: 80,
+				atlasCall: 100, wakeCall: 80, genericCall: 80, consultQuestion: 110,
 			},
 			resultSummary: {
 				shellLast: 70, context: 110, refusal: 110, atlas: 90, search: 80, list: 80, write: 80,

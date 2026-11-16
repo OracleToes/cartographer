@@ -108,6 +108,8 @@ export function describeCall(call, describeRef) {
 		case "list":
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
 
+		case "consult":
+			return `the storyteller  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
 		case "wake":
 			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
@@ -148,6 +150,16 @@ export function describeResult(message) {
 	if (message.toolName === "book" && message.details?.target === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
 	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
 	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
+	// The storyteller: how long it took, how much it wrote — in the receipt's own words. Where the answer stands is said in the opened row.
+	if (message.toolName === "consult" && !message.isError) {
+		const tokens = typeof message.details?.tokens === "number" && Number.isFinite(message.details.tokens) ? `${Math.round(message.details.tokens).toLocaleString("en-US")} tokens` : "";
+		const seconds = typeof message.details?.seconds === "number" && Number.isFinite(message.details.seconds)
+			? `${Math.floor(message.details.seconds / 60)} m ${String(Math.round(message.details.seconds % 60)).padStart(2, "0")} s`
+			: "";
+		const ended = message.details?.finish === "length" ? " · cut off at consultMaxTokens" : "";
+		const parts = [seconds, tokens].filter((part) => part !== "");
+		return `${parts.join(" · ")}${ended}`;
+	}
 	// "Wrote roll.py: 34 lines, a new file." The path is already on the line.
 	if (message.toolName === "write" || message.toolName === "edit") return oneLine(text.slice(text.indexOf(": ") + 2).replace(/\.$/, ""), POLICY.limits.terminal.resultSummary.write);
 	const lines = text.split("\n").length;

@@ -27,6 +27,8 @@ import { cut, repeats, span, width, wrap } from "./text.mjs";
 const LIVE_ROWS = POLICY.limits.screen.chatLiveRows;
 /** How many rows of the reply that is being written are shown. */
 const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
+/** The most of the context sent to the storyteller that an opened consult row shows; the question always shows in full. */
+const CONTEXT_MAX = Math.floor(POLICY.limits.screen.chatDetailChars / 2);
 /** The most of one result that is kept for opening it in place. */
 const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
 /** The most rows an opened result shows; the rest is in the tab it leads to, or in /report. */
@@ -66,16 +68,19 @@ const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (To
 function bodyOf(call) {
 	const args = call.arguments ?? {};
 	let best = "";
-	for (const key of ["content", "new_text", "command", "brief", "report", "text", "input"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
+	for (const key of ["content", "new_text", "command", "brief", "report", "text", "input", "context", "question"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
 	if (best === "" && args.operation !== null && typeof args.operation === "object") best = JSON.stringify(args.operation, null, 1);
 	return best;
 }
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
+ *   readFile: reads a project-relative file; for a consult row, so the whole exchange can be shown from the
+ *   file the answer was written to, without keeping that text in the session. Without it, a consult row
+ *   opens to the call and its outcome only.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readFile } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -112,6 +117,30 @@ export function createChat({ now = () => Date.now(), markdown, describeRef } = {
 	const say = (item) => {
 		closeGroup();
 		return push({ at: now(), ...item });
+	};
+
+	/**
+	 * What a consult row holds, assembled once and kept: the ask from the call's arguments, the answer from the
+	 * file the tool wrote (never from the session — the answer is large and belongs on disk exactly once). The
+	 * file's own "Answer:" line is the marker; a file without one (hand-edited, or older) is shown whole.
+	 */
+	const storyOf = (row) => {
+		if (row.story !== undefined) return row.story;
+		const args = row.args ?? {};
+		const question = String(args.question ?? "").trim();
+		const context = typeof args.context === "string" ? args.context.trim() : "";
+		const file = typeof row.details?.file === "string" ? row.details.file : undefined;
+		const raw = file !== undefined && readFile !== undefined ? readFile(file) : undefined;
+		const unreadable = file !== undefined && readFile === undefined;
+		let answer;
+		if (raw !== undefined) {
+			const marker = "\nAnswer:\n";
+			const at = raw.indexOf(marker);
+			const body = at >= 0 ? raw.slice(at + marker.length) : raw;
+			answer = body.trim() === "" ? undefined : body.trim();
+		}
+		row.story = { file, question, context, answer, unreadable, missing: raw === undefined };
+		return row.story;
 	};
 
 	const api = {
@@ -202,8 +231,10 @@ export function createChat({ now = () => Date.now(), markdown, describeRef } = {
 					}
 					row.state = message.isError ? "failed" : "done";
 					row.ended = now();
-					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.taskErrorChars) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message);
-					row.detail = text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
+					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.taskErrorChars) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message) || undefined;
+					// The consult's answer is not in the result (the receipt keeps the session lean); no detail to show.
+					row.receipt = row.name === "consult" ? text : undefined;
+					row.detail = row.name === "consult" ? undefined : text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
 					row.details = message.details;
 					// What a task leaves behind is said in full: the report line, the files it changed, the plan item.
 					if (depth === 0 && row.name === "task" && printed.trim() !== "") {
@@ -381,6 +412,37 @@ export function createChat({ now = () => Date.now(), markdown, describeRef } = {
 					if (!row.open && text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [`… ${text.length - POLICY.limits.screen.notePreviewLines} more lines`, "faint"]], { ...ref, kind: "note" });
 					return;
 				}
+				if (row.name === "consult") {
+					// The storyteller: the call opens to the whole exchange — what I asked, and what it answered.
+					add(callLine(row), { ...ref, kind: "call" });
+					if (row.open) {
+						const indent = row.depth > 0 ? "  │   " : "    ";
+						const section = (title) => add([[indent, "faint"], [title, "faint"]], { ...ref, kind: "detail" });
+						const body = (text, style = "muted") => {
+							for (const piece of wrap(text, inner - width(indent))) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : style]], { ...ref, kind: "detail" });
+						};
+						const story = storyOf(row);
+						if (story.file !== undefined) add([[indent, "faint"], [`the answer stands in ${story.file}`, "faint"]], { ...ref, kind: "detail" });
+						if (story.context !== "") {
+							section("what I sent — the context");
+							body(story.context.length > CONTEXT_MAX ? `${story.context.slice(0, CONTEXT_MAX)}\n… (${story.context.length - CONTEXT_MAX} more characters of context)` : story.context);
+						}
+						section("what I asked — the question");
+						body(story.question === "" ? "(the question is not in the call)" : story.question);
+						if (row.state === "failed") {
+							section("why it failed");
+							body(plain(row.receipt ?? ""));
+							return;
+						}
+						section("what the storyteller answered");
+						if (story.answer !== undefined) body(story.answer);
+						else if (row.state === "running") body("(the storyteller is still writing; the answer lands in the file when it finishes)", "faint");
+						else if (story.unreadable) body(`(this view cannot read ${story.file}; the answer stands in it)`, "faint");
+						else if (story.missing) body(story.file === undefined ? "(the answer is not in the session, and no file was named)" : `(${story.file} is gone from disk; the answer stood in it)`, "faint");
+						else body("(the file holds no answer)", "faint");
+					}
+					return;
+				}
 				add(callLine(row), { ...ref, kind: "call" });
 				if (row.open && row.detail !== undefined) {
 					const indent = row.depth > 0 ? "  │   " : "    ";
@@ -433,8 +495,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef } = {
 					const open = item.open || running;
 					const failed = calls.filter((row) => row.state === "failed").length;
 					const tasks = calls.filter((row) => row.name === "task").map((row) => row.details?.report ?? (row.args?.item ? `task ${row.args.item}` : "task"));
+					const consults = calls.filter((row) => row.name === "consult").map((row) => cut(String(row.args?.question ?? "").replace(/\s+/g, " "), 48)).filter((text) => text !== "");
 					const took = span((item.ended ?? now()) - item.started);
-					const head = [`${calls.length === 1 ? "1 call" : `${calls.length} calls`}`, ...new Set(tasks), took].join(" · ");
+					const head = [`${calls.length === 1 ? "1 call" : `${calls.length} calls`}`, ...new Set([...tasks, ...consults]), took].join(" · ");
 					add([[open ? "▾ " : "▸ ", running ? "warn" : "tool"], [head, running ? "" : "muted"], [failed > 0 ? ` · ${failed} failed` : "", "err"]], { item: item.key, kind: "group", bg: "bgTool" });
 					if (open) {
 						// A run that is going on shows its newest rows; opened by hand, it shows all of them.
@@ -450,7 +513,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef } = {
 			const base = `${cols}|${thinking}|${styleRev}`;
 			const linesOf = (item) => {
 				const still = item.type !== "group" || (item.closed && !item.rows.some((row) => row.kind === "call" && row.state === "running"));
-				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : `${base}|${item.text.length}|${item.open ?? ""}`;
+				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : item.type === "block" ? `${base}|${item.text.length}|${item.open ?? ""}` : `${base}|${item.text.length}`;
 				if (sign !== undefined && item.made?.sign === sign) return item.made.lines;
 				sink = [];
 				make(item);
@@ -507,6 +570,14 @@ export function createChat({ now = () => Date.now(), markdown, describeRef } = {
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note") return row.text;
+				if (row?.name === "consult") {
+					const story = storyOf(row);
+					const parts = [row.label];
+					if (story.file !== undefined) parts.push(`The answer stands in ${story.file}`);
+					if (story.context !== "") parts.push("", "What I sent — the context", "", story.context);
+					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the storyteller answered", "", story.answer ?? (story.missing ? `(${story.file ?? "the consult file"} is gone from disk; the answer stood in it)` : "(the file holds no answer)"));
+					return parts.join("\n");
+				}
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
 				return item.rows.map((entry) => (entry.kind === "note" ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
 			}

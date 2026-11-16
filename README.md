@@ -358,6 +358,8 @@ Cartographer can hand one hard, verifiable sub-problem — a kernel, an invarian
 
 **What comes back.** The answer is written into the project as `consult/<stamp>.md` (visible in the tree, catalogued as a file) and shelved for whoever asked — main agent or focus. Over the shelf's view budget it is kept unseen and the state block says so; either way the file stands. The agent reads it, verifies it against a test or a proof, and applies it itself, with the same gate as any other change. Its say is a proposal, never a verdict: the model was not trained on tool-calling or agent work, it is strong on algorithms and math and weak anywhere a test cannot refute it, and it is abliterated (no refusals) — all the more reason nothing rides on its confidence.
 
+**To see the conversation.** The call stands in the Chat tab like any other work, folded into the run of calls. Open the run (Enter), then open the consult call: the whole exchange stands there — the context that was sent (shown up to half of `chatDetailChars`, the question in full), what came back (read from the file the answer was written to, never from the session), and where the answer stands. A failed consult says why it failed instead of showing an answer that never came. `y` on the call copies the whole exchange — context, question and answer; `+` and `-` open and fold every run at once.
+
 **To set it up**, add a section to your llama-swap config next to ByteShape's (names match `consultModel`):
 
 ```yaml

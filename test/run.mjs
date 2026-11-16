@@ -1501,6 +1501,82 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	assert.equal(chat.lastAgent(), "It rolls one die.");
 });
 
+test("screen: a consult call folds to one line, and opens to the whole exchange — the context, the question, and the answer from the file", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	let clock = 1000;
+	const files = {
+		"consult/20261116-053946.md": "The storyteller (Mythos-nano) — 2026-11-16T05:39:46.000Z\nModel: MythosNano\nElapsed: 1 m 12 s · 9,001 output tokens · finish: stop\n\nQuestion:\nIs the roller sound?\n\nAnswer:\n\nIt is not. Roll twice, not once, or the die never lands on six.\n",
+	};
+	const chat = createChat({ now: () => clock, readFile: (rel) => files[rel] });
+	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
+	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
+
+	chat.user("Is the roller sound?");
+	chat.entry(0, reply([call("c1", "consult", { question: "Is the roller sound?", context: "The roller rolls one die.\nThe user suspects it is unfair." })], 1));
+	clock += 72_000;
+	chat.entry(0, result("c1", "consult", "The storyteller took 1 m 12 s (9,001 output tokens). The answer is written to consult/20261116-053946.md. Shelved as placement sh1 (12,340 rendered tokens); the file stands. A story is not a record: read it with `read consult/20261116-053946.md`, check the work against a test or a proof, and apply it yourself.", { details: { consult: true, file: "consult/20261116-053946.md", placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
+	chat.entry(0, reply([call("c2", "chat", { text: "It rolls once; ask the storyteller, and it says twice." })], 2));
+
+	// Folded: one line for the run, and the line says whose work it was; nothing of the answer stands until it is opened.
+	has(text(), "▸ 1 call · Is the roller sound? · 1m 12s", "once something is said, the run is one line, and the line says what the storyteller was asked");
+	hasNot(text(), "the storyteller  Is the roller sound?", "the call's own line is folded away with the run");
+	hasNot(text(), "Roll twice", "the answer is not shown until the call is opened");
+	hasNot(text(), "It is not.", "and the receipt never carried it either");
+
+	// The run opened: the call is one line — who was asked, what, how long it took, how much it wrote, where the answer stands.
+	chat.toggle(chat.lines(80).find((line) => line.kind === "group").item);
+	has(text(), "the storyteller  Is the roller sound?  → 1 m 12 s · 9,001 tokens", "opened, the call line says who was asked, what, how long it took and how much it wrote");
+	hasNot(text(), "Roll twice", "the answer stands behind the call");
+
+	// Opened: the whole exchange stands in the row, read from the file, never from the session.
+	const consultRow = chat.lines(80).find((line) => line.kind === "call");
+	chat.toggleRow(consultRow.item, consultRow.row);
+	const opened = text();
+	has(opened, "the answer stands in consult/20261116-053946.md", "the opened row says where the answer stands");
+	has(opened, "what I sent — the context", "the ask says what was sent");
+	has(opened, "The roller rolls one die.", "the context of the call");
+	has(opened, "The user suspects it is unfair.", "all of it");
+	has(opened, "what I asked — the question", "and what was asked");
+	has(opened, "Is the roller sound?", "the question in full");
+	has(opened, "what the storyteller answered", "and what came back");
+	has(opened, "It is not. Roll twice, not once, or the die never lands on six.", "the answer, from the file it was written to");
+	hasNot(opened, "Shelved as placement", "the receipt is not repeated inside the opened row");
+
+	// y copies the whole exchange: the context, the question and the answer, not just the one line.
+	const copied = chat.textOf(consultRow.item, consultRow.row);
+	has(copied, "The answer stands in consult/20261116-053946.md", "the copied text carries the file");
+	has(copied, "The roller rolls one die.", "the copied text carries the context");
+	has(copied, "Is the roller sound?", "the question");
+	has(copied, "Roll twice, not once", "and the answer");
+
+	// A missing file is said as such, not as an empty answer: a fresh chat cannot read a file that is gone.
+	delete files["consult/20261116-053946.md"];
+	const gone = createChat({ now: () => clock, readFile: (rel) => files[rel] });
+	gone.entry(0, reply([call("c9", "consult", { question: "Is the roller sound?", context: "" })], 1));
+	gone.entry(0, result("c9", "consult", "The storyteller took 1 m 12 s. The answer is written to consult/20261116-053946.md.", { details: { consult: true, file: "consult/20261116-053946.md", tokens: 9001, finish: "stop", seconds: 72.4 } }));
+	gone.toggle(gone.lines(80).find((line) => line.kind === "group").item);
+	const goneRow = gone.lines(80).find((line) => line.kind === "call");
+	gone.toggleRow(goneRow.item, goneRow.row);
+	has(gone.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "is gone from disk", "a file that is gone is said as gone");
+
+	// A failed consult shows why it failed, once, where the answer would stand.
+	const failed = createChat({ now: () => clock, readFile: (rel) => files[rel] });
+	failed.entry(0, reply([call("c8", "consult", { question: "Is the roller sound?", context: "" })], 1));
+	failed.entry(0, result("c8", "consult", "The storyteller refused the call: HTTP 500. boom", { isError: true }));
+	failed.toggle(failed.lines(80).find((line) => line.kind === "group").item);
+	const failedRow = failed.lines(80).find((line) => line.kind === "call");
+	failed.toggleRow(failedRow.item, failedRow.row);
+	const failedText = failed.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	has(failedText, "why it failed", "a failed consult says why");
+	has(failedText, "HTTP 500", "with what the endpoint said");
+	hasNot(failedText, "what the storyteller answered", "and no empty answer section under it");
+
+	// A consult that fails carries no answer section and no file; the harness line stands alone.
+	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
+});
+
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
 	const { colorMode, makeTheme, markdownTheme, parseColorReply, schemeFromEnv, schemeOf, to256, HUES } = await import("../src/screen/theme.mjs");
 	const { colorToOklch, rgbColor } = await import("@earendil-works/pi-tui");
