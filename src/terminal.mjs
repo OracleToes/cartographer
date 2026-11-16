@@ -160,8 +160,12 @@ export function describeResult(message) {
 		const parts = [seconds, tokens].filter((part) => part !== "");
 		return `${parts.join(" · ")}${ended}`;
 	}
-	// "Wrote roll.py: 34 lines, a new file." The path is already on the line.
-	if (message.toolName === "write" || message.toolName === "edit") return oneLine(text.slice(text.indexOf(": ") + 2).replace(/\.$/, ""), POLICY.limits.terminal.resultSummary.write);
+	// "Wrote roll.py: 34 lines, a new file." / "Edited roll.py: …" / "Removed roll.py."
+	if (message.toolName === "write" || message.toolName === "edit" || (message.toolName === "book" && message.details?.target === "file" && message.details?.change === true)) {
+		const colon = text.indexOf(": ");
+		const summary = colon >= 0 ? text.slice(colon + 2).replace(/\s+File id:.*$/, "").replace(/\.$/, "") : text.replace(/\.$/, "");
+		return oneLine(summary, POLICY.limits.terminal.resultSummary.write);
+	}
 	const lines = text.split("\n").length;
 	return `${count(lines)} lines`;
 }

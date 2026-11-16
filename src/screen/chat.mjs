@@ -46,6 +46,7 @@ const BLANK = { spans: [] };
 export function homeOf(name, args = {}) {
 	if (name === "book") {
 		const target = args?.target;
+		if (target === "file" && (args?.action === "create" || args?.action === "edit" || args?.action === "remove")) return { tab: "diff" };
 		if (target === "ledger" || target === "plan" || target === "atlas") return { tab: "carto", view: target };
 		// The assessment rides in the context tab's copied top block; it has no view of its own.
 		if (target === "assessment") return { tab: "context", view: "window" };
@@ -69,7 +70,7 @@ const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (To
 function bodyOf(call) {
 	const args = call.arguments ?? {};
 	let best = "";
-	for (const key of ["content", "new_text", "command", "brief", "report", "text", "input", "context", "question"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
+	for (const key of ["content", "newText", "new_text", "oldText", "old_text", "command", "brief", "report", "text", "input", "context", "question"]) if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
 	if (best === "" && args.operation !== null && typeof args.operation === "object") best = JSON.stringify(args.operation, null, 1);
 	return best;
 }

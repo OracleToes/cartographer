@@ -1470,7 +1470,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	const read = chat.lines(80).find((line) => line.kind === "call" && line.spans.some(([part]) => part.includes("read roll.py")));
 	chat.toggleRow(read.item, read.row);
 	has(text(), "│ ✓ read roll.py  → 3 lines\n  │   == roll.py (lines 1-2 of 2)\n  │   1  import random\n  │   2  print(1)", "a call opens to its result, in place");
-	assert.deepEqual([homeOf("write"), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write lives in Diff, a command in Shells, the plan in Carto; a read opens where it stands");
+	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("book", { target: "file", action: "read" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, undefined, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, a command in Shells, the plan in Carto; a read opens where it stands");
 
 	// With the notes hidden, the note rows are gone and the calls stay.
 	chat.setThinking(false);
@@ -1483,6 +1483,14 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: "The file needs a seed." }, call("c9", "task", { brief: "Add a seed\nto the roller" })] });
 	has(text(), "┊ The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
 	assert.equal(chat.doing().what, "writing task Add a seed to the roller");
+	// `book file edit` streams `oldText` and then `newText`; both show as they are written, and `newText` wins at equal length.
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)\n" })] });
+	has(text(), "✎ book file edit f1\n  │ print(1)", "book file edit shows oldText while newText has not started yet");
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)\n", newText: "random.seed(7)\nprint(1)\n" })] });
+	has(text(), "✎ book file edit f1\n  │ random.seed(7)\n  │ print(1)", "book file edit streams newText as it grows");
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "print(2)" })] });
+	has(text(), "✎ book file edit f1\n  │ print(2)", "at equal length, newText is shown over oldText");
+	chat.live(1, undefined);
 	chat.live(0, { timestamp: 9, content: [call("c9", "chat", { text: "Half a sen" })] });
 	has(text(), "› Write it\n\nHalf a sen", "a message to the user appears as it is written");
 	assert.equal(chat.doing().what, "writing to you");

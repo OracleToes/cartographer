@@ -24,7 +24,7 @@ import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs"
 import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
-import { describeCall } from "../src/terminal.mjs";
+import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest } from "../src/request.mjs";
@@ -786,8 +786,9 @@ test("file edit: the ID alone is enough, and it always points at the live versio
 	assert.equal(stale.isError, true);
 	assert.match(stale.output[0].text, /Stale|status/);
 
-	// The call label names the tool that carries it.
+	// The call label names the tool that carries it, and the result summary strips the file header like `edit`.
 	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", ref: { id }, oldText: "x", newText: "y" } }), `book file edit ${id}`);
+	assert.equal(describeResult({ toolName: "book", content: firstEdit.output, details: firstEdit.details, isError: firstEdit.isError }), "2 lines from line 2 replaced by 2 lines");
 });
 
 test("write create: over the line cap the head is written and the agent is told", (t) => {
