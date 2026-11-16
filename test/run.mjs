@@ -1484,12 +1484,12 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	has(text(), "┊ The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
 	assert.equal(chat.doing().what, "writing task Add a seed to the roller");
 	// `book file edit` streams `oldText` and then `newText`; both show as they are written, and `newText` wins at equal length.
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)\n" })] });
-	has(text(), "✎ book file edit f1\n  │ print(1)", "book file edit shows oldText while newText has not started yet");
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)\n", newText: "random.seed(7)\nprint(1)\n" })] });
-	has(text(), "✎ book file edit f1\n  │ random.seed(7)\n  │ print(1)", "book file edit streams newText as it grows");
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)" })] });
+	has(text(), "  │ ✎ book file edit f1\n  │   │ print(1)", "book file edit shows oldText while newText has not started yet");
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "random.seed(7)\nprint(1)" })] });
+	has(text(), "  │ ✎ book file edit f1\n  │   │ random.seed(7)\n  │   │ print(1)", "book file edit streams newText as it grows");
 	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "print(2)" })] });
-	has(text(), "✎ book file edit f1\n  │ print(2)", "at equal length, newText is shown over oldText");
+	has(text(), "  │ ✎ book file edit f1\n  │   │ print(2)", "at equal length, newText is shown over oldText");
 	chat.live(1, undefined);
 	chat.live(0, { timestamp: 9, content: [call("c9", "chat", { text: "Half a sen" })] });
 	has(text(), "› Write it\n\nHalf a sen", "a message to the user appears as it is written");
