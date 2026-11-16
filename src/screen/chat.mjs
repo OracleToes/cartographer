@@ -43,7 +43,9 @@ const BLANK = { spans: [] };
 export function homeOf(name, args = {}) {
 	if (name === "book") {
 		const target = args?.target;
-		if (target === "ledger" || target === "plan" || target === "atlas" || target === "assessment" || target === "practice") return { tab: "carto", view: target };
+		if (target === "ledger" || target === "plan" || target === "atlas") return { tab: "carto", view: target };
+		// The assessment rides in the context tab's copied top block; it has no view of its own.
+		if (target === "assessment") return { tab: "context", view: "window" };
 		if (target === "context") return { tab: "context" };
 		return undefined;
 	}
@@ -51,7 +53,7 @@ export function homeOf(name, args = {}) {
 	if (name === "shell") return { tab: "shells" };
 	if (name === "plan") return { tab: "carto", view: "plan" };
 	if (name === "ledger") return { tab: "carto", view: "ledger" };
-	if (name === "assess" || name === "books") return { tab: "carto", view: "assessment" };
+	if (name === "assess") return { tab: "context", view: "window" };
 	if (name === "context") return { tab: "context" };
 	return undefined;
 }
