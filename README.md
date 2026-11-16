@@ -1060,7 +1060,7 @@ In build order:
 1. **Plugins** under `.brain/plugins/`: the agent testing the project by extending its own harness.
 2. **Heat and focus for the graph**, so that a large graph shows the part in use.
 
-And smaller things, named where they belong above: the full screen does not replay earlier sessions; the reading of the prompt is not shown for the read-ahead after a collapse.
+And smaller things, named where they belong above: the full screen does not replay earlier sessions; the reading of the prompt is not shown for the read-ahead after a collapse; and nothing is ever pruned from the brain — the transcript, the catalog and the index memo grow without bound on a long goal, and no lifecycle exists yet (design.md parks it pending an explicit decision).
 
 ## Tests
 

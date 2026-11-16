@@ -37,6 +37,8 @@ The user's direction, recorded verbatim in substance:
 
 **The line that holds in both modes:** yolo removes the *human* gate; it never removes the *mechanical* ones. Project-root confinement, the sandbox and its network control, checkpoints and `/undo` around change tasks, `.brain/` and `.git/` protection, the ignore rules — unchanged in every mode (user-confirmed 2026-11-15). Yolo says "I trust your judgment," never "delete what you like."
 
+One documented departure from the mechanical line is the user's own hand on the sandbox switch: `"bwrap": false` in the settings holds for every run, `--no-bwrap` carries one run, and `/bwrap off` switches it mid-session (never remembered — every start is sandboxed again). With it off, change tasks' commands run directly on the machine, outside the project; the user types it, the approval and checkpoint rules still apply, and the screen says so. The main agent's read-only lane is unaffected by the switch — it is held by bubblewrap itself: with no working sandbox the lane is refused outright, never run unconfined. Yolo does not imply any of this, and nothing the agent does can flip any of it.
+
 ## 5. The charter — what the agent does when nobody is talking
 
 On start, and after every wake with nothing pending, **the agent initiates**. It does not wait to be addressed. The standing duty:
@@ -69,6 +71,7 @@ The automatic out-of-brain focus dispatch (`externalWork`) and the `mainLooks` r
 - **The agent tends its own context.** The state block tells it the truth (how full; what stands in full with recall by id) and instrumentation (`/context`) is always available. The 27B manages its working set deliberately; the harness backstops at the ceiling. Fold is how it shrinks what it carries mid-session; recall is how it brings anything back.
 - **One-line provenance in the state block, not diffs.** (Proposal — see Open decisions.) "`src/foo.mjs` changed since its snapshot" is enough; the diff is a tool call away, not prompt cargo.
 - **The keep-set is small on purpose.** Finished tasks as one-liners + recall; the shelf pinned by the agent; the talk capped at `chatWindow`. Identity, plan, ledger, atlas and the assessment are never in the conversation — a collapse cannot touch them.
+- **The ceiling does not wait for a tool round.** The collapse is normally decided after a round of tool results (`afterMainCall`); a stretch of plain replies never reaches one. Since 2026-11-16 the plain-reply path checks the same line itself: at it, the run ends, the rest path collapses with a forced marker even with nothing droppable (the reset costs one re-read of what was kept), and the task path checks before every request. A notes-only run is never allowed to grow the window without limit.
 - **Nothing is lost, anything is forgettable.** Soft-forget (message edit) is the confirmed contract, unchanged: the agent may drop its messages from view; the Durable transcript remains, append-only, forensically recoverable. Reclaiming storage is a separate lifecycle, not this design's job (see Open).
 
 ## 8. The shared brain — one engine, two doors
@@ -94,7 +97,7 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 - **Stage 4A focus-dispatch for out-of-brain operations** (items 6–7): superseded by §6. Brain records ran direct already; the rest now runs inline too. The `externalWork` auto-dispatch and `mainLooks` refusal die.
 - **The 17-to-13 tool era artifacts**: the standalone `atlas` tool (already folded, `7571490`), the schema-replay lifecycle (already deleted), and any future temptation to reach back for them.
 - **Recursive self-improvement as a standing duty**: cut (user-confirmed). The agent maps and maintains *the project it is aimed at*. Its own harness is fixed furniture unless the user aims it at the install directory deliberately, in which case changes still go through the same plan gate.
-- **Plugins**: not built, not designed here. **Retention/prune lifecycle** for old transcript (separate, unresolved; explicit user conversation before any design). **Stage 8-scale verification**: deferred; to be reconsidered only with live evidence from a real session.
+- **Plugins**: not built, not designed here. **Retention/prune lifecycle** for old transcript (separate, unresolved; explicit user conversation before any design). For the record, what grows on a long goal with nothing ever reclaimed: the Durable transcript, the catalog, and the index memo under `.brain/catalog/`. Parked until the user wants it designed; the cost is visible and the mitigation is none. **Stage 8-scale verification**: deferred; to be reconsidered only with live evidence from a real session.
 
 ## 11. Decisions (small, explicit)
 
