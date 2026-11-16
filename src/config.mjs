@@ -40,8 +40,8 @@ export const DEFAULTS = freezeTree({
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
 	// how long a file one `write` call can hold.
 	maxTokens: 32768,
-	// One question to Mythos-nano, a small long-reasoning model served by the same endpoint. llama-swap swaps it in
-	// for the agent's model for the duration; the call itself takes as long as the model takes. Empty switches it off.
+	// One question to the storyteller (Mythos-nano), a small long-reasoning model served by the same endpoint. llama-swap
+	// swaps it in for the agent's model for the duration; the call itself takes as long as the story takes. Empty switches it off.
 	consultModel: "MythosNano",
 	// The most Mythos-nano is asked to write: the model card's own ceiling for hard problems.
 	consultMaxTokens: 40960,
