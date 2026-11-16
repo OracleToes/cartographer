@@ -589,6 +589,30 @@ test("state: the sandboxed block does not claim the main agent is blocked", (t) 
 	assert.doesNotMatch(block, /You yourself may still run commands in this session/);
 });
 
+test("dressRequest: the replay build equals the live build, for the same inputs", (t) => {
+	const { brainDir, root } = fresh(t);
+	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
+	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ version: 1, items: [] }, null, "\t"));
+	writeFileSync(join(root, "a.txt"), "alpha\nbeta\n");
+	const at = Date.parse("2026-11-15T10:00:00.000Z");
+	const messages = [
+		{ role: "user", content: [{ type: "text", text: "Map the parser." }], timestamp: at },
+		{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } }], timestamp: at + 1000 },
+		{ role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "alpha\nbeta\n" }], timestamp: at + 2000 },
+	];
+	// Both builds get the same stubs; the replay just may not consume anything.
+	let consumed = 0;
+	const windows = { list: () => [], noteShown: () => { consumed += 1; return []; } };
+	const wakes = { check: () => { consumed += 1; }, noteShown: () => { consumed += 1; return []; }, lines: () => undefined };
+	const args = { brainDir, root, runner: { mode: "sandbox", available: { ok: true, version: "0.9.0", shell: "bash" } }, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID, used: 4321 };
+	const live = dressRequest(messages, { ...args, windows, wakes });
+	const replay = dressRequest(messages, { ...args, windows, wakes, replay: true });
+	const again = dressRequest(messages, { ...args, windows, wakes, replay: true });
+	assert.equal(JSON.stringify(replay), JSON.stringify(again), "the replay is deterministic");
+	assert.equal(consumed, 3, "the live build consumed its wakes and windows; the replay consumed nothing");
+	assert.equal(JSON.stringify(live), JSON.stringify(replay), "the view the screen renders is byte-identical to the request the model got");
+});
+
 test("dressRequest: a task carries the context lines and the requests, as the live agent does", (t) => {
 	const { brainDir, root } = fresh(t);
 	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
