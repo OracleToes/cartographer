@@ -287,12 +287,12 @@ test("ledger: a call that is run again after a crash is not applied twice", asyn
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ root: dir, brainDir: dir, config: {}, engine: undefined, gate: undefined });
 	const api = { taskId: "task-1", conversationId: ROOT_CONVERSATION_ID, now: () => 0 };
-	const first = await tool.execute({ target: "ledger", action: "add", operation: { kind: "note", text: "once" } }, api);
+	const first = await tool.execute({ target: "ledger", action: "add", kind: "note", text: "once" }, api);
 	assert.equal(first.output[0].text, "n1 added.\nOpen: no goals, no questions, 1 note.");
-	const again = await tool.execute({ target: "ledger", action: "add", operation: { kind: "note", text: "once" } }, api);
+	const again = await tool.execute({ target: "ledger", action: "add", kind: "note", text: "once" }, api);
 	has(again.output[0].text, "These operations were already applied, before a restart.", "the rerun says so");
 	assert.equal(loadLedger(dir).ledger.items.length, 1, "and adds nothing");
-	await tool.execute({ target: "ledger", action: "add", operation: { kind: "note", text: "twice" } }, { ...api, taskId: "task-2" });
+	await tool.execute({ target: "ledger", action: "add", kind: "note", text: "twice" }, { ...api, taskId: "task-2" });
 	assert.equal(loadLedger(dir).ledger.items.length, 2, "another call is applied");
 });
 
@@ -1485,11 +1485,11 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	has(text(), "┊ The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
 	assert.equal(chat.doing().what, "writing task Add a seed to the roller");
 	// `book file edit` streams `oldText` and then `newText`; both show as they are written, and `newText` wins at equal length.
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)" })] });
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)" })] });
 	has(text(), "  │ ✎ book file edit f1\n  │   │ print(1)", "book file edit shows oldText while newText has not started yet");
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "random.seed(7)\nprint(1)" })] });
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)", newText: "random.seed(7)\nprint(1)" })] });
 	has(text(), "  │ ✎ book file edit f1\n  │   │ random.seed(7)\n  │   │ print(1)", "book file edit streams newText as it grows");
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "print(2)" })] });
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)", newText: "print(2)" })] });
 	has(text(), "  │ ✎ book file edit f1\n  │   │ print(2)", "at equal length, newText is shown over oldText");
 	chat.live(1, undefined);
 	chat.live(0, { timestamp: 9, content: [call("c9", "chat", { text: "Half a sen" })] });

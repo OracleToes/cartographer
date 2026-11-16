@@ -5,13 +5,15 @@
 // declaration (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
 import { projectFiles } from "./look.mjs";
+import { ChangeError, confineWrite } from "./change.mjs";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { bool, compile, obj, opt, str, unknown } from "@earendil-works/pi-schema";
+import { arr, bool, compile, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
 import { applyPlanOp, authorizationLine, isAuthorized, loadPlan, PlanError, savePlan } from "../plan.mjs";
-import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "../atlas.mjs";
+import { applyAtlasOp, AtlasError, findNode, loadAtlas, saveAtlas } from "../atlas.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed, pin } from "../top.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
@@ -34,10 +36,23 @@ const normalizeRef = (brainDir, ref, target) => {
 	if (out.kind === undefined && target !== "shelf") out.kind = target;
 	return out;
 };
+/** Lift a top-level `id` into the normalized internal `ref` envelope when `ref` was not given directly, without mutating frozen inputs. */
+const normalizeArgs = (brainDir, given) => {
+	if (given === null || given === undefined || typeof given !== "object") return given;
+	const trimmedId = typeof given.id === "string" && given.id.trim() !== "" ? given.id.trim() : undefined;
+	const rawRef = given.ref !== undefined ? given.ref : (trimmedId !== undefined ? { id: trimmedId } : undefined);
+	const ref = normalizeRef(brainDir, rawRef, given.target);
+	const id = trimmedId ?? (typeof ref?.id === "string" && ref.id.trim() !== "" ? ref.id.trim() : undefined);
+	const out = { ...given };
+	if (id !== undefined) out.id = id;
+	if (ref !== undefined) out.ref = ref;
+	return out;
+};
+const isCatalogFileId = (id) => /^f(\d+|-[0-9a-f]{8}-)/i.test(String(id ?? ""));
 /**
  * A shelf ref given an ID alone: find what kind of thing it is. Files and reports are cheap to check; the tool
- * registry and the durable index are tried after, and the durable index is the slow path, so it is tried last.
- * Returns the ref with its kind filled in, or undefined when nothing by that ID exists.
+ * registry and the durable index are tried after, and a confined project path passed in `id` resolves to its
+ * catalog file identity last. Returns the ref with its kind filled in, or undefined when nothing by that ID exists.
  */
 const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
 	let namespace;
@@ -51,24 +66,32 @@ const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
 			if (found !== undefined) return { ...filled, kind };
 		} catch { /* not this kind */ }
 	}
+	if (ref.version === undefined && !isCatalogFileId(ref.id)) {
+		try {
+			const fileRef = fileReference(root, brainDir, ref.id);
+			return { namespace: fileRef.namespace, kind: "file", id: fileRef.id };
+		} catch { /* not an existing confined project file */ }
+	}
 	return undefined;
 };
 /**
  * One source of truth for what exists: target → action → validation spec. The provider declaration (enums), the
  * local validator and the executor's dispatch all derive from this table; the tool description's capability
  * matrix is written to match it. Spec fields:
- *   ref: "required" → needs a ref with an `id`; the namespace and kind are inferred, the live version is used
- *   pathOk: a ref OR an explicit project-relative path locates the thing (file read; shelf add)
- *   operation: "required" → needs the target-specific payload object; operationFields lists required non-empty
- *             string fields inside it; hint overrides the "an operation payload" wording
+ *   ref: "required" → needs `id` (or `ref` when pinning `version`); namespace and kind are inferred
+ *   pathOk: `id` (or `ref`) OR an explicit project-relative `path` locates the thing
+ *   confirmOk: `id` (or `ref`), `name`, or `names` locates the atlas node(s) to confirm
+ *   lookOk: `id` (or `ref`), `name`, or `path` locates the atlas node or file to inspect
  *   fields: required non-empty string arguments on the call itself
+ *   exactFields: required non-empty string arguments preserved verbatim (including whitespace)
+ *   stringFields: required string arguments that may be empty ("")
  */
 const CAPABILITIES = {
 	file: {
 		read: { pathOk: true },
-		create: { fields: ["path", "content"] },
-		edit: { ref: "required", fields: ["oldText", "newText"] },
-		remove: { ref: "required" },
+		create: { fields: ["path"], stringFields: ["content"] },
+		edit: { pathOk: true, exactFields: ["oldText"], stringFields: ["newText"] },
+		remove: { pathOk: true },
 		rebind: { ref: "required", fields: ["expectedVersion", "path"] },
 	},
 	report: {
@@ -82,43 +105,45 @@ const CAPABILITIES = {
 	ledger: {
 		list: {},
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		done: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
+		add: { fields: ["kind", "text"] },
+		edit: { ref: "required" },
+		done: { ref: "required" },
+		remove: { ref: "required" },
 	},
 	plan: {
 		list: {},
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		done: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
-		before: { ref: "required", operation: "required" },
+		add: { fields: ["mode", "text"] },
+		edit: { ref: "required" },
+		done: { ref: "required" },
+		remove: { ref: "required" },
+		before: { ref: "required" },
+		clear: {},
 	},
 	atlas: {
 		list: {},
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		link: { ref: "required", operation: "required" },
-		unlink: { ref: "required", operation: "required" },
-		confirm: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
-		rename: { ref: "required", operation: "required", operationFields: ["to"] },
-		look: { operation: "required", operationFields: ["name"] },
+		add: { fields: ["name", "gist"] },
+		edit: { ref: "required", fields: ["gist"] },
+		link: { ref: "required" },
+		unlink: { ref: "required" },
+		confirm: { confirmOk: true },
+		remove: { ref: "required" },
+		rename: { ref: "required", fields: ["to"] },
+		look: { lookOk: true },
 		tree: {},
 	},
 	assessment: {
-		write: { operation: "required", operationFields: ["text"], hint: "operation { text }: the whole assessment; it replaces the current one" },
+		write: { fields: ["text"] },
 	},
 	context: {
 		list: {},
 		read: { ref: "required" },
+		recall: { ref: "required" },
 		archive: { ref: "required" },
 		restore: { ref: "required" },
-		fold: { operation: "required", operationFields: ["id"], hint: "operation { id }: the report to drop from view, like t12, or the task-step result ids" },
-		note: { operation: "required", operationFields: ["text"], hint: "operation { text }: what to keep, with file paths and line numbers" },
+		fold: { ref: "required" },
+		note: { fields: ["text"] },
 		collapse: {},
 	},
 	conversation: { list: {}, read: { ref: "required" } },
@@ -131,23 +156,21 @@ const CAPABILITIES = {
 	shelf: {
 		list: {},
 		// The namespace and the kind are inferred from the ID alone (src/tools/book.mjs, inferShelfRef); a full reference is not needed.
-		add: { pathOk: true, refAlternative: "a ref or path", refInfer: true },
-		remove: { fields: ["placementId"] },
+		add: { pathOk: true, refAlternative: "id or path", refInfer: true },
+		remove: { pathOk: true, refAlternative: "id or path", refInfer: true },
 	},
 };
 const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
 const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
 const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
-	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`; a record's ID from any `list`. Never a path — for a file whose ID you do not have yet, pass `path`." }),
+	id: str({ minLength: 1, maxLength: 256, description: "Stable ID of the entity. Pass top-level `id` instead unless pinning `version`." }),
 	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
 	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred when omitted: from the target, or for target=shelf from what the ID is." })),
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
-/** A file's id is not its name; tell the agent where the real one comes from. */
-const fileIdHint = (id) => `An id is not a file's name (${JSON.stringify(String(id ?? ""))} is not one). A file's ID comes from the book file create result ("File id: f1") or from a \`book file read\` of the path (the read header says "· file f1 @<64 hex>"). To read a file whose ID you do not have yet, pass \`path\` (project-relative) for the read — the header gives you the ID.`;
-const noFileRecord = (id) => `There is no file record for ID ${JSON.stringify(String(id ?? ""))}. ${fileIdHint(id)}`;
+const noFileRecord = (id) => `There is no file record for ID ${JSON.stringify(String(id ?? ""))}. Pass project-relative \`path\`, or use a file ID from \`book file create\` ("File id: f1") or \`book file read\` ("· file f1 @<64 hex>").`;
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
 /** Append any "this was clipped for you" notes raised while the call ran. Every tool call drains, once. */
 const withNotes = (result) => {
@@ -193,49 +216,54 @@ function renderReadSelection(bytes, path, range, id, version) {
 const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
 
 // ─── Error-attached guidance (Q3, 2026-11-15) ───────────────────────────────
-// One line per action, appended ONLY to local failures, only for brain targets whose operation payloads are
-// opaque to the declaration. Durable/report/file failures are already precise; the happy path never pays for this.
+// One line per action, appended ONLY to local failures; the happy path never pays for this.
 const ACTION_GUIDE = {
 	ledger: {
 		add: "kind (goal | question | note) and text — a goal also needs done_when; a note may take salient: true",
-		edit: "id, plus text, done_when (done_when only on a goal), or salient: true/false (only on a note)",
+		edit: "id, plus text, done_when (only on a goal), salient: true/false (only on a note), or outcome (when closed)",
 		done: "id, plus an optional text outcome",
 		remove: "id",
 	},
 	plan: {
 		add: "mode (look | change) and text — before, network and standing optional (network/standing only with change)",
-		edit: "id, plus text, mode, network or standing",
+		edit: "id, plus text, mode, network, standing, or outcome (when done)",
 		done: "id, plus an optional text outcome",
 		remove: "id",
-		before: "id and before",
+		before: "id, plus optional before (omit to move to the end)",
+		clear: "no other fields — clears the plan",
 	},
 	assessment: {
-		write: "operation { text }: the whole assessment; it replaces the current one",
+		write: "text (the whole assessment; it replaces the current one)",
 	},
 	file: {
 		create: "path and content — a new file keeps at most the line cap (see the session's `writeLines`); the rest is not written and the result says so. The result names the new file's `File id:`",
-		read: "a path, or the file `ref` ({ id }) from a create/read header — the header of a path read shows `· file f1`; range optional",
-		edit: "the file `ref` ({ id }), oldText and newText — an `id` alone names the live version",
-		remove: "the file `ref` ({ id })",
-		rebind: "the file `ref` ({ id }), `path` and `expectedVersion` — a `file read` header shows `· file f1 @<64 hex>`: the id and the digest",
+		read: "path or id (from a create/read header `· file f1`); range optional",
+		edit: "id or path, oldText and newText",
+		remove: "id or path",
+		rebind: "id, path and expectedVersion — a `file read` header shows `· file f1 @<64 hex>`: the id and the digest",
 	},
 	atlas: {
 		add: "name and gist — detail, files and links optional; the node comes back with its `c<N>` id",
-		edit: "the node `ref` names: gist and optional kind/detail/files/links — the name stays (`rename` moves it)",
-		rename: "the node `ref` names, and `to` (its new name); what links to it is rewritten",
-		confirm: "the node `ref` names — or several via operation `names`",
-		link: "for the node `ref` names: files (paths) and/or links (node names or ids) — { files: [\"src/x.js\"], links: [\"other_node\"] }; the ref is the node, no `name` in the operation",
-		unlink: "for the node `ref` names: files (paths) and/or links (node names or ids) to take off; the ref is the node, no `name` in the operation",
-		remove: "the node `ref` names",
-		look: "name (a node name, a node id such as c3, or a project path)",
-		tree: "anchor and depth (folder of the project; anchor '.' is the root)",
+		edit: "id (or node name) and gist — detail, files and links optional; `rename` changes the name",
+		rename: "id (or node name) and `to` (its new name); what links to it is rewritten",
+		confirm: "id (or node name) — or several via `names`",
+		link: "id (or node name), plus `files` (paths) and/or `links` (node names or ids)",
+		unlink: "id (or node name), plus `files` (paths) and/or `links` (node names or ids) to take off",
+		remove: "id (or node name)",
+		look: "id, name, or path (a node id such as c3, a node name, or a project path)",
+		tree: "anchor and/or depth (folder of the project; anchor '.' is the root)",
 	},
 	context: {
+		recall: "id (a report id like t12)",
 		archive: "id",
 		restore: "id",
-		fold: "{ id } (an id like t12)",
-		note: "{ text }",
-		collapse: "{ text } optional",
+		fold: "id (a report id like t12, or task-step result ids like s3)",
+		note: "text (what to keep, with file paths and line numbers)",
+		collapse: "optional text",
+	},
+	shelf: {
+		add: "id or path — range and handOn optional",
+		remove: "id (placement sh1, target id, or 'all') or path",
 	},
 };
 const guideFor = (target, action) => ACTION_GUIDE[target]?.[action];
@@ -288,7 +316,7 @@ const listRef = (namespace, kind, id, version) => ({ namespace, kind, id, ...(ve
 const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "context"]);
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
-	plan: new Set(["add", "edit", "done", "remove", "before"]),
+	plan: new Set(["add", "edit", "done", "remove", "before", "clear"]),
 	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove", "rename"]),
 	context: new Set(["archive", "restore"]),
 };
@@ -300,6 +328,12 @@ function listBrainRecords(target, brainDir) {
 	return [];
 }
 function brainRecord(target, brainDir, id) {
+	if (target === "atlas") {
+		const loaded = loadAtlas(brainDir);
+		if (!loaded.atlas) throw new Error(`The atlas cannot be read: ${loaded.error}`);
+		const record = findNode(loaded.atlas, id);
+		return record === undefined ? undefined : { record, version: contentVersion(record) };
+	}
 	const items = listBrainRecords(target, brainDir);
 	const record = items.find((item) => item.id === id);
 	return record === undefined ? undefined : { record, version: contentVersion(record) };
@@ -307,12 +341,15 @@ function brainRecord(target, brainDir, id) {
 
 async function runUniversal({ root, brainDir, config, engine, gate }, given, api, callContext) {
 	const main = api.conversationId === ROOT_CONVERSATION_ID;
+	if (typeof given?.id === "string" && given.id.trim() !== "" && typeof given?.ref?.id === "string" && given.id.trim() !== given.ref.id.trim()) {
+		return fail("`id` and `ref.id` do not match; pass `id` alone unless pinning `ref.version`.");
+	}
 	// Tool callers may reach here without prepareArguments: normalizing again is harmless.
-	const args = { ...given, ref: normalizeRef(brainDir, given.ref, given.target) };
+	const args = normalizeArgs(brainDir, given);
 	const target = args.target;
 	const action = args.action;
 	if (target === "file" && action === "rebind") {
-		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file rebind needs a stable file reference.");
+		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file rebind needs a stable file `id`.");
 		if (typeof args.path !== "string" || typeof args.expectedVersion !== "string") return fail("file rebind needs a new confined path and the current expectedVersion.");
 		try {
 			const rebound = rebindFile(root, brainDir, args.ref, args.path, args.expectedVersion);
@@ -321,12 +358,15 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 	}
 	if (target === "file" && ["create", "edit", "remove"].includes(action)) {
 		if (main) return fail("Project-file create/edit/remove must run in a focused change task for an authorized plan item.");
-		if (typeof args.planItem !== "string" || args.planItem.trim() === "") return fail("Project-file create/edit/remove requires the authorized planItem carried by this focus.");
 		// What this focus carries, recorded when it was created (src/tools/task.mjs) in the durable context store:
-		// the plan item it carries out and that it is a change. Cheap to read, and right after a restart.
-		// (An entry scan was tried; it cannot see an entry that sits after the first forty of a long conversation.)
+		// the plan item it carries out and that it is a change. Inferred automatically; an explicit planItem must match.
 		const task = loadContext(brainDir).tasks[api.conversationId];
-		if (task?.mode !== POLICY.enums.planMode.change || task.item !== args.planItem) return fail("File mutation refused: this focus is not carrying that authorized change plan item.");
+		if (task?.mode !== POLICY.enums.planMode.change || typeof task.item !== "string" || task.item.trim() === "") {
+			return fail("File mutation refused: this focus is not carrying an authorized change plan item.");
+		}
+		if (args.planItem !== undefined && String(args.planItem).trim() !== "" && args.planItem !== task.item) {
+			return fail("File mutation refused: this focus is not carrying that authorized change plan item.");
+		}
 		let filePath = args.path;
 		let expectedVersion;
 		if (action === "create") {
@@ -335,10 +375,30 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			const output = nested.structuredOutput;
 			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, change: true } };
 		}
-		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail(`file ${action} requires a stable file ref; paths alone are not mutation targets. An \`id\` alone is enough: { \"id\": \"f1\" }.`);
+		let ref = args.ref;
+		if (ref === undefined) {
+			if (typeof args.path !== "string" || args.path.trim() === "") return fail(`file ${action} needs \`id\` or project-relative \`path\`.`);
+			try {
+				const confined = confineWrite(root, brainDir, args.path);
+				if (!existsSync(confined.abs)) return fail(`File ${action} refused: ${confined.rel} does not exist.`);
+				ref = fileReference(root, brainDir, confined.rel);
+			} catch (error) { return fail(`File ${action} refused: ${error.message}.`); }
+		}
+		if (!validateReference(ref) || ref.kind !== "file") return fail(`file ${action} needs a file \`id\` or \`path\`.`);
 		if (args.expectedVersion !== undefined && (typeof args.expectedVersion !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedVersion))) return fail("`expectedVersion` must be a 64-character SHA-256 digest, or be omitted: the file's ID always points at the live version.");
-		const resolved = resolveFile(root, brainDir, args.ref);
-		if (resolved.status !== "live") return fail(`File ${action} refused: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(args.ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`}`);
+		let resolved = resolveFile(root, brainDir, ref);
+		if (resolved.status !== "live" && resolved.error === "No catalog record exists for this file identity." && ref.version === undefined && !isCatalogFileId(ref.id)) {
+			try {
+				const confined = confineWrite(root, brainDir, ref.id);
+				if (existsSync(confined.abs)) {
+					ref = fileReference(root, brainDir, confined.rel);
+					resolved = resolveFile(root, brainDir, ref);
+				}
+			} catch (error) {
+				if (error instanceof ChangeError) return fail(`File ${action} refused: ${error.message}.`);
+			}
+		}
+		if (resolved.status !== "live") return fail(`File ${action} refused: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`}`);
 		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file ${action}: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was ${action === "remove" ? "removed" : "changed"}.`);
 		filePath = resolved.record.path;
 		// The ID points at the live version; the version handed to the nested call is resolved here, never asked of the agent.
@@ -358,12 +418,18 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		let ref = args.ref;
 		try {
 			if (ref === undefined) {
-				if (typeof args.path !== "string" || args.path.trim() === "") return fail(`file ${action} needs a stable \`ref\` or explicit project-relative \`path\`.`);
+				if (typeof args.path !== "string" || args.path.trim() === "") return fail(`file ${action} needs \`id\` or explicit project-relative \`path\`.`);
 				ref = fileReference(root, brainDir, args.path);
 			}
 		} catch (error) { return fail(`Could not resolve the file reference: ${error.message}.`); }
 		if (!validateReference(ref) || ref.kind !== "file") return fail("Invalid file reference; expected at least an `id`.");
-		const result = resolveFile(root, brainDir, ref);
+		let result = resolveFile(root, brainDir, ref);
+		if (result.status !== "live" && result.error === "No catalog record exists for this file identity." && ref.version === undefined && !isCatalogFileId(ref.id)) {
+			try {
+				ref = fileReference(root, brainDir, ref.id);
+				result = resolveFile(root, brainDir, ref);
+			} catch { /* keep missing-record error */ }
+		}
 		const readablePinned = ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
 		const record = result.record;
 		if (result.status !== "live" && !readablePinned) return fail(`${result.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`}`);
@@ -490,10 +556,8 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 	}
 	if (target === "assessment") {
 		if (action !== "write") return unsupported(target, action);
-		const payload = args.operation ?? {};
-		if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail("assessment write needs an operation object: { text }, the whole assessment.");
-		let text = typeof payload.text === "string" ? payload.text.trim() : "";
-		if (text === "") return fail("assessment write needs operation { text }: the whole assessment; it replaces the current one.");
+		let text = typeof args.text === "string" ? args.text.trim() : "";
+		if (text === "") return withGuide(target, action, fail("assessment write needs `text`: the whole assessment; it replaces the current one."));
 		if (text.length > ASSESSMENT_MAX) {
 			const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
 			warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
@@ -521,7 +585,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 		}
 		if (action === "read") {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
+			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
 			let current;
 			try { current = nativeReference(brainDir, target, args.ref.id); }
 			catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
@@ -539,32 +603,36 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 				if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; historical content is unavailable.`);
 				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 			}
-			const ref = nativeReference(brainDir, target, args.ref.id, found.version);
+			const ref = nativeReference(brainDir, target, found.record.id ?? args.ref.id, found.version);
 			return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
 		}
-		if (target === "context" && (action === "fold" || action === "note" || action === "collapse")) {
-			// No ref, no precondition: fold takes operation {id}, note takes operation {text}, collapse is free-form.
-			const payload = args.operation ?? {};
-			if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail(`context ${action} needs an operation object with the target-specific fields.`);
-			return runContext({ root, brainDir, config, engine }, { ops: [{ ...payload, action }] }, api);
+		if (target === "context" && (action === "fold" || action === "recall" || action === "note" || action === "collapse")) {
+			const contextOp = {
+				action,
+				...(args.id !== undefined ? { id: args.id } : {}),
+				...(args.text !== undefined ? { text: args.text } : {}),
+			};
+			return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [contextOp] }, api));
 		}
 		if (target === "atlas" && (action === "look" || action === "tree")) {
-			if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`The atlas ${action} operation needs an object with the target-specific fields.`);
 			const { atlas, error } = loadAtlas(brainDir);
 			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
 			const { plan } = loadPlan(brainDir);
+			const atlasOp = action === "look"
+				? { action, ...(args.name !== undefined || args.path !== undefined || args.id !== undefined ? { name: args.name ?? args.path ?? args.id } : {}) }
+				: { action, ...(args.anchor !== undefined ? { anchor: args.anchor } : {}), ...(args.depth !== undefined ? { depth: args.depth } : {}) };
 			try {
-				const result = applyAtlasOp(atlas, { ...(args.operation ?? {}), action }, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
+				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
 				if (result.changed) saveAtlas(brainDir, atlas);
 				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
 			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
 		}
 		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
-		const isAdd = action === "add";
 		if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
+		const needsRef = action !== "add" && !(target === "plan" && action === "clear") && !(target === "atlas" && action === "confirm" && args.ref === undefined);
 		let current;
-		if (!isAdd) {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
+		if (needsRef) {
+			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
 			try {
 				const namespace = nativeReference(brainDir, target, args.ref.id);
 				if (args.ref.namespace !== namespace.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
@@ -575,14 +643,20 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			const expected = args.expectedVersion ?? args.ref.version ?? current.version;
 			if (expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
 		}
-		if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`${target} ${action} needs an operation object with the target-specific fields.`);
-		const operation = { ...(args.operation ?? {}), action };
-		if (!isAdd) operation.id = args.ref.id;
 		if (target === "atlas") {
 			const { atlas, error } = loadAtlas(brainDir);
 			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
 			if (atlas.lastCall === api.taskId) return textResult("This atlas operation was already applied before a restart.", { replay: true });
-			const atlasOp = { ...operation, ...(isAdd ? {} : { name: args.ref.id }) };
+			const atlasOp = {
+				action,
+				...(needsRef ? { name: current.record.id } : args.name !== undefined ? { name: args.name } : {}),
+				...(args.gist !== undefined ? { gist: args.gist } : {}),
+				...(args.detail !== undefined ? { detail: args.detail } : {}),
+				...(args.files !== undefined ? { files: args.files } : {}),
+				...(args.links !== undefined ? { links: args.links } : {}),
+				...(args.to !== undefined ? { to: args.to } : {}),
+				...(args.names !== undefined ? { names: args.names } : {}),
+			};
 			const { plan } = loadPlan(brainDir);
 			try {
 				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
@@ -590,14 +664,36 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
 			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
 		}
-		if (target === "ledger") return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [operation] }, api));
-		if (target === "plan") return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [operation] }, api));
+		if (target === "ledger") {
+			const ledgerOp = {
+				action,
+				...(needsRef ? { id: current.record.id } : {}),
+				...(args.kind !== undefined ? { kind: args.kind } : {}),
+				...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+				...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
+				...(args.salient !== undefined ? { salient: args.salient } : {}),
+				...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
+			};
+			return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [ledgerOp] }, api));
+		}
+		if (target === "plan") {
+			const planOp = {
+				action,
+				...(needsRef ? { id: current.record.id } : {}),
+				...(args.mode !== undefined ? { mode: args.mode } : {}),
+				...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+				...(args.before !== undefined ? { before: args.before } : {}),
+				...(args.network !== undefined ? { network: args.network } : {}),
+				...(args.standing !== undefined ? { standing: args.standing } : {}),
+				...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
+			};
+			return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [planOp] }, api));
+		}
 		if (target === "context") {
 			if (action === "archive" || action === "restore") {
-				try { return textResult(applyContextRowAction(brainDir, args.ref.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, args.operation?.when, api.taskId), { target, action, ref: args.ref }); }
+				try { return textResult(applyContextRowAction(brainDir, current.record.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, undefined, api.taskId), { target, action, ref: args.ref }); }
 				catch (error) { return withGuide(target, action, fail(`Context row ${action} refused: ${error.message}.`)); }
 			}
-			return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [operation] }, api));
 		}
 	}
 	if (target === "report" && action === "list") {
@@ -652,10 +748,17 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			}
 			if (!validateReference(ref)) return fail("Invalid shelf target reference.");
 			if (ref.kind === "file") {
-				const resolved = resolveFile(root, brainDir, ref);
+				let resolved = resolveFile(root, brainDir, ref);
+				if (resolved.status !== "live" && resolved.error === "No catalog record exists for this file identity." && ref.version === undefined && !isCatalogFileId(ref.id)) {
+					try {
+						const fileRef = fileReference(root, brainDir, ref.id);
+						ref = { namespace: fileRef.namespace, kind: "file", id: fileRef.id };
+						resolved = resolveFile(root, brainDir, ref);
+					} catch { /* keep missing-record error */ }
+				}
 				if (resolved.status !== "live") return fail(`Cannot shelf file: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "The reference is not current."}`}`);
 				path = resolved.record.path;
-		} else if (ref.kind === "report") {
+			} else if (ref.kind === "report") {
 			const verified = await runUniversal({ root, brainDir, config, engine, gate }, { target: "report", action: "read", ref }, api, callContext);
 			if (verified.isError) return verified;
 			path = `report:${ref.id}`;
@@ -702,22 +805,29 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		return textResult(`Added ${shelfLabel(item)} to the shelf as placement ${item.id}; ${count(picked.tokens)} rendered tokens are in view now.\n\n${picked.item.snapshot}`, { placement: item.id, ref: item.target });
 	}
 	if (target === "shelf" && action === "remove") {
-		const placementId = String(args.placementId ?? "");
-		if (!placementId) return fail("shelf remove needs the exact shelf placementId, not the target ID.");
+		const wanted = String(args.id ?? args.ref?.id ?? args.path ?? "").trim();
+		if (!wanted) return withGuide("shelf", "remove", fail("shelf remove needs `id` or `path`."));
 		if (loadContext(brainDir).appliedOperations?.includes(String(api.taskId))) {
-			cleanupShelfSnapshots(brainDir, [{ id: placementId, type: "file" }]);
-			return textResult(`Removed shelf placement ${placementId}; the target identity remains unchanged.`, { removedPlacement: placementId, replay: true });
+			cleanupShelfSnapshots(brainDir, [{ id: wanted, type: "file" }]);
+			return textResult(`Removed shelf placement ${wanted}; the target identity remains unchanged.`, { removedPlacement: wanted, replay: true });
 		}
 		const mine = currentShelf(brainDir, api.conversationId, main);
-		const gone = mine.filter((item) => item.id === placementId);
-		if (gone.length === 0) return fail(`No shelf placement ${placementId} exists in this context.`);
+		const normalizedWanted = wanted.replace(/^\.\//, "");
+		const gone = wanted === "all"
+			? mine
+			: mine.filter((item) => item.id === wanted || item.target?.id === wanted || item.ref?.id === wanted || shelfLabel(item) === wanted || item.path === wanted || item.path === normalizedWanted);
+		if (gone.length === 0) {
+			return fail(`No shelf item ${JSON.stringify(wanted)} exists in this context.${mine.length > 0 ? ` On it: ${mine.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.` : " The shelf is empty."}`);
+		}
+		const removedIds = new Set(gone.map((item) => item.id));
 		updateContext(brainDir, (next) => {
-			if (main) next.shelf = next.shelf.filter((item) => item.id !== placementId);
-			else taskState(next, api.conversationId).shelf = mine.filter((item) => item.id !== placementId);
+			if (main) next.shelf = next.shelf.filter((item) => !removedIds.has(item.id));
+			else taskState(next, api.conversationId).shelf = mine.filter((item) => !removedIds.has(item.id));
 			next.appliedOperations = [...new Set([...(next.appliedOperations ?? []), String(api.taskId)])].slice(-POLICY.limits.context.operationReplay);
 		});
 		cleanupShelfSnapshots(brainDir, gone);
-		return textResult(`Removed shelf placement ${placementId}; the target identity remains unchanged.`, { removedPlacement: placementId });
+		const label = gone.map((item) => item.id).join(", ");
+		return textResult(`Removed shelf placement ${label}; the target identity remains unchanged.`, { removedPlacement: gone.length === 1 ? gone[0].id : gone.map((item) => item.id) });
 	}
 	return unsupported(target, action);
 }
@@ -802,7 +912,7 @@ function runPlan({ brainDir, gate }, args, api) {
 			if (!(problem instanceof PlanError)) throw problem;
 			let message = problem.message;
 			if (op?.action === POLICY.enums.actions.add && (typeof op.text !== "string" || op.text.trim() === "")) {
-				const expected = { action: POLICY.enums.actions.add, mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "one-line description of what this item covers" };
+				const expected = { target: "plan", action: POLICY.enums.actions.add, mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "one-line description of what this item covers" };
 				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe item's wording belongs in \`text\`, not \`lines\`. Correct the call; do not repeat it unchanged.`;
 			}
 			lines.push(`Op ${index + 1} (${opLabel(op, "mode")}) not applied: ${message}`);
@@ -993,44 +1103,62 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 export function bookTool({ root, brainDir, config, engine, gate }) {
 	/** One flat declaration: the provider grammar stays a root-level object (llama.cpp/Qwen-safe), closed enums, everything optional except target and action. */
 	const validationSchema = obj({
-		target: str({ enum: UNIVERSAL_TARGETS, description: "The referenced entity family, or shelf." }),
-		action: str({ enum: UNIVERSAL_ACTIONS, description: "One target-specific operation. Unsupported target/action pairs fail closed." }),
+		target: str({ enum: UNIVERSAL_TARGETS, description: "The surface to act on: file, report, ledger, plan, atlas, assessment, context, shelf, or a Durable record family." }),
+		action: str({ enum: UNIVERSAL_ACTIONS, description: "One action on that target. Unsupported target/action pairs fail closed." }),
+		id: opt(str({ minLength: 1, maxLength: 256, description: "Stable ID of the item to act on (plan p1, ledger g1/q1/n1, atlas c1 or node name, file f1, report t1, shelf sh1, Durable record). Points at the live version." })),
 		ref: opt(REFERENCE_SCHEMA),
-		path: opt(str({ description: "Explicit project-relative locator for a file you have not read yet — pass it instead of `ref` (the read header then names the file's ID). Accepted for file reads and shelf add." })),
-		range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
-		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
+		path: opt(str({ description: "Project-relative file path for file create/read/edit/remove/rebind, shelf add/remove, or atlas look." })),
+		range: opt(str({ description: 'File line selection such as "10-80"; omitted means the default window.' })),
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
-		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit/remove." })),
-		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition; omit it — a ref's ID always points at the live version. Supplied, it is enforced as a precondition." })),
+		text: opt(str({ description: "Body text for ledger add/edit/done, plan add/edit/done, assessment write, or context note/collapse." })),
+		kind: opt(str({ enum: Object.values(POLICY.enums.ledgerKind), description: "Ledger entry kind on ledger add: goal, question, or note." })),
+		done_when: opt(str({ description: "Observable completion test for a ledger goal (required on ledger add when kind is goal; editable on a goal)." })),
+		salient: opt(bool({ description: "Mark or unmark a ledger note as salient so it stands in every request and across collapses." })),
+		mode: opt(str({ enum: Object.values(POLICY.enums.planMode), description: "Plan item mode on plan add/edit: look or change." })),
+		before: opt(str({ description: "Plan item ID to insert or move this item before (omit on plan before to move to the end)." })),
+		network: opt(bool({ description: "Allow outbound network access on a change plan item." })),
+		standing: opt(bool({ description: "Allow long-lived processes on a change plan item." })),
+		outcome: opt(str({ description: "Outcome wording when editing an already closed ledger entry or done plan item." })),
+		name: opt(str({ description: "Atlas node name on atlas add, confirm, or look." })),
+		gist: opt(str({ description: "One-line summary of an atlas node on atlas add/edit." })),
+		detail: opt(str({ description: "Expanded body of an atlas node on atlas add/edit (empty string clears it)." })),
+		files: opt(arr(str(), { description: "Project-relative file paths linked to an atlas node on add/edit/link/unlink." })),
+		links: opt(arr(str(), { description: "Related atlas node names or IDs on add/edit/link/unlink." })),
+		to: opt(str({ description: "New node name on atlas rename." })),
+		names: opt(arr(str(), { description: "Multiple atlas node names or IDs on atlas confirm." })),
+		anchor: opt(str({ description: 'Project folder to root the file tree at on atlas tree ("." resets to the project root).' })),
+		depth: opt(int({ minimum: 1, maximum: 6, description: "Directory levels (1-6) to draw on atlas tree." })),
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
-		newText: opt(str({ description: "Replacement passage in file edit." })),
-		handOn: opt(bool({ description: "When adding from a focus, hand this placement to the shared shelf on return." })),
-		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. For `plan` and `ledger`: `done` names the item by its id — operation {id} (plus an optional `text` outcome). `assessment` takes write {text}: the whole assessment. `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
+		newText: opt(str({ description: "Replacement passage in file edit (empty string deletes oldText)." })),
+		handOn: opt(bool({ description: "When adding to the shelf from a focus, hand the placement to the shared shelf on return." })),
+		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition (required on file rebind; omit elsewhere for the live version)." })),
+		planItem: opt(str({ description: "Optional authorized change plan item ID on file create/edit/remove; inferred from the active change focus when omitted." })),
 	});
 	const validate = compile(validationSchema, { coerce: true });
 	const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";
 	const joinList = (items) => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 	/** The generic interpreter over CAPABILITIES; the one place the call grammar is enforced. */
-	const checkCall = (target, action, args) => {
+	const checkCall = (target, action, args, rawArgs = args) => {
 		const spec = capabilityFor(target, action);
 		if (spec === undefined) return { unsupported: true };
+		if (nonEmpty(rawArgs?.id) && typeof rawArgs?.ref?.id === "string" && rawArgs.id.trim() !== rawArgs.ref.id.trim()) {
+			return { problems: ["matching `id` and `ref.id` (pass `id` alone unless pinning `ref.version`)"] };
+		}
 		const problems = [];
 		if (args.ref !== undefined && !validateReference(args.ref)) {
 			// Where the kind can be inferred (the shelf: from what the ID is), an id-carrying ref is enough;
 			// the executor resolves it and says precisely when it cannot.
-			const idOnly = spec.refInfer === true && typeof args.ref === "object" && args.ref !== null && typeof args.ref.id === "string" && args.ref.id.trim() !== "";
-			if (!idOnly) return { problems: [spec.refInfer === true ? "a ref with an `id` (the namespace and kind are inferred from it), or an explicit project-relative path" : "a ref with an `id`"] };
+			const idOnly = spec.refInfer === true && typeof args.ref === "object" && args.ref !== null && nonEmpty(args.ref.id);
+			if (!idOnly) return { problems: [spec.refInfer === true ? "id or path" : "`id` (or `ref` with `id`)"] };
 		}
-		const kind = spec.refKind ?? target;
-		const article = /^[aeiou]/i.test(kind) ? "an" : "a";
-		if (spec.ref === "required" && args.ref === undefined) problems.push(`${article} ${kind} reference ({ \"id\": … } is enough)`);
-		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "ref or path");
+		if (spec.ref === "required" && args.ref === undefined) problems.push("`id`");
+		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "`id` or `path`");
+		if (spec.confirmOk && args.ref === undefined && !nonEmpty(args.name) && !(Array.isArray(args.names) && args.names.some(nonEmpty))) problems.push("`id` (or `names`)");
+		if (spec.lookOk && args.ref === undefined && !nonEmpty(args.name) && !nonEmpty(args.path)) problems.push("`id`, `name` or `path`");
 		for (const field of spec.fields ?? []) if (!nonEmpty(args[field])) problems.push(field);
-		if (spec.operation === "required") {
-			if (args.operation === undefined) problems.push(spec.hint ?? "an operation payload");
-			else for (const field of spec.operationFields ?? []) if (!nonEmpty(args.operation?.[field])) problems.push(`operation.${field}`);
-		}
+		for (const field of spec.exactFields ?? []) if (typeof args[field] !== "string" || args[field] === "") problems.push(field);
+		for (const field of spec.stringFields ?? []) if (typeof args[field] !== "string") problems.push(field);
 		return { problems };
 	};
 	return defineTool({
@@ -1047,10 +1175,9 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			}
 			const value = result.value;
 			if (value.target === undefined || value.action === undefined) throw new Error('Validation failed for tool "book": target and action are both required.');
-			const ref = normalizeRef(brainDir, value.ref, value.target);
 			// The harness hands the call's arguments to tools deeply frozen; never mutate them, carry a new object.
-			const prepared = ref === undefined ? { ...value } : { ...value, ref };
-			const { unsupported, problems } = checkCall(value.target, value.action, prepared);
+			const prepared = normalizeArgs(brainDir, value);
+			const { unsupported, problems } = checkCall(value.target, value.action, prepared, value);
 			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.${CAPABILITIES[value.target] === undefined ? "" : ` Supported actions for ${value.target}: ${Object.keys(CAPABILITIES[value.target]).join(", ")}.`}`);
 			if (problems.length > 0) {
 				const guide = guideFor(value.target, value.action);
@@ -1068,10 +1195,8 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		execute: async (args, api, callContext) => {
 			if (args.target !== undefined) {
 				const main = api.conversationId === ROOT_CONVERSATION_ID;
-				const mutation = args.target === "file" && ["create", "edit", "remove"].includes(args.action);
-				if (main && mutation && (typeof args.planItem !== "string" || args.planItem.trim() === "")) return fail("file create/edit/remove needs an authorized change planItem; first get it approved in the plan.");
 				takeWarnings(); // drop any note raised before this call started, so a call reports only its own
-			if (main && args.target === "file" && args.action === "rebind") {
+				if (main && args.target === "file" && args.action === "rebind") {
 					const taskArgs = {
 						brief: `Perform exactly one bounded book operation, then return immediately. Call book once with these exact arguments: ${JSON.stringify(args)}. Do not broaden scope, do not make project changes, and return its result.`,
 					};

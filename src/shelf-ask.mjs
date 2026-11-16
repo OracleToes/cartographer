@@ -14,7 +14,7 @@
 // several, the agent gives the numbers of the ones to shelf ("yes" shelves them all; "1 3" shelves those; "no"
 // shelves none). Shelving outcomes are told with a note on the agent's next tool result.
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { resolveFile } from "./catalog.mjs";
+import { ensureCatalog, fileReference, resolveFile } from "./catalog.mjs";
 import { loadContext, persistShelfSnapshot, shelfItem, taskState, updateContext } from "./context.mjs";
 import { warn } from "./warnings.mjs";
 
@@ -34,8 +34,9 @@ const callIdOf = (call) => (typeof call?.id === "string" ? call.id : undefined);
 /** What the entry looks like in the question: the path if it was given one, the stable id otherwise. */
 const entryOf = (args) => {
 	if (typeof args?.path === "string" && args.path.trim() !== "") return { path: args.path.trim(), display: args.path.trim() };
-	const id = args?.ref?.id;
-	return { path: undefined, ref: args?.ref, display: typeof id === "string" ? `file ${id}` : "a file" };
+	const rawId = typeof args?.id === "string" && args.id.trim() !== "" ? args.id.trim() : (typeof args?.ref?.id === "string" && args.ref.id.trim() !== "" ? args.ref.id.trim() : undefined);
+	const ref = args?.ref ?? (rawId !== undefined ? { id: rawId } : undefined);
+	return { path: undefined, ref, display: rawId !== undefined ? `file ${rawId}` : "a file" };
 };
 
 /**
@@ -154,8 +155,21 @@ export function settleShelfAsk(conversationId, message, { root, brainDir }) {
 	for (const index of picks) {
 		const file = ask.files[index];
 		let path = file.path;
+		let resolvedRef = file.ref;
 		if (path === undefined && file.ref !== undefined) {
-			try { path = resolveFile(root, brainDir, file.ref)?.record?.path; } catch { path = undefined; }
+			try {
+				const namespace = file.ref.namespace ?? ensureCatalog(brainDir).namespace;
+				const candidate = { ...file.ref, namespace, kind: file.ref.kind ?? "file" };
+				const resolved = resolveFile(root, brainDir, candidate);
+				if (resolved.status === "live") {
+					path = resolved.record.path;
+					resolvedRef = { namespace, kind: "file", id: candidate.id, ...(candidate.version ? { version: candidate.version } : {}) };
+				} else if (candidate.version === undefined && !/^f(\d+|-[0-9a-f]{8}-)/i.test(candidate.id)) {
+					const fileRef = fileReference(root, brainDir, candidate.id);
+					path = resolveFile(root, brainDir, fileRef)?.record?.path;
+					resolvedRef = { namespace: fileRef.namespace, kind: "file", id: fileRef.id };
+				}
+			} catch { path = undefined; }
 		}
 		if (typeof path !== "string" || path.trim() === "") {
 			warn(`The shelf did not take the file asked for (\`${file.display}\`): its path could not be resolved.`);
@@ -164,7 +178,7 @@ export function settleShelfAsk(conversationId, message, { root, brainDir }) {
 		try {
 			const existing = mine();
 			const picked = shelfItem(root, path, undefined, brainDir, existing);
-			const item = { ...picked.item, ...(file.ref ? { target: file.ref } : {}) };
+			const item = { ...picked.item, ...(resolvedRef ? { target: resolvedRef } : {}) };
 			persistShelfSnapshot(brainDir, item, picked.backing);
 			updateContext(brainDir, (next) => {
 				const list = main ? next.shelf : (taskState(next, conversationId).shelf ??= []);

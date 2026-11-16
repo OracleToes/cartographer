@@ -846,8 +846,11 @@ function shelfBlock(root, items, max, brainDir) {
 
 // ─── The front block ─────────────────────────────────────────────────────────
 
+/** The heading of the finished-tasks section in the collapse block; written and dressed identically. */
+const REPORT_HEADING = "Finished tasks (`book` with target=context, action=recall, id brings a report back in full)";
+const LEGACY_REPORT_HEADING = "Finished tasks (`book` with book context, action recall and the id brings a report back in full)";
 /** The heading of the salient-notes section in the collapse block; written and dressed identically. */
-const SALIENT_HEADING = "Salient notes (ledger notes marked salient; `book` with target=ledger, action=edit, salient: false drops the mark)";
+const SALIENT_HEADING = "Salient notes (ledger notes marked salient; `book` with target=ledger, action=edit, id, salient: false drops the mark)";
 /** One salient line of the front block: the minute the note was taken, then the entry. Written and re-dressed identically. */
 const salientLine = (item) => `${clock(item.added)}  ${entryLine(item)}`;
 /** The prefix of the shelf section's heading; dressFrontRows finds the section by it. */
@@ -910,7 +913,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn, calls
 			OPEN,
 			`${HEAD} My context was collapsed at ${clock(now)} (${reason}). What I had in view before is gone except for what stands here: the finished tasks,${salient.length > 0 ? " my salient notes," : ""} my shelf, the last of my talk with ${USER_NAME}, and the calls of the stretch before the collapse. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.`,
 			"",
-			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
+			REPORT_HEADING,
 			record.text,
 			...(salient.length > 0 ? ["", SALIENT_HEADING, ...salient.map(salientLine)] : []),
 			"",
@@ -1159,7 +1162,7 @@ export function dressReads(messages) {
 function dressFrontRows(message, store, salient) {
 	let text = textOf(message);
 	const currentRows = store.front?.rows ?? [];
-	const reportHeading = "Finished tasks (`book` with book context, action recall and the id brings a report back in full)";
+	const reportHeading = text.includes(`${REPORT_HEADING}\n`) ? REPORT_HEADING : LEGACY_REPORT_HEADING;
 	const reportStart = text.indexOf(`${reportHeading}\n`);
 	const shelfStart = text.indexOf(`\n\n${SHELF_PREFIX}`, reportStart);
 	if (reportStart >= 0 && shelfStart >= 0) {
@@ -1190,7 +1193,7 @@ export function dressMain(messages, brainDir) {
 		if (active && !store.dropped.includes(id)) return message;
 		if (record?.archived === true) return withText(message, `[Report ${id} is archived. Its record: ${recordLine(record)}.]`);
 		if (record !== undefined && !active) return withText(message, `[Report ${id} is queued to enter context at the next boundary: ${recordLine(record)}.]`);
-		if (store.dropped.includes(id)) return withText(message, `[I dropped report ${id} from view. Its record: ${record ? recordLine(record) : "(no line kept)"}. \`book\` with target=context, action=recall and ${id} brings it back.]`);
+		if (store.dropped.includes(id)) return withText(message, `[I dropped report ${id} from view. Its record: ${record ? recordLine(record) : "(no line kept)"}. \`book\` with target=context, action=recall, id="${id}" brings it back.]`);
 		if (record === undefined) return withText(message, `[Report ${id} was deleted from the brain and is no longer in context.]`);
 		return message;
 	});
@@ -1239,7 +1242,7 @@ export function callWords(call) {
 	if (call.name === "book") {
 		const target = typeof args.target === "string" && args.target !== "" ? args.target : "book";
 		const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
-		const what = args.ref?.id ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
+		const what = args.id ?? args.ref?.id ?? args.path ?? args.name ?? args.kind ?? args.mode ?? args.text ?? args.gist ?? "";
 		return `${target} ${action}${what === "" ? "" : ` ${oneLine(String(what), POLICY.limits.context.bookWordsChars)}`}`.trim();
 	}
 	return `${call.name} ${oneLine(JSON.stringify(args), POLICY.limits.context.genericCallChars)}`;

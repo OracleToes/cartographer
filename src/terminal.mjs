@@ -94,8 +94,9 @@ export function describeCall(call, describeRef) {
 		case "book": {
 			const target = typeof args.target === "string" && args.target !== "" ? args.target : "";
 			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
-			const refText = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== "" ? describeRef?.(args.ref) ?? args.ref.id : undefined;
-			const what = refText ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
+			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== "" ? args.ref : (typeof args.id === "string" && args.id !== "" ? { ...(target !== "" && target !== "shelf" ? { kind: target } : {}), id: args.id } : undefined);
+			const refText = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : undefined;
+			const what = refText ?? args.path ?? args.name ?? args.kind ?? args.mode ?? args.text ?? args.gist ?? "";
 			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
 		}
 		case "read": {

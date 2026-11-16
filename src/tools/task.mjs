@@ -72,7 +72,7 @@ function kindOf(brainDir, item, gate) {
 	const found = plan.items.find((entry) => entry.id === String(item).trim());
 	if (found === undefined) {
 		const ids = plan.items.map((entry) => entry.id).join(", ");
-		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `plan` first, or leave `item` out for a task that reads only." : `The plan has ${ids}.`}` };
+		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `book` (target=plan) first, or leave `item` out for a task that reads only." : `The plan has ${ids}.`}` };
 	}
 	if (found.status === POLICY.enums.entryStatus.done) return { refusal: `${found.id} is marked done. For further work, add a new item to the plan.` };
 	// Approval is per item: a change item runs once the user has approved it (requests), once the
@@ -110,7 +110,6 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			let text = textOf({ content: result.output });
 			if (handed.added.length > 0) text += `\n\nThe task put on my shelf; these snapshots are in view now and will stand at the next collapse: ${handed.added.join(", ")}.\n\n${handed.snapshots.join("\n\n")}`;
 			if (handed.refused.length > 0) text += `\n\nThe task wanted on my shelf, but it would not fit: ${handed.refused.join(", ")}.`;
-			text += `\n\nInternal checkpoint for the orchestrating context: yes or no—should this outcome add or change anything in the shared atlas, ledger, or assessment? If yes, perform only those brain-scoped book operations now; if no, continue with the outcome. This does not bypass ${USER_NAME}'s approval or project safety gates.`;
 			// The report is kept under an id, and one line of it goes into the record a collapse keeps
 			// (src/context.mjs). The id is taken once, also when this call runs again after a restart.
 			const id = (await api.memo("record", callContext)) ?? (await api.memo("record", reserveId(brainDir), callContext));
@@ -333,7 +332,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 							marked = `\n\n[My record: the task returned done, so ${run.item} is marked done in the plan. If the report or the record below shows that something is missing, add an item for it.]`;
 						}
 					} catch (error) {
-						marked = `\n\n[My record: ${run.item} could not be marked done (${error.message}); mark it with \`plan\`.]`;
+						marked = `\n\n[My record: ${run.item} could not be marked done (${error.message}); mark it with \`book\` (target=plan, action=done).]`;
 					}
 				} else marked = `\n\n[My record: the task returned not done, so ${run.item} stays open in the plan.]`;
 			} else if (!returned.done) marked = "\n\n[My record: the task returned not done.]";

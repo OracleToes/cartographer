@@ -18,17 +18,18 @@ import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
-import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine } from "../src/context.mjs";
+import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, dressMain, KEPT_AS } from "../src/context.mjs";
 import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
+import { taskTool } from "../src/tools/task.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest, withoutAdditions } from "../src/request.mjs";
-import { TOOLS, systemPrompt } from "../src/prompt.mjs";
+import { TOOLS, TASK_HANDOFF, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
@@ -152,15 +153,16 @@ test("assessment: the book tool writes it whole, and /assessment reads the file"
 	const { brainDir, root } = fresh(t);
 	const tool = bookTool({ root, brainDir, config: {}, engine: { messagesOf: () => [] } });
 	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "test-assessment-write", now: () => Date.now(), executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	const result = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "A dice roller. Builds with npm test." } }), api, undefined);
+	const result = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", text: "A dice roller. Builds with npm test." }), api, undefined);
 	assert.equal(result.isError, undefined, JSON.stringify(result.output));
 	assert.match(readFileSync(assessmentPath(brainDir), "utf8"), /A dice roller\./);
 	assert.match(result.output[0].text, /Assessment saved \(36 characters/);
-	// An empty assessment is refused at the door, and the file is untouched.
-	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "" } }), /operation.text/);
+	// An empty assessment is refused at the door, and the file is untouched; the retired `operation` envelope is rejected.
+	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", text: "" }), /text/);
+	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "nope" } }), /operation|unknown|additional/i);
 	// An over-long one is clipped and says so.
 	const long = "x".repeat(4000);
-	const clipped = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", operation: { text: long } }), api, undefined);
+	const clipped = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", text: long }), api, undefined);
 	assert.equal(clipped.isError, undefined);
 	assert.equal(readFileSync(assessmentPath(brainDir), "utf8").trim().length <= 3001, true);
 });
@@ -289,19 +291,29 @@ test("atlas: the ref system takes the node, end to end through the book tool", a
 	// which the replay guard swallows on purpose.
 	let serial = 0;
 	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `t${++serial}`, now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
-	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source." } }), api(), undefined);
+	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", name: "src", gist: "The source." }), api(), undefined);
 	assert.ok(!added.isError, added.output[0].text);
 	const id = loadAtlas(brainDir).atlas.nodes[0].id;
 	assert.match(id, /^c\d+$/, "the node came back with a c-id");
 	const listed = await tool.execute({ target: "atlas", action: "list" }, api(), undefined);
 	assert.match(listed.output[0].text, new RegExp(`"id": "${id}"`), "and `list` returns a ref to it");
-	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", ref: { id }, operation: {} }), api(), undefined);
+	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", id }), api(), undefined);
 	assert.ok(!confirmed.isError, confirmed.output[0].text);
-	assert.match(confirmed.output[0].text, new RegExp(`${id} src confirmed\.`), "confirming by the id alone reaches the node");
-	const renamed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "rename", ref: { id }, operation: { to: "source" } }), api(), undefined);
+	assert.match(confirmed.output[0].text, new RegExp(`${id} src confirmed\\.`), "confirming by top-level id reaches the node");
+	const renamed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "rename", id, to: "source" }), api(), undefined);
 	assert.ok(!renamed.isError, renamed.output[0].text);
 	assert.equal(loadAtlas(brainDir).atlas.nodes[0].name, "source", "and the rename moves the name, not the id");
 	assert.equal(loadAtlas(brainDir).atlas.nodes[0].id, id);
+	// Node name lookup works anywhere `id` is accepted (`edit`, `read`, `look`, `confirm`).
+	const editedByName = await tool.execute(tool.prepareArguments({ target: "atlas", action: "edit", id: "source", gist: "Updated source.", files: ["src/app.mjs"] }), api(), undefined);
+	assert.ok(!editedByName.isError, editedByName.output[0].text);
+	const readByName = await tool.execute(tool.prepareArguments({ target: "atlas", action: "read", id: "source" }), api(), undefined);
+	assert.ok(!readByName.isError, readByName.output[0].text);
+	assert.equal(readByName.details.ref.id, id);
+	const lookedById = await tool.execute(tool.prepareArguments({ target: "atlas", action: "look", id }), api(), undefined);
+	assert.ok(!lookedById.isError && lookedById.output[0].text.includes("Updated source."));
+	const batchConfirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", names: ["source"] }), api(), undefined);
+	assert.ok(!batchConfirmed.isError, batchConfirmed.output[0].text);
 });
 
 test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
@@ -311,9 +323,10 @@ test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
 	const { ref } = observeFile(root, brainDir, "src/index.html");
 	const describeRef = createRefDescriber({ brainDir });
 	assert.equal(describeRef(ref), `index.html (${ref.id})`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", id: ref.id } }, describeRef), `book file read index.html (${ref.id})`);
 	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", ref } }, describeRef), `book file read index.html (${ref.id})`);
 	// What a call means without a describer is unchanged: the bare id.
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", ref } }), `book file read ${ref.id}`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", id: ref.id } }), `book file read ${ref.id}`);
 });
 
 test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t) => {
@@ -322,10 +335,11 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 	writeFileSync(join(root, "src", "app.mjs"), "console.log(1)\n");
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "t1", now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source." } }), api, undefined);
+	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", name: "src", gist: "The source." }), api, undefined);
 	const node = loadAtlas(brainDir).atlas.nodes[0];
 	const describeRef = createRefDescriber({ brainDir });
 	assert.equal(describeRef({ kind: "atlas", id: node.id }), `src (${node.id})`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", id: node.id } }, describeRef), `book atlas confirm src (${node.id})`);
 	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: node.id } } }, describeRef), `book atlas confirm src (${node.id})`);
 });
 
@@ -748,7 +762,7 @@ test("plan: an item approved one by one is authorized everywhere the agent is to
 	assert.match(planSummary(plan), /authorized$/);
 });
 
-test("change gate: a focus carries an approved item whatever the history's length; a stranger is refused", async (t) => {
+test("change gate: a focus carries an approved item whatever the history's length; planItem is inferred; a stranger is refused", async (t) => {
 	const { root, brainDir } = fresh(t);
 	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
 	approveRequests(brainDir, ["p1"]);
@@ -764,64 +778,81 @@ test("change gate: a focus carries an approved item whatever the history's lengt
 		carry: { conversationId: focus, executeTool: async (name, args) => { writes.push([name, args]); return { isError: false, structuredOutput: "Wrote src/new.txt: 1 line, a new file." } } },
 		stranger: { conversationId: 4242, executeTool: async () => { throw new Error("must not be reached"); } },
 	};
-	const ok = await tool.execute({ target: "file", action: "create", path: "src/new.txt", content: "hello\n", planItem: "p1" }, apis.carry, undefined);
-	assert.equal(writes.length, 1, "the authorized focus reached the nested write");
+	// Omitting `planItem` infers `p1` directly from the focus's recorded task state.
+	const inferred = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/new.txt", content: "hello\n" }), apis.carry, undefined);
+	assert.equal(writes.length, 1, "the authorized focus reached the nested write without repeating planItem");
 	assert.equal(writes[0][0], "write");
-	assert.equal(ok.isError, false);
+	assert.equal(inferred.isError, false);
+	// Matching `planItem` still works; a mismatched explicit `planItem` is refused.
+	const matching = await tool.execute({ target: "file", action: "create", path: "src/new2.txt", content: "hello\n", planItem: "p1" }, apis.carry, undefined);
+	assert.equal(matching.isError, false);
+	const mismatch = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n", planItem: "p9" }, apis.carry, undefined);
+	assert.equal(mismatch.isError, true);
+	assert.match(mismatch.output[0].text, /not carrying/);
 	updateContext(brainDir, (store) => {
 		Object.assign(taskState(store, "4242"), { purpose: "nosy", item: "p2", mode: "look" });
 	});
-	const no = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n", planItem: "p1" }, apis.stranger, undefined);
+	const no = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n" }, apis.stranger, undefined);
 	assert.equal(no.isError, true);
 	assert.match(no.output[0].text, /not carrying/);
 });
 
-test("file edit: the ID alone is enough, and it always points at the live version", async (t) => {
+test("file edit: top-level id or path is enough, and always points at the live version", async (t) => {
 	const { root, brainDir } = fresh(t);
 	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the throw." }), null);
 	approveRequests(brainDir, ["p1"]);
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "dice.js"), "const a = 1;\nconst b = 2;\n");
+	writeFileSync(join(root, "src", "extra.js"), "export const x = 1;\n");
 	const { ref } = observeFile(root, brainDir, "src/dice.js");
 	const id = ref.id;
-	// The agent never sees a namespace, a kind or a 64-character hash: only the file's ID.
+	// The agent never sees a namespace, a kind or a 64-character hash: only the file's ID or path.
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	const focus = 7777;
 	updateContext(brainDir, (store) => {
 		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
 	});
-	const [, edit] = changeTools({ root, brainDir });
+	const [, edit, rm] = changeTools({ root, brainDir });
 	const focusApi = { conversationId: focus, executeTool: async (name, args) => {
-		if (name !== "edit") throw new Error(`unexpected nested tool ${name}`);
-		const nested = await edit.execute(args);
+		const impl = name === "edit" ? edit : name === "rm" ? rm : undefined;
+		if (!impl) throw new Error(`unexpected nested tool ${name}`);
+		const nested = await impl.execute(args);
 		// What the harness does with a nested call's result: flag + structured output.
 		return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
 	} };
 
-	// `file read` by the ID alone: the bytes as they are, no line numbers, and the ID to edit by.
-	const read = await tool.execute({ target: "file", action: "read", ref: { id } }, focusApi, undefined);
+	// `file read` by top-level `id`: the bytes as they are, no line numbers, and the ID to edit by.
+	const read = await tool.execute(tool.prepareArguments({ target: "file", action: "read", id }), focusApi, undefined);
 	const readText = read.output[0].text;
 	assert.ok(readText.includes("const a = 1;\nconst b = 2;"), `the read shows the exact bytes:\n${readText}`);
 	assert.ok(!/\d+ │ /.test(readText) && !/│/.test(readText), "no line numbers in the read");
 	assert.ok(readText.includes(`file ${id}`), "and it says which file ID it is");
 
-	// `file edit` by the ID alone.
-	const firstEdit = await tool.execute({ target: "file", action: "edit", ref: { id }, oldText: "const b = 2;\n", newText: "const b = 3;\n", planItem: "p1" }, focusApi, undefined);
+	// `file edit` by top-level `id` alone (with no `planItem` needed).
+	const firstEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", id, oldText: "const b = 2;\n", newText: "const b = 3;\n" }), focusApi, undefined);
 	assert.equal(firstEdit.isError, false, `the edit by ID succeeded: ${firstEdit.output[0].text}`);
 	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 1;\nconst b = 3;\n");
 
 	// The ID points at the live version: a second edit with no version anywhere must succeed too.
-	const secondEdit = await tool.execute({ target: "file", action: "edit", ref: { id }, oldText: "const a = 1;\n", newText: "const a = 10;\n", planItem: "p1" }, focusApi, undefined);
+	const secondEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", id, oldText: "const a = 1;\n", newText: "const a = 10;\n" }), focusApi, undefined);
 	assert.equal(secondEdit.isError, false, `the second edit by ID succeeded: ${secondEdit.output[0].text}`);
 	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 10;\nconst b = 3;\n");
 
+	// `file edit` and `file remove` also accept `path` directly (and empty `newText` deletes the passage).
+	const byPathEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", path: "src/extra.js", oldText: "export const x = 1;\n", newText: "" }), focusApi, undefined);
+	assert.equal(byPathEdit.isError, false, byPathEdit.output[0].text);
+	assert.equal(readFileSync(join(root, "src", "extra.js"), "utf8"), "");
+	const byPathRemove = await tool.execute(tool.prepareArguments({ target: "file", action: "remove", path: "src/extra.js" }), focusApi, undefined);
+	assert.equal(byPathRemove.isError, false, byPathRemove.output[0].text);
+	assert.equal(existsSync(join(root, "src", "extra.js")), false);
+
 	// A pinned ref is still honored as an optimistic check, and fails only because it is stale by choice.
-	const stale = await tool.execute({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n", planItem: "p1" }, focusApi, undefined);
+	const stale = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n" }), focusApi, undefined);
 	assert.equal(stale.isError, true);
 	assert.match(stale.output[0].text, /Stale|status/);
 
 	// The call label names the tool that carries it, and the result summary strips the file header like `edit`.
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", ref: { id }, oldText: "x", newText: "y" } }), `book file edit ${id}`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", id, oldText: "x", newText: "y" } }), `book file edit ${id}`);
 	assert.equal(describeResult({ toolName: "book", content: firstEdit.output, details: firstEdit.details, isError: firstEdit.isError }), "2 lines from line 2 replaced by 2 lines");
 });
 
@@ -845,26 +876,38 @@ test("write create: over the line cap the head is written and the agent is told"
 	assert.equal(clipped.clipped, true);
 });
 
-test("shelf add: the ID alone is enough, and it finds the file behind it", async (t) => {
+test("shelf add and remove: top-level id, project path in id, or path works directly", async (t) => {
 	const { root, brainDir } = fresh(t);
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\n");
+	writeFileSync(join(root, "index.html"), "<!doctype html>\n");
 	const { ref } = observeFile(root, brainDir, "src/notes.txt");
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	// Root conversation: the main shelf.
-	const focusApi = { conversationId: ROOT_CONVERSATION_ID, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
+	let taskSeq = 0;
+	const makeApi = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `shelf-${++taskSeq}`, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
 
-	// The harness runs every call through prepareArguments before dispatch; an id-only ref must survive it
-	// (it once was refused for missing kind and namespace, which the shelf infers by design).
-	const prepared = tool.prepareArguments({ target: "shelf", action: "add", ref: { id: ref.id } });
-	const added = await tool.execute(prepared, focusApi, undefined);
-	assert.ok(!added.isError, `shelf add by the ID alone succeeded: ${added.output[0].text}`);
-	const listed = await tool.execute({ target: "shelf", action: "list" }, focusApi, undefined);
+	// Top-level `id` alone survives prepareArguments and shelves the catalog file.
+	const prepared = tool.prepareArguments({ target: "shelf", action: "add", id: ref.id });
+	const added = await tool.execute(prepared, makeApi(), undefined);
+	assert.ok(!added.isError, `shelf add by top-level id succeeded: ${added.output[0].text}`);
+	const listed = await tool.execute({ target: "shelf", action: "list" }, makeApi(), undefined);
 	assert.match(listed.output[0].text, /placement/, "and the shelf holds it");
 	assert.match(listed.output[0].text, new RegExp(`"id":\\s*"${ref.id}"`), "as the file the agent saw");
 
+	// Passing an existing project path in `id` (before any prior `file read`) catalogs and shelves it on the first call.
+	const byPathInId = await tool.execute(tool.prepareArguments({ target: "shelf", action: "add", id: "index.html" }), makeApi(), undefined);
+	assert.ok(!byPathInId.isError, `shelf add with path in id succeeded: ${byPathInId.output[0].text}`);
+
+	// Removing by placement `id` (`sh1`) and by `path` both work; retired `placementId` is rejected by validation.
+	assert.throws(() => tool.prepareArguments({ target: "shelf", action: "remove", placementId: added.details.placement }), /placementId|unknown|additional/i);
+	const removedById = await tool.execute(tool.prepareArguments({ target: "shelf", action: "remove", id: added.details.placement }), makeApi(), undefined);
+	assert.ok(!removedById.isError, removedById.output[0].text);
+	const removedByPath = await tool.execute(tool.prepareArguments({ target: "shelf", action: "remove", path: "index.html" }), makeApi(), undefined);
+	assert.ok(!removedByPath.isError, removedByPath.output[0].text);
+
 	// An ID that is nothing at all is refused with a sentence, not a validation error.
-	const missing = await tool.execute({ target: "shelf", action: "add", ref: { id: "f999" } }, focusApi, undefined);
+	const missing = await tool.execute(tool.prepareArguments({ target: "shelf", action: "add", id: "f999" }), makeApi(), undefined);
 	assert.equal(missing.isError, true);
 	assert.match(missing.output[0].text, /Nothing with the ID/);
 });
@@ -883,11 +926,96 @@ test("book: prepareArguments repairs the (deeply frozen) harness arguments witho
 	assert.equal(preparedPath.target, "file");
 	assert.equal(preparedPath.action, "read");
 	assert.equal(preparedPath.ref, undefined, "no ref is invented for a path call");
-	const byRef = deepFreeze({ target: "file", action: "read", ref: { id: "f1" } });
+	const byId = deepFreeze({ target: "file", action: "read", id: "f1" });
+	const preparedId = tool.prepareArguments(byId);
+	assert.equal(preparedId.id, "f1");
+	assert.equal(preparedId.ref.id, "f1");
+	assert.ok(typeof preparedId.ref.namespace === "string" && preparedId.ref.namespace.length >= 16, "the namespace is inferred");
+	assert.equal(preparedId.ref.kind, "file", "the kind is inferred from the target");
+	const byRef = deepFreeze({ target: "file", action: "read", ref: { id: "f1", version: "a".repeat(64) } });
 	const preparedRef = tool.prepareArguments(byRef);
 	assert.equal(preparedRef.ref.id, "f1");
-	assert.ok(typeof preparedRef.ref.namespace === "string" && preparedRef.ref.namespace.length >= 16, "the namespace is inferred");
-	assert.equal(preparedRef.ref.kind, "file", "the kind is inferred from the target");
+	assert.equal(preparedRef.ref.version, "a".repeat(64));
+	assert.throws(() => tool.prepareArguments({ target: "file", action: "read", id: "f1", ref: { id: "f2" } }), /matching `id` and `ref\.id`/);
+});
+
+test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let messages = [];
+	const engine = { messagesOf: () => messages, want: () => {}, callWords: () => "book" };
+	const tool = bookTool({ root, brainDir, config: {}, engine, gate: { yolo: false } });
+	let seq = 0;
+	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `flat-${++seq}`, now: () => 1700000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
+	const run = (args) => tool.execute(tool.prepareArguments(args), api(), undefined);
+
+	// Plan: flat add, edit, done, remove, and clear.
+	const p1 = await run({ target: "plan", action: "add", mode: "look", text: "Map the entry point." });
+	assert.ok(!p1.isError && /p1 added/.test(p1.output[0].text), p1.output[0].text);
+	const p2 = await run({ target: "plan", action: "add", mode: "change", text: "Fix the roller.", before: "p1" });
+	assert.ok(!p2.isError && /p2 added/.test(p2.output[0].text), p2.output[0].text);
+	const pEdit = await run({ target: "plan", action: "edit", id: "p2", text: "Fix the dice roller." });
+	assert.ok(!pEdit.isError, pEdit.output[0].text);
+	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
+	assert.ok(!pDone.isError && /p1 marked done/.test(pDone.output[0].text), pDone.output[0].text);
+	const pRemove = await run({ target: "plan", action: "remove", id: "p2" });
+	assert.ok(!pRemove.isError && /p2 removed/.test(pRemove.output[0].text), pRemove.output[0].text);
+	await run({ target: "plan", action: "add", mode: "look", text: "Leftover item." });
+	const cleared = await run({ target: "plan", action: "clear" });
+	assert.ok(!cleared.isError && /Plan cleared/.test(cleared.output[0].text), cleared.output[0].text);
+	assert.equal(loadPlan(brainDir).plan.items.length, 0);
+
+	// Ledger: flat goal add, salient note add/edit, done, remove.
+	const g1 = await run({ target: "ledger", action: "add", kind: "goal", text: "Clean schema", done_when: "npm test passes with flat book calls" });
+	assert.ok(!g1.isError && /g1 added/.test(g1.output[0].text), g1.output[0].text);
+	const n1 = await run({ target: "ledger", action: "add", kind: "note", text: "Use top-level id.", salient: true });
+	assert.ok(!n1.isError && /n1 added/.test(n1.output[0].text), n1.output[0].text);
+	const nEdit = await run({ target: "ledger", action: "edit", id: "n1", salient: false });
+	assert.ok(!nEdit.isError, nEdit.output[0].text);
+	const gDone = await run({ target: "ledger", action: "done", id: "g1", text: "All tests pass." });
+	assert.ok(!gDone.isError && /g1 closed/.test(gDone.output[0].text), gDone.output[0].text);
+	const nRemove = await run({ target: "ledger", action: "remove", id: "n1" });
+	assert.ok(!nRemove.isError && /n1 removed/.test(nRemove.output[0].text), nRemove.output[0].text);
+
+	// Context: fold by top-level `id`, dressMain notice, and `context recall` by top-level `id`.
+	addRecord(brainDir, { id: "t1", at: 1700000000000, mode: "look", brief: "Inspect", report: `Detailed report body.\n\n${KEPT_AS("t1")}`, summary: "Inspected" });
+	messages = [{ role: "toolResult", toolCallId: "tc1", toolName: "task", content: [{ type: "text", text: `Detailed report body.\n\n${KEPT_AS("t1")}` }] }];
+	const folded = await run({ target: "context", action: "fold", id: "t1" });
+	assert.ok(!folded.isError && /Dropped from view: t1/.test(folded.output[0].text), folded.output[0].text);
+	const dressed = dressMain(messages, brainDir);
+	assert.match(dressed[0].content[0].text, /target=context, action=recall/);
+	const recalled = await run({ target: "context", action: "recall", id: "t1" });
+	assert.ok(!recalled.isError && /Report t1 stands in its place again/.test(recalled.output[0].text), recalled.output[0].text);
+
+	// Task tool no longer appends the unconditional "Internal checkpoint" prompt to task reports.
+	const memos = new Map();
+	const tTool = taskTool({ root, brainDir, config: { taskTurns: 4, maxTokens: 4096 } });
+	const taskRes = await tTool.execute({ brief: "Read index" }, {
+		conversationId: ROOT_CONVERSATION_ID,
+		taskId: "task-run-1",
+		callId: "call-1",
+		now: () => 1700000000000,
+		memo: async (k, v) => { if (v !== undefined) memos.set(k, v); return memos.get(k); },
+		details: async () => {},
+		commit: async (fn) => fn({
+			scanConversations: async () => ({ items: [{ id: "focus-1", parent: { at: 1 } }] }),
+			scanEntries: async () => ({ items: [{ conversationId: "focus-1", kind: "carto.brief", data: { mode: "look" } }] }),
+		}),
+		conversation: async () => ({
+			submit: async () => ({
+				wait: async () => {
+					updateContext(brainDir, (store) => { taskState(store, "focus-1").returned = { report: "Clean task report.", done: true }; });
+					return {};
+				},
+			}),
+		}),
+	}, undefined);
+	assert.equal(taskRes.isError, undefined);
+	assert.match(taskRes.output[0].text, /Clean task report\./);
+	assert.doesNotMatch(taskRes.output[0].text, /Internal checkpoint/);
+
+	// Prompts accurately reflect the flat `book` schema with no stale `operation` or `placementId` instructions.
+	const fullPrompt = `${systemPrompt({ root })}\n${TOOLS.book}\n${TASK_HANDOFF}`;
+	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`/);
 });
 
 test("prepend: the user's own markdown is read before the prompt — core first, brain second; nothing when absent", (t) => {
