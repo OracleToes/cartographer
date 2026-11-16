@@ -66,7 +66,7 @@ function direction(ledger, plan, yolo = false) {
 		return `${FIRST} Beyond that, nothing of the plan is left to do once.${standing}${noGoal}`;
 	}
 	if (next === undefined) {
-		const check = goals ? ` I check each open goal against its done-when line. Before I close one, I bring the assessment book up to date with \`book\` (target=assessment, action=edit) if the work changed my picture of the project: the copy at the top of my context is rewritten when a goal closes. I close the goals that are reached, tell ${USER_NAME} what was achieved and how to try it, and clear the plan.` : ` I tell ${USER_NAME} what was done and how to try it, and clear the plan.`;
+		const check = goals ? ` I check each open goal against its done-when line. Before I close one, I rewrite the assessment with \`book\` (target=assessment, action=write) if the work changed my picture of the project: the copy at the top of my context is rewritten when a goal closes. I close the goals that are reached, tell ${USER_NAME} what was achieved and how to try it, and clear the plan.` : ` I tell ${USER_NAME} what was done and how to try it, and clear the plan.`;
 		return `${FIRST} Every item of the plan is done.${check} If something is still missing, I add items for it.`;
 	}
 	if (waits) {
@@ -81,7 +81,7 @@ function direction(ledger, plan, yolo = false) {
 function focusDirection(task) {
 	const purpose = String(task?.purpose ?? task?.brief ?? "the assigned work").replace(/\s+/g, " ").trim();
 	const item = task?.item === undefined ? "" : ` Assigned plan item: ${task.item}.`;
-	return `Focus${item}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared books, atlas, or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan.`;
+	return `Focus${item}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan.`;
 }
 
 /** Said only while approval is off, as the plain state of how this session runs. Here and not in the system prompt, because the user can change it while the session runs, and the present state is all the prompt needs to carry. */
@@ -252,7 +252,7 @@ function atlasText(brainDir, root, config, now) {
 	const linked = atlas.nodes.length === 0 ? "" : ` Files a node links to: ${linkedCount(atlas, tree.files)} of ${tree.files.length}.`;
 	lines.push(
 		`Graph: ${atlas.nodes.length === 0 ? "no nodes yet" : atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`}.${linked} Assessment: ${
-			assessment.text === "" ? "none yet. I write one with `book` (target=assessment, action=add) once I know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
+			assessment.text === "" ? "none yet. I write one with `book` (target=assessment, action=write, operation { text }) once I know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
 		}`,
 	);
 	const since = sinceTop(brainDir, atlas, assessment.text);

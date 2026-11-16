@@ -24,7 +24,7 @@ The user's own framing: *the guy from Memento* — a highly capable agent that c
 
 ## 3. The brain, the context, the talk
 
-- **The brain** (`.brain/`): the ledger (goals/questions/notes), the plan, the atlas (project map + node graph), the books (assessment/practice/…), reports of finished work, the catalog (identity/versions), the context store (what a collapse keeps), and the raw Durable transcript. The user edits any of it; the agent sees hand-edits at the next step.
+- **The brain** (`.brain/`): the ledger (goals/questions/notes), the plan, the atlas (project map + node graph), the assessment (one whole text about the project), reports of finished work, the catalog (identity/versions), the context store (what a collapse keeps), and the raw Durable transcript. The user edits any of it; the agent sees hand-edits at the next step.
 - **The context**: what the model can see *now* — the system prompt, the copied top block, the collapse block, the work since, and the two per-request blocks (state, windows). It is a cache. It is rebuilt mechanically at collapse.
 - **The talk**: the user↔agent conversation, kept word for word up to `chatWindow` across collapses, and *both parties hold the pruning tool*: either may edit any message (`e`, and agent-side the soft-forget contract for messages). Poor prompting and mistakes are pruned at the source, so intent stays sharp. The user is a gardener of the conversation, not a spectator of it.
 
@@ -42,11 +42,11 @@ The user's direction, recorded verbatim in substance:
 On start, and after every wake with nothing pending, **the agent initiates**. It does not wait to be addressed. The standing duty:
 
 1. **Look.** Map the project: what it is, how it builds, how it tests, where the entry points are, what the docs claim. Record what it learns in the atlas and the assessment.
-2. **Form hypotheses and record them** — in the books (a finding, a suspicion, a question for the user) and, when a change is warranted, as plan items (default) or directly (yolo).
+2. **Form hypotheses and record them** — in the ledger (a finding, a suspicion, a question for the user) and, when a change is warranted, as plan items (default) or directly (yolo).
 3. **Verify.** Test its own hypotheses when it can. Update or strike the ones reality refutes.
 4. **Work what is approved.** Plan items in dependency order, one at a time, with the checkpoint/undo discipline.
 5. **Deepen the map.** Re-map what changed; close the gaps the atlas still shows; find weaknesses worth reporting or fixing.
-6. **Sleep only when nothing remains.** `sleep` is the answer to *"I can find nothing to do"* — reached through a written checklist, stated to itself first: no user message waiting; no wake owed; no approved open plan item; no open question owed to the user; no hypothesis in the books untested; the atlas covers the in-scope ground at the tree depth in view; no fragility found-but-unplanned. Only then sleep. Sleep is not a mood; it is a conclusion with evidence.
+6. **Sleep only when nothing remains.** `sleep` is the answer to *"I can find nothing to do"* — reached through a written checklist, stated to itself first: no user message waiting; no wake owed; no approved open plan item; no open question owed to the user; no hypothesis in the ledger untested; the atlas covers the in-scope ground at the tree depth in view; no fragility found-but-unplanned. Only then sleep. Sleep is not a mood; it is a conclusion with evidence.
 
 In **default mode**, the user's silence means "not authorized yet," not "don't look." Looking is free. Changing waits its turn in the queue — and the queue shows everything waiting in one place (the Requests view), which is what makes async approval scale past a handful of items.
 
@@ -68,7 +68,7 @@ The automatic out-of-brain focus dispatch (`externalWork`) and the `mainLooks` r
 - **The collapse is a breath, not a crisis.** While the agent rests and enough would go; when a goal closes; at the ceiling — the context is replaced mechanically with a fixed, known keep-set (records of finished tasks, the shelf, the talk, plus a verbatim carry of what the last reply just did). No summarization, no negotiation, no request-shaped ceremony that demands a 0.6B-grade act of metacognition in the least capable moment of the window.
 - **The agent tends its own context.** The state block tells it the truth (how full; what stands in full with recall by id) and instrumentation (`/context`) is always available. The 27B manages its working set deliberately; the harness backstops at the ceiling. Fold is how it shrinks what it carries mid-session; recall is how it brings anything back.
 - **One-line provenance in the state block, not diffs.** (Proposal — see Open decisions.) "`src/foo.mjs` changed since its snapshot" is enough; the diff is a tool call away, not prompt cargo.
-- **The keep-set is small on purpose.** Finished tasks as one-liners + recall; the shelf pinned by the agent; the talk capped at `chatWindow`. Identity, plan, ledger, atlas and books are never in the conversation — a collapse cannot touch them.
+- **The keep-set is small on purpose.** Finished tasks as one-liners + recall; the shelf pinned by the agent; the talk capped at `chatWindow`. Identity, plan, ledger, atlas and the assessment are never in the conversation — a collapse cannot touch them.
 - **Nothing is lost, anything is forgettable.** Soft-forget (message edit) is the confirmed contract, unchanged: the agent may drop its messages from view; the Durable transcript remains, append-only, forensically recoverable. Reclaiming storage is a separate lifecycle, not this design's job (see Open).
 
 ## 8. The shared brain — one engine, two doors
@@ -77,7 +77,7 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 
 - Today: the agent has `book target/action` (validated locally, actionable errors); the screen has the Hands view (shelf/rows/reports with `f`/`v`/`x`/`d`, curated rows via `/row`), the Carto tab (ledger/plan/atlas), and assorted `/` commands — overlapping but not identical, and each hand-implemented.
 - The design: the `book` capability table is the single source of truth for brain operations. The model's door validates per `target`/`action`; the terminal's door performs the same operations inline (with the same checks and the same messages) or through existing commands; the screen becomes an editor *of the same artifacts*, exposing the same verbs (`fold`/`recall`/`archive`/`shelve`/…), with the same refusals.
-- Concretely, the brain on screen gets the parity the agent has and lacks today: plan items with mode/network/standing and their approval state, ledger edits, atlas nodes, books entries, reports, shelf placements — all editable in place, all with the same preconditions (expectedVersion) and the same messages. The user gardens the brain as fluently as the agent does.
+- Concretely, the brain on screen gets the parity the agent has and lacks today: plan items with mode/network/standing and their approval state, ledger edits, atlas nodes, the assessment, reports, shelf placements — all editable in place, all with the same preconditions (expectedVersion) and the same messages. The user gardens the brain as fluently as the agent does.
 - The chat remains the steering wheel: always available, reaches the agent immediately (it interrupts a turn naturally via the next result), and every user/agent message stays editable by both parties.
 
 ## 9. What the harness guarantees, always

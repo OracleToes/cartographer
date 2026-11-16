@@ -2,7 +2,7 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.brain/`, which holds the agent's memory of that project.
 
-Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and books are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update shared books and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with tabs for chat, the brain, changes, shell windows, and context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with tabs for chat, the brain, changes, shell windows, and context. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
@@ -88,8 +88,8 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | `+` and `-` | Open everything, fold everything (`zR` and `zM` do the same) |
 | Ctrl-D, Ctrl-U | Scroll half a page. Ctrl-F and Ctrl-B a page, Ctrl-E and Ctrl-Y a row |
 | `/` | Search the tab that shows. Enter or Down goes to the next match, Up to the one before, Esc closes the search |
-| `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item, a node or an entry of the books at the line where it stands in its file. In Chat, a message of yours or of the agent (see [Saying a message anew](#saying-a-message-anew)); tool work cannot be edited, and neither can what Cartographer printed. In Context, whatever has a source to edit: the system prompt's wording in `src/prompt.mjs`, a tool of the unfolded Tools part where it is defined, the assessment file, the store of what the last collapse keeps, a shelved file, and the chat messages (see [Saying a message anew](#saying-a-message-anew)). The row under the tabs names the file, where there is one |
-| `f`, `v`, `d`, `x`, `t`, `n` | On a row of any view but Chat: `f` folds a report out of view or brings it back (in Hands), `v` archives it out of what the agent reads — a report's record line, a ledger entry, a plan item, an entry of the books, a node — or brings it back, `d` deletes it for good (`d` again says so), `x` takes a shelved file off the shelf (in Hands), `t` settles it the way the agent settles one (a ledger entry is closed, a plan item done, an entry of the books settled, a node confirmed). In Carto's book views (Atlas, Ledger, Plan, Books), `n` opens `$EDITOR` on a template for a new entry; what you save goes in through the same operations the agent uses. `a` puts `/shelve` in the place to type (in Hands) or approves the request (in Requests) |
+| `e` | Open what is selected in `$EDITOR` (or `$VISUAL`; `vi` when neither is set): a file of the Tree, a changed file at its first changed line, and a ledger entry, a plan item or a node at the line where it stands in its file. In Chat, a message of yours or of the agent (see [Saying a message anew](#saying-a-message-anew)); tool work cannot be edited, and neither can what Cartographer printed. In Context, whatever has a source to edit: the system prompt's wording in `src/prompt.mjs`, a tool of the unfolded Tools part where it is defined, the assessment file, the store of what the last collapse keeps, a shelved file, and the chat messages (see [Saying a message anew](#saying-a-message-anew)). The row under the tabs names the file, where there is one |
+| `f`, `v`, `d`, `x`, `t`, `n` | On a row of any view but Chat: `f` folds a report out of view or brings it back (in Hands), `v` archives it out of what the agent reads — a report's record line, a ledger entry, a plan item, a node — or brings it back, `d` deletes it for good (`d` again says so), `x` takes a shelved file off the shelf (in Hands), `t` settles it the way the agent settles one (a ledger entry is closed, a plan item done, a node confirmed). In Carto's views (Atlas, Ledger, Plan), `n` opens `$EDITOR` on a template for a new entry; what you save goes in through the same operations the agent uses. `a` puts `/shelve` in the place to type (in Hands) or approves the request (in Requests) |
 | `y`, `Y` | Copy what is selected; copy the whole tab |
 | `r` | Read the tab again |
 | `:` | Type a command |
@@ -267,7 +267,6 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `● plan  + p2 [change] …` | The agent changed its plan, with the same signs. `[change, network]`: the item's commands may reach the network. `[change, standing]`: a duty that stays open and may be carried out again and again |
 | `◂ atlas  wrote roller, cli` | What a task did to the graph: nodes it wrote or removed, and nodes its changes left possibly out of date |
 | `● atlas  + component roller …` | The main agent changed the graph itself: `+` written, `~` rewritten, `-` removed, `✓` confirmed. Also where it moved the tree |
-| `● a3 [assessment] The tests check nothing yet` | The agent added an entry to one of its books (`assess`) |
 | `● top of the context rewritten` | The copy of the assessment and the graph at the start of the agent's context was replaced with the current ones. The next answer reads the whole context again |
 | `atlas: 3 nodes · assessment written 2 h ago` | At the start: what the atlas holds |
 | `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2` |
@@ -284,15 +283,15 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
 | `/fold ID …` | What the agent does with `fold`: take a kept report out of view, leaving its one line |
 | `/recall ID …` | Bring a kept report back into view in full |
-| `/archive ID …`, `/unarchive ID …` | Take a row out of what the agent reads for good, or bring it back: a report's record line, a ledger entry, a plan item, an entry of the books, a node of the graph. The row stays on disk either way |
-| `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a plan item is done, an entry of the books is settled, a node is confirmed |
+| `/archive ID …`, `/unarchive ID …` | Take a row out of what the agent reads for good, or bring it back: a report's record line, a ledger entry, a plan item, a node of the graph. The row stays on disk either way |
+| `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed |
 | `/delete ID …` | Remove a report for good: its record line and its file. Nothing recalls it again |
 | `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
 | `/model`, `/model NAME` | The models the server serves, each with its own window where the server reports one, and which is on; a name or a number from the list switches. A task forked after runs on it too, and the context window follows |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, whether its change items are approved, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
-| `/assessment`, `/practice`, `/books` | The two books: the assessment of the project, the agent's notes on how it works, or both, and where the file is |
+| `/assessment` | The agent's summary of the project, and where the file is |
 | `/requests` | What waits for you: change items to approve and questions of taste to answer |
 | `/approve ID …` | Approve those requests. `/approve` alone approves the plan as it stands, the old whole-plan way |
 | `/deny ID [why]` | Turn one request down: a change item is taken out of the plan, a question closed |
@@ -300,7 +299,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
 | `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. The settings can hold the default (`yolo`); a switch while running is never remembered. See [Without approval](#without-approval-yolo) |
-| `/initiate`, `/initiate on`, `/initiate off` | Whether the agent starts working on its own when carto starts (it looks around, tends the books and works what is approved, or sleeps when there is nothing to do). The settings can hold the default (`initiate`); a switch while running is never remembered |
+| `/initiate`, `/initiate on`, `/initiate off` | Whether the agent starts working on its own when carto starts (it looks around, tends the map and works what is approved, or sleeps when there is nothing to do). The settings can hold the default (`initiate`); a switch while running is never remembered |
 | `/wakes`, `/wakes remove ID`, `/wakes remove all` | What the agent has set to wake itself, and taking one or all of them away |
 | `/diff` | What the last change task did to the files, as a patch; or a shell window, when that is the newest step. `/diff all` shows a long patch in full |
 | `/undo` | Take the last step back: a change task, or what a shell window changed with no task around. Again for the one before it |
@@ -363,14 +362,14 @@ Going up from the folder you are in, the first folder that has a Cartographer br
 
 ## How it works
 
-The orchestrating context talks with you and decides what focused work to do. It cannot call project file or command tools itself, so it starts one `task` focus with a brief; a change focus must name an open, user-authorized plan item. A task is a forked working conversation of this same agent. It receives a fresh state block, shares the durable books and atlas, and may keep findings there while it works. Only the orchestrating context changes the plan.
+The orchestrating context talks with you and decides what focused work to do. It cannot call project file or command tools itself, so it starts one `task` focus with a brief; a change focus must name an open, user-authorized plan item. A task is a forked working conversation of this same agent. It receives a fresh state block, shares the durable ledger, atlas and assessment, and may keep findings there while it works. Only the orchestrating context changes the plan.
 
-The focus is temporary, not a second mind: when it returns, the orchestrating context receives its report and shared-memory updates, while its detailed working conversation may leave active context. This soft-forget does not erase the underlying Durable transcript. The focus should know this and keep the facts needed later in the ledger, books, atlas, context shelf, or report. The active state block gives it a one-line `I am ...` purpose and current project/brain state. Project file text and command output stay in that working context unless kept or reported.
+The focus is temporary, not a second mind: when it returns, the orchestrating context receives its report and shared-memory updates, while its detailed working conversation may leave active context. This soft-forget does not erase the underlying Durable transcript. The focus should know this and keep the facts needed later in the ledger, the atlas, the context shelf, or the report. The active state block gives it a one-line `I am ...` purpose and current project/brain state. Project file text and command output stay in that working context unless kept or reported.
 
 | Tool | Who | What |
 |---|---|---|
 | `task` | orchestrating context | Enter one bounded focus context. A change focus names an open plan item and runs only when authorized |
-| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. Resolves project files, reports, ledger/plan/atlas/books, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
+| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. Resolves project files, reports, ledger/plan/atlas/assessment, Durable conversations/messages/tool calls/results, prompts, tools, and exact local schemas; supports first-class shelf placements. External content work from the orchestrator dispatches to one focus; plan edits remain orchestrator-only |
 | `atlas` | orchestrating and focused contexts | Write, link, confirm, remove and read graph nodes. The orchestrating context also moves the tree with it |
 | `search` | any focus | A regular expression over project files; returns `path:line: text` |
 | `list` | any focus | Project files as a tree with sizes |
@@ -392,11 +391,11 @@ The same tool set is registered in every request, for the orchestrating context 
 
 ### How a task goes
 
-A focus begins with its one-line purpose in the state block, the current shared state, the brief, and instructions for what is allowed. It knows its detailed working conversation may leave active context at return, so it should put lasting findings in the shared books and atlas before they are lost; the underlying Durable transcript remains stored. After that:
+A focus begins with its one-line purpose in the state block, the current shared state, the brief, and instructions for what is allowed. It knows its detailed working conversation may leave active context at return, so it should put lasting findings in the shared ledger and atlas before they are lost; the underlying Durable transcript remains stored. After that:
 
 - Text without a call is a note to itself and never ends the focus.
 - `chat` and `ask` reach you from inside a focus.
-- `book` can update the shared ledger (including salient notes), assessment/practice books, reports, and shelf. The only book operation reserved for the orchestrating context is changing the plan. `task`, `wake`, and `sleep` remain orchestration-only; a focus cannot nest another focus.
+- `book` can update the shared ledger (including salient notes), the assessment (one whole-text write), reports, and shelf. The only book operation reserved for the orchestrating context is changing the plan. `task`, `wake`, and `sleep` remain orchestration-only; a focus cannot nest another focus.
 - **`return` ends the focus**, and nothing else does. `report` carries the outcome not already represented in shared memory. `done` says whether the assigned work is carried out: for a plan item, `true` marks it done and `false` leaves it open. `summary` is the line kept for the focus after collapse; without it, the start of the report is used. `shelf` names files or references to add if needed, then hand to the shared context.
 - A focus has `taskTurns` replies, notes included. From three before the end, each result says how many remain and asks for return. If it uses them all, the orchestrating context receives the notes marked as not a report, and nothing is marked done.
 - What you type while a focus runs goes to it with its next result; the orchestrating context is told with the report.
@@ -554,7 +553,7 @@ With piped input (`echo … | carto`) nobody is there to wait, and `carto` leave
 
 ### Starting on its own
 
-When carto starts, the agent gets a turn of its own: nobody has to write first. In it the agent does what the situation calls for — reads the project and tends the books and the atlas, works what stands approved in the plan, or calls `sleep` when there is nothing to do. What it may do without you in the room follows the same gates as always: looking is free, changes wait for your approval (unless `/yolo`), and commands it runs itself are read-only (below) — none at all while the sandbox is off. `/initiate off` keeps it waiting for you instead; `/initiate on` lets it start on its own again, and it starts at once if it is resting. The setting is `initiate` in the settings (default `true`); a `/initiate` switch while carto runs is never remembered. This first turn is what keeps an unattended `carto` moving: without it the agent sat in front of an unread project until someone wrote.
+When carto starts, the agent gets a turn of its own: nobody has to write first. In it the agent does what the situation calls for — reads the project and tends the assessment and the atlas, works what stands approved in the plan, or calls `sleep` when there is nothing to do. What it may do without you in the room follows the same gates as always: looking is free, changes wait for your approval (unless `/yolo`), and commands it runs itself are read-only (below) — none at all while the sandbox is off. `/initiate off` keeps it waiting for you instead; `/initiate on` lets it start on its own again, and it starts at once if it is resting. The setting is `initiate` in the settings (default `true`); a `/initiate` switch while carto runs is never remembered. This first turn is what keeps an unattended `carto` moving: without it the agent sat in front of an unread project until someone wrote.
 
 ### Waking up
 
@@ -683,19 +682,19 @@ The atlas is the agent's map of the project. It has two parts, and they are kept
 
 **The tree** is drawn by Cartographer from the files as they are, so it cannot be wrong or out of date. It respects `.gitignore` and leaves out `.brain/`. It is drawn three levels below an anchor, which starts at the project root; a folder below the last level is one line with a file count. A drawing longer than 60 lines is made smaller, first by showing fewer entries of each folder, then fewer levels, and the first line says so. The agent sees the tree in every request and can move it: an `atlas` call with a `tree` operation sets the anchor to a folder, sets it back with anchor `.`, or changes the depth from 1 to 6. The view stays as the agent left it, across sessions. A task gets the tree in its brief and looks further with `list`.
 
-**The graph** is written by the agent and its tasks as nodes. A node has a name, one line that says what it is, and optionally a longer detail, links to other nodes, links to files or folders, and a kind: `component`, `finding`, or `dead_end` for something tried and ruled out. A node needs no file and no link, and no file needs a node: what gets a node is the agent's decision. Each file line of the tree names the nodes that link to it.
+**The graph** is written by the agent and its tasks as nodes. A node has a name, one line that says what it is, and optionally a longer detail, links to other nodes, and links to files or folders. A node needs no file and no link, and no file needs a node: what gets a node is the agent's decision. Each file line of the tree names the nodes that link to it.
 
 When a node links to a file, Cartographer keeps a fingerprint of that file from the moment the node was written. If the file later changes or disappears, the node is reported as "may be out of date", to the agent in every request and under the report of the task that changed the file. It stays so until the node is rewritten or the agent confirms that it still holds. A folder link notices files added to or removed from that folder, not changes inside them.
 
 **A node for a file that is not there yet.** While the project may be changed, that is, once the change item it belongs to is approved or approval is switched off, linking a node to a path that does not exist creates it: an empty file, or a folder when the path ends with a slash. The agent is told what was created, and so are you. Before that, nothing is created and the agent is told to write the node without the link for now. Such a file is not part of a task's checkpoint when the main agent made it, so `/undo` does not remove it.
 
-**The books.** The agent keeps two lists of short entries, in one language with the ledger and the plan. The **assessment** (`a1`, `a2`, …) is about the project: what it is, how it is built and run, what state it is in. The **practice** (`r1`, `r2`, …) is about itself: what it has learned about this harness and the habits it wants to keep. Both are written with `assess`, with the same verbs as the ledger and the plan — `add`, `edit`, `done`, `remove`, `before` — so compacting the assessment is one `edit`, not a rewrite of the whole. A task cannot; it puts what it learned in its report.
+**The assessment.** The agent keeps one summary of the project for itself: what it is, how it is built and run, what state it is in, what matters when changing it. It lives in `.brain/assessment.md` as plain text, rides at the top of the agent's context, and its only write path is one whole-text `book` call (`target=assessment, action=write`) — the whole text at once, no entries, no partial edits; the details that would not fit belong in nodes of the atlas. A task cannot rewrite it; it puts what it learned in its report.
 
 **Who writes.** A look task is asked to record what it learned that will still matter later, and a change task to rewrite the nodes about what it changed. Both write directly, so the knowledge does not have to pass through a report and be written down a second time. Under the task's report the main agent gets Cartographer's own record: which nodes the task wrote, removed, or left possibly out of date. The main agent can write, correct and remove nodes too.
 
 **Mapping without a goal.** When no goal is set, or a plan waits for your `/approve`, the agent is told it may start a look task that maps a part of the project the graph says nothing about. Whether to do that and when to stop is left to it. Nothing in the project changes; type a message or `/stop` at any time.
 
-**Editing them yourself.** The graph is `<project>/.brain/carto-atlas.json`, the books are `<project>/.brain/carto-books.json` (one list of entries). Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. The assessment half of the books is mirrored to the old `<project>/.brain/assessment.md`, and a project that has one is split into entries by paragraph the first time the agent edits its books — so an assessment you keep by hand still works, and `/assessment` shows it. A node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
+**Editing them yourself.** The graph is `<project>/.brain/carto-atlas.json`, the assessment is `<project>/.brain/assessment.md`. Both are read again at every step. A node needs `name` and `gist`; everything else is optional, and fields Cartographer does not know are kept. An assessment you keep by hand works as it is, and `/assessment` shows it. A books file (`carto-books.json`) left from an earlier Cartographer is folded into the assessment the first time it is read, once, and its practice entries are dropped — the practice book is retired. A node you added is listed as new. A graph file that cannot be read is reported to you and to the agent and is never overwritten; the tree is still drawn.
 
 ```
 › /atlas
@@ -708,10 +707,8 @@ tests/
   test_roll.py
 README.md
 Graph: 3 nodes
-Components:
   cli  Prints one roll; takes no arguments yet  [src/cli.py]
   roller  roll(sides) returns a random whole number from 1 to sides  [src/roll.py]  → cli
-Findings:
   tests_are_empty  tests/test_roll.py holds one test that checks nothing
   /home/momo/Projects/simpledice/.brain/carto-atlas.json · edit it by hand, or tell the agent what to change
 ```
@@ -724,10 +721,10 @@ Besides the tool descriptions, the prompt tells the agent how to work when nobod
 
 - **The dyad.** You work beside the agent at a shared screen. Chat is the steering wheel: interrupt any time, and answer while it works; your messages may drop or redirect the work, and your edits to the brain are taken as they are.
 - **Two modes.** With approval required (the default), each change item is a request you answer in your own time; looking, recording, testing and proposing never wait for it. With approval off (`/yolo`), the agent's judgment governs — still one plan item at a time, still with checkpoints, still inside the plan gate and the sandbox. Approval off is trust, never a wider reach. The state block says which mode you are in.
-- **The standing duty.** At the start of a session, and after every wake with nothing owed to you, the agent's turn is its own: map the project, record it in the books and the atlas, form hypotheses and test them (with the commands it may run), work what stands approved, and keep the map honest. Your silence is "not authorized yet", never "do not look".
+- **The standing duty.** At the start of a session, and after every wake with nothing owed to you, the agent's turn is its own: map the project, record it in the assessment and the atlas, form hypotheses and test them (with the commands it may run), work what stands approved, and keep the map honest. Your silence is "not authorized yet", never "do not look".
 - **Sleep, with evidence.** `sleep` is a conclusion the agent reaches after checking a written list — nothing waiting from you, no open wake, no approved item uncarried, no question owed to you, no untested hypothesis, no unmapped ground in view, no found weakness unplanned. If anything remains, that is the next work, not a reason to sleep.
 
-What the state block says (time, tree, atlas, books, ledger, plan, requests, shelf, fold-ins) is built fresh for every request and is never stored; see [How the agent sees its brain](#how-the-agent-sees-its-brain).
+What the state block says (time, tree, atlas, ledger, plan, requests, shelf, fold-ins) is built fresh for every request and is never stored; see [How the agent sees its brain](#how-the-agent-sees-its-brain).
 
 ### Time
 
@@ -745,7 +742,7 @@ Shell windows use the same clock: how long a command has been running, and how l
 
 None of the brain is stored in the conversation. Cartographer adds it to each request as the request is sent, in two places chosen by how often the content changes. The server re-reads a prompt from the first changed character on, so what changes rarely goes to the front and what changes often goes to the very end.
 
-**At the front: the books and the outline of the graph.** The assessment, any practice entries, and the graph's outline stand before your first message, in every request of the main agent and of every task:
+**At the front: the assessment and the outline of the graph.** The assessment and the graph's outline stand before your first message, in every request of the main agent and of every task:
 
 ```
 <project>
@@ -754,19 +751,14 @@ Written by Cartographer from your own records of this project, as they stood on 
 Your assessment
 A small Python dice roller. roll.py holds the roller, cli.py prints one roll. The tests check nothing yet.
 
-Your practice
-Look tasks first, then change. The stand-in says exit 0 even for nonsense: read what a command printed.
-
 Your graph (3 nodes)
-Components:
   cli  Prints one roll; takes no arguments yet  [src/cli.py]
   roller  roll(sides) returns a random whole number from 1 to sides  [src/roll.py]  → cli
-Findings:
   tests_are_empty  tests/test_roll.py holds one test that checks nothing
 </project>
 ```
 
-This is a copy, kept in `.brain/carto-top.json`, and it is replaced at four moments only: the first start in a project, when the context is collapsed (a closed goal is the usual cause), on `/new`, and on `/pin`. Writing a node or the assessment does not touch it, because a change here makes the server read the whole context again; at a collapse the whole context is read again anyway, so the new copy costs nothing more. Between those moments the state block lists the nodes written since the copy, and the agent's own `assess` call holds its newest assessment. An outline over 6,000 characters lists its oldest nodes by name only.
+This is a copy, kept in `.brain/carto-top.json`, and it is replaced at four moments only: the first start in a project, when the context is collapsed (a closed goal is the usual cause), on `/new`, and on `/pin`. Writing a node or the assessment does not touch it, because a change here makes the server read the whole context again; at a collapse the whole context is read again anyway, so the new copy costs nothing more. Between those moments the state block lists the nodes written since the copy, and the agent's own `book` (target=assessment, action=write) call holds its newest assessment. An outline over 6,000 characters lists its oldest nodes by name only.
 
 **At the end: the state block.** Each request of the main agent ends with a block, built at that moment and added to that request only:
 
@@ -898,7 +890,7 @@ The shelf holds whatever you add; nothing refuses. Half the window (the shelf's 
 
 ### Recalling and folding
 
-The state block lists every report that stands in view, with its size, so the agent sees what it is carrying. A report stays in view until **the agent decides** it has done the bookkeeping for it — updated the books, the graph, the ledger and the plan from it — and folds it itself; the automatic collapse is only the backstop.
+The state block lists every report that stands in view, with its size, so the agent sees what it is carrying. A report stays in view until **the agent decides** it has done the bookkeeping for it — updated the assessment, the graph, the ledger and the plan from it — and folds it itself; the automatic collapse is only the backstop.
 
 `{"action":"fold","id":"t12"}` replaces a report that stands in the context by its one line. This changes the context in its middle, so the server reads everything behind that place again; the answer to the call says how many tokens that is. A folded report comes back to its place with `{"action":"recall","id":"t12"}`, which returns it in full; it stays in view until the next collapse or until it is folded again. (`drop` does the same as `fold`, for habits carried over.)
 
@@ -906,7 +898,7 @@ The main agent has no notes of its own that survive a collapse, on purpose: a `n
 
 ### Inside a task
 
-A focus has its own collapsible working conversation, but it is the same agent and shares durable books and atlas. It receives the current state block and its one-line purpose; changes it makes to shared memory persist beyond the focus.
+A focus has its own collapsible working conversation, but it is the same agent and shares the durable ledger, atlas and assessment. It receives the current state block and its one-line purpose; changes it makes to shared memory persist beyond the focus.
 
 - A large result ends with a mark like `[s3 · about 2,100 tokens]`. `{"action":"drop","id":"s3"}` replaces that result by one line.
 - When a task reads the same lines of a file again, the older copy is replaced by one line without being asked. This is done only where it pays: the copy is at least about 400 tokens, and what follows it, which the server then reads again, is at most eight times its size.
@@ -1041,17 +1033,17 @@ And smaller things, named where they belong above: the full screen does not repl
 
 ## Tests
 
-`npm test` runs `test/unit.mjs`, a fast, self-contained suite of unit checks for the books, the operations the screen offers over a row, the shell tool's contract and the state block. It covers the ledger, plan, books and atlas operations and their refusals, the screen's settle/add/archive/drop paths (including the double-load regression), the shell tool's schema and its in-band notes, and the state block's command lines. It is not the former integration suite (the real `carto` command in throwaway project folders against a scripted stand-in for the model server), which asserted an earlier specification and has not been carried over; recovering it requires an explicit decision and an audit against this one. The unit suite takes seconds and is meant for the end of a piece of work, not for each step along the way. It covers:
+`npm test` runs `test/unit.mjs`, a fast, self-contained suite of unit checks for the shared operations the screen offers over a row, the shell tool's contract and the state block. It covers the ledger, plan and atlas operations and their refusals, the screen's settle/add/archive/drop paths (including the double-load regression), the shell tool's schema and its in-band notes, and the state block's command lines. It is not the former integration suite (the real `carto` command in throwaway project folders against a scripted stand-in for the model server), which asserted an earlier specification and has not been carried over; recovering it requires an explicit decision and an audit against this one. The unit suite takes seconds and is meant for the end of a piece of work, not for each step along the way. It covers:
 
 - the ledger: add/done and the errors an unknown id gets;
 - the plan: add/done and the file left consistent;
-- the shared books: add/done, `assessment.md` kept in step, refusals for bad input (a kind that does not exist, a goal with no done-when line, JSON that does not parse);
+- the assessment: one whole-text write through the `book` tool, clip-and-inform over the limit, and a legacy books file folded into it on first read;
 - the atlas: `add` with `mayCreate` off refused for a missing file and accepted for one that exists, `confirm` re-stamping a node;
 - the screen's operations (`src/ops.mjs`): archive/unarchive/drop/settle round-trips on every book, the specific item removed (the double-load regression), a goal closed re-pinning the copy at the top of the context;
 - the shell tool: the parameter schema (missing required refused, `seconds` unified across run/wait/send), the in-band line that says which arguments mean nothing for the action, and the read-only lane's refusals with the sandbox off;
 - the state block: the command lines for the sandbox on, switched off, and unavailable, including that the switched-off line says the main agent cannot run commands at all.
 
-The former integration suite (the real `carto` command against a scripted stand-in server, plus a terminal emulator) asserted an earlier specification — it predates the inline reads, the salient-note ledger, the read-only lane and the books migration — and is not in this branch. It is not run by `npm test`. Recovering it would need an explicit decision and an audit of every case against this specification, and a budget for its minutes.
+The former integration suite (the real `carto` command against a scripted stand-in server, plus a terminal emulator) asserted an earlier specification — it predates the inline reads, the salient-note ledger and the read-only lane — and is not in this branch. It is not run by `npm test`. Recovering it would need an explicit decision and an audit of every case against this specification, and a budget for its minutes.
 
 ## Files
 
@@ -1064,7 +1056,6 @@ The former integration suite (the real `carto` command against a scripted stand-
 | `src/config.mjs` | Settings and where they come from |
 | `src/harness.mjs` | Opens the session: model provider, tools, and who may call which |
 | `src/prompt.mjs` | The built-in system prompt, tool descriptions, the task's role line and refusals |
-| `src/books.mjs` | The two books of short entries: the assessment and the practice |
 | `src/requests.mjs` | The one list of what waits for the user, and carrying a decision out |
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |
 | `src/plan.mjs` | The plan: its file, its operations, the per-item approval rules |

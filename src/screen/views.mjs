@@ -13,9 +13,7 @@ import { POLICY } from "../config.mjs";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
-import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
 import { chatLine, estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
 import { entryLine, loadLedger, salientNotes } from "../ledger.mjs";
@@ -75,7 +73,6 @@ export function atlasView({ root, brainDir }) {
 			key: `node:${node.name}`,
 			archived: node.archived === true,
 			head: [
-				[node.kind ? `${node.kind.replace("_", " ")} ` : "", "muted"],
 				[node.name, "bold"],
 				[`  ${node.gist}`, ""],
 				[node.files.length > 0 ? `  [${node.files.join(", ")}]` : "", "tool"],
@@ -255,37 +252,6 @@ export function treeView({ root, brainDir }, isOpen) {
 	walk(top, "", 0);
 	if (items.length === 0) items.push(note("  The project folder is empty."));
 	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root}`, "bold"], ["  (without what git ignores and the brain folder; ← names the graph's nodes about a file)", "muted"]]], items };
-}
-
-/** The books: the assessment of the project and the practice, one entry to an item, so that `e` opens the file where it is. */
-export function booksView({ brainDir }) {
-	// Until the agent's first book operation the entries live only in assessment.md; the view opens that.
-	const store = booksPath(brainDir);
-	const file = existsSync(store) ? store : assessmentPath(brainDir);
-	const book = loadBooks(brainDir);
-	const entry = (item) => {
-		const first = item.text.split("\n")[0];
-		const more = item.text.includes("\n") || width(first) > POLICY.limits.screen.rowWrapChars;
-		const target = file === store ? { file, line: jsonLine(file, "id", item.id) } : { file, line: lineOf(file, first) };
-		return {
-			key: `entry:${item.id}`,
-			head: [[`${item.id}  `, item.status === POLICY.enums.entryStatus.done ? "muted" : "tool"], [first, item.status === POLICY.enums.entryStatus.done ? "muted" : ""]],
-			...(more ? { body: item.text } : {}),
-			copy: bookLine(item),
-			target,
-		};
-	};
-	const items = [];
-	for (const [kind, title] of [[POLICY.enums.bookKind.assessment, "Assessment of the project"], [POLICY.enums.bookKind.practice, "Practice: how the agent works"]]) {
-		const mine = book.items.filter((item) => item.kind === kind);
-		if (mine.length === 0) continue;
-		items.push(heading(title));
-		items.push(...mine.filter((item) => item.status === POLICY.enums.entryStatus.open).map(entry), ...mine.filter((item) => item.status === POLICY.enums.entryStatus.done).map(entry));
-	}
-	if (items.length === 0) {
-		return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice prints the practice book", "faint"]]], items: [note("  The books are empty. The agent writes what it learns about the project, and about how it works. n starts a new entry.")] };
-	}
-	return { header: [[[`The agent's books · ${store}`, "bold"]], [["  /practice prints the practice book", "faint"]]], items };
 }
 
 // ─── Diff ───────────────────────────────────────────────────────────────────
@@ -712,7 +678,7 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 		if (part.key === "system") return { editKind: "prompt" };
 		if (part.key === "tools") return { editKind: "tools" };
 		if (typeof part.key === "string" && part.key.startsWith("tool:")) return { editKind: "tool" };
-		if (part.cat === "top") return { editKind: POLICY.enums.bookKind.assessment };
+		if (part.cat === "top") return { editKind: "assessment" };
 		if (part.cat === "kept") return { editKind: "store" };
 		if (part.cat === "you") return { editKind: "chat-you" };
 		if (part.cat === "agent") return { editKind: "chat-agent" };

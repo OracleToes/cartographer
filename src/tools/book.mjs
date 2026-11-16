@@ -1,8 +1,8 @@
-// The `book` tool is the single interface to the agent's durable surfaces — ledger, plan, books, atlas, context,
-// Durable records, referenced entities and the shelf. Focused contexts may update the shared brain; only the
-// orchestrating context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs, src/books.mjs,
-// src/atlas.mjs and src/context.mjs; this file routes target/action calls to them. One flat declaration
-// (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
+// The `book` tool is the single interface to the agent's durable surfaces — ledger, plan, atlas, assessment,
+// context, Durable records, referenced entities and the shelf. Focused contexts may update the shared brain; only
+// the orchestrating context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs,
+// src/atlas.mjs, src/assessment.mjs and src/context.mjs; this file routes target/action calls to them. One flat
+// declaration (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
 import { projectFiles } from "./look.mjs";
 import { createHash } from "node:crypto";
@@ -12,10 +12,8 @@ import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
 import { applyPlanOp, authorizationLine, isAuthorized, loadPlan, PlanError, savePlan } from "../plan.mjs";
 import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "../atlas.mjs";
-import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "../books.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
-import { noteAssessed } from "../top.mjs";
-import { pin } from "../top.mjs";
+import { noteAssessed, pin } from "../top.mjs";
 import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
@@ -112,22 +110,7 @@ const CAPABILITIES = {
 		tree: {},
 	},
 	assessment: {
-		list: {},
-		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		done: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
-		before: { ref: "required", operation: "required" },
-	},
-	practice: {
-		list: {},
-		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		done: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
-		before: { ref: "required", operation: "required" },
+		write: { operation: "required", operationFields: ["text"], hint: "operation { text }: the whole assessment; it replaces the current one" },
 	},
 	context: {
 		list: {},
@@ -224,21 +207,10 @@ const ACTION_GUIDE = {
 		before: "id and before",
 	},
 	assessment: {
-		add: "text (one short entry; the book implies the kind)",
-		edit: "id and text",
-		done: "id, plus an optional text outcome",
-		remove: "id",
-		before: "id and before",
-	},
-	practice: {
-		add: "text (one short entry; the book implies the kind)",
-		edit: "id and text",
-		done: "id, plus an optional text outcome",
-		remove: "id",
-		before: "id and before",
+		write: "operation { text }: the whole assessment; it replaces the current one",
 	},
 	atlas: {
-		add: "name and gist — kind, detail, files and links optional; the node comes back with its `c<N>` id",
+		add: "name and gist — detail, files and links optional; the node comes back with its `c<N>` id",
 		edit: "the node `ref` names: gist and optional kind/detail/files/links — the name stays (`rename` moves it)",
 		rename: "the node `ref` names, and `to` (its new name); what links to it is rewritten",
 		confirm: "the node `ref` names — or several via operation `names`",
@@ -303,20 +275,17 @@ const listFooter = ({ page, next, total }) => (next === undefined ? "" : `\n(${p
 const summaryLine = (record) => String(record.summary ?? record.id ?? "").replace(/\s+/g, " ").trim().slice(0, 240);
 /** Namespace-qualified reference without touching the registry/catalog again. */
 const listRef = (namespace, kind, id, version) => ({ namespace, kind, id, ...(version ? { version } : {}) });
-const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "assessment", "practice", "context"]);
+const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "context"]);
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
 	plan: new Set(["add", "edit", "done", "remove", "before"]),
 	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove", "rename"]),
-	assessment: new Set(["add", "edit", "done", "remove", "before"]),
-	practice: new Set(["add", "edit", "done", "remove", "before"]),
 	context: new Set(["archive", "restore"]),
 };
 function listBrainRecords(target, brainDir) {
 	if (target === "ledger") { const loaded = loadLedger(brainDir); if (!loaded.ledger) throw new Error(`The ledger cannot be read: ${loaded.error}`); return loaded.ledger.items; }
 	if (target === "plan") { const loaded = loadPlan(brainDir); if (!loaded.plan) throw new Error(`The plan cannot be read: ${loaded.error}`); return loaded.plan.items; }
 	if (target === "atlas") { const loaded = loadAtlas(brainDir); if (!loaded.atlas) throw new Error(`The atlas cannot be read: ${loaded.error}`); return loaded.atlas.nodes; }
-	if (target === "assessment" || target === "practice") return loadBooks(brainDir).items.filter((item) => item.kind === target);
 	if (target === "context") return composedRows(loadContext(brainDir));
 	return [];
 }
@@ -509,6 +478,21 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		const ref = nativeReference(brainDir, target, found.id, found.version);
 		return textResult(JSON.stringify(found.value, null, 2), { ref, status: "live" });
 	}
+	if (target === "assessment") {
+		if (action !== "write") return unsupported(target, action);
+		const payload = args.operation ?? {};
+		if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail("assessment write needs an operation object: { text }, the whole assessment.");
+		let text = typeof payload.text === "string" ? payload.text.trim() : "";
+		if (text === "") return fail("assessment write needs operation { text }: the whole assessment; it replaces the current one.");
+		if (text.length > ASSESSMENT_MAX) {
+			const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
+			warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
+			text = clipped;
+		}
+		saveAssessment(brainDir, text);
+		noteAssessed(brainDir, text);
+		return textResult(`Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`, { target, action, shown: [`assessment written, ${text.length} characters`] });
+	}
 	if (BRAIN_TARGETS.has(target)) {
 		if (action === "list") {
 			let records;
@@ -584,7 +568,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`${target} ${action} needs an operation object with the target-specific fields.`);
 		const operation = { ...(args.operation ?? {}), action };
 		if (!isAdd) operation.id = args.ref.id;
-		if ((target === "assessment" || target === "practice") && action === "add") operation.kind = target;
 		if (target === "atlas") {
 			const { atlas, error } = loadAtlas(brainDir);
 			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
@@ -599,7 +582,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		}
 		if (target === "ledger") return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [operation] }, api));
 		if (target === "plan") return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [operation] }, api));
-		if (target === "assessment" || target === "practice") return withGuide(target, action, runBooks({ brainDir }, { ops: [operation] }, api));
 		if (target === "context") {
 			if (action === "archive" || action === "restore") {
 				try { return textResult(applyContextRowAction(brainDir, args.ref.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, args.operation?.when, api.taskId), { target, action, ref: args.ref }); }
@@ -825,69 +807,6 @@ function runPlan({ brainDir, gate }, args, api) {
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-/** The books' run: see the `assess` tool this replaces (src/tools/assess.mjs in the last release). */
-function runBooks({ brainDir }, args, api) {
-	// The old whole-text call, kept for a hand-written assessment.md and older callers.
-	if (!Array.isArray(args.ops) || args.ops.length === 0) {
-		let text = typeof args.text === "string" ? args.text.trim() : "";
-		if (text === "") return fail("`text` is empty and `ops` holds nothing. Write an entry with `ops`, or the whole assessment with `text`.");
-		if (text.length > ASSESSMENT_MAX) {
-			const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
-			warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
-			text = clipped;
-		}
-		saveAssessment(brainDir, text);
-		noteAssessed(brainDir, text);
-		return {
-			output: [
-				{
-					type: "text",
-					text: `Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`,
-				},
-			],
-			details: { shown: [`assessment written, ${text.length} characters`] },
-		};
-	}
-	const book = loadBooks(brainDir);
-	if (book.lastCall === api.taskId) {
-		if (book.items.some((item) => item.kind === POLICY.enums.bookKind.assessment)) {
-			const assessment = renderBook(book, POLICY.enums.bookKind.assessment);
-			saveAssessment(brainDir, assessment);
-			noteAssessed(brainDir, assessment);
-		}
-		return textResult("These book operations were already applied before a restart.", { replay: true });
-	}
-	const lines = [];
-	const shown = [];
-	let applied = 0;
-	for (const [index, op] of args.ops.entries()) {
-		try {
-			const result = applyBookOp(book, op, api.now());
-			lines.push(result.line);
-			shown.push(result.shown);
-			applied++;
-		} catch (problem) {
-			if (!(problem instanceof BookError)) throw problem;
-			lines.push(`Op ${index + 1} (${op?.action ?? "?"}) not applied: ${problem.message}`);
-		}
-	}
-	if (applied === 0) return fail(lines.join("\n"));
-	book.lastCall = api.taskId;
-	saveBooks(brainDir, book);
-	// Keep assessment.md in step with the assessment entries, so the copy at the top of the
-	// context, /assessment and the user's own edits still read the same text.
-	const assessment = renderBook(book, POLICY.enums.bookKind.assessment);
-	if (book.items.some((item) => item.kind === POLICY.enums.bookKind.assessment)) {
-		saveAssessment(brainDir, assessment);
-		noteAssessed(brainDir, assessment);
-	}
-	const practice = renderBook(book, POLICY.enums.bookKind.practice);
-	return {
-		output: [{ type: "text", text: `${lines.join("\n")}${practice === "" ? "" : `\n\nMy practice now reads:\n${practice}`}` }],
-		details: { shown },
-	};
-}
-
 /** The context operations' run: see the `context` tool this replaces (src/tools/context.mjs in the last release). */
 function runContext({ root, brainDir, config, engine }, args, api) {
 	const main = api.conversationId === ROOT_CONVERSATION_ID;
@@ -1077,7 +996,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
 		newText: opt(str({ description: "Replacement passage in file edit." })),
 		handOn: opt(bool({ description: "When adding from a focus, hand this placement to the shared shelf on return." })),
-		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. `done` names the item by its id — for `plan`, `ledger`, `assessment` and `practice`: operation {id} (plus an optional `text` outcome). `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
+		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. For `plan` and `ledger`: `done` names the item by its id — operation {id} (plus an optional `text` outcome). `assessment` takes write {text}: the whole assessment. `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
 	});
 	const validate = compile(validationSchema, { coerce: true });
 	const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";
@@ -1132,7 +1051,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 
 		executionMode: "sequential",
 		// Safe to run again after a crash: the ledger and the plan remember the last call they applied,
-		// and the rest of the books change nothing when the same words are written twice.
+		// and the rest of the brain changes nothing when the same words are written twice.
 		replay: POLICY.enums.toolReplay.safe,
 		// Read-only operations run inline for every context; project changes go through the one gate (§6 of
 		// docs/design.md). `file rebind` still dispatches to a short focus: it is a catalog identity write.

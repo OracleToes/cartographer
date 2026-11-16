@@ -91,7 +91,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 	return defineTool({
 		name: "task",
 		description:
-			"Enter one focused context for bounded work. It is the same agent over the shared books and atlas, but its working conversation is temporary and may be forgotten when it returns. Without `item` the focus only reads project files with `book` target=file action=read, plus `search` and `list`. With an authorized change `item`, it can also use `book` target=file action=create/edit/remove and run commands. Its purpose appears in the state block; keep lasting findings before returning a report.",
+			"Enter one focused context for bounded work. It is the same agent over the shared ledger and atlas, but its working conversation is temporary and may be forgotten when it returns. Without `item` the focus only reads project files with `book` target=file action=read, plus `search` and `list`. With an authorized change `item`, it can also use `book` target=file action=create/edit/remove and run commands. Its purpose appears in the state block; keep lasting findings before returning a report.",
 		parameters: obj({
 			brief: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "What the task must do, and what its report must contain" }),
 			item: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.planId, description: "The plan item this task carries out (p2). Leave out for a task that only looks." })),

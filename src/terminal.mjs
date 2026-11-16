@@ -28,8 +28,7 @@ import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
 import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
-import { listRequests, approveRequests, denyRequest, answerQuestion } from "./requests.mjs";
-import { booksPath } from "./books.mjs";
+import { listRequests, approveRequests, denyRequest, answerQuestion, approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, pin, sinceTop, splitTop } from "./top.mjs";
@@ -451,7 +450,7 @@ export async function runTerminal(session, options) {
 							if (parts.length > 0) line(`${bold("◂")} atlas  ${parts.join(" · ")}  ${dim("(/atlas shows the graph)")}`);
 						}
 					} else if (message.toolName === "book") {
-						// One tool for the books; each keeps the words on the screen it had as a tool of its own.
+						// The brain tools; each keeps the words on the screen it had as a tool of its own.
 						const name = message.details?.target ?? message.details?.book ?? "book";
 						const call = pendingCalls.get(message.toolCallId);
 						pendingCalls.delete(message.toolCallId);
@@ -464,7 +463,7 @@ export async function runTerminal(session, options) {
 						} else if (name === "context") {
 							if (message.isError || shown.length === 0) line(`${bold("●")} context  nothing done: ${oneLine(plain(textOf(message)), POLICY.limits.terminal.messageSummaryChars)}`);
 							else for (const change of shown) line(`${bold("●")} context  ${oneLine(change, POLICY.limits.terminal.resultSummary.contextChange)}`);
-						} else if (name === "books" && !message.isError && shown.length > 0) {
+						} else if (name === "assessment" && !message.isError && shown.length > 0) {
 							for (const change of shown) line(`${bold("●")} ${change}  ${dim("(/assessment shows it)")}`);
 						} else if (name === "atlas") {
 							// What the agent wrote to its map, one line each.
@@ -590,7 +589,7 @@ export async function runTerminal(session, options) {
 
 	/** The folded blocks of a request (they are what the agent sees, and then does not need to hold again). */
 	const printBlocks = (state, windows, tail) => {
-		if (state !== undefined) ui.block("the state block — the time, the atlas, the books, the ledger, the plan", state);
+		if (state !== undefined) ui.block("the state block — the time, the atlas, the ledger, the plan", state);
 		if (windows !== undefined) ui.block("the shell windows as they stand", windows);
 		if (tail !== undefined) ui.block("the newest read — its content stands at the end of the request", tail);
 	};
@@ -1098,8 +1097,7 @@ export async function runTerminal(session, options) {
 						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
 						"  /pause    hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream",
-						"  /practice the agent's notes on how it works; /assessment and /books show the two books in full",
-						"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
+												"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
 						"  /initiate /initiate off keeps the agent waiting for you at the start; /initiate on lets it start on its own again",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
 						"  /diff     what the last change task did to the files (/diff all: the whole patch)",
@@ -1112,9 +1110,9 @@ export async function runTerminal(session, options) {
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
-					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a books entry, a node of the graph; the row stays on disk either way",
-					"  /done ID …  settle a row the way the agent does: a ledger entry is closed, a plan item is done, a books entry is settled, a node is confirmed",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a books entry, a node of the graph",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
+					"  /done ID …  settle a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1134,15 +1132,6 @@ export async function runTerminal(session, options) {
 					}
 					line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
 				}
-				return true;
-			}
-			case "books":
-			case "practice": {
-				const { loadBooks, renderBook, BOOK_KINDS } = await import("./books.mjs");
-				const books = loadBooks(options.brainDir);
-				const kinds = name === "practice" ? ["practice"] : BOOK_KINDS;
-				for (const kind of kinds) line(`  ${bold(kind)}\n${renderBook(books, kind) || "    (empty)"}`);
-				line(dim(`  ${booksPath(options.brainDir)}`));
 				return true;
 			}
 			case "report": {
@@ -1718,7 +1707,7 @@ export async function runTerminal(session, options) {
 			case "unarchive": {
 				const ids = args;
 				if (ids.length === 0) {
-					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a books entry, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
 				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
@@ -1726,7 +1715,7 @@ export async function runTerminal(session, options) {
 			}
 			case "done": {
 				if (argument === undefined || args.length === 0) {
-					line("  /done ID …  settles a row the way the agent does: a ledger entry is closed, a plan item is done, a books entry is settled, a node is confirmed.");
+					line("  /done ID …  settles a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed.");
 					return true;
 				}
 				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);
@@ -1978,6 +1967,11 @@ export async function runTerminal(session, options) {
 				if (asks?.pending() !== undefined) {
 					asks.answer(text);
 					return;
+				}
+				// Their words carry the approval: an unambiguous yes while change items wait approves them (the gate reads it, not the agent).
+				if (gate.yolo !== true) {
+					const approved = approvalWords(options.brainDir, text);
+					if (approved !== undefined) line(`${bold("●")} approved from your words: ${approved.join(", ")}`);
 				}
 				const wasBusy = busy;
 				userSpoke();

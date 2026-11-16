@@ -27,6 +27,34 @@ export function listRequests(brainDir, { yolo = false } = {}) {
 	return out;
 }
 
+
+// ─── Approval in the user's own words ─────────────────────────────────────────
+// The catch this closes: the user writes "yes" or "approved p1" as a message instead of typing /approve, and the
+// gate (a change task is only carried out for an authorized item) refuses the work they just approved. An unambiguous
+// affirmative, optionally naming items of the plan, approves what waits. Anything less clear is not an approval:
+// the line goes to the agent as written.
+const APPROVAL = /^(?:i\s+)?(?:y(?:es|eah|ep)|yeah|ok(?:ay)?|sure|approved?|go(?:\s+ahead)?|go\s+for\s+it|do\s+it|proceed|lgtm|ship(?:\s+it)?|looks\s+good|sounds\s+good)(?:(?:[ ,]+p\d+)|(?:,?\s+(?:the\s+)?(?:plan|it|them|all|everything)))*[.!]*$/i;
+
+/**
+ * Approve waiting change items from what the user typed, without the slash command.
+ * @returns {string[] | undefined} the approved ids, or undefined when the line is not an approval or nothing waits
+ */
+export function approvalWords(brainDir, text, now = new Date().toISOString()) {
+	const line = String(text ?? "").trim();
+	if (!APPROVAL.test(line)) return undefined;
+	const { plan } = loadPlan(brainDir);
+	if (plan === undefined) return undefined;
+	const pending = waiting(plan);
+	if (pending.length === 0) return undefined;
+	const asked = line.match(/p\d+/gi)?.map((id) => id.toLowerCase());
+	const ids = asked === undefined ? pending.map((item) => item.id) : pending.filter((item) => asked.includes(item.id)).map((item) => item.id);
+	if (ids.length === 0) return undefined;
+	const result = approve(plan, now, ids);
+	if (result.approved.length === 0) return undefined;
+	savePlan(brainDir, plan);
+	return result.approved;
+}
+
 /** The requests as lines for the agent's state block; "" when nothing waits. */
 export function requestLines(brainDir, more) {
 	const all = listRequests(brainDir, more);

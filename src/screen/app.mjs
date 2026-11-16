@@ -33,7 +33,6 @@ import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
-import { booksPath, loadBooks } from "../books.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
@@ -46,7 +45,7 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { atlasView, booksView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
+import { atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
 export const TABS = [
@@ -64,7 +63,6 @@ const VIEWS = {
 		{ id: "plan", name: "Plan" },
 		{ id: "requests", name: "Requests" },
 		{ id: "tree", name: "Tree" },
-		{ id: "books", name: "Books" },
 	],
 	diff: [
 		{ id: "last", name: "Last step" },
@@ -83,7 +81,7 @@ const VIEWS = {
 	],
 };
 /** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.books", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -101,7 +99,6 @@ const COMMANDS = [
 	["ledger", "goals, questions and notes, open and closed"],
 	["atlas", "the tree as the agent sees it, and the graph's nodes"],
 	["assessment", "the agent's summary of the project"],
-	["practice", "the agent's notes on how it works"],
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
@@ -111,10 +108,10 @@ const COMMANDS = [
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
-	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, book entry, or node"],
+	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["done", "settle a row the way the agent does: a ledger entry, a plan item, a book entry, a node of the graph"],
-	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, book entry, or node"],
+	["done", "settle a row the way the agent does: a ledger entry, a plan item, a node of the graph"],
+	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -488,7 +485,6 @@ export async function runScreen(session, options, runTerminal) {
 		"carto.plan": "t done · n new · v archive · d delete · e edit",
 		"carto.requests": "a approve · n deny · d forget · e edit",
 		"carto.tree": "Enter fold · y copy · e edit",
-		"carto.books": "t settle · n new · v archive · d delete · e edit",
 		"diff.last": "Enter open · y copy · e edit",
 		"diff.session": "Enter open · y copy · e edit",
 		"diff.git": "Enter open · y copy · e edit",
@@ -512,7 +508,6 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.atlas": atlasPath(brainDir),
 			"carto.ledger": join(brainDir, "carto-ledger.json"),
 			"carto.plan": planPath(brainDir),
-			"carto.books": booksPath(brainDir),
 		})[id];
 	const env = { root, brainDir, session, started };
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
@@ -524,7 +519,6 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
 		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
 		if (id === "carto.tree") return treeView(env, isOpen);
-		if (id === "carto.books") return booksView(env);
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
 		if (id === "shells.list") return shellsView(env);
 		if (id === "shells.out") return shellsOutView(env, state.shell);
@@ -781,7 +775,7 @@ export async function runScreen(session, options, runTerminal) {
 		flash(said);
 		refresh(viewId(), true);
 	};
-	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.books": "books", "carto.atlas": "atlas" };
+	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
 	const editContext = () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
@@ -874,14 +868,6 @@ export async function runScreen(session, options, runTerminal) {
 			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
 			return { id, fields };
 		}
-		if (viewId_ === "carto.books") {
-			const book = loadBooks(brainDir);
-			const item = book.items.find((entry) => entry.id === id);
-			if (item === undefined) return undefined;
-			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.books.textChars, value: item.text }];
-			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.books.outcomeChars, value: item.outcome ?? "" });
-			return { id, fields };
-		}
 		if (viewId_ === "carto.atlas") {
 			const { atlas } = loadAtlas(brainDir);
 			const node = atlas?.nodes.find((entry) => entry.name === id);
@@ -939,14 +925,9 @@ export async function runScreen(session, options, runTerminal) {
 			{ id: "network", label: "Network", limit: 5, value: "false" },
 			{ id: "standing", label: "Standing", limit: 5, value: "false" },
 		],
-		books: () => [
-			{ id: "kind", label: "Kind", limit: 10, value: "assessment" },
-			{ id: "text", label: "Text", limit: POLICY.limits.books.textChars, value: "" },
-		],
 		atlas: () => [
 			{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: "" },
 			{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: "" },
-			{ id: "kind", label: "Kind", limit: 9, value: "" },
 			{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: "" },
 		],
 	};
@@ -964,8 +945,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (book === "plan") {
 			return { mode: said("mode").trim(), text: said("text"), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
 		}
-		if (book === "books") return { kind: said("kind").trim(), text: said("text") };
-		return { name: said("name"), gist: said("gist"), ...(said("kind").trim() !== "" ? { kind: said("kind").trim() } : {}), ...(said("detail").trim() !== "" ? { detail: said("detail") } : {}) };
+		return { name: said("name"), gist: said("gist"), ...(said("detail").trim() !== "" ? { detail: said("detail") } : {}) };
 	};
 	const openAddBox = (book) => {
 		const template = ADD_FIELDS[book];

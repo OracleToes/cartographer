@@ -38,7 +38,7 @@ export function returnTool({ root, brainDir, config }) {
 	return defineTool({
 		name: "return",
 		description: [
-			"End this focused context and continue the orchestrating conversation. Keep durable findings in shared books before returning; the report carries the outcome and anything not already kept.",
+			"End this focused context and continue the orchestrating conversation. Keep durable findings in the shared ledger or atlas before returning; the report carries the outcome and anything not already kept.",
 			"Items named in `shelf` are added to my shelf if needed, then handed to the shared context when this focus returns.",
 		].join(" "),
 		parameters: obj({

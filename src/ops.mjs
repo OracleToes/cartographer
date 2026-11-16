@@ -12,12 +12,10 @@ import { applyContextRowAction, ContextRowError, foldReports, loadContext, recal
 import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "./atlas.mjs";
 import { applyOp, LedgerError, loadLedger, prune, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
-import { applyBookOp, BookError, loadBooks, renderBook, saveBooks } from "./books.mjs";
-import { saveAssessment } from "./assessment.mjs";
 import { noteAssessed, pin } from "./top.mjs";
 
 /** The books an id might name, and the words for them in a line of refusal. */
-export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a books entry a1 or r1, a node of the graph its name`;
+export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
 const contextAction = (brainDir, id, action) => {
 	try {
 		return applyContextRowAction(brainDir, id, action);
@@ -45,17 +43,7 @@ function row(brainDir, id) {
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas?.nodes.find((entry) => entry.name === id);
 	if (node !== undefined) return { what: "node", archived: node.archived === true, kind: node.kind ?? "node", found: node };
-	const book = loadBooks(brainDir);
-	const bookEntry = book?.items.find((item) => item.id === id);
-	return bookEntry === undefined ? undefined : { what: bookEntry.kind === POLICY.enums.bookKind.practice ? "practice entry" : "assessment entry", archived: bookEntry.archived === true, kind: bookEntry.kind, found: bookEntry };
-}
-
-/** Keep assessment.md in step with the assessment entries, as the agent's own book operations do. */
-function syncAssessment(brainDir, book) {
-	if (!book.items.some((item) => item.kind === POLICY.enums.bookKind.assessment)) return;
-	const assessment = renderBook(book, POLICY.enums.bookKind.assessment);
-	saveAssessment(brainDir, assessment);
-	noteAssessed(brainDir, assessment);
+	return undefined;
 }
 
 /**
@@ -81,14 +69,6 @@ export function archiveRow(brainDir, id) {
 		item.archived = true;
 		savePlan(brainDir, plan);
 		return `${id} archived: the item leaves the plan as the agent reads it, and waits in the file; /unarchive brings it back.`;
-	}
-	if (found.what === "assessment entry" || found.what === "practice entry") {
-		const book = loadBooks(brainDir);
-		const entry = book.items.find((item) => item.id === id);
-		entry.archived = true;
-		saveBooks(brainDir, book);
-		syncAssessment(brainDir, book);
-		return `${id} archived: the entry leaves the book as the agent reads it, and waits in the file; /unarchive brings it back.`;
 	}
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas.nodes.find((entry) => entry.name === id);
@@ -116,14 +96,6 @@ export function unarchiveRow(brainDir, id) {
 		delete item.archived;
 		savePlan(brainDir, plan);
 		return `${id} is back in the plan as the agent reads it.`;
-	}
-	if (found.what === "assessment entry" || found.what === "practice entry") {
-		const book = loadBooks(brainDir);
-		const entry = book.items.find((item) => item.id === id);
-		delete entry.archived;
-		saveBooks(brainDir, book);
-		syncAssessment(brainDir, book);
-		return `${id} is back in the book as the agent reads it.`;
 	}
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas.nodes.find((entry) => entry.name === id);
@@ -156,14 +128,6 @@ export function dropRow(brainDir, id) {
 		plan.items.splice(at, 1);
 		savePlan(brainDir, plan);
 		return `${id} is gone for good: the item is out of the plan, and nothing of it is said to the agent.`;
-	}
-	if (found.what === "assessment entry" || found.what === "practice entry") {
-		const book = loadBooks(brainDir);
-		const at = book.items.findIndex((item) => item.id === id);
-		book.items.splice(at, 1);
-		saveBooks(brainDir, book);
-		syncAssessment(brainDir, book);
-		return `${id} is gone for good: the entry is out of the book, and nothing of it is said to the agent.`;
 	}
 	const { atlas, error } = loadAtlas(brainDir);
 	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
@@ -206,8 +170,8 @@ export const dropRows = (brainDir, ids) => rows(brainDir, ids, dropRow);
 
 /**
  * Mark a row of a view settled, with the same operations the agent uses: a ledger entry is closed (with the
- * outcome line the agent would give), a plan item is done, a book entry is settled (and assessment.md is kept
- * in step), a node of the graph is confirmed (the node's own "still true"). @returns the line to show
+ * outcome line the agent would give), a plan item is done, a node of the graph is confirmed (the node's own
+ * "still true"). @returns the line to show
  */
 export function settleRow(brainDir, id, root) {
 	const found = row(brainDir, id);
@@ -235,13 +199,6 @@ export function settleRow(brainDir, id, root) {
 			savePlan(brainDir, plan);
 			return result.line;
 		}
-		if (found.what === "assessment entry" || found.what === "practice entry") {
-			const book = loadBooks(brainDir);
-			const result = applyBookOp(book, { action: POLICY.enums.actions.done, id }, now);
-			saveBooks(brainDir, book);
-			syncAssessment(brainDir, book);
-			return result.line;
-		}
 		const { atlas, error } = loadAtlas(brainDir);
 		if (atlas === undefined) return `! The graph cannot be read: ${error}`;
 		if (root === undefined) return "A node is confirmed from somewhere the graph can re-read its files.";
@@ -249,7 +206,7 @@ export function settleRow(brainDir, id, root) {
 		saveAtlas(brainDir, atlas);
 		return result.line;
 	} catch (error) {
-		if (error instanceof LedgerError || error instanceof PlanError || error instanceof BookError || error instanceof AtlasError) return `! ${error.message}`;
+		if (error instanceof LedgerError || error instanceof PlanError || error instanceof AtlasError) return `! ${error.message}`;
 		throw error;
 	}
 }
@@ -258,7 +215,6 @@ export function settleRow(brainDir, id, root) {
 const ADD_TEMPLATES = {
 	ledger: { label: "ledger entry", text: () => `${JSON.stringify({ kind: "note", text: "", salient: false, done_when: "" }, null, "\t")}\n` },
 	plan: { label: "plan item", text: () => `${JSON.stringify({ mode: "look", text: "", network: false, standing: false }, null, "\t")}\n` },
-	books: { label: "book entry", text: () => `${JSON.stringify({ kind: "assessment", text: "" }, null, "\t")}\n` },
 	atlas: { label: "node", text: () => `${JSON.stringify({ name: "", gist: "", kind: "", detail: "" }, null, "\t")}\n` },
 };
 
@@ -297,13 +253,6 @@ export function applyAdd(brainDir, book, text, root) {
 			savePlan(brainDir, plan);
 			return result.line;
 		}
-		if (book === "books") {
-			const b = loadBooks(brainDir);
-			const result = applyBookOp(b, { action: POLICY.enums.actions.add, ...op }, now);
-			saveBooks(brainDir, b);
-			syncAssessment(brainDir, b);
-			return result.line;
-		}
 		const { atlas, error } = loadAtlas(brainDir);
 		if (atlas === undefined) return `! The graph cannot be read: ${error}`;
 		if (root === undefined) return "A node is added from somewhere the graph can check its files.";
@@ -311,7 +260,7 @@ export function applyAdd(brainDir, book, text, root) {
 		saveAtlas(brainDir, atlas);
 		return result.line;
 	} catch (error) {
-		if (error instanceof LedgerError || error instanceof PlanError || error instanceof BookError || error instanceof AtlasError) return `! ${error.message}`;
+		if (error instanceof LedgerError || error instanceof PlanError || error instanceof AtlasError) return `! ${error.message}`;
 		throw error;
 	}
 }
@@ -353,19 +302,6 @@ export function editRow(brainDir, id, changes, root) {
 			savePlan(brainDir, plan);
 			return result.line;
 		}
-		if (found.what === "assessment entry" || found.what === "practice entry") {
-			const book = loadBooks(brainDir);
-			const op = {
-				action: POLICY.enums.actions.edit,
-				id,
-				...(changes.text !== undefined ? { text: changes.text } : {}),
-				...(changes.outcome !== undefined ? { outcome: changes.outcome } : {}),
-			};
-			const result = applyBookOp(book, op, now);
-			saveBooks(brainDir, book);
-			syncAssessment(brainDir, book);
-			return result.line;
-		}
 		if (found.what === "node") {
 			const { atlas, error } = loadAtlas(brainDir);
 			if (atlas === undefined) return `! The graph cannot be read: ${error}`;
@@ -388,7 +324,7 @@ export function editRow(brainDir, id, changes, root) {
 		}
 		return `There is no ${id}. ${BOOKS}.`;
 	} catch (error) {
-		if (error instanceof LedgerError || error instanceof PlanError || error instanceof BookError || error instanceof AtlasError) return `! ${error.message}`;
+		if (error instanceof LedgerError || error instanceof PlanError || error instanceof AtlasError) return `! ${error.message}`;
 		throw error;
 	}
 }

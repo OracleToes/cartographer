@@ -11,7 +11,7 @@
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
 //   atlas: [OPS]         the same with `atlas`
-//   assess: TEXT         call `assess` with TEXT
+//   assess: TEXT         call `book` with target=assessment, action=write, operation { text: TEXT }
 //   cut                  start a `task` call and run into the output limit in the middle of it
 //   context: {JSON}      call `context` with these arguments (a task can, too)
 //   ON COLLAPSE: DIRECTIVE   planted: asked before a collapse, it answers that it wants a turn first, and in that
@@ -110,7 +110,7 @@ function lookCall(directive) {
 		return { name: "edit", args: { path: path.trim(), old_text: breaks(oldText), new_text: breaks(newText) } };
 	}
 	if (name === "plan" || name === "atlas") return { name, args: { ops: JSON.parse(rest) } };
-	if (name === "assess") return { name: "assess", args: { text: breaks(rest) } };
+	if (name === "assess") return { name: "book", args: { target: "assessment", action: "write", operation: { text: breaks(rest) } } };
 	// wake: {"action":"set","note":"look at the log","every":60}
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
 	// context: {"action":"shelve","path":"a.txt"}

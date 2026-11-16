@@ -1,11 +1,11 @@
-// The one language the agent's entry books speak, written once.
+// The one language the agent's entry lists speak, written once.
 //
-// The ledger (src/ledger.mjs) and the books (src/books.mjs) are the same machine wearing different
-// clothes: a list of short entries with ids (g1, a3), kinds, an open/closed life, the verbs add, done,
+// The ledger (src/ledger.mjs) and the plan (src/plan.mjs) are the same machine wearing different
+// clothes: a list of short entries with ids (g1, p2), kinds, an open/closed life, the verbs add, done,
 // edit, remove — and, where order matters, before. Their file formats, their ids and every line the
-// agent or the user sees stay exactly as they were; only the machinery is shared. A book describes
+// agent or the user sees stay exactly as they were; only the machinery is shared. A list describes
 // itself with a `spec`, and `applyEntryOp` carries an operation out. Where the two differ — a goal's
-// done-when line, the books' reordering — the spec says so with a small hook, rather than the engine
+// done-when line, the plan's reordering — the spec says so with a small hook, rather than the engine
 // growing a case for each.
 //
 // What a spec holds:
@@ -25,10 +25,10 @@
 //   show           one line for an entry, as the agent and the user see it, after the verb's sign
 import { POLICY } from "./config.mjs";
 import { clipNote, warn } from "./warnings.mjs";
-//   closedWord     "closed" (ledger) or "settled" (books)
+//   closedWord     "closed" (ledger) or "settled" (plan)
 //   alreadyText    what is said when `done` reaches an entry that is done already
 //   outcome        for `done`: the entry's outcome from `op.text`, or undefined to leave it out
-//   markClosed     whether `done` stamps the time it happened (the ledger keeps it, the books do not)
+//   markClosed     whether `done` stamps the time it happened (the ledger keeps it, the plan does not)
 //   doneFollow     for `done`: what else the agent is told (the ledger: what a closed goal asks of it)
 //   afterDone      for `done`: book-specific cleanup after shared status/outcome handling
 //   addFields      for `add`: the fields beyond id, kind and text (the ledger: a goal's doneWhen)
@@ -37,7 +37,7 @@ import { clipNote, warn } from "./warnings.mjs";
 //   afterEdit      for `edit`: book-specific cleanup after shared fields are applied
 //   editResult     the book's wording for a successful `edit`
 //   kindInvalid    the book's wording when an added kind is not allowed
-//   editTextRequired  whether `edit` must have `text` (the books) or may change other fields instead
+//   editTextRequired  whether `edit` must have `text` (the plan) or may change other fields instead
 //   reorder        whether `before` is an action of its own
 //   unknownAction  the error for an action the book does not know
 

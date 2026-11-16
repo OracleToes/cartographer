@@ -27,7 +27,6 @@ const freezeTree = (value) => {
 const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close", rename: "rename" });
 const LEDGER_KIND = freezeTree({ goal: "goal", question: "question", note: "note" });
 const PLAN_MODE = freezeTree({ look: "look", change: "change" });
-const BOOK_KIND = freezeTree({ assessment: "assessment", practice: "practice" });
 const WAKE_KIND = freezeTree({ time: "time", file: "file", window: "window" });
 const WINDOW_WAIT_REASON = freezeTree({ done: "done", time: "time", asks: "asks", until: "until", quiet: "quiet", stopped: "stopped", closed: "closed", nudged: "nudged", idle: "idle", read: "read" });
 
@@ -68,7 +67,7 @@ export const DEFAULTS = freezeTree({
 	writeLines: 60,
 	writeCreatesOnly: true,
 	// Whether the agent starts working on its own when carto starts, without waiting to be addressed: it looks
-	// around, keeps the books and works what is approved, or sleeps when there is nothing to do. /initiate switches
+	// around, keeps the map and works what is approved, or sleeps when there is nothing to do. /initiate switches
 	// it while carto runs, and that switch is never remembered.
 	initiate: true,
 	// Whether change items run without asking for approval. --yolo overrides for one run; /yolo switches it
@@ -107,9 +106,8 @@ export const DEFAULTS = freezeTree({
 export const POLICY = freezeTree({
 	limits: {
 		ledger: { textChars: 400, openEntries: 40, closedEntriesKept: 50 },
-		books: { textChars: 600, items: 60, outcomeChars: 300 },
 		plan: { itemChars: 300, items: 30 },
-		atlas: { nameChars: 40, gistChars: 200, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
+		atlas: { nameChars: 80, gistChars: 400, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
 		assessment: { textChars: 3000 },
 		context: { callsTokens: 1000, recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, operationReplay: 256, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
 		git: { errorChars: 400, maxBufferBytes: 256 * 1024 * 1024, checkoutBatchItems: 200, undoTimestampToleranceMs: 1000, checkpointBufferBytes: 64 * 1024 * 1024 },
@@ -211,12 +209,8 @@ export const POLICY = freezeTree({
 		wakeKinds: WAKE_KIND,
 		windowStates: { starting: "starting", idle: "idle", busy: "busy", closed: "closed", gone: "gone" },
 		windowWaitReasons: WINDOW_WAIT_REASON,
-		bookKind: BOOK_KIND,
-		bookKinds: Object.values(BOOK_KIND),
-		bookActions: [ACTION.add, ACTION.edit, ACTION.done, ACTION.remove, ACTION.before],
 		ledgerNonGoalKinds: [LEDGER_KIND.question, LEDGER_KIND.note],
 		wakeActions: [ACTION.set, ACTION.remove],
-		atlasKinds: ["component", "finding", "dead_end"],
 		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree, rename: ACTION.rename },
 		atlasAuthors: { main: "main", task: "task", user: "user" },
 		shellAction: { run: ACTION.run, read: ACTION.read, wait: ACTION.wait, send: ACTION.send, stop: ACTION.stop, close: ACTION.close },
@@ -233,7 +227,6 @@ export const POLICY = freezeTree({
 		ledger: { goal: "g", question: "q", note: "n" },
 		plan: "p",
 		wake: "w",
-		books: { assessment: "a", practice: "r" },
 		taskStep: "s",
 		atlas: "c",
 	},

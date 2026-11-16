@@ -9,8 +9,7 @@ import assert from "node:assert/strict";
 
 import { POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
-import { applyPlanOp, loadPlan } from "../src/plan.mjs";
-import { loadBooks } from "../src/books.mjs";
+import { applyPlanOp, loadPlan, savePlan } from "../src/plan.mjs";
 import { loadAtlas, saveAtlas } from "../src/atlas.mjs";
 import { createRefDescriber } from "../src/refs.mjs";
 import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate } from "../src/ops.mjs";
@@ -20,7 +19,7 @@ import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
 import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront } from "../src/context.mjs";
-import { approveRequests } from "../src/requests.mjs";
+import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
@@ -127,54 +126,82 @@ test("plan: a change item added by the user goes through the same withdrawal as 
 	assert.equal(loadPlan(brainDir).plan.authorized, undefined);
 });
 
-// ─── The shared books ───────────────────────────────────────────────────────
+// ─── The assessment ─────────────────────────────────────────────────────────
 
-test("books: an assessment entry settles and assessment.md is kept in step", (t) => {
-	const { brainDir } = fresh(t);
-	assert.equal(applyAdd(brainDir, "books", JSON.stringify({ kind: "assessment", text: "A dice roller." }), null), "a1 added.");
-	// Assessment.md renders the open entries; a settled entry leaves it.
+test("assessment: the book tool writes it whole, and /assessment reads the file", async (t) => {
+	const { brainDir, root } = fresh(t);
+	const tool = bookTool({ root, brainDir, config: {}, engine: { messagesOf: () => [] } });
+	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "test-assessment-write", now: () => Date.now(), executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
+	const result = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "A dice roller. Builds with npm test." } }), api, undefined);
+	assert.equal(result.isError, undefined, JSON.stringify(result.output));
 	assert.match(readFileSync(assessmentPath(brainDir), "utf8"), /A dice roller\./);
-	const settled = settleRow(brainDir, "a1", null);
-	assert.match(settled, /a1 settled\./);
-	assert.doesNotMatch(readFileSync(assessmentPath(brainDir), "utf8"), /A dice roller\./);
-	const book = loadBooks(brainDir);
-	assert.equal(book.items[0].status, POLICY.enums.entryStatus.done);
+	assert.match(result.output[0].text, /Assessment saved \(36 characters/);
+	// An empty assessment is refused at the door, and the file is untouched.
+	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "" } }), /operation.text/);
+	// An over-long one is clipped and says so.
+	const long = "x".repeat(4000);
+	const clipped = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", operation: { text: long } }), api, undefined);
+	assert.equal(clipped.isError, undefined);
+	assert.equal(readFileSync(assessmentPath(brainDir), "utf8").trim().length <= 3001, true);
 });
 
-test("books: dropRow removes the named entry, never the last one", (t) => {
+// ─── The plan: approval in the user's own words ─────────────────────────────
+
+test("approval words: a bare affirmative authorizes the waiting change items", (t) => {
 	const { brainDir } = fresh(t);
-	applyAdd(brainDir, "books", JSON.stringify({ kind: "assessment", text: "About the project." }), null);
-	applyAdd(brainDir, "books", JSON.stringify({ kind: "practice", text: "Verify notes." }), null);
-	dropRow(brainDir, "a1");
-	// The two books share one id counter, so the practice entry is r2; the point is that the named one goes, not the last.
-	assert.deepEqual(loadBooks(brainDir).items.map((item) => item.id), ["r2"]);
+	savePlan(brainDir, { version: 1, next: 1, items: [
+		{ id: "p1", mode: "change", text: "Change the palette.", status: "open", added: 1 },
+		{ id: "p2", mode: "change", text: "Change the schema.", network: true, status: "open", added: 1 },
+		{ id: "p3", mode: "look", text: "Look first.", status: "open", added: 1 },
+	] });
+	assert.equal(approvalWords(brainDir, "yes") !== undefined, true);
+	const { plan } = loadPlan(brainDir);
+	assert.equal(plan.items.find((item) => item.id === "p1").approved !== undefined, true, "the change item is approved");
+	assert.equal(plan.items.find((item) => item.id === "p2").approved !== undefined, true, "a network item waits for the same word — the words are the user's own, and the receipt says what was approved");
+	// Already approved: the same word approves nothing new.
+	assert.equal(approvalWords(brainDir, "yes"), undefined);
 });
 
-test("books: archive and unarchive round-trip persists through the file", (t) => {
+test("approval words: only the named items are approved; look items never wait", (t) => {
 	const { brainDir } = fresh(t);
-	applyAdd(brainDir, "books", JSON.stringify({ kind: "practice", text: "Verify notes." }), null);
-	archiveRow(brainDir, "r1");
-	assert.equal(loadBooks(brainDir).items[0].archived, true);
-	unarchiveRow(brainDir, "r1");
-	assert.equal(loadBooks(brainDir).items[0].archived, undefined);
+	savePlan(brainDir, { version: 1, next: 1, items: [
+		{ id: "p1", mode: "change", text: "One.", status: "open", added: 1 },
+		{ id: "p2", mode: "change", text: "Two.", network: true, status: "open", added: 1 },
+	] });
+	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
+	const { plan } = loadPlan(brainDir);
+	assert.equal(plan.items.find((item) => item.id === "p1").approved, undefined);
+	assert.equal(approvalWords(brainDir, "approved p9"), undefined, "an unknown id approves nothing");
 });
 
-test("books: a kind that does not exist is refused, nothing is added", (t) => {
+test("approval words: anything less than an affirmative is not an approval", (t) => {
 	const { brainDir } = fresh(t);
-	assert.match(applyAdd(brainDir, "books", JSON.stringify({ kind: "memo", text: "x" }), null), /assessment, practice/);
-	assert.equal(loadBooks(brainDir).items.length, 0);
+	savePlan(brainDir, { version: 1, next: 1, items: [{ id: "p1", mode: "change", text: "Change it.", status: "open", added: 1 }] });
+	for (const words of ["no, wait", "yes but not p1", "what does p1 do?", "maybe", "ok?", "approve it later", "I approved the plan yesterday"]) {
+		assert.equal(approvalWords(brainDir, words), undefined, JSON.stringify(words));
+	}
+	assert.equal(loadPlan(brainDir).plan.items[0].approved, undefined);
+});
+
+test("approval words: the whole-plan wording authorizes the plan as it stands", (t) => {
+	const { brainDir } = fresh(t);
+	savePlan(brainDir, { version: 1, next: 1, items: [
+		{ id: "p1", mode: "change", text: "Change it.", status: "open", added: 1 },
+		{ id: "p2", mode: "change", text: "And that.", status: "open", added: 1 },
+	] });
+	assert.deepEqual(approvalWords(brainDir, "i approved the plan"), ["p1", "p2"]);
 });
 
 // ─── The atlas ──────────────────────────────────────────────────────────────
 
 test("atlas: add refuses a file that does not exist, then accepts it once it does", (t) => {
 	const { brainDir, root } = fresh(t);
-	const missing = applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "The docs.", kind: "component", detail: "Design notes.", files: ["docs/design.md"] }), root);
+	const missing = applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "The docs.", detail: "Design notes.", files: ["docs/design.md"] }), root);
 	assert.match(missing, /there is no file or folder docs\/design\.md/);
 	assert.equal(loadAtlas(brainDir).atlas.nodes.length, 0);
 	mkdirSync(join(root, "docs"));
 	writeFileSync(join(root, "docs", "design.md"), "# design\n");
-	const added = applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "The docs.", kind: "component", detail: "Design notes.", files: ["docs/design.md"] }), root);
+	const added = applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "The docs.", detail: "Design notes.", files: ["docs/design.md"] }), root);
 	assert.equal(added, "c1 docs written.");
 	assert.deepEqual(loadAtlas(brainDir).atlas.nodes.map((node) => node.name), ["docs"]);
 });
@@ -183,7 +210,7 @@ test("atlas: settleRow confirms a node", (t) => {
 	const { brainDir, root } = fresh(t);
 	mkdirSync(join(root, "docs"));
 	writeFileSync(join(root, "docs", "design.md"), "# design\n");
-	applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "The docs.", kind: "component", detail: "Design notes.", files: ["docs/design.md"] }), root);
+	applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "The docs.", detail: "Design notes.", files: ["docs/design.md"] }), root);
 	assert.match(settleRow(brainDir, "docs", root), /docs confirmed\./);
 });
 
@@ -191,14 +218,18 @@ test("atlas: dropRow takes a node out of the graph", (t) => {
 	const { brainDir, root } = fresh(t);
 	mkdirSync(join(root, "src"));
 	writeFileSync(join(root, "src", "app.mjs"), "console.log(1)\n");
-	applyAdd(brainDir, "atlas", JSON.stringify({ name: "src", gist: "The source.", kind: "component", detail: "Where the code lives.", files: ["src/app.mjs"] }), root);
+	applyAdd(brainDir, "atlas", JSON.stringify({ name: "src", gist: "The source.", detail: "Where the code lives.", files: ["src/app.mjs"] }), root);
 	dropRow(brainDir, "src");
 	assert.equal(loadAtlas(brainDir).atlas.nodes.length, 0);
 });
 
-test("atlas: a node kind the graph does not know is refused", (t) => {
+test("atlas: a `kind` written by an older carto is not read nor kept", (t) => {
 	const { brainDir, root } = fresh(t);
-	assert.match(applyAdd(brainDir, "atlas", JSON.stringify({ name: "docs", gist: "x", kind: "directory" }), root), /component, finding, dead_end/);
+	writeFileSync(join(brainDir, "carto-atlas.json"), JSON.stringify({ version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ id: "c1", name: "docs", kind: "finding", gist: "x", links: [], files: [], seen: {}, written: 1, by: "main" }] }));
+	const { atlas } = loadAtlas(brainDir);
+	assert.equal(atlas.nodes[0].kind, undefined, "the kind is dropped on load");
+	saveAtlas(brainDir, atlas);
+	assert.equal(readFileSync(join(brainDir, "carto-atlas.json"), "utf8").includes("\"kind\""), false, "and never written back");
 });
 
 test("atlas: a graph written before ids existed gets them, deterministically, and keeps them", (t) => {
@@ -225,7 +256,7 @@ test("atlas: the ref system takes the node, end to end through the book tool", a
 	// which the replay guard swallows on purpose.
 	let serial = 0;
 	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `t${++serial}`, now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
-	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source.", kind: "component" } }), api(), undefined);
+	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source." } }), api(), undefined);
 	assert.ok(!added.isError, added.output[0].text);
 	const id = loadAtlas(brainDir).atlas.nodes[0].id;
 	assert.match(id, /^c\d+$/, "the node came back with a c-id");
@@ -258,7 +289,7 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 	writeFileSync(join(root, "src", "app.mjs"), "console.log(1)\n");
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "t1", now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source.", kind: "component" } }), api, undefined);
+	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source." } }), api, undefined);
 	const node = loadAtlas(brainDir).atlas.nodes[0];
 	const describeRef = createRefDescriber({ brainDir });
 	assert.equal(describeRef({ kind: "atlas", id: node.id }), `src (${node.id})`);
@@ -269,7 +300,7 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 
 test("templates: every book has a template that parses and applies", (t) => {
 	const { brainDir, root } = fresh(t);
-	for (const [book, expect] of [["ledger", /added\.$/], ["plan", /added\.$/], ["books", /added\.$/]]) {
+	for (const [book, expect] of [["ledger", /added\.$/], ["plan", /added\.$/]]) {
 		const template = addTemplate(book);
 		assert.equal(typeof template, "string");
 		assert.doesNotThrow(() => JSON.parse(template));

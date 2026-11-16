@@ -19,7 +19,6 @@ import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
 import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, loadAtlas, nodeChanges, nodeHashes, NODES_MAX, renderOutline, saveAtlas, staleNodes } from "../src/atlas.mjs";
 import { applyOp, LedgerError, loadLedger, OPEN_MAX, renderLedger, saveLedger, TEXT_MAX } from "../src/ledger.mjs";
 import { applyAdd } from "../src/ops.mjs";
-import { applyBookOp, BookError, loadBooks, saveBooks } from "../src/books.mjs";
 import { applyPlanOp, authorize, ITEM_MAX, loadPlan, openOnce, PlanError, planSummary, renderPlan, savePlan, YOLO_LINE } from "../src/plan.mjs";
 import { withoutAdditions, withTimes } from "../src/request.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "../src/state.mjs";
@@ -833,7 +832,7 @@ test("top: the copy is written at its moments and not otherwise, and goes in fro
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: ["one"], removed: [], assessment: true, at: new Date(at).toISOString() }, "what was written since the copy");
 	assert.deepEqual(pin(dir, { now: at + 120_000, reason: "goal g1 was closed" }), { changed: true });
 	has(loadTop(dir).text, "as they stood on Tue 10 Nov 2026, 14:07 (goal g1 was closed).", "when and why");
-	has(loadTop(dir).text, "My assessment\nA demo.\n\nMy graph (1 node)\nOther nodes:\n  c1  one  the first node\n</project>", "the assessment and the outline");
+	has(loadTop(dir).text, "My assessment\nA demo.\n\nMy graph (1 node)\n  c1  one  the first node\n</project>", "the assessment and the outline");
 	assert.deepEqual(sinceTop(dir, atlas, "A demo."), { written: [], removed: [], assessment: false, at: new Date(at + 120_000).toISOString() }, "nothing is newer than a fresh copy");
 	writeFileSync(join(dir, "carto-atlas.json"), "{ not json");
 	const kept = readFileSync(topPath(dir), "utf8");
@@ -871,7 +870,7 @@ test("time: each of the user's messages and each task report says when it came, 
 test("terminal: one line per call to the atlas and the assessment", () => {
 	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", operation: { name: "dice" } } }), "book atlas add dice");
 	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: "a" } } }), "book atlas confirm a");
-	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "add", operation: { text: "x".repeat(1200) } } }), `book assessment add ${"x".repeat(69)}…`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "write", operation: { text: "x".repeat(1200) } } }), `book assessment write ${"x".repeat(69)}…`);
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "book", isError: false, details: { target: "atlas", ...details }, content: [{ type: "text", text }] });
 	assert.equal(result({ shown: ["+ node a  what a is", "✓ confirmed b"] }, "a written.\nb confirmed."), "+ node a what a is · ✓ confirmed b");
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");
@@ -1365,7 +1364,7 @@ test("screen: a collapse of the main context leaves only the marker, and the age
 	chat.print("Cartographer · /project\nbrain /project/.brain · model at server\n", { keep: true });
 	chat.user("hello before");
 	chat.entry(0, reply([call("c1", "chat", { text: "Hi." })], 1));
-	chat.block("the state block — the time, the atlas, the books, the ledger, the plan", "Ledger\n- g1 finish the roller\n\nPlan\np1 open");
+	chat.block("the state block — the time, the atlas, the ledger, the plan", "Ledger\n- g1 finish the roller\n\nPlan\np1 open");
 	assert.match(out(), /the state block/, "a block folds to one line");
 	assert.equal(out().includes("g1 finish the roller"), false, "and its content is not in view until it is opened");
 	const before = chat.lines(80).find((line) => line.kind === "block");
@@ -1783,24 +1782,13 @@ test("screen: the Context tab unfolds the collapse block into one row per kept o
 	}
 });
 
-// ─── The books' outcomes, the atlas rename, the audit of cuts, and the small box ───────────────
+// ─── Outcomes of settled entries, the atlas rename, the audit of cuts, and the small box ───────────────
 
-test("books: an outcome of a settled entry is editable; the books refuse what makes no sense", () => {
+test("brain: an outcome of a settled entry is editable; the lists refuse what makes no sense", () => {
 	const root = makeProject("outcome-edits");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	const now = "2026-11-15T00:00:00.000Z";
-	// The books: settle, then reword the outcome; the engine keeps it to the outcome's limit.
-	saveBooks(brainDir, { version: 1, next: 2, items: [{ id: "a1", kind: "assessment", text: "The deploy takes an hour.", status: "open" }] });
-	let book = loadBooks(brainDir);
-	applyBookOp(book, { action: "done", id: "a1", text: "It takes an hour, mostly the database migration." }, now);
-	const done = applyBookOp(book, { action: "edit", id: "a1", outcome: "Mostly the migration; the rest is fast." }, now);
-	assert.equal(done.line.includes("reworded") || done.line.includes("settled") || done.line.includes("changed"), true);
-	assert.equal(book.items[0].outcome, "Mostly the migration; the rest is fast.", "the outcome is rewritten through the same operations");
-	assert.throws(() => applyBookOp(book, { action: "edit", id: "a1" }, now), BookError, "an edit of nothing is refused");
-	saveBooks(brainDir, { version: 1, next: 3, items: [{ id: "a2", kind: "assessment", text: "Open entry.", status: "open" }] });
-	book = loadBooks(brainDir);
-	assert.throws(() => applyBookOp(book, { action: "edit", id: "a2", outcome: "not settled yet" }, now), BookError, "an outcome on an open entry is refused");
 	// The ledger: the same rule, on a goal with a done-when line.
 	saveLedger(brainDir, { version: 1, next: 2, items: [{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: "It is live", status: "done", outcome: "shipped", closed: 1 }] });
 	const ledger = loadLedger(brainDir).ledger;
@@ -1846,7 +1834,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const { ledgerView, planView, booksView, atlasView, requestsView, shellsView } = await import("../src/screen/views.mjs");
+	const { ledgerView, planView, atlasView, requestsView, shellsView } = await import("../src/screen/views.mjs");
 	const flatStr = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 	const exposed = (item) => flatStr([item.body, typeof item.copy === "function" ? item.copy() : item.copy].filter((part) => part !== undefined).join("\n"));
 	const expectReachable = (name, view, needle) => {
@@ -1871,8 +1859,6 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
 	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: LONG, status: "open", added: 1 }] });
 	expectReachable("plan item", planView({ brainDir, yolo: false }), LONG);
-	saveBooks(brainDir, { version: 1, next: 2, items: [{ id: "a1", kind: "assessment", text: LONG, status: "open", added: 1 }] });
-	expectReachable("books entry", booksView({ brainDir }), LONG);
 	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
 	expectReachable("atlas gist", atlasView({ root, brainDir }), LONG.slice(0, 200));
 	expectReachable("atlas detail", atlasView({ root, brainDir }), LONG);
