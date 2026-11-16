@@ -967,14 +967,14 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	// Ledger: flat goal add, salient note add/edit, done, remove.
 	const g1 = await run({ target: "ledger", action: "add", kind: "goal", text: "Clean schema", done_when: "npm test passes with flat book calls" });
 	assert.ok(!g1.isError && /g1 added/.test(g1.output[0].text), g1.output[0].text);
-	const n1 = await run({ target: "ledger", action: "add", kind: "note", text: "Use top-level id.", salient: true });
-	assert.ok(!n1.isError && /n1 added/.test(n1.output[0].text), n1.output[0].text);
-	const nEdit = await run({ target: "ledger", action: "edit", id: "n1", salient: false });
+	const n2 = await run({ target: "ledger", action: "add", kind: "note", text: "Use top-level id.", salient: true });
+	assert.ok(!n2.isError && /n2 added/.test(n2.output[0].text), n2.output[0].text);
+	const nEdit = await run({ target: "ledger", action: "edit", id: "n2", salient: false });
 	assert.ok(!nEdit.isError, nEdit.output[0].text);
 	const gDone = await run({ target: "ledger", action: "done", id: "g1", text: "All tests pass." });
 	assert.ok(!gDone.isError && /g1 closed/.test(gDone.output[0].text), gDone.output[0].text);
-	const nRemove = await run({ target: "ledger", action: "remove", id: "n1" });
-	assert.ok(!nRemove.isError && /n1 removed/.test(nRemove.output[0].text), nRemove.output[0].text);
+	const nRemove = await run({ target: "ledger", action: "remove", id: "n2" });
+	assert.ok(!nRemove.isError && /n2 removed/.test(nRemove.output[0].text), nRemove.output[0].text);
 
 	// Context: fold by top-level `id`, dressMain notice, and `context recall` by top-level `id`.
 	addRecord(brainDir, { id: "t1", at: 1700000000000, mode: "look", brief: "Inspect", report: `Detailed report body.\n\n${KEPT_AS("t1")}`, summary: "Inspected" });
