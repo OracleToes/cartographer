@@ -48,10 +48,11 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 	const doFetch = fetchImpl ?? globalThis.fetch;
 	return defineTool({
 		name: "consult",
+		// The harness sends describe("consult") (src/prompt.mjs TOOLS) to the model; this stands in when that is absent, in the same voice.
 		description: [
-			"The storyteller is Mythos-nano: a small long-reasoning model served by the same local endpoint. It sees nothing of the project, it can do nothing in it, and nothing it says carries weight until a test or a proof bears it out.",
-			"One call per problem, with the whole problem in it: in `context` what it may not guess (files with paths and line numbers, constraints, what I tried and what it printed), the question last, and at the end of the question the shape of the answer I want. While it tells its story my own model is not served, so the call takes minutes.",
-			"It is good at algorithms, math and proofs — not at taste or design. The answer lands in `consult/<stamp>.md` and is shelved for me; I read it, check the work, and apply it myself.",
+			"The storyteller. One hard sub-problem whose answer a test or a proof can refute — a kernel, an invariant, a proof, a counterexample — handed over whole and once.",
+			"In `context` what it may not guess (files with paths and line numbers, constraints, what I tried and what it printed), the question last, and at the end of the question the shape of the answer I want. It knows nothing of the project and keeps nothing once it speaks; everything it needs goes in the call.",
+			"Its answer comes back as a file in `consult/` and on my shelf: a story, not a record — I check it against a test or a proof and keep what holds. I reach for it early, when a refutable hard question stands in my way. Strong where an answer can be refuted; of no use where taste rules.",
 		].join(" "),
 		parameters: obj({
 			question: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "The problem, self-contained, with the shape of the answer wanted at the end (for example: the complete function; the invariant with its proof; the counterexample)." }),
@@ -74,7 +75,7 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 			const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 			const model = typeof config.consultModel === "string" ? config.consultModel.trim() : "";
 			if (model === "") {
-				return fail("`consult` is switched off: `consultModel` is empty in the settings. Nothing was asked. Set it to the name llama-swap serves the storyteller under (or remove it to use the default, MythosNano).");
+				return fail("`consult` is switched off: `consultModel` is empty in the settings. Nothing was asked. Set it to the name llama-swap serves the storyteller under (or remove it to use the default).");
 			}
 			const context = clipConsultContext(args.context);
 			// The question last: what is newest is what the model answers.
