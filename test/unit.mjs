@@ -24,7 +24,7 @@ import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs"
 import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { describeCall } from "../src/terminal.mjs";
-import { changeTools } from "../src/tools/change.mjs";
+import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { TOOLS } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -708,6 +708,26 @@ test("file edit: the ID alone is enough, and it always points at the live versio
 
 	// The call label names the tool that carries it.
 	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", ref: { id }, oldText: "x", newText: "y" } }), `book file edit ${id}`);
+});
+
+test("write create: over the line cap the head is written and the agent is told", (t) => {
+	const { root, brainDir } = fresh(t);
+	const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
+	const [write] = changeTools({ root, brainDir, write: { newOnly: true, maxLines: 60 } });
+	const prepared = write.prepareArguments({ path: "long.txt", content });
+	assert.equal(prepared.content.split("\n").length, 60, "prepareArguments clips to the line cap before validation sees it");
+	assert.equal(prepared.content, Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n"));
+	const result = writeOne(root, brainDir, "long.txt", content, { newOnly: true, maxLines: 60 });
+	assert.equal(readFileSync(join(root, "long.txt"), "utf8"), prepared.content, "the file holds the head, and only the head");
+	assert.match(result, /60 lines, a new file/);
+	assert.match(result, /if you wrote more, the rest is not in the file/);
+	// A file written exactly at the cap carries the same honest advisory; below the cap, no advisory.
+	assert.match(writeOne(root, brainDir, "exact.txt", "a\nb\n", { newOnly: true, maxLines: 2 }), /at most|most a new file/, "the exact-cap file is told the rule");
+	assert.doesNotMatch(writeOne(root, brainDir, "small.txt", "a\nb\n", { newOnly: true, maxLines: 60 }), /most a new file/);
+	// One pathological line is cut at the character budget, not kept whole.
+	const clipped = clipWriteContent("z".repeat(300), 1);
+	assert.equal(clipped.text.length, 250);
+	assert.equal(clipped.clipped, true);
 });
 
 test("shelf add: the ID alone is enough, and it finds the file behind it", async (t) => {

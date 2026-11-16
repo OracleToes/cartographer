@@ -983,7 +983,7 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
 | `contextWindow` | 100000 | Context size the server was started with (`-c`) |
 | `maxTokens` | 32768 | Longest single reply, thinking included |
-| `writeLines` | 60 | Longest new file one `write` call creates, in lines. A file to grow beyond that is written and then edited |
+| `writeLines` | 60 | Longest new file one `write` call creates, in lines (or 250 characters a line, whichever binds first). What a `write` call keeps is the head of the file; the result says so when it was cut, and the way to finish such a file is `edit` anchored on its end |
 | `writeCreatesOnly` | true | Whether `write` refuses to replace an existing file whole, pointing at `edit` instead. false: the old create-or-replace |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Carrying out a plan takes about two per item |
 | `taskTurns` | 30 | Replies one task may make, notes included, before it is ended without a report |

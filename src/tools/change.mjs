@@ -19,11 +19,37 @@ import { fileReference } from "../catalog.mjs";
 import { USER_NAME } from "../user.mjs";
 
 const CONTENT_MAX_BYTES = POLICY.limits.change.contentBytes;
+/** Rough character budget for a new file: the line cap is the main limit; this one stops a runaway. */
+const WRITE_CHARS_PER_LINE = 250;
+const writeBudget = (maxLines) => maxLines * WRITE_CHARS_PER_LINE;
 
 export class ChangeError extends Error {}
 
 const lineCount = (text) => (text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0));
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/**
+ * Clip `content` to what the tool keeps of a new file: at most `maxLines` lines and at most
+ * `maxLines * WRITE_CHARS_PER_LINE` characters, whichever binds first; whole lines, unless one line
+ * is longer than the whole budget, in which case it is cut at the budget.
+ * @returns {{ text: string, clipped: boolean }}
+ */
+export function clipWriteContent(content, maxLines) {
+	const budget = writeBudget(maxLines);
+	if (content.length <= budget && lineCount(content) <= maxLines) return { text: content, clipped: false };
+	const lines = content.split("\n");
+	const kept = [];
+	let chars = 0;
+	for (const line of lines) {
+		if (kept.length >= maxLines) break;
+		const add = kept.length === 0 ? line.length : line.length + 1;
+		if (chars + add > budget) break;
+		kept.push(line);
+		chars += add;
+	}
+	if (kept.length === 0) return { text: lines[0].slice(0, budget), clipped: true };
+	return { text: kept.join("\n"), clipped: true };
+}
 
 /**
  * Turn what the model wrote into a path a change task may write to, or throw.
@@ -67,12 +93,18 @@ export function confineWrite(root, brainDir, given) {
  */
 export function writeOne(root, brainDir, given, content, options = {}) {
 	if (typeof content !== "string") throw new ChangeError("`content` is required: the whole text of the file");
-	if (Buffer.byteLength(content) > CONTENT_MAX_BYTES) throw new ChangeError(`\`content\` is larger than ${CONTENT_MAX_BYTES / 1_000_000} MB; write the file in parts, or generate it another way`);
-	const path = confineWrite(root, brainDir, given);
-	const lines = lineCount(content);
-	if (options.maxLines !== undefined && lines > options.maxLines) {
-		throw new ChangeError(`\`content\` has ${plural(lines, "line")}; \`write\` may create at most ${plural(options.maxLines, "line")} of a new file. Start the file short and grow it with \`edit\`, one exact passage at a time`);
+	let written = content;
+	let atCap = false;
+	if (options.maxLines !== undefined) {
+		const clipped = clipWriteContent(content, options.maxLines);
+		written = clipped.text;
+		atCap = clipped.clipped
+			|| lineCount(clipped.text) >= options.maxLines
+			|| clipped.text.length >= writeBudget(options.maxLines);
 	}
+	if (Buffer.byteLength(written) > CONTENT_MAX_BYTES) throw new ChangeError(`\`content\` is larger than ${CONTENT_MAX_BYTES / 1_000_000} MB; write the file in parts, or generate it another way`);
+	const path = confineWrite(root, brainDir, given);
+	const lines = lineCount(written);
 	const priorBytes = existsSync(path.abs) ? readFileSync(path.abs) : undefined;
 	const had = priorBytes === undefined ? undefined : lineCount(priorBytes.toString("utf8"));
 	if (options.newOnly === true && had !== undefined) {
@@ -80,7 +112,7 @@ export function writeOne(root, brainDir, given, content, options = {}) {
 	}
 	mkdirSync(dirname(path.abs), { recursive: true });
 	try {
-		writeFileSync(path.abs, content, options.newOnly === true ? { flag: "wx" } : undefined);
+		writeFileSync(path.abs, written, options.newOnly === true ? { flag: "wx" } : undefined);
 	} catch (error) {
 		if (options.newOnly === true && error.code === "EEXIST") throw new ChangeError(`${path.rel} was created by another operation; nothing was overwritten`);
 		throw error;
@@ -96,7 +128,8 @@ export function writeOne(root, brainDir, given, content, options = {}) {
 		}
 		throw new ChangeError(`The stable file identity could not be recorded (${error.message}); the file was restored and nothing was changed.`);
 	}
-	return `Wrote ${path.rel}: ${plural(lines, "line")}, ${had === undefined ? "a new file" : `replacing a file of ${plural(had, "line")}`}. File id: ${ref.id} (to read or change it: { "id": "${ref.id}" }).`;
+	const cap = atCap ? ` — the most a new file created with write keeps (or ${writeBudget(options.maxLines)} characters); if you wrote more, the rest is not in the file, and the way to finish it is \`edit\`, anchored on the end of the file` : "";
+	return `Wrote ${path.rel}: ${plural(lines, "line")}${had === undefined ? ", a new file" : `, replacing a file of ${plural(had, "line")}`}${cap}. File id: ${ref.id} (to read or change it: { "id": "${ref.id}" }).`;
 }
 
 /**
@@ -162,11 +195,20 @@ export function changeTools({ root, brainDir, write = {} }) {
 	return [
 		defineTool({
 			name: "write",
-			description: "Create a NEW file of the project with a short piece of boilerplate. `write` refuses to replace an existing file and will not write a long one: build and grow files with `edit`, one exact passage at a time. Folders are created as needed.",
+			description: "Create a NEW file of the project with a short piece of boilerplate. `write` refuses to replace an existing file; what it keeps of a new file is limited — beyond the limit the rest is not written and the result says so — so build and grow files with `edit`, one exact passage at a time. Folders are created as needed.",
 			parameters: obj({
 				path: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Path relative to the project directory" }),
-				content: str({ description: "The whole text of the file" }),
+				content: str({ maxLength: writeBudget(write.maxLines ?? 4096), description: "The whole text of the file; over the cap, the tail is not written" }),
 			}),
+			prepareArguments(args) {
+				// Clipped here, before validation sees it, so an oversized call keeps the head of the file instead of being refused whole.
+				const maxLines = write.maxLines ?? 4096;
+				if (args !== null && typeof args === "object" && typeof args.content === "string") {
+					const clipped = clipWriteContent(args.content, maxLines);
+					if (clipped.clipped) return { ...args, content: clipped.text };
+				}
+				return args;
+			},
 			callers: ["tools"], // Internal primitive for book; the model uses target=file, action=create.
 			executionMode: "sequential",
 			// Writing the same text twice leaves the same file.

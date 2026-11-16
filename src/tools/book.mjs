@@ -213,7 +213,7 @@ const ACTION_GUIDE = {
 		write: "operation { text }: the whole assessment; it replaces the current one",
 	},
 	file: {
-		create: "path and content — the result names the new file's `File id:`",
+		create: "path and content — a new file keeps at most the line cap (see the session's `writeLines`); the rest is not written and the result says so. The result names the new file's `File id:`",
 		read: "a path, or the file `ref` ({ id }) from a create/read header — the header of a path read shows `· file f1`; range optional",
 		edit: "the file `ref` ({ id }), oldText and newText — an `id` alone names the live version",
 		remove: "the file `ref` ({ id })",
