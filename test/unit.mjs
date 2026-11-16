@@ -650,29 +650,45 @@ import { beginShelfGate, readGateCheck, takeShelfAsk, settleShelfAsk, parseShelf
 
 const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c${path}`, name: "book", arguments: { target: "file", action: "read", path } });
 
-test("read gate: the first file read of a reply is returned, further ones are refused and ride the question", () => {
+test("read gate: the first file read of a reply is returned, the rest are refused, and the question rides the read that came back", () => {
 	const id = "gate-first";
 	const message = { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md"), readCall("c.md")] };
 	beginShelfGate(id, message);
 	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
 	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
 	assert.match(readGateCheck(id, readCall("c.md")), /c\.md was not returned/);
-	const ask = takeShelfAsk(id);
+	// A refusal carries no question,
+	assert.equal(takeShelfAsk(id, readCall("b.md"), { isError: true }), undefined, "a refusal never carries the question");
+	// and neither does a result from a call that is not one of the reply's reads.
+	assert.equal(takeShelfAsk(id, { type: "toolCall", id: "shell-1", name: "shell", arguments: {} }, { isError: false }), undefined);
+	// The read that came back does.
+	const ask = takeShelfAsk(id, readCall("a.md"), { isError: false });
 	assert.match(ask, /<shelf-ask>/);
-	assert.match(ask, /1  a\.md/);
+	assert.match(ask, /1  a\.md  \(read this reply\)/);
 	assert.match(ask, /2  b\.md {2}\(not returned\)/);
 	assert.match(ask, /3  c\.md {2}\(not returned\)/);
-	assert.equal(takeShelfAsk(id), undefined, "the question rides a result once");
+	assert.match(ask, /not answering shelves none/);
+	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: false }), undefined, "the question rides a once");
 	// A reply without file reads clears the gate.
 	beginShelfGate(id, { role: "assistant", timestamp: 2, content: [{ type: "text", text: "noted" }] });
-	assert.equal(takeShelfAsk(id), undefined);
+	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: false }), undefined);
+});
+
+test("read gate: when no read comes back cleanly, the last read of the reply carries the question", () => {
+	const id = "gate-all-fail";
+	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md")] });
+	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
+	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
+	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: true }), undefined, "not before the round's reads are all in");
+	const ask = takeShelfAsk(id, readCall("b.md"), { isError: true });
+	assert.match(ask, /<shelf-ask>/, "the last read carries it rather than no one");
 });
 
 test("read gate: a single read asks the yes/no question about the one file", () => {
 	const id = "gate-single";
 	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("solo.md")] });
 	assert.equal(readGateCheck(id, readCall("solo.md")), undefined);
-	const ask = takeShelfAsk(id);
+	const ask = takeShelfAsk(id, readCall("solo.md"), { isError: false });
 	assert.match(ask, /Should I shelf solo\.md\? Yes or no/);
 	assert.doesNotMatch(ask, /by number/);
 });
@@ -684,7 +700,7 @@ test("read gate: a yes shelves the files, numbers pick, a no shelves none", (t) 
 	const mk = (id, files) => {
 		beginShelfGate(id, { role: "assistant", timestamp: 1, content: files.map((f, i) => readCall(f, `c${i}`)) });
 		for (const f of files) readGateCheck(id, readCall(f, `c${files.indexOf(f)}`));
-		takeShelfAsk(id);
+		takeShelfAsk(id, readCall(files[0], "c0"), { isError: false });
 	};
 	const main = ROOT_CONVERSATION_ID;
 	mk(main, ["x.md", "y.md"]);

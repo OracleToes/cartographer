@@ -302,8 +302,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				afterTool: async (call, result, api) => {
 					if (call.parent !== undefined) return undefined;
 					const looped = loopCheck(call, result, api);
-					// The reply's reads are all decided by now (or were never): ask about the shelf once, if there is anything to ask.
-					const shelfAsk = takeShelfAsk(api.conversationId);
+					// The reply's reads are being answered one by one; the question, when it is asked, rides the read that came back.
+					const shelfAsk = takeShelfAsk(api.conversationId, call, result);
 					const out = shelfAsk === undefined ? (looped ?? result) : withText(looped ?? result, shelfAsk);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {

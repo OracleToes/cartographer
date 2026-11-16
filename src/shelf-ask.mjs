@@ -1,7 +1,8 @@
 // The read gate: one read comes back per reply, in every turn. Whatever else the agent asked to read in the same
-// reply is refused inside beforeTool — the model never sees the file's content — and a question rides the round's
-// results: should the files it did not get (and the one it did) be shelved? The shelf is where several files stay
-// in view at once (src/context.mjs), so asking is the honest alternative to handing everything to the model.
+// reply is refused inside beforeTool — the model never sees the file's content — and a question rides the result of
+// the read that came back: should the files it did not get (and the one it did) be shelved? The shelf is where
+// several files stay in view at once (src/context.mjs), so asking is the honest alternative to handing everything
+// to the model. The refusals never carry the question; the read that came back does.
 //
 // The question is one-shot: once the agent has answered (its next reply), the stored question is dressed out of
 // what it sees (dressShelfAsk, called from src/request.mjs); the conversation record keeps it, as it keeps the notes.
@@ -25,6 +26,7 @@ const pending = new Map();
 const textOf = (message) => (typeof message?.content === "string" ? message.content : Array.isArray(message?.content) ? message.content.map((part) => part.text ?? "").join("") : "");
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
 const isFileRead = (call) => call?.name === "book" && call.arguments?.action === "read" && call.arguments?.target === "file";
+const callIdOf = (call) => (typeof call?.id === "string" ? call.id : undefined);
 
 /** What the entry looks like in the question: the path if it was given one, the stable id otherwise. */
 const entryOf = (args) => {
@@ -42,7 +44,7 @@ const entryOf = (args) => {
 export function beginShelfGate(conversationId, message) {
 	const planned = callsOf(message).filter(isFileRead).length;
 	if (planned === 0) { gates.delete(conversationId); return; }
-	gates.set(conversationId, { planned, entered: 0, ran: undefined, declined: [], ready: false, asked: false });
+	gates.set(conversationId, { planned, ran: undefined, ranId: undefined, declined: [], asked: false, seen: new Set(), answered: 0 });
 }
 
 /**
@@ -54,16 +56,17 @@ export function readGateCheck(conversationId, call) {
 	if (!isFileRead(call)) return undefined;
 	const gate = gates.get(conversationId);
 	if (gate === undefined) return undefined; // a read outside a planned reply (not an assistant message we saw) — not gated
-	gate.entered += 1;
+	const id = callIdOf(call);
+	if (id !== undefined) gate.seen.add(id);
 	const entry = entryOf(call.arguments);
 	let refused;
 	if (gate.ran === undefined) {
 		gate.ran = { ...entry, returned: true };
+		gate.ranId = id;
 	} else {
 		gate.declined.push({ ...entry, returned: false });
-		refused = `${entry.display} was not returned. Only one read comes back per reply — the question at the end of the round asks whether to shelf it. Read it next reply instead, or shelf it.`;
+		refused = `${entry.display} was not returned. One read comes back per reply — ask for it in your next reply.`;
 	}
-	if (gate.entered >= gate.planned) gate.ready = true;
 	return refused;
 }
 
@@ -73,18 +76,25 @@ export function shelfAskText(files) {
 	if (files.length === 1) {
 		return `${SHELF_ASK_OPEN}\nShould I shelf ${files[0].display}? Yes or no — if yes, it is shelved for me and stays in view; if no, the read stands as a read.\n${SHELF_ASK_CLOSE}`;
 	}
-	const lines = files.map((file, index) => `  ${index + 1}  ${file.display}${file.returned === false ? "  (not returned)" : ""}`);
-	return `${SHELF_ASK_OPEN}\nShould I shelf them? Yes or no — if yes, which, by number (for example "1 3"); yes alone shelves them all; no shelves none.\n${lines.join("\n")}\n${SHELF_ASK_CLOSE}`;
+	const lines = files.map((file, index) => `  ${index + 1}  ${file.display}${file.returned === false ? "  (not returned)" : "  (read this reply)"}`);
+	return `${SHELF_ASK_OPEN}\nShould I shelf them? Yes or no — if yes, which, by number (for example "1 3"); yes alone shelves them all; no shelves none; not answering shelves none either.\n${lines.join("\n")}\n${SHELF_ASK_CLOSE}`;
 }
 
 /**
- * The question for the reply in flight, once every read it planned has been decided: the returned file and the
- * declined ones, in the order they were called. Called from afterTool; the question rides the result once.
+ * The question for the reply in flight, carried once. It rides the result of the read that came back — never a
+ * refusal's — so the question never shares a failed result with the rule it enforces. If the read that came back
+ * failed too (or nothing came back), the last read of the round carries it. Called from afterTool.
  * @returns {string | undefined} the question block, or undefined when there is nothing to ask about
  */
-export function takeShelfAsk(conversationId) {
+export function takeShelfAsk(conversationId, call, result) {
 	const gate = gates.get(conversationId);
-	if (gate === undefined || !gate.ready || gate.asked) return undefined;
+	if (gate === undefined || gate.asked) return undefined;
+	const id = callIdOf(call);
+	if (id === undefined || !gate.seen.has(id)) return undefined; // not one of this round's reads
+	gate.answered += 1;
+	const isReturned = gate.ranId !== undefined && id === gate.ranId;
+	const clean = result?.isError !== true;
+	if (!(isReturned && clean) && gate.answered < gate.planned) return undefined;
 	const files = [gate.ran, ...gate.declined].filter(Boolean);
 	if (files.length === 0) return undefined;
 	gate.asked = true;
