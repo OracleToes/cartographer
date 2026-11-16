@@ -20,6 +20,7 @@ import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs"
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
+import { beginShelfGate, readGateCheck, settleShelfAsk, takeShelfAsk } from "./shelf-ask.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
@@ -271,6 +272,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
+					// One read comes back per reply. A further file read of the same reply is refused with no content; the question that follows asks whether to shelf the lot (src/shelf-ask.mjs).
+					const readRefused = readGateCheck(api.conversationId, call);
+					if (readRefused !== undefined) return { block: readRefused };
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
 					if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
 						// Running a command as a read is open to the main conversation (it executes in a read-only window); typing into a running program is not a read.
@@ -293,7 +297,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				afterTool: async (call, result, api) => {
 					if (call.parent !== undefined) return undefined;
 					const looped = loopCheck(call, result, api);
-					const out = looped ?? result;
+					// The reply's reads are all decided by now (or were never): ask about the shelf once, if there is anything to ask.
+					const shelfAsk = takeShelfAsk(api.conversationId);
+					const out = shelfAsk === undefined ? (looped ?? result) : withText(looped ?? result, shelfAsk);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
 						const id = api.conversationId;
@@ -323,7 +329,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					// Whether the main agent's context collapses with this round of calls.
 					const pending = waiting.get(api.conversationId) ?? new Map();
 					const decided = await engine.afterMainCall({ last: [...pending.values()].every((left) => left <= 0), round: rounds.get(api.conversationId) ?? 0, turn: turns.get(api.conversationId) });
-					if (decided === undefined) return looped;
+					if (decided === undefined) return shelfAsk === undefined ? looped : out;
 					return {
 						...out,
 						...(decided.note !== undefined ? { output: [...(out.output ?? []), { type: "text", text: `${(out.output ?? []).length > 0 ? "\n\n" : ""}${decided.note}` }] } : {}),
@@ -361,6 +367,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					return { payload, model };
 				},
 				afterResponse: async (message, api) => {
+					// A question about the shelf asked with the last round of calls is answered by this reply: carry it out, if it said yes. Then plan this reply's reads for the gate.
+					settleShelfAsk(api.conversationId, message, { root, brainDir });
+					beginShelfGate(api.conversationId, message);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);

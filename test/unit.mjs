@@ -643,3 +643,78 @@ test("prepend: the user's own markdown is read before the prompt — core first,
 	assert.match(crlf, /Be terse\./);
 	assert.equal(crlf.includes("\r"), false);
 });
+
+// ─── The read gate: one read per reply, then the shelf question ─────────────
+
+import { beginShelfGate, readGateCheck, takeShelfAsk, settleShelfAsk, parseShelfDecision, dressShelfAsk, SHELF_ASK_OPEN } from "../src/shelf-ask.mjs";
+
+const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c${path}`, name: "book", arguments: { target: "file", action: "read", path } });
+
+test("read gate: the first file read of a reply is returned, further ones are refused and ride the question", () => {
+	const id = "gate-first";
+	const message = { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md"), readCall("c.md")] };
+	beginShelfGate(id, message);
+	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
+	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
+	assert.match(readGateCheck(id, readCall("c.md")), /c\.md was not returned/);
+	const ask = takeShelfAsk(id);
+	assert.match(ask, /<shelf-ask>/);
+	assert.match(ask, /1  a\.md/);
+	assert.match(ask, /2  b\.md {2}\(not returned\)/);
+	assert.match(ask, /3  c\.md {2}\(not returned\)/);
+	assert.equal(takeShelfAsk(id), undefined, "the question rides a result once");
+	// A reply without file reads clears the gate.
+	beginShelfGate(id, { role: "assistant", timestamp: 2, content: [{ type: "text", text: "noted" }] });
+	assert.equal(takeShelfAsk(id), undefined);
+});
+
+test("read gate: a single read asks the yes/no question about the one file", () => {
+	const id = "gate-single";
+	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("solo.md")] });
+	assert.equal(readGateCheck(id, readCall("solo.md")), undefined);
+	const ask = takeShelfAsk(id);
+	assert.match(ask, /Should I shelf solo\.md\? Yes or no/);
+	assert.doesNotMatch(ask, /by number/);
+});
+
+test("read gate: a yes shelves the files, numbers pick, a no shelves none", (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(root, "x.md"), "alpha\n");
+	writeFileSync(join(root, "y.md"), "beta\n");
+	const mk = (id, files) => {
+		beginShelfGate(id, { role: "assistant", timestamp: 1, content: files.map((f, i) => readCall(f, `c${i}`)) });
+		for (const f of files) readGateCheck(id, readCall(f, `c${files.indexOf(f)}`));
+		takeShelfAsk(id);
+	};
+	const main = ROOT_CONVERSATION_ID;
+	mk(main, ["x.md", "y.md"]);
+	settleShelfAsk(main, { role: "assistant", content: [{ type: "text", text: "yes" }] }, { root, brainDir });
+	assert.deepEqual(loadContext(brainDir).shelf.map((s) => s.path).sort(), ["x.md", "y.md"]);
+
+	// A no: nothing new on the shelf.
+	const id = "gate-no";
+	mk(id, ["x.md"]);
+	const before = loadContext(brainDir).shelf.length;
+	settleShelfAsk(id, { role: "assistant", content: [{ type: "text", text: "no" }] }, { root, brainDir });
+	assert.equal(loadContext(brainDir).shelf.length, before);
+
+	// Numbers pick, across an unanswered single question folded in.
+	assert.deepEqual(parseShelfDecision("yes — 2", 3), [1]);
+	assert.deepEqual(parseShelfDecision("1 3", 3), [0, 2]);
+	assert.deepEqual(parseShelfDecision("yes", 2), [0, 1]);
+	assert.deepEqual(parseShelfDecision("the renderer has 3 faces and 18 vertices", 3), []);
+	assert.deepEqual(parseShelfDecision("2d canvas", 3), []);
+});
+
+test("shelf ask: the question stays until the agent has answered, then dresses out", () => {
+	const toolResult = (text) => ({ role: "toolResult", toolName: "book", toolCallId: "c0", content: [{ type: "text", text }] });
+	const ask = `content of the read\n\n${SHELF_ASK_OPEN}\nShould I shelf it? Yes or no.\n${SHELF_ASK_OPEN.replace("shelf-ask", "/shelf-ask")}`;
+	// Nothing for the model to see yet: no assistant message after it.
+	const before = dressShelfAsk([toolResult(ask)]);
+	assert.match(text0(before), /shelf it/i);
+	// The agent answered: the question is stripped from what it sees.
+	const after = dressShelfAsk([toolResult(ask), { role: "assistant", content: [{ type: "text", text: "no" }] }]);
+	assert.doesNotMatch(text0(after), /shelf it/i);
+	assert.match(text0(after), /content of the read/, "the read itself stays");
+});
+const text0 = (messages) => messages.map((m) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((p) => p.text ?? "").join(""))).join("\n");

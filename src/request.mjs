@@ -18,6 +18,7 @@
 //   read results                        ephemeral: every read but the newest as one line, the newest's content at
 //                                       the very end of the request, after the state and windows blocks
 import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
+import { dressShelfAsk } from "./shelf-ask.mjs";
 import { isNote, withoutQuietWakes } from "./wake.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "./state.mjs";
 import { STAMP, stamp, took } from "./time.mjs";
@@ -87,6 +88,8 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 	let kept = withoutQuietWakes(messages);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
+	// A one-shot question about shelving rides the results of a round of reads; once the agent has answered it, it is dressed out.
+	kept = dressShelfAsk(kept);
 	// Read results are ephemeral: every read but the newest as one line here, the newest's content at the very end.
 	const ephemeral = dressReads(kept);
 	kept = ephemeral.messages;
