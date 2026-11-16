@@ -926,6 +926,13 @@ test("read gate: when no read comes back cleanly, the last read of the reply car
 	assert.match(ask, /<shelf-ask>/, "the last read carries it rather than no one");
 });
 
+test("read gate: a single read that fails asks nothing — there is nothing to weigh", () => {
+	const id = "gate-single-fail";
+	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("broken.md")] });
+	assert.equal(readGateCheck(id, readCall("broken.md")), undefined);
+	assert.equal(takeShelfAsk(id, readCall("broken.md"), { isError: true }), undefined);
+});
+
 test("read gate: a single read asks the yes/no question about the one file", () => {
 	const id = "gate-single";
 	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("solo.md")] });

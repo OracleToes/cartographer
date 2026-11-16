@@ -139,14 +139,14 @@ const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
 const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
 const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
-	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`; a record's ID from any `list`." }),
+	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`; a record's ID from any `list`. Never a path — for a file whose ID you do not have yet, pass `path`." }),
 	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
 	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred when omitted: from the target, or for target=shelf from what the ID is." })),
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
 /** A file's id is not its name; tell the agent where the real one comes from. */
-const fileIdHint = (id) => `An id is not a file's name (${JSON.stringify(String(id ?? ""))} is not one). A file's ID comes from the book file create result ("File id: f1") or from a \`book file read\` of the path (the read header says "· file f1 @<64 hex>").`;
+const fileIdHint = (id) => `An id is not a file's name (${JSON.stringify(String(id ?? ""))} is not one). A file's ID comes from the book file create result ("File id: f1") or from a \`book file read\` of the path (the read header says "· file f1 @<64 hex>"). To read a file whose ID you do not have yet, pass \`path\` (project-relative) for the read — the header gives you the ID.`;
 const noFileRecord = (id) => `There is no file record for ID ${JSON.stringify(String(id ?? ""))}. ${fileIdHint(id)}`;
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
 /** Append any "this was clipped for you" notes raised while the call ran. Every tool call drains, once. */
@@ -996,7 +996,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		target: str({ enum: UNIVERSAL_TARGETS, description: "The referenced entity family, or shelf." }),
 		action: str({ enum: UNIVERSAL_ACTIONS, description: "One target-specific operation. Unsupported target/action pairs fail closed." }),
 		ref: opt(REFERENCE_SCHEMA),
-		path: opt(str({ description: "Explicit project-relative locator, accepted only for file resolution and shelf add." })),
+		path: opt(str({ description: "Explicit project-relative locator for a file you have not read yet — pass it instead of `ref` (the read header then names the file's ID). Accepted for file reads and shelf add." })),
 		range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
 		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),

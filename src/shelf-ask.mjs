@@ -4,6 +4,9 @@
 // several files stay in view at once (src/context.mjs), so asking is the honest alternative to handing everything
 // to the model. The refusals never carry the question; the read that came back does.
 //
+// A round whose only read failed asks nothing: there is nothing to weigh. Declined files of the same round still
+// get their question — they were kept out, and shelving persists them without a re-read.
+//
 // The question is one-shot: once the agent has answered (its next reply), the stored question is dressed out of
 // what it sees (dressShelfAsk, called from src/request.mjs); the conversation record keeps it, as it keeps the notes.
 //
@@ -83,7 +86,8 @@ export function shelfAskText(files) {
 /**
  * The question for the reply in flight, carried once. It rides the result of the read that came back — never a
  * refusal's — so the question never shares a failed result with the rule it enforces. If the read that came back
- * failed too (or nothing came back), the last read of the round carries it. Called from afterTool.
+ * failed too, and files were declined beside it, the last read of the round carries the question; a round whose
+ * only read failed asks nothing. Called from afterTool.
  * @returns {string | undefined} the question block, or undefined when there is nothing to ask about
  */
 export function takeShelfAsk(conversationId, call, result) {
@@ -94,6 +98,8 @@ export function takeShelfAsk(conversationId, call, result) {
 	gate.answered += 1;
 	const isReturned = gate.ranId !== undefined && id === gate.ranId;
 	const clean = result?.isError !== true;
+	// Nothing came back clean and nothing was declined either: a round whose only read failed has nothing to weigh.
+	if (!(isReturned && clean) && gate.declined.length === 0) return undefined;
 	if (!(isReturned && clean) && gate.answered < gate.planned) return undefined;
 	const files = [gate.ran, ...gate.declined].filter(Boolean);
 	if (files.length === 0) return undefined;
