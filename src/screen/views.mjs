@@ -17,12 +17,12 @@ import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
 import { bookLine, booksPath, loadBooks } from "../books.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
-import { entryLine, loadLedger } from "../ledger.mjs";
+import { chatLine, estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
+import { entryLine, loadLedger, salientNotes } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
 import { listRequests } from "../requests.mjs";
-import { ago, stamp, took } from "../time.mjs";
+import { ago, clock, stamp, took } from "../time.mjs";
 import { projectFiles } from "../tools/look.mjs";
 import { short, width } from "./text.mjs";
 import { RECORD } from "../voice.mjs";
@@ -505,11 +505,140 @@ export function contextBar(parts, windowSize, cols) {
 }
 
 /**
+ * The kept part unfolds into one row per stored object inside it, so the user can see, edit and delete each like a
+ * row of its own. The tasks, salient notes, shelf items and the talk come from the store — the same truth the
+ * agent reads (the Context view rebuilds on every action, so an edit shows at once); the calls come from the
+ * block's own lines, since they are history and are not stored anywhere.
+ * @returns {{ children: any[], summary: string }}
+ */
+function keptChildren(part, { root, brainDir, edits, deleted }) {
+	const store = brainDir === undefined ? undefined : loadContext(brainDir);
+	const children = [];
+	const counts = [];
+	const front = store?.front;
+	// The preamble, in the block's own words.
+	const preamble = part.text.split("\n").find((line) => line.includes("My context was collapsed")) ?? part.text.split("\n")[1] ?? part.text;
+	children.push({
+		key: "kept:meta",
+		plain: true,
+		depth: 1,
+		head: [[`  ${firstWords(preamble)}`, "faint"]],
+		body: preamble,
+	});
+	// Finished tasks: the same rows the Hands view offers, with the same verbs.
+	const tasks = (front?.rows ?? (store === undefined ? [] : composedRows(store))).filter((row) => row.archived !== true);
+	for (const record of tasks) {
+		const folded = store?.dropped?.includes(record.id) === true;
+		children.push({
+			key: `report:${record.id}`,
+			kind: "report",
+			archived: false,
+			folded,
+			depth: 1,
+			head: [
+				[`${clock(record.at)}  `, "muted"],
+				[`${record.id}`, "bold"],
+				[folded ? " · folded  " : " · in view  ", folded ? "muted" : "ok"],
+				[firstWords(record.brief), "faint"],
+			],
+			body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
+			copy: recordLine(record),
+		});
+	}
+	if (tasks.length > 0) counts.push(`${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`);
+	// Salient notes: ledger entries — the small box edits them (e), t settles, d deletes.
+	let salient = [];
+	try {
+		const { ledger } = brainDir === undefined ? { ledger: undefined } : loadLedger(brainDir);
+		if (ledger !== undefined) salient = salientNotes(ledger);
+	} catch {
+		salient = [];
+	}
+	for (const item of salient) {
+		children.push({
+			key: `entry:${item.id}`,
+			depth: 1,
+			head: [
+				[`${clock(item.added)}  `, "muted"],
+				[`● ${item.id}  `, ""],
+				[firstWords(item.text), "faint"],
+			],
+			body: entryLine(item),
+			copy: entryLine(item),
+		});
+	}
+	if (salient.length > 0) counts.push(`${salient.length} ${salient.length === 1 ? "note" : "notes"}`);
+	// The shelf: what stood at the collapse, with the contents on open.
+	const shelfItems = front?.shelf ?? [];
+	for (const item of shelfItems) {
+		children.push({
+			key: `shelf:${item.id}`,
+			kind: "shelf",
+			depth: 1,
+			...(item.path === undefined || root === undefined ? {} : { path: join(root, item.path) }),
+			head: [
+				[`${clock(front?.at ?? 0)}  `, "muted"],
+				[shelfLabel(item), ""],
+				[`  [${item.id}]`, "muted"],
+			],
+			body: () => shelfText(root, item, brainDir),
+			copy: () => shelfText(root, item, brainDir),
+		});
+	}
+	if (shelfItems.length > 0) counts.push(`${shelfItems.length} shelf ${shelfItems.length === 1 ? "item" : "items"}`);
+	// The talk: real chat objects — e edits the words, d takes them out of the talk the collapse keeps. The store's
+	// indices hold as keys; a deleted saying is skipped, not filtered, so deleting one in the middle renumbers nothing.
+	let talk = 0;
+	for (const [index, entry] of (store?.chat ?? []).entries()) {
+		if (deleted !== undefined && deleted.has(entry.text)) continue;
+		talk += 1;
+		const full = chatLine(entry);
+		const shown = edits?.get(full) ?? full;
+		children.push({
+			key: `talk:${index}:${entry.at}`,
+			depth: 1,
+			chat: entry.text,
+			editKind: entry.who === "user" ? "chat-you" : "chat-agent",
+			head: [
+				[`${clock(entry.at)}  `, "muted"],
+				[entry.who === "user" ? "user" : "me", styleOf(entry.who === "user" ? "you" : "agent")],
+				[`: ${firstWords(entry.text)}`, "faint"],
+			],
+			body: shown === "" ? "(empty)" : shown,
+			copy: shown,
+		});
+	}
+	if (talk > 0) counts.push(`${talk} talk`);
+	// The calls: history, read-only, one line each — parsed from the block's own section.
+	const callsHeading = "Calls of the stretch before the collapse";
+	const at = part.text.indexOf(callsHeading);
+	let calls = 0;
+	if (at >= 0) {
+		const start = part.text.indexOf("\n", at) + 1;
+		for (const raw of part.text.slice(start).split("\n")) {
+			const line = raw.trim();
+			if (line === "" || line === "</context>" || line.startsWith("This collapse came in the middle")) break;
+			if (line.startsWith("(")) continue;
+			children.push({
+				key: `call:${calls}`,
+				depth: 1,
+				head: [[`  ${line}`, "muted"]],
+				body: line,
+				copy: line,
+			});
+			calls += 1;
+		}
+	}
+	if (calls > 0) counts.push(`${calls} ${calls === 1 ? "call" : "calls"}`);
+	return { children, summary: counts.length === 0 ? "empty" : counts.join(" · ") };
+}
+
+/**
  * The Context tab's main view.
  * @param {ReturnType<ReturnType<typeof import("../engine.mjs").createEngine>["window"]>} sent  what the engine holds of the newest request
- * @param {{ windowSize: number, cols: number, writing?: any }} options  writing: the reply as far as it is written
+ * @param {{ windowSize: number, cols: number, writing?: any, root?: string, brainDir?: string }} options  writing: the reply as far as it is written
  */
-export function contextView(sent, { windowSize, cols, writing, isOpen, edits, deleted }) {
+export function contextView(sent, { windowSize, cols, writing, isOpen, edits, deleted, root, brainDir }) {
 	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to the model in this run of carto yet. Say something, and what the agent sees shows here.")] };
 	const { payload } = sent;
 	const messages = payload.messages ?? [];
@@ -613,6 +742,20 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 		// A part the user has deleted stands out of the list, but the sizes above stay those of what was sent:
 		// the agent reads it until the next collapse, and then the talk that replaced it keeps nothing of it.
 		if (deleted !== undefined && (deleted.has(part.text) || (part.chat !== undefined && deleted.has(part.chat)))) continue;
+		// The collapse block unfolds into one row per stored object inside it; the rows carry the verbs the same objects carry elsewhere.
+		if (part.cat === "kept") {
+			let kept;
+			try {
+				kept = keptChildren(part, { root, brainDir, edits, deleted });
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				kept = { summary: "not readable", children: [{ key: "kept:error", plain: true, depth: 1, head: [[`! ${firstWords(message)}`, "warn"]], body: message }] };
+			}
+			part.preview = kept.summary;
+			items.push(one(part, { folder: true, key: "kept" }));
+			if (isOpen?.("kept")) items.push(...kept.children);
+			continue;
+		}
 		items.push(one(part, part.key === "tools" ? { folder: true } : {}));
 		// The tools part stands for the block the model reads; unfolded, a line for each tool of it.
 		if (part.key === "tools" && isOpen?.("tools")) {

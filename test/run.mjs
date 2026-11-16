@@ -18,11 +18,12 @@ import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo }
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
 import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, loadAtlas, nodeChanges, nodeHashes, NODES_MAX, renderOutline, saveAtlas, staleNodes } from "../src/atlas.mjs";
 import { applyOp, LedgerError, loadLedger, OPEN_MAX, renderLedger, saveLedger, TEXT_MAX } from "../src/ledger.mjs";
+import { applyAdd } from "../src/ops.mjs";
 import { applyBookOp, BookError, loadBooks, saveBooks } from "../src/books.mjs";
 import { applyPlanOp, authorize, ITEM_MAX, loadPlan, openOnce, PlanError, planSummary, renderPlan, savePlan, YOLO_LINE } from "../src/plan.mjs";
 import { withoutAdditions, withTimes } from "../src/request.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "../src/state.mjs";
-import { ago, STAMP, stamp, took } from "../src/time.mjs";
+import { ago, clock, STAMP, stamp, took } from "../src/time.mjs";
 import { loadTop, noteAssessed, pin, sinceTop, topPath, withoutTop, withTop } from "../src/top.mjs";
 import { drawTree, treeSection } from "../src/tree.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
@@ -778,6 +779,7 @@ test("time: stamps, durations and ages are written one way", () => {
 	const at = new Date(2026, 10, 10, 14, 5).getTime();
 	assert.equal(stamp(at), "Tue 10 Nov 2026, 14:05");
 	assert.match(stamp(new Date(2026, 0, 1, 0, 0).getTime()), new RegExp(`^${STAMP}$`), "the pattern matches what is written");
+	assert.deepEqual([new Date(2026, 10, 10, 14, 5).getTime(), new Date(2026, 10, 10, 9, 0).getTime(), NaN].map(clock), ["14:05", "09:00", "--:--"], "hour and minute, as the collapsed block is stamped");
 	assert.deepEqual([0, 42_000, 120_000, 130_000, 3_900_000, 266_400_000].map(took), ["0 s", "42 s", "2 m", "2 m 10 s", "1 h 5 m", "3 d 2 h"]);
 	assert.deepEqual([30_000, 300_000, 3 * 3_600_000, 47 * 3_600_000, 50 * 3_600_000].map(ago), ["just now", "5 m ago", "3 h ago", "47 h ago", "2 d ago"]);
 });
@@ -1715,6 +1717,70 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("The reply, as it is being written"), writing.body], [true, "Half a tho"], "and the reply shows as far as it is written");
 	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "The context was collapsed after this request was sent", "a collapse since then is said");
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
+});
+
+test("screen: the Context tab unfolds the collapse block into one row per kept object, with the same verbs", async () => {
+	const { contextView } = await import("../src/screen/views.mjs");
+	const { writeFront, noteChat, shelfItem, updateContext } = await import("../src/context.mjs");
+	const root = mkdtempSync(join(tmpdir(), "carto-kept-"));
+	const brainDir = join(root, ".brain");
+	mkdirSync(brainDir, { recursive: true });
+	const at = (h, m) => new Date(2026, 10, 15, h, m).getTime();
+	try {
+		writeFileSync(join(root, "shelf.txt"), "the shelf keeps this\n");
+		noteChat(brainDir, "user", at(13, 10), "please add the wrist throw");
+		noteChat(brainDir, "you", at(13, 12), "on it");
+		applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep quotes in English." }), null);
+		mkdirSync(join(brainDir, "reports"), { recursive: true });
+		writeFileSync(join(brainDir, "reports", "s3.md"), "# Report s3\n\nIt throws now.\n");
+		updateContext(brainDir, (store) => {
+			store.rows.push({ id: "s3", species: "composed", at: at(13, 5), mode: "look", brief: "Add the wrist throw", outcome: "It throws.", changed: 2, ref: { type: "report", id: "s3" } });
+		});
+		const shelved = shelfItem(root, "shelf.txt", undefined, brainDir, []);
+		updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
+		// The salient mark, through the same op the agent edits with.
+		const ledger = loadLedger(brainDir).ledger;
+		applyOp(ledger, { action: "edit", id: "n1", salient: true }, new Date().toISOString());
+		saveLedger(brainDir, ledger);
+		const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, { now: at(14, 32), reason: "a test collapse", calls: [
+			{ at: at(13, 20), text: "read shelf.txt", outcome: "12 lines" },
+			{ at: at(13, 25), text: "edit src/dice.mjs", outcome: "34 lines changed" },
+		] });
+		const payload = { messages: [{ role: "user", content: `${front.text}\n\nWhere are we?` }] };
+		const sent = { task: false, payload, reply: undefined, results: new Map(), at: Date.now(), count: 3, used: 4000, collapsedSince: false };
+		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir, edits: new Map(), deleted: new Set() });
+		const keys = view.items.map((item) => item.key);
+		const keptAt = keys.indexOf("kept");
+		assert.ok(keptAt >= 0, "the kept block stands as one folder");
+		assert.equal(view.items[keptAt].folder, true);
+		assert.equal(view.items[keptAt].editKind, "store", "e on the folder still opens the raw store");
+		assert.ok(keys.join(" ").includes("kept:meta"), "the preamble is the first row inside");
+		assert.deepEqual(keys.slice(keptAt + 1, keptAt + 5), ["kept:meta", "report:s3", "entry:n1", "shelf:sh1"], "the shelf row keys by the id, not the label");
+		// The talk rows are the chat objects: e and d work on them as elsewhere.
+		const talk = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("talk:"));
+		assert.equal(talk.length, 2, "both sayings stand inside the block");
+		assert.deepEqual([talk[0].editKind, talk[1].editKind], ["chat-you", "chat-agent"]);
+		assert.equal(talk[0].chat, "please add the wrist throw", "the row carries the words, for the edit machinery");
+		// The calls rows are the block's history: visible, copyable, not editable.
+		const calls = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("call:"));
+		assert.equal(calls.length, 2);
+		assert.ok(calls.every((item) => item.editKind === undefined), "history is not editable");
+		// The parent says what it holds.
+		assert.match(view.items[keptAt].head.map(([part]) => part).join(""), /1 task.*1 note.*1 shelf item.*2 talk.*2 calls/);
+		// A saying the user has deleted stands out of the block's rows as well.
+		const gone = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir, edits: new Map(), deleted: new Set(["please add the wrist throw"]) });
+		const left = gone.items.filter((item) => typeof item.key === "string" && item.key.startsWith("talk:"));
+		assert.deepEqual(left.map((item) => item.chat), ["on it"], "the deleted saying is out of the rows, the rest stands");
+		assert.deepEqual(left.map((item) => item.key), ["talk:1:" + at(13, 12)], "deleting the middle saying does not renumber the rest");
+		// A store that cannot be read still renders the kept folder instead of blanking the tab.
+		const noStore = join(root, "no-store");
+		mkdirSync(noStore, { recursive: true });
+		const bare = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir: join(noStore, ".brain"), edits: new Map(), deleted: new Set() });
+		assert.ok(bare.items.some((item) => item.key === "kept"), "the folder renders even with no store at all");
+		assert.match(bare.items.find((item) => item.key === "kept").head.map(([part]) => part).join(""), /not readable|empty|calls/, "and it carries a summary instead of throwing");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 // ─── The books' outcomes, the atlas rename, the audit of cuts, and the small box ───────────────

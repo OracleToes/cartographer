@@ -530,7 +530,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted });
+			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted, root, brainDir });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
 		if (id === "context.hands") return handsView({ root, brainDir });
@@ -826,6 +826,8 @@ export async function runScreen(session, options, runTerminal) {
 			case "carto":
 				return flash("what Cartographer writes into a message cannot be edited");
 			default: {
+				// A kept row that is a ledger entry opens the small box on its fields, as in the Ledger view.
+				if (typeof item.key === "string" && item.key.startsWith("entry:")) return void openFieldBox(viewId(), item.key);
 				// Hands: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
 					if (!existsSync(item.path)) return flash("the shelved file is not there");
@@ -855,7 +857,7 @@ export async function runScreen(session, options, runTerminal) {
 	/** The fields of the row the list has selected, with their current values; undefined when the row is not an entry. */
 	const editFieldsFor = (viewId_, rowKey) => {
 		const id = rowKey.slice(rowKey.indexOf(":") + 1);
-		if (viewId_ === "carto.ledger") {
+		if (viewId_ === "carto.ledger" || (viewId_ === "context.main" || viewId_ === "context.window") && rowKey.startsWith("entry:")) {
 			const { ledger } = loadLedger(brainDir);
 			const item = ledger?.items.find((entry) => entry.id === id);
 			if (item === undefined) return undefined;
