@@ -74,8 +74,11 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace }) {
+export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
+	// What the settings asked for, whatever the server said at the start. /model re-applies it per model: the
+	// effective window is never more than this, and never more than what the model's server reports (meta.n_ctx).
+	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
 	const model = {
 		id: config.model,
 		name: config.model,
@@ -103,12 +106,17 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// an older model must still start (the conversation keeps the model it began with until /model changes
 	// it), and /model can switch to any of the others without a restart.
 	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
+	// One record per served model, kept by reference: a record's contextWindow is what pi-ai sizes the reply
+	// budget from, and /model updates the record it switches to (per request, not at conversation creation).
+	// A model that was never switched to starts at the ceiling; the configured one at the (possibly lowered)
+	// window the session opened with.
+	const providerModels = known.map((id) => (id === config.model ? model : { ...model, id, name: id, contextWindow: windowCeiling }));
 	const provider = createProvider({
 		id: PROVIDER,
 		name: "local model server",
 		baseUrl: config.server,
 		auth: { apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "local" } }) } },
-		models: known.map((id) => (id === config.model ? model : { ...model, id, name: id })),
+		models: providerModels,
 		api: openAICompletionsApi(),
 	});
 	// What the session tells the screen that is not in any conversation: how far the server is with reading a
@@ -424,11 +432,23 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		context,
 		/** The model the main conversation is on, as { provider, modelId }. */
 		model: async () => (await main.agent(context)).model,
-		/** Switch the model of the main conversation, and so of every task forked after. Undefined when the name is not served. */
-		setModel: async (modelId, ctx = context) => {
+		/**
+		 * Switch the model of the main conversation, and so of every task forked after.
+		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
+		 * @param {number} [limits.contextWindow]  its meta.n_ctx, when it says one
+		 * @returns {false | number} false when the name is not served; otherwise the effective context window it switches to
+		 *   (the smaller of the settings' ceiling and the model's own limit), which is also what the engine, the
+		 *   state block, the shelf's soft cap (half of it) and the display now use.
+		 */
+		setModel: async (modelId, ctx = context, limits = {}) => {
 			if (!known.includes(modelId)) return false;
+			const reported = limits?.contextWindow;
+			const effective = Number.isInteger(reported) && reported > 0 ? Math.min(windowCeiling, reported) : windowCeiling;
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
-			return true;
+			config.contextWindow = effective;
+			const target = providerModels.find((entry) => entry.id === modelId);
+			if (target) target.contextWindow = effective;
+			return effective;
 		},
 		/** The model names the server was serving when the session opened. */
 		servedModels: [...known],

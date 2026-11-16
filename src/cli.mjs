@@ -130,6 +130,8 @@ export async function main(argv) {
 		checkProject(project.root, { allowHome: flags.here === true });
 		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
 		const config = loadConfig({ brainDir: brainPath, flags });
+		// What the settings asked for; /model re-applies it (min of it and the new model's own limit) when switching.
+		const configuredContextWindow = config.contextWindow;
 		const served = await checkServer(config);
 		let contextNote = "";
 		if (served?.context !== undefined && served.context < config.contextWindow) {
@@ -192,7 +194,7 @@ export async function main(argv) {
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, trace });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, trace, configuredContextWindow });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
