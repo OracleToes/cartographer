@@ -4,15 +4,22 @@
 // new stretch of context, and that stretch begins with one message Cartographer
 // writes, the front block, between <context> and </context>:
 //
-//   the record   one line for each finished task: what was asked, how it ended, and
-//                an id under which the whole report can be brought back
-//   the shelf    files, or line ranges of files, the agent chose to keep in view
+//   the record   one line for each finished task, with the minute it ended: what was
+//                asked, how it ended, and an id under which the whole report can be
+//                brought back
 //   the salient  the open ledger notes carrying salience (src/ledger.mjs), one
-//   notes        line each, re-read from the ledger when the block is dressed
+//   notes        line each with its minute, re-read from the ledger when the block is dressed
+//   the shelf    a structured listing of the items held, then the files, or line ranges of
+//                files, the agent chose to keep in view, as the collapse found them
 //   the talk     the last of what the user and the agent said to each other, word
-//                for word, up to `chatWindow` tokens
+//                for word, in order, each saying with its minute, up to `chatWindow` tokens
+//   the calls    one line per call of the stretch before the collapse: the minute, the
+//                call, its outcome; the newest that fit, under `callsTokens` tokens
 //   now          when the collapse came in the middle of a turn: the calls of the
 //                last reply and what they returned
+//
+// Every line carries a local hour:minute; the block is typed in clusters, and what is
+// stamped within a cluster reads in the order it happened.
 //
 // The agent's own notes, old tool calls and results, and reports in full are not
 // carried over. The ledger, the plan, the graph and the assessment are files of
@@ -42,7 +49,7 @@ import { RECORD } from "./voice.mjs";
 
 /** The stable anchor every block written by me starts with; the regex below is built from it so the marker cannot drift. */
 const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-import { stamp } from "./time.mjs";
+import { clock, stamp } from "./time.mjs";
 import { entryLine, loadLedger, salientNotes, saveLedger } from "./ledger.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { fileReference } from "./catalog.mjs";
@@ -379,7 +386,7 @@ function reportIdOf(message) {
 }
 
 export const recordLine = (record) =>
-	`${record.id} · ${stamp(record.at)} · ${record.mode}${record.item ? ` ${record.item}` : ""} · asked: ${record.brief} → ${record.failed ? "did not end well: " : record.undone ? "not done: " : ""}${record.outcome}${record.changed ? ` · ${record.changed === 1 ? "1 file" : `${record.changed} files`} changed` : ""}`;
+	`${record.id} · ${clock(record.at)} · ${record.mode}${record.item ? ` ${record.item}` : ""} · asked: ${record.brief} → ${record.failed ? "did not end well: " : record.undone ? "not done: " : ""}${record.outcome}${record.changed ? ` · ${record.changed === 1 ? "1 file" : `${record.changed} files`} changed` : ""}`;
 
 const checkWhen = (when) => {
 	if (when !== undefined && !Object.values(VISIBILITY).includes(when)) throw new ContextRowError(`\`when\` is ${JSON.stringify(when)}; it is now or next-boundary.`);
@@ -468,6 +475,7 @@ function recordText(records) {
 	if (shown.length === 0) return { text: records.length === 0 ? "No task has finished yet." : "No task stands in the record; older ones are archived (recall by id brings one back).", listed: 0 };
 	const lines = [];
 	let used = 0;
+	// The budget keeps the newest; what is listed reads in the order the tasks ended.
 	for (const record of [...shown].reverse()) {
 		const line = recordLine(record);
 		if (used + estimate(line) > RECORD_MAX_TOKENS && lines.length > 0) break;
@@ -502,7 +510,7 @@ export function noteUserMessages(brainDir, messages) {
 }
 
 const isNoteText = (text) => text.startsWith(`${NOTE_OPEN}\n${HEAD}`);
-const chatLine = (entry) => `[${entry.who === "user" ? "user" : "me"} · ${stamp(entry.at)}] ${entry.text}`;
+export const chatLine = (entry) => `${clock(entry.at)}  ${entry.who === "user" ? "user" : "me"}: ${entry.text}`;
 
 /** The newest sayings that fit into `max` tokens; the newest one is kept whatever its size. */
 function chatWindow(chat, max) {
@@ -828,6 +836,10 @@ function shelfBlock(root, items, max, brainDir) {
 
 /** The heading of the salient-notes section in the collapse block; written and dressed identically. */
 const SALIENT_HEADING = "Salient notes (ledger notes marked salient; `book` with target=ledger, action=edit, salient: false drops the mark)";
+/** One salient line of the front block: the minute the note was taken, then the entry. Written and re-dressed identically. */
+const salientLine = (item) => `${clock(item.added)}  ${entryLine(item)}`;
+/** The prefix of the shelf section's heading; dressFrontRows finds the section by it. */
+const SHELF_PREFIX = "Shelf at ";
 /** The salient open notes to show in the block, re-read from the ledger; a ledger that cannot be read shows none. */
 const salientFrom = (brainDir) => {
 	try {
@@ -845,14 +857,34 @@ export const isFront = (message) => message?.role === "user" && textOf(message).
 export const withoutFront = (text) => text.replace(FRONT_BLOCK, "");
 
 /**
+ * The calls of the stretch before the collapse, as one line each: the minute, the call, its outcome. The newest
+ * that fit under `callsTokens`; what is older is counted, not listed.
+ * @param {{ at?: number, text: string, outcome: string }[]} calls  oldest first
+ */
+function callLines(calls) {
+	const lines = calls.map((call) => `${call.at !== undefined ? clock(call.at) : "--:--"}  ${call.text} → ${call.outcome}`);
+	const budget = POLICY.limits.context.callsTokens;
+	const kept = [];
+	let used = 0;
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const size = estimate(lines[i]);
+		if (used + size > budget && kept.length > 0) break;
+		used += size;
+		kept.unshift(lines[i]);
+	}
+	const older = lines.length - kept.length;
+	return [...(older > 0 ? [`(${older} earlier ${older === 1 ? "call is" : "calls are"} not listed.)`] : []), ...kept];
+}
+
+/**
  * Write the front block for a collapse that happens now, and remember what it holds.
  * @param {string} brainDir
  * @param {string} root
  * @param {{ chatWindow: number, contextWindow: number }} config
- * @param {{ now: number, reason: string, midTurn?: { by: "user" | "note", reminded: boolean, note?: string, calls: { text: string, result: string }[] } }} input
- * @returns {{ text: string, kept: { tasks: number, shelf: number, talk: number }, tokens: { record: number, shelf: number, talk: number, now: number, total: number }, left: { item: object, why: string }[] }}
+ * @param {{ now: number, reason: string, midTurn?: { by: "user" | "note", reminded: boolean, note?: string, calls: { text: string, result: string }[] }, calls?: { at?: number, text: string, outcome: string }[] }} input
+ * @returns {{ text: string, kept: { tasks: number, shelf: number, talk: number }, tokens: { record: number, shelf: number, talk: number, now: number, calls: number, total: number }, left: { item: object, why: string }[] }}
  */
-export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
+export function writeFront(brainDir, root, config, { now, reason, midTurn, calls }) {
 	return updateContext(brainDir, (store) => {
 		const record = recordText(composedRows(store));
 		const salient = salientFrom(brainDir);
@@ -861,21 +893,25 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 		store.shelf = shelf.items;
 		store.chat = chatWindow(store.chat, config.chatWindow);
 		const talk = store.chat.map(chatLine).join("\n");
+		const calls_ = Array.isArray(calls) ? callLines(calls) : [];
 		const parts = [
 			OPEN,
-			`${HEAD} My context was collapsed on ${stamp(now)} (${reason}). What I had in view before is gone except for what stands here: one line for each finished task, ${salient.length > 0 ? "my salient notes, " : ""}my shelf, and the last of my talk with ${USER_NAME}. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.`,
+			`${HEAD} My context was collapsed at ${clock(now)} (${reason}). What I had in view before is gone except for what stands here: the finished tasks,${salient.length > 0 ? " my salient notes," : ""} my shelf, the last of my talk with ${USER_NAME}, and the calls of the stretch before the collapse. My ledger, plan, graph and assessment are as I left them; the state block at the end of the request shows them.`,
 			"",
 			"Finished tasks (`book` with book context, action recall and the id brings a report back in full)",
 			record.text,
-			...(salient.length > 0 ? ["", SALIENT_HEADING, ...salient.map((item) => entryLine(item))] : []),
+			...(salient.length > 0 ? ["", SALIENT_HEADING, ...salient.map(salientLine)] : []),
 			"",
-			shelf.shown.length === 0 ? "My shelf is empty." : `My shelf: ${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`,
+			`${SHELF_PREFIX}${clock(now)} · ${shelf.shown.length === 0 ? "empty" : `${shelf.shown.length === 1 ? "1 item" : `${shelf.shown.length} items`}, as the files were at the collapse`}`,
+			...shelf.shown.map((entry) => `${clock(now)}  ${shelfLabel(entry.item)} [${entry.item.id}]`),
+			...(shelf.shown.length > 0 ? [""] : []),
 			...shelf.shown.map((entry) => entry.text),
 			...shelf.left.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] remains on the shelf but is not shown: ${entry.why}.)`),
 			...shelf.stale.map((entry) => `(${shelfLabel(entry.item)} [${entry.item.id}] is stale: ${entry.why}.)`),
 			"",
-			store.chat.length === 0 ? `${USER_HEAD} and I have not talked yet.` : `My talk with ${USER_NAME}, word for word; what was said before it is gone`,
+			store.chat.length === 0 ? `${USER_HEAD} and I have not talked yet.` : `Talk with ${USER_NAME}, word for word, in order; what was said before ${clock(store.chat[0].at)} is gone`,
 			...(talk === "" ? [] : [talk]),
+			...(calls_.length > 0 ? ["", "Calls of the stretch before the collapse (the minute, the call, its outcome; the newest that fit stand here)", ...calls_] : []),
 		];
 		let nowText = "";
 		if (midTurn !== undefined) {
@@ -894,7 +930,7 @@ export function writeFront(brainDir, root, config, { now, reason, midTurn }) {
 		}
 		parts.push(CLOSE);
 		const text = parts.join("\n");
-		const tokens = { record: estimate(record.text), shelf: shelf.tokens, talk: estimate(talk), now: estimate(nowText), total: estimate(text) };
+		const tokens = { record: estimate(record.text), shelf: shelf.tokens, talk: estimate(talk), now: estimate(nowText), calls: estimate(calls_.join("\n")), total: estimate(text) };
 		store.dropped = [];
 		store.front = {
 			at: now,
@@ -1113,18 +1149,18 @@ function dressFrontRows(message, store, salient) {
 	const currentRows = store.front?.rows ?? [];
 	const reportHeading = "Finished tasks (`book` with book context, action recall and the id brings a report back in full)";
 	const reportStart = text.indexOf(`${reportHeading}\n`);
-	const shelfStart = text.indexOf("\n\nMy shelf", reportStart);
+	const shelfStart = text.indexOf(`\n\n${SHELF_PREFIX}`, reportStart);
 	if (reportStart >= 0 && shelfStart >= 0) {
 		const start = reportStart + reportHeading.length + 1;
 		const record = recordText(currentRows.filter((row) => row.species === ROW_SPECIES.composed)).text;
 		text = `${text.slice(0, start)}${record}${text.slice(shelfStart)}`;
 	}
 	const sectionStart = text.indexOf(`\n\n${SALIENT_HEADING}`);
-	const sectionEnd = sectionStart < 0 ? -1 : text.indexOf("\n\nMy shelf", sectionStart);
+	const sectionEnd = sectionStart < 0 ? -1 : text.indexOf(`\n\n${SHELF_PREFIX}`, sectionStart);
 	if (salient.length > 0) {
-		const section = `\n\n${SALIENT_HEADING}\n${salient.map((item) => entryLine(item)).join("\n")}`;
+		const section = `\n\n${SALIENT_HEADING}\n${salient.map(salientLine).join("\n")}`;
 		if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${section}${text.slice(sectionEnd)}`;
-		else text = text.replace("\n\nMy shelf", `${section}\n\nMy shelf`);
+		else text = text.replace(`\n\n${SHELF_PREFIX}`, `${section}\n\n${SHELF_PREFIX}`);
 	} else if (sectionStart >= 0 && sectionEnd >= 0) text = `${text.slice(0, sectionStart)}${text.slice(sectionEnd)}`;
 	return text === textOf(message) ? message : withText(message, text);
 }

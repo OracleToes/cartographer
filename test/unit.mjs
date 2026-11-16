@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { POLICY } from "../src/config.mjs";
-import { applyOp, loadLedger } from "../src/ledger.mjs";
+import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, loadPlan } from "../src/plan.mjs";
 import { loadBooks } from "../src/books.mjs";
 import { loadAtlas, saveAtlas } from "../src/atlas.mjs";
@@ -19,7 +19,7 @@ import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
-import { shelfItem, updateContext, loadContext, taskState } from "../src/context.mjs";
+import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront } from "../src/context.mjs";
 import { approveRequests } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
@@ -361,6 +361,117 @@ test("shelf: placement ids count up within a brain — sh1, sh2 — across store
 	assert.equal(second.item.id, "sh2", "the number comes from the store as well, not just the in-flight list");
 	const store = loadContext(brainDir);
 	assert.equal(store.shelf[0].id, "sh1");
+});
+
+// ─── The front block: what a collapse keeps ──────────────────────────────────
+
+test("collapse: the front block reads as typed, minute-stamped clusters; the calls cluster is capped", (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(root, "shelf.txt"), "the shelf keeps this\n");
+	const at = (h, m) => new Date(2026, 10, 15, h, m).getTime();
+	// The talk, oldest first.
+	noteChat(brainDir, "user", at(13, 10), "please add the wrist throw");
+	noteChat(brainDir, "you", at(13, 12), "on it");
+	// A salient note.
+	assert.equal(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep quotes in English." }), null), "n1 added.");
+	const { ledger } = loadLedger(brainDir);
+	applyOp(ledger, { action: "edit", id: "n1", salient: true }, new Date().toISOString());
+	saveLedger(brainDir, ledger);
+	// Two finished tasks, as the record holds them.
+	mkdirSync(join(brainDir, "reports"), { recursive: true });
+	writeFileSync(join(brainDir, "reports", "s3.md"), "# Report s3\n\nIt is done.\n");
+	writeFileSync(join(brainDir, "reports", "s4.md"), "# Report s4\n\nIt is done.\n");
+	updateContext(brainDir, (store) => {
+		store.rows.push({ id: "s3", species: "composed", at: at(13, 5), mode: "look", brief: "Add the wrist throw", outcome: "It throws.", changed: 2, ref: { type: "report", id: "s3" } });
+		store.rows.push({ id: "s4", species: "composed", at: at(13, 40), mode: "change", item: "p1", brief: "Ship the dice roller", outcome: "It rolls one die.", changed: 4, ref: { type: "report", id: "s4" } });
+	});
+	// A shelved file.
+	const shelved = shelfItem(root, "shelf.txt", undefined, brainDir, []);
+	updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
+	// The stretch of calls the collapse drops.
+	const calls = Array.from({ length: 40 }, (_, i) => ({ at: at(13, 20), text: `read a-file-with-a-rather-long-name-${i}.txt`, outcome: `${i} lines read, and some words to spend the budget honestly ${"x".repeat(24)}` }));
+	const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, { now: at(14, 32), reason: "a test collapse", calls });
+
+	assert.ok(front.text.startsWith("<context>\n"), "the block opens with the marker");
+	assert.ok(front.text.endsWith("\n</context>"), "and closes with it");
+	assert.match(front.text, /My context was collapsed at 14:32 \(a test collapse\)/);
+	// The clusters stand in order: tasks, notes, shelf, talk, calls.
+	const order = ["Finished tasks", "Salient notes", "Shelf at 14:32", "Talk with", "Calls of the stretch"];
+	let idx = -1;
+	for (const heading of order) {
+		const found = front.text.indexOf(heading);
+		assert.ok(found > idx, `${heading} stands after the cluster before it`);
+		idx = found;
+	}
+	// The record lines are chronological, each with its minute.
+	const s3 = front.text.indexOf("s3 · 13:05");
+	const s4 = front.text.indexOf("s4 · 13:40");
+	assert.ok(s3 >= 0 && s4 >= 0, "both record lines stand, with their minutes");
+	assert.ok(s3 < s4, "the record reads in the order things happened");
+	// The salient note with its minute.
+	assert.match(front.text, /^\d{2}:\d{2}  ● n1  Keep quotes in English\.$/m);
+	// The shelf: a structured listing, then the contents.
+	assert.match(front.text, /^14:32  shelf\.txt \[sh1\]$/m);
+	assert.match(front.text, /^== shelf\.txt/m);
+	assert.match(front.text, /the shelf keeps this/);
+	// The talk: word for word, in order, each saying with its minute.
+	const user = front.text.indexOf("user: please add the wrist throw");
+	const me = front.text.indexOf("me: on it");
+	assert.ok(user >= 0 && me >= 0, "both sayings stand");
+	assert.ok(user < me, "in the order they were said");
+	assert.match(front.text, /^13:10  user: please add the wrist throw$/m);
+	assert.match(front.text, /^13:12  me: on it$/m);
+	// The calls: the newest fit the budget, the oldest are counted, and the section reads in order.
+	assert.match(front.text, /^Calls of the stretch before the collapse/m);
+	assert.match(front.text, /\(\d+ earlier calls? are not listed\.\)/);
+	assert.ok(front.text.includes("read a-file-with-a-rather-long-name-39.txt"), "the newest call stands");
+	assert.ok(!front.text.includes("a-file-with-a-rather-long-name-0.txt"), "the oldest fell out of the budget");
+	const last = front.text.indexOf("name-38.txt");
+	const newest = front.text.indexOf("name-39.txt");
+	assert.ok(last >= 0 && newest >= 0 && last < newest, "the calls read in the order they were made");
+	// The act of writing the block says what it kept.
+	assert.deepEqual(front.kept, { tasks: 2, shelf: 1, talk: 2 });
+	assert.equal(typeof front.tokens.calls, "number");
+});
+
+test("collapse: no calls and a tight talk window — the sections shrink, the block still stands", (t) => {
+	const { root, brainDir } = fresh(t);
+	const at = (h, m) => new Date(2026, 10, 15, h, m).getTime();
+	noteChat(brainDir, "user", at(9, 0), `the first saying, long enough to spend the whole window ${"x".repeat(120)}`);
+	noteChat(brainDir, "you", at(9, 1), "the second saying");
+	const front = writeFront(brainDir, root, { chatWindow: 20, contextWindow: 100_000 }, { now: at(9, 5), reason: "a test collapse" });
+	assert.ok(!front.text.includes("Calls of the stretch"), "no calls, no cluster");
+	assert.ok(!front.text.includes("the first saying"), "the oldest saying fell out of the window");
+	assert.ok(front.text.includes("the second saying"), "the newest stands");
+	assert.equal(loadContext(brainDir).chat.length, 1, "the window prunes what is stored, not only what is shown");
+	// The front block is what is kept already: a collapse frees nothing more of it.
+	const kept = writeFront(brainDir, root, { chatWindow: 20, contextWindow: 100_000 }, { now: at(9, 6), reason: "again" });
+	assert.ok(kept.text.startsWith("<context>\n"));
+});
+
+test("collapse: mid-turn — the stretch's calls and the current reply's calls each stand once, in their own section", (t) => {
+	const { root, brainDir } = fresh(t);
+	const at = (h, m) => new Date(2026, 10, 15, h, m).getTime();
+	mkdirSync(join(brainDir, "reports"), { recursive: true });
+	const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, {
+		now: at(15, 0),
+		reason: "it held about 80% of what fits",
+		midTurn: { by: "user", reminded: false, calls: [{ text: "edit src/roll.py", result: "12 lines changed" }] },
+		calls: [{ at: at(14, 40), text: "read src/roll.py", outcome: "30 lines" }],
+	});
+	// The stretch cluster holds the earlier call, one line, with its minute and outcome.
+	assert.match(front.text, /^Calls of the stretch before the collapse/m);
+	assert.match(front.text, /^14:40  read src\/roll\.py → 30 lines$/m);
+	// The current reply's calls stand in the mid-turn section, verbatim, marked.
+	assert.match(front.text, /This collapse came in the middle of my turn/);
+	assert.match(front.text, /^▸ edit src\/roll\.py\n12 lines changed$/m);
+	// The current reply's call is not in the calls cluster, and the stretch's call is not in the mid-turn section.
+	const stretchAt = front.text.indexOf("14:40  read src/roll.py");
+	const midAt = front.text.indexOf("▸ edit src/roll.py");
+	assert.ok(stretchAt >= 0 && midAt >= 0);
+	assert.ok(stretchAt < midAt, "the calls cluster precedes the mid-turn section");
+	assert.ok(!front.text.slice(0, midAt).includes("▸"), "no verbatim call lines before the mid-turn section");
+	assert.equal(front.text.indexOf("12 lines changed"), front.text.lastIndexOf("12 lines changed"), "the reply's outcome stands exactly once");
 });
 
 // ─── The read-only lane ─────────────────────────────────────────────────────

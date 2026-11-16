@@ -17,7 +17,7 @@
 // reply shape and a different end.
 import { POLICY } from "./config.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { describeCall } from "./terminal.mjs";
+import { describeCall, describeResult } from "./terminal.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
 import { calibrate } from "./calibrate.mjs";
@@ -147,6 +147,33 @@ export function createEngine({ root, brainDir, config }) {
 	 * Collapse the main context now: bring the top up to date, write the front block.
 	 * @returns {{ text: string }} the front block, to be stored as the start of the new context
 	 */
+	/**
+	 * The calls of the stretch a collapse drops: one entry per call, oldest first, with what the call came to.
+	 * Derived from the stored messages, not from a live tally, so it is exactly what was in view.
+	 * The reply the collapse may come with is not included — it is not stored yet at the time of a mid-turn
+	 * collapse, and its calls are the ones the mid-turn section keeps verbatim for the rest of the turn.
+	 * The reset that follows the collapse starts the context at the block, so a later collapse never sees them
+	 * either.
+	 * @param {readonly any[]} stored
+	 */
+	function callsOfStretch(stored) {
+		const byResult = new Map();
+		for (const message of stored) if (message.role === "toolResult") byResult.set(message.toolCallId, message);
+		const calls = [];
+		for (const message of stored) {
+			if (message.role !== "assistant") continue;
+			for (const call of callsOf(message)) {
+				const result = byResult.get(call.id);
+				calls.push({
+					at: Number.isFinite(message.timestamp) ? message.timestamp : undefined,
+					text: describeCall(call, describeRef),
+					outcome: result === undefined ? "no result" : describeResult(result),
+				});
+			}
+		}
+		return calls;
+	}
+
 	function collapse({ reason, midTurn, now = Date.now(), before }) {
 		// Everything is read again anyway: the moment to bring the copy of assessment and graph up to date.
 		try {
@@ -154,7 +181,8 @@ export function createEngine({ root, brainDir, config }) {
 		} catch {
 			// The old copy stays.
 		}
-		const front = writeFront(brainDir, root, config, { now, reason, midTurn });
+		const calls = callsOfStretch(of(ROOT_CONVERSATION_ID).messages ?? []);
+		const front = writeFront(brainDir, root, config, { now, reason, midTurn, calls });
 		const state = of(ROOT_CONVERSATION_ID);
 		const fixed = state.payload === undefined ? undefined : estimate(JSON.stringify(state.payload.tools ?? [])) + estimate(state.payload.messages?.[0]?.role === "system" ? state.payload.messages[0].content : "");
 		const info = { at: now, reason, before: before ?? state.used, after: fixed === undefined ? undefined : fixed + estimate(loadTop(brainDir)?.text ?? "") + front.tokens.total, kept: front.kept, left: front.left, midTurn: midTurn !== undefined };

@@ -10,6 +10,13 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const two = (n) => String(n).padStart(2, "0");
 
+/** A point in time, hour and minute only, in the machine's own time zone: "14:32". For the collapsed block, where a date on every line would say nothing new. */
+export function clock(ms) {
+	const date = new Date(ms);
+	if (!Number.isFinite(date.getTime())) return "--:--";
+	return `${two(date.getHours())}:${two(date.getMinutes())}`;
+}
+
 /** A point in time, in the machine's own time zone: "Tue 10 Nov 2026, 14:32". */
 export function stamp(ms) {
 	const date = new Date(ms);
