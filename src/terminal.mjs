@@ -522,7 +522,12 @@ export async function runTerminal(session, options) {
 		const message = live?.generation?.message;
 		const writing = message === undefined || finished.has(message.timestamp) ? undefined : message;
 		checkRepeat(writing, depth);
-		if (ui !== undefined) return void ui.live(depth, writing);
+		if (ui !== undefined) {
+			ui.live(depth, writing);
+			// What the tools are saying while they run: the storyteller's draft, as far as the harness keeps it.
+			ui.liveTools?.(depth, live?.tools);
+			return;
+		}
 		if (writing === undefined || depth > 0) return;
 		advance(message, false);
 	};

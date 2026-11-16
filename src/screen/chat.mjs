@@ -85,6 +85,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 	const items = [];
 	const rows = new Map(); // call id -> row
 	const live = new Map(); // depth -> the reply being written there
+	const toolTails = new Map(); // call id -> the tail of a running tool's output, as the harness keeps it
 	let thinking = true;
 	// Counted up when the colours change: what was rendered with the old ones is made again.
 	let styleRev = 0;
@@ -261,6 +262,27 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			live.set(depth, { message, since: before?.message.timestamp === message.timestamp ? before.since : now() });
 			touch();
 		},
+		/** What the running tools at this depth are saying, as far as the harness keeps it: a bounded tail of each. */
+		liveTools(depth, slots) {
+			void depth;
+			const next = new Map();
+			for (const slot of slots ?? []) {
+				if (slot?.callId === undefined || slot?.status !== "running") continue;
+				if (typeof slot.output !== "string" || slot.output === "") continue;
+				next.set(slot.callId, { text: slot.output, clipped: (slot.droppedBytes ?? 0) > 0 });
+			}
+			let same = next.size === toolTails.size;
+			if (same) for (const [id, entry] of next) {
+				const previous = toolTails.get(id);
+				if (previous === undefined || previous.text !== entry.text || previous.clipped !== entry.clipped) {
+					same = false;
+					break;
+				}
+			}
+			toolTails.clear();
+			for (const [id, entry] of next) toolTails.set(id, entry);
+			if (!same) touch();
+		},
 		/** Whether the end of what is being written is the same thing over and over (src/screen/text.mjs). */
 		stuck() {
 			for (const { message } of live.values()) {
@@ -295,6 +317,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			}
 			// The call that runs now: inside a task, the task's own call and not the task.
 			const row = running.filter((entry) => entry !== taskRow).at(-1);
+			if (row?.name === "consult") return { what: "the storyteller is writing", depth: row.depth, task };
 			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars), depth: row.depth, task };
 			if (taskRow !== undefined) return { what: "between two steps", depth: 1, task };
 			return undefined;
@@ -415,6 +438,16 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				if (row.name === "consult") {
 					// The storyteller: the call opens to the whole exchange — what I asked, and what it answered.
 					add(callLine(row), { ...ref, kind: "call" });
+					if (row.state === "running") {
+						// Its words as they come: the tail the harness keeps, not the file (the file lands when it finishes).
+						const tail = toolTails.get(row.id);
+						if (tail !== undefined) {
+							const indentLive = row.depth > 0 ? "  │   " : "    ";
+							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the story is on its way to the file", "faint"]], { ...ref, kind: "detail" });
+							const shown = wrap(tail.text.replace(/\s+$/, ""), inner - width(indentLive));
+							for (const piece of shown.slice(-POLICY.limits.screen.chatLiveTextRows)) add([[indentLive, "faint"], [piece, "muted"]], { ...ref, kind: "detail" });
+						}
+					}
 					if (row.open) {
 						const indent = row.depth > 0 ? "  │   " : "    ";
 						const section = (title) => add([[indent, "faint"], [title, "faint"]], { ...ref, kind: "detail" });

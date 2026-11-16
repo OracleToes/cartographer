@@ -1577,6 +1577,35 @@ test("screen: a consult call folds to one line, and opens to the whole exchange 
 	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
 });
 
+test("screen: while the storyteller writes, the Chat tab shows the tail of its draft, and wipes it when the answer lands", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	let clock = 1000;
+	const files = { "consult/20261116-053946.md": "The storyteller (Mythos-nano) — 2026-11-16T05:39:46.000Z\nModel: Mythos-nano\nElapsed: 0 m 12 s · finish: stop\n\nQuestion:\nq?\n\nAnswer:\n\nIt is not. Roll twice.\n" };
+	const chat = createChat({ now: () => clock, readFile: (rel) => files[rel] });
+	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
+	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
+
+	chat.user("q?");
+	chat.entry(0, reply([call("c1", "consult", { question: "q?", context: "" })], 1));
+	// The draft streams in through the harness's live slot, a bounded tail — nothing from the session.
+	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six" }]);
+	has(text(), "… the storyteller", "while it runs, the call line shows the waiting mark");
+	has(text(), "No. The uniform() call modulo six", "and the draft as far as it has come");
+	clock += 3000;
+	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six biases toward 1 and 2. Draw with rejection." }]);
+	has(text(), "biases toward 1 and 2. Draw with", "the tail grows as it writes");
+	has(text(), "rejection.", "wrapped onto the next row like everything else");
+	assert.equal(chat.doing().what, "the storyteller is writing", "the strip says whose words those are");
+	// The answer lands: the tool result stands, the tail is gone.
+	clock += 2000;
+	chat.entry(0, result("c1", "consult", "The storyteller took 0 m 05 s (40 output tokens). The answer is written to consult/20261116-053946.md. Shelved as placement sh1.", { details: { consult: true, file: "consult/20261116-053946.md", tokens: 40, finish: "stop", seconds: 5 } }));
+	chat.liveTools(0, []);
+	hasNot(text(), "modulo six", "once the answer lands, the draft leaves the tab — the file holds it");
+	has(text(), "→ 0 m 05 s · 40 tokens", "and the call line keeps how long it took and how much it wrote");
+});
+
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
 	const { colorMode, makeTheme, markdownTheme, parseColorReply, schemeFromEnv, schemeOf, to256, HUES } = await import("../src/screen/theme.mjs");
 	const { colorToOklch, rgbColor } = await import("@earendil-works/pi-tui");

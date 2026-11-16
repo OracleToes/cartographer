@@ -17,6 +17,9 @@ import { loadContext, persistShelfSnapshot, shelfItem, taskState, updateContext 
 
 const CONTEXT_CHARS = POLICY.limits.consult.contextChars;
 const SNIPPET_CHARS = POLICY.limits.consult.bodyChars;
+// While the storyteller tells its story, what the live view keeps is a bounded tail of the draft; the file keeps it all.
+const LIVE_TAIL_BYTES = 8192;
+const LIVE_TAIL_LINES = 200;
 
 const pad = (value, width = 2) => String(value).padStart(width, "0");
 /** UTC stamp for the file name, e.g. 20261115-143022. */
@@ -65,6 +68,8 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 		executionMode: "sequential",
 		// Not run a second time after a crash: the ask is unique and expensive, and the task reads the file again anyway.
 		replay: POLICY.enums.toolReplay.never,
+		// While it writes, the harness keeps a bounded tail of the storyteller's draft for the live view; the file gets all of it.
+		outputLimits: { maxBytes: LIVE_TAIL_BYTES, maxLines: LIVE_TAIL_LINES, retain: "tail" },
 		execute: async (args, api) => {
 			const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 			const model = typeof config.consultModel === "string" ? config.consultModel.trim() : "";
@@ -75,40 +80,116 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 			// The question last: what is newest is what the model answers.
 			const content = (context.text.trim().length > 0 ? `${context.text.trim()}\n\n---\n\n` : "") + String(args.question ?? "").trim();
 			const startedAt = api.now();
-			let response;
-			try {
-				response = await doFetch(`${config.server}/chat/completions`, {
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({
-						model,
-						messages: [{ role: "user", content }],
-						max_tokens: config.consultMaxTokens,
-						temperature: config.consultTemperature,
-					}),
-					signal: AbortSignal.timeout(Math.max(1, config.consultTimeoutSeconds) * 1000),
-				});
-			} catch (error) {
-				if (error?.name === "TimeoutError" || error?.name === "AbortError") {
-					return fail(`The storyteller did not answer within ${config.consultTimeoutSeconds} seconds (consultTimeoutSeconds); the server stops generating when the connection drops. Nothing was written. Give it a narrower question, or raise consultTimeoutSeconds.`);
-				}
-				return fail(`The storyteller could not be reached at ${config.server}: ${snippet(error?.message ?? error)}. Nothing was asked of it.`);
-			}
-			const raw = await response.text().catch(() => "");
-			if (!response.ok) {
-				const likely = response.status >= 400 && response.status < 500
+			const url = `${config.server}/chat/completions`;
+			// The story streams token by token: the Chat tab shows the tail of the draft as it is written. One retry without stream_options for a server that refuses it; usage is simply not reported then.
+			const request = (withUsage) => ({
+				method: "POST",
+				headers: { "content-type": "application/json", accept: "text/event-stream" },
+				body: JSON.stringify({
+					model,
+					messages: [{ role: "user", content }],
+					max_tokens: config.consultMaxTokens,
+					temperature: config.consultTemperature,
+					stream: true,
+					...(withUsage ? { stream_options: { include_usage: true } } : {}),
+				}),
+				signal: AbortSignal.timeout(Math.max(1, config.consultTimeoutSeconds) * 1000),
+			});
+			const networkMessage = (error) =>
+				error?.name === "TimeoutError" || error?.name === "AbortError"
+					? `The storyteller did not answer within ${config.consultTimeoutSeconds} seconds (consultTimeoutSeconds); the server stops generating when the connection drops. Nothing was written. Give it a narrower question, or raise consultTimeoutSeconds.`
+					: `The storyteller could not be reached at ${config.server}: ${snippet(error?.message ?? error)}. Nothing was asked of it.`;
+			const refusal = (status, raw) => {
+				const likely = status >= 400 && status < 500
 					? ` The model named "${model}" is probably not what llama-swap serves: set \`consultModel\` to the llama-swap section name (or CARTO_CONSULT_MODEL).`
 					: "";
-				return fail(`The storyteller refused the call: HTTP ${response.status}. ${snippet(raw)}${likely}`);
+				return fail(`The storyteller refused the call: HTTP ${status}. ${snippet(raw)}${likely}`);
+			};
+			let response;
+			try {
+				response = await doFetch(url, request(true));
+			} catch (error) {
+				return fail(networkMessage(error));
 			}
-			let body;
-			try { body = JSON.parse(raw); } catch {
-				return fail(`The answer could not be read as JSON: ${snippet(raw)}`);
+			if (!response.ok && response.status === 400) {
+				const head = await response.text().catch(() => "");
+				if (/stream_options/i.test(head)) {
+					try {
+						response = await doFetch(url, request(false));
+					} catch (error) {
+						return fail(networkMessage(error));
+					}
+					if (!response.ok) return refusal(response.status, await response.text().catch(() => ""));
+				} else {
+					return refusal(400, head);
+				}
 			}
-			const answer = typeof body?.choices?.[0]?.message?.content === "string" ? body.choices[0].message.content.trim() : "";
-			if (answer === "") return fail(`The storyteller answered with no text: ${snippet(raw)}`);
-			const finishReason = typeof body?.choices?.[0]?.finish_reason === "string" ? body.choices[0].finish_reason : "unknown";
-			const completionTokens = typeof body?.usage?.completion_tokens === "number" && Number.isFinite(body.usage.completion_tokens) ? body.usage.completion_tokens : undefined;
+			if (!response.ok) return refusal(response.status, await response.text().catch(() => ""));
+			// Read the SSE frames; the whole answer lands in the file all the same — nothing is truncated on disk.
+			let answer = "";
+			let finishReason = "unknown";
+			let completionTokens;
+			let cutOff;
+			const rawChunks = [];
+			try {
+				const reader = response.body?.getReader();
+				if (reader === undefined) throw new Error("the response carries no stream");
+				const decoder = new TextDecoder();
+				let pending = "";
+				for (;;) {
+					const { done, value } = await reader.read();
+					if (done) break;
+					const piece = decoder.decode(value, { stream: true });
+					rawChunks.push(piece);
+					pending += piece;
+					let at;
+					while ((at = pending.indexOf("\n")) !== -1) {
+						const line = pending.slice(0, at).trim();
+						pending = pending.slice(at + 1);
+						if (line === "" || line.startsWith(":") || !line.startsWith("data:")) continue;
+						const data = line.slice(5).trim();
+						if (data === "[DONE]") continue;
+						let chunk;
+						try {
+							chunk = JSON.parse(data);
+						} catch {
+							continue;
+						}
+						const text = chunk?.choices?.[0]?.delta?.content ?? chunk?.choices?.[0]?.message?.content;
+						if (typeof text === "string" && text !== "") {
+							answer += text;
+							api.output?.(text);
+						}
+						const finish = chunk?.choices?.[0]?.finish_reason;
+						if (typeof finish === "string" && finish !== "") finishReason = finish;
+						const tokens = chunk?.usage?.completion_tokens;
+						if (typeof tokens === "number" && Number.isFinite(tokens)) completionTokens = tokens;
+					}
+				}
+			} catch (error) {
+				cutOff = error;
+			}
+			// A server that ignored stream and answered with one plain JSON body: read the story out of it all the same.
+			if (answer === "" && rawChunks.length > 0) {
+				try {
+					const body = JSON.parse(rawChunks.join(""));
+					const text = body?.choices?.[0]?.message?.content;
+					if (typeof text === "string" && text.trim() !== "") {
+						answer = text.trim();
+						const finish = body?.choices?.[0]?.finish_reason;
+						if (typeof finish === "string" && finish !== "") finishReason = finish;
+						const tokens = body?.usage?.completion_tokens;
+						if (typeof tokens === "number" && Number.isFinite(tokens)) completionTokens = tokens;
+					}
+				} catch { /* nothing to salvage */ }
+			}
+			answer = answer.trim();
+			if (answer === "") {
+				return fail(cutOff !== undefined
+					? `The storyteller's story broke before it began: ${snippet(cutOff?.message ?? cutOff)}. Nothing was written.`
+					: "The storyteller answered with no text. Nothing was written.");
+			}
+			if (cutOff !== undefined) finishReason = "cut off";
 			const elapsed = Math.max(0, api.now() - startedAt);
 			// The answer lands in the project as a file: visible in the tree, catalogued, shelveable.
 			const stamp = stampFor(startedAt);
@@ -121,6 +202,7 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 						`The storyteller (Mythos-nano) — ${new Date(startedAt).toISOString()}`,
 						`Model: ${model} (served by the same local endpoint; llama-swap swapped it in, so the agent's own model was not served while this was written)`,
 						`Elapsed: ${elapsedOf(elapsed)} · ${completionTokens !== undefined ? `${count(completionTokens)} output tokens` : "output tokens not reported"} · finish: ${finishReason}`,
+						...(cutOff !== undefined ? [`The story was cut off mid-answer: ${snippet(cutOff?.message ?? cutOff)}`, ""] : []),
 						"",
 						"Question:",
 						String(args.question ?? "").trim(),
@@ -156,12 +238,16 @@ export function consultTool({ root, brainDir, config, fetchImpl }) {
 			} catch (error) {
 				shelfMsg = `Not shelved (${snippet(error?.message ?? error)}); the file stands at ${rel}.`;
 			}
-			const finishNote = finishReason === "length"
-				? ` It ran out of room (finish: length) — the ending is incomplete; ask again with a narrower question, or raise consultMaxTokens (${config.consultMaxTokens}).`
-				: "";
+			const finishNote = cutOff !== undefined
+				? ` The story broke mid-answer (${snippet(cutOff?.message ?? cutOff)}): what it wrote stands incomplete in ${rel}.`
+				: finishReason === "length"
+					? ` It ran out of room (finish: length) — the ending is incomplete; ask again with a narrower question, or raise consultMaxTokens (${config.consultMaxTokens}).`
+					: "";
 			const clipNote = context.clipped ? ` The context was clipped to the first ${count(CONTEXT_CHARS)} characters (it was ${count(context.from)}); the rest was not sent.` : "";
 			const text = `The storyteller took ${elapsedOf(elapsed)} (${completionTokens !== undefined ? `${count(completionTokens)} output tokens` : "tokens not reported"}). The answer is written to ${rel}. ${shelfMsg} A story is not a record: read it with \`read ${rel}\`, check the work against a test or a proof, and apply it yourself.${finishNote}${clipNote}`;
-			return { output: [{ type: "text", text }], details: { consult: true, file: rel, ...(placement === undefined ? {} : { placement }), tokens: completionTokens, finish: finishReason, seconds: Math.round(elapsed / 100) / 10 } };
+			const details = { consult: true, file: rel, ...(placement === undefined ? {} : { placement }), tokens: completionTokens, finish: finishReason, seconds: Math.round(elapsed / 100) / 10 };
+			if (cutOff !== undefined) return { isError: true, output: [{ type: "text", text }], details };
+			return { output: [{ type: "text", text }], details };
 		},
 	});
 }

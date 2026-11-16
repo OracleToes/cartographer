@@ -902,8 +902,18 @@ const text0 = (messages) => messages.map((m) => (typeof m.content === "string" ?
 
 const consultConfig = { server: "http://127.0.0.1:8888/v1", consultModel: "MythosNano", consultMaxTokens: 40960, consultTemperature: 0.6, consultTimeoutSeconds: 1800, contextWindow: 100000 };
 const consultApi = (conversationId) => ({ conversationId, taskId: "c1", now: () => 1726000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
-const okAnswer = (content = "The answer is 42.", finishReason = "stop", completionTokens = 1234) =>
-	new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }], usage: { prompt_tokens: 256, completion_tokens: completionTokens, total_tokens: 256 + completionTokens } }), { status: 200, headers: { "content-type": "application/json" } });
+/** An SSE body the way the endpoint streams one: deltas, a final finish_reason with usage, a [DONE]. */
+const sseAnswer = (content = "The answer is 42.", finishReason = "stop", completionTokens = 1234) => {
+	const frames = [];
+	for (const piece of String(content).split(/(?<=\n)/)) {
+		if (piece === "") continue;
+		frames.push(`data: ${JSON.stringify({ choices: [{ delta: { content: piece }, finish_reason: null }] })}\n\n`);
+	}
+	frames.push(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 256, completion_tokens: completionTokens, total_tokens: 256 + completionTokens } })}\n\n`);
+	frames.push("data: [DONE]\n\n");
+	return new Response(frames.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+const okAnswer = sseAnswer;
 
 test("consult: one plain chat completion, the answer in a file, shelved", async (t) => {
 	const { root, brainDir } = fresh(t);
@@ -913,8 +923,11 @@ test("consult: one plain chat completion, the answer in a file, shelved", async 
 		return okAnswer("The answer is 42.\n");
 	};
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "What is the answer?", context: "It was asked before." }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const chunks = [];
+	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
+	const result = await tool.execute({ question: "What is the answer?", context: "It was asked before." }, api, undefined);
 	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(chunks.join(""), "The answer is 42.\n", "the words are reported as they stream, token for token");
 	// The request: same endpoint, plain chat completion, no tools, no grammar, the question last.
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].url, "http://127.0.0.1:8888/v1/chat/completions");
@@ -923,6 +936,8 @@ test("consult: one plain chat completion, the answer in a file, shelved", async 
 	assert.equal(sent.model, "MythosNano");
 	assert.equal(sent.max_tokens, 40960);
 	assert.equal(sent.temperature, 0.6);
+	assert.equal(sent.stream, true, "the story streams token by token");
+	assert.equal(sent.stream_options?.include_usage, true, "and asks the server for usage at the end");
 	assert.equal("tools" in sent, false, "no tool definitions are sent");
 	assert.equal(sent.messages.length, 1);
 	assert.equal(sent.messages[0].role, "user");
@@ -997,6 +1012,58 @@ test("consult: an empty consultModel switches the tool off and asks nothing", as
 	assert.equal(result.isError, true);
 	assert.match(result.output[0].text, /switched off/);
 	assert.equal(called, 0, "the endpoint is never hit");
+});
+
+test("consult: a story that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const encoder = new TextEncoder();
+	const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: "It is not. Roll twice." }, finish_reason: null }] })}\n\n`;
+	let sent = false;
+	const stream = new ReadableStream({
+		pull(controller) {
+			if (!sent) {
+				controller.enqueue(encoder.encode(frames));
+				sent = true;
+				return;
+			}
+			controller.error(new Error("connection reset"));
+		},
+	});
+	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true, "a broken story is an error");
+	assert.match(result.output[0].text, /broke mid-answer/);
+	const file = readFileSync(join(root, result.details.file), "utf8");
+	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the file");
+	assert.match(file, /cut off/, "and says it was cut off");
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 1, "the partial is shelved all the same");
+});
+
+test("consult: a server that refuses stream_options is asked again without it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		const sent = JSON.parse(init.body);
+		calls.push(sent);
+		if (sent.stream_options !== undefined) return new Response("unknown field: stream_options", { status: 400 });
+		return okAnswer("Plain answer.");
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(calls.length, 2, "the refusal is answered with one retry, no more");
+	assert.equal(calls[1].stream_options, undefined, "without stream_options the second time");
+});
+
+test("consult: a server that answers with one plain JSON body all the same reads the story out of it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: "42." }, finish_reason: "stop" }], usage: { completion_tokens: 7 } }), { status: 200, headers: { "content-type": "application/json" } });
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.ok(readFileSync(join(root, result.details.file), "utf8").includes("42."));
 });
 
 test("consult: a timeout is reported as a timeout and writes nothing", async (t) => {
