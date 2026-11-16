@@ -801,7 +801,7 @@ export function handsView({ root, brainDir }) {
 	];
 	const items = [];
 	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
-	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `context`, action shelve."));
+	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `shelf`."));
 	for (const item of store.shelf) {
 		items.push({
 			key: `shelf:${shelfLabel(item)}`,

@@ -22,6 +22,8 @@ import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront,
 import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
+import { readTool } from "../src/tools/read.mjs";
+import { shelfTool } from "../src/tools/shelf.mjs";
 import { taskTool } from "../src/tools/task.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
@@ -29,7 +31,7 @@ import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest, withoutAdditions } from "../src/request.mjs";
-import { TOOLS, TASK_HANDOFF, systemPrompt } from "../src/prompt.mjs";
+import { TOOLS, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
@@ -323,10 +325,11 @@ test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
 	const { ref } = observeFile(root, brainDir, "src/index.html");
 	const describeRef = createRefDescriber({ brainDir });
 	assert.equal(describeRef(ref), `index.html (${ref.id})`);
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", id: ref.id } }, describeRef), `book file read index.html (${ref.id})`);
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", ref } }, describeRef), `book file read index.html (${ref.id})`);
+	assert.equal(describeCall({ name: "read", arguments: { id: ref.id } }, describeRef), `read index.html (${ref.id})`);
+	assert.equal(describeCall({ name: "read", arguments: { id: ref.id, range: "1-20" } }, describeRef), `read index.html (${ref.id}) (lines 1-20)`);
+	assert.equal(describeCall({ name: "shelf", arguments: { action: "add", id: ref.id } }, describeRef), `shelf add index.html (${ref.id})`);
 	// What a call means without a describer is unchanged: the bare id.
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", id: ref.id } }), `book file read ${ref.id}`);
+	assert.equal(describeCall({ name: "read", arguments: { id: ref.id } }), `read ${ref.id}`);
 });
 
 test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t) => {
@@ -821,12 +824,18 @@ test("file edit: top-level id or path is enough, and always points at the live v
 		return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
 	} };
 
-	// `file read` by top-level `id`: the bytes as they are, no line numbers, and the ID to edit by.
-	const read = await tool.execute(tool.prepareArguments({ target: "file", action: "read", id }), focusApi, undefined);
+	// Top-level `read` by `id` (and by `path`): the bytes as they are, no line numbers, and the ID to edit by.
+	const reader = readTool({ root, brainDir });
+	const read = await reader.execute(reader.prepareArguments({ id }), focusApi, undefined);
 	const readText = read.output[0].text;
 	assert.ok(readText.includes("const a = 1;\nconst b = 2;"), `the read shows the exact bytes:\n${readText}`);
 	assert.ok(!/\d+ │ /.test(readText) && !/│/.test(readText), "no line numbers in the read");
 	assert.ok(readText.includes(`file ${id}`), "and it says which file ID it is");
+	const readByPath = await reader.execute(reader.prepareArguments({ path: "src/dice.js", range: "1-1" }), focusApi, undefined);
+	assert.match(readByPath.output[0].text, /== src\/dice\.js \(lines 1-1 of 2\) · file f\d+/);
+	assert.ok(!readByPath.output[0].text.includes("const b = 2;"));
+	// `book` redirects `file read` cleanly to top-level `read` / `shelf`.
+	assert.throws(() => tool.prepareArguments({ target: "file", action: "read", id }), /top-level `read` tool/);
 
 	// `file edit` by top-level `id` alone (with no `planItem` needed).
 	const firstEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", id, oldText: "const b = 2;\n", newText: "const b = 3;\n" }), focusApi, undefined);
@@ -876,67 +885,100 @@ test("write create: over the line cap the head is written and the agent is told"
 	assert.equal(clipped.clipped, true);
 });
 
-test("shelf add and remove: top-level id, project path in id, or path works directly", async (t) => {
+test("shelf tool: first-class add/remove/list, one-line receipt, range refresh by placement id, and focus shelf in state", async (t) => {
 	const { root, brainDir } = fresh(t);
 	mkdirSync(join(root, "src"), { recursive: true });
-	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\n");
-	writeFileSync(join(root, "index.html"), "<!doctype html>\n");
+	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\nSecond line.\nThird line.\n");
+	writeFileSync(join(root, "index.html"), "<!doctype html>\n<title>dice</title>\n");
 	const { ref } = observeFile(root, brainDir, "src/notes.txt");
-	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	// Root conversation: the main shelf.
+	const shelf = shelfTool({ root, brainDir, config: { contextWindow: 100_000 } });
+	const book = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	let taskSeq = 0;
-	const makeApi = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `shelf-${++taskSeq}`, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
+	const makeApi = (conversationId = ROOT_CONVERSATION_ID) => ({ conversationId, taskId: `shelf-${++taskSeq}`, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
 
-	// Top-level `id` alone survives prepareArguments and shelves the catalog file.
-	const prepared = tool.prepareArguments({ target: "shelf", action: "add", id: ref.id });
-	const added = await tool.execute(prepared, makeApi(), undefined);
+	// `book` redirects `target: "shelf"` to the top-level `shelf` tool.
+	assert.throws(() => book.prepareArguments({ target: "shelf", action: "add", id: ref.id }), /top-level `shelf` tool/);
+
+	// Top-level `id` alone survives prepareArguments, shelves the catalog file, and returns a 1-line receipt (no duplicate snapshot body).
+	const prepared = shelf.prepareArguments({ action: "add", id: ref.id });
+	const added = await shelf.execute(prepared, makeApi(), undefined);
 	assert.ok(!added.isError, `shelf add by top-level id succeeded: ${added.output[0].text}`);
-	const listed = await tool.execute({ target: "shelf", action: "list" }, makeApi(), undefined);
+	assert.equal(added.output[0].text.includes("Ship it on Friday."), false, "receipt does not duplicate the snapshot body into tool history");
+	const listed = await shelf.execute(shelf.prepareArguments({ action: "list" }), makeApi(), undefined);
 	assert.match(listed.output[0].text, /placement/, "and the shelf holds it");
 	assert.match(listed.output[0].text, new RegExp(`"id":\\s*"${ref.id}"`), "as the file the agent saw");
 
-	// Passing an existing project path in `id` (before any prior `file read`) catalogs and shelves it on the first call.
-	const byPathInId = await tool.execute(tool.prepareArguments({ target: "shelf", action: "add", id: "index.html" }), makeApi(), undefined);
+	// Re-adding by placement ID (`sh1`) updates the range and refreshes from disk.
+	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Monday.\nSecond line.\nThird line.\n");
+	const narrowed = await shelf.execute(shelf.prepareArguments({ action: "add", id: added.details.placement, range: "1-1" }), makeApi(), undefined);
+	assert.ok(!narrowed.isError, narrowed.output[0].text);
+	assert.equal(narrowed.details.placement, added.details.placement, "updates the same placement in place");
+	assert.match(loadContext(brainDir).shelf[0].snapshot, /Ship it on Monday\./);
+	assert.doesNotMatch(loadContext(brainDir).shelf[0].snapshot, /Second line\./);
+
+	// Passing an existing project path in `id` (before any prior `read`) catalogs and shelves it on the first call.
+	const byPathInId = await shelf.execute(shelf.prepareArguments({ action: "add", id: "index.html" }), makeApi(), undefined);
 	assert.ok(!byPathInId.isError, `shelf add with path in id succeeded: ${byPathInId.output[0].text}`);
 
+	// Snapshot renders once in `<state>` (and vanishes immediately on `shelf remove`).
+	const userMessages = [{ role: "user", content: [{ type: "text", text: "Check shelf." }], timestamp: Date.parse("2026-11-16T10:00:00.000Z") }];
+	const beforeRemove = dressRequest(userMessages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID });
+	assert.match(beforeRemove.at(-1).content.at(-1).text, /<title>dice<\/title>/, "snapshot body appears in state block");
+
 	// Removing by placement `id` (`sh1`) and by `path` both work; retired `placementId` is rejected by validation.
-	assert.throws(() => tool.prepareArguments({ target: "shelf", action: "remove", placementId: added.details.placement }), /placementId|unknown|additional/i);
-	const removedById = await tool.execute(tool.prepareArguments({ target: "shelf", action: "remove", id: added.details.placement }), makeApi(), undefined);
+	assert.throws(() => shelf.prepareArguments({ action: "remove", placementId: added.details.placement }), /placementId|unknown|additional/i);
+	const removedById = await shelf.execute(shelf.prepareArguments({ action: "remove", id: added.details.placement }), makeApi(), undefined);
 	assert.ok(!removedById.isError, removedById.output[0].text);
-	const removedByPath = await tool.execute(tool.prepareArguments({ target: "shelf", action: "remove", path: "index.html" }), makeApi(), undefined);
+	const removedByPath = await shelf.execute(shelf.prepareArguments({ action: "remove", path: "index.html" }), makeApi(), undefined);
 	assert.ok(!removedByPath.isError, removedByPath.output[0].text);
+	const afterRemove = dressRequest(userMessages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID });
+	assert.doesNotMatch(afterRemove.at(-1).content.at(-1).text, /<title>dice<\/title>/, "unshelving drops the snapshot from the next request immediately");
+
+	// Inside a focused task, `shelf add` populates the focus's own shelf and `<state>` renders it for that focus.
+	const focusAdded = await shelf.execute(shelf.prepareArguments({ action: "add", path: "index.html" }), makeApi("focus-42"), undefined);
+	assert.ok(!focusAdded.isError, focusAdded.output[0].text);
+	assert.equal(loadContext(brainDir).shelf.length, 0, "main shelf remains empty");
+	const focusDressed = dressRequest(userMessages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: false, conversationId: "focus-42" });
+	assert.match(focusDressed.at(-1).content.at(-1).text, /<title>dice<\/title>/, "focus sees its own shelved snapshot in state");
 
 	// An ID that is nothing at all is refused with a sentence, not a validation error.
-	const missing = await tool.execute(tool.prepareArguments({ target: "shelf", action: "add", id: "f999" }), makeApi(), undefined);
+	const missing = await shelf.execute(shelf.prepareArguments({ action: "add", id: "f999" }), makeApi(), undefined);
 	assert.equal(missing.isError, true);
 	assert.match(missing.output[0].text, /Nothing with the ID/);
 });
 
-test("book: prepareArguments repairs the (deeply frozen) harness arguments without throwing", (t) => {
+test("prepareArguments: book, read, and shelf repair deeply frozen harness arguments without mutating them", (t) => {
 	// The harness reads the assistant entry and deep-freezes everything in it, the tool-call arguments included
-	// (pi-durable freezeJson). The repair must carry a new object instead of mutating the frozen one.
+	// (pi-durable freezeJson). Each tool's repair must carry a new object instead of mutating the frozen one.
 	const { root, brainDir } = fresh(t);
-	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const book = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const reader = readTool({ root, brainDir });
+	const shelf = shelfTool({ root, brainDir, config: {} });
 	const deepFreeze = (value) => {
 		if (value && typeof value === "object") { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value); }
 		return value;
 	};
-	const byPath = deepFreeze({ target: "file", action: "read", path: "index.html" });
-	const preparedPath = tool.prepareArguments(byPath);
-	assert.equal(preparedPath.target, "file");
-	assert.equal(preparedPath.action, "read");
-	assert.equal(preparedPath.ref, undefined, "no ref is invented for a path call");
-	const byId = deepFreeze({ target: "file", action: "read", id: "f1" });
-	const preparedId = tool.prepareArguments(byId);
-	assert.equal(preparedId.id, "f1");
-	assert.equal(preparedId.ref.id, "f1");
-	assert.ok(typeof preparedId.ref.namespace === "string" && preparedId.ref.namespace.length >= 16, "the namespace is inferred");
-	assert.equal(preparedId.ref.kind, "file", "the kind is inferred from the target");
-	const byRef = deepFreeze({ target: "file", action: "read", ref: { id: "f1", version: "a".repeat(64) } });
-	const preparedRef = tool.prepareArguments(byRef);
-	assert.equal(preparedRef.ref.id, "f1");
-	assert.equal(preparedRef.ref.version, "a".repeat(64));
-	assert.throws(() => tool.prepareArguments({ target: "file", action: "read", id: "f1", ref: { id: "f2" } }), /matching `id` and `ref\.id`/);
+	const readPath = deepFreeze({ path: "index.html", range: "1-40" });
+	assert.deepEqual(reader.prepareArguments(readPath), { path: "index.html", range: "1-40" });
+	const readId = deepFreeze({ id: "f1", version: "a".repeat(64) });
+	assert.deepEqual(reader.prepareArguments(readId), { id: "f1", version: "a".repeat(64) });
+	assert.throws(() => reader.prepareArguments(deepFreeze({})), /read needs `path` or `id`/);
+
+	const shelfById = shelf.prepareArguments(deepFreeze({ action: "add", id: "f1", range: "1-20" }));
+	assert.equal(shelfById.id, "f1");
+	assert.equal(shelfById.ref.id, "f1");
+	assert.ok(typeof shelfById.ref.namespace === "string" && shelfById.ref.namespace.length >= 16);
+	assert.throws(() => shelf.prepareArguments(deepFreeze({ action: "add", id: "f1", ref: { id: "f2" } })), /matching `id` and `ref\.id`/);
+
+	const editPath = book.prepareArguments(deepFreeze({ target: "file", action: "edit", path: "index.html", oldText: "a", newText: "b" }));
+	assert.equal(editPath.ref, undefined, "no ref is invented for a path call");
+	const editId = book.prepareArguments(deepFreeze({ target: "file", action: "edit", id: "f1", oldText: "a", newText: "b" }));
+	assert.equal(editId.id, "f1");
+	assert.equal(editId.ref.id, "f1");
+	assert.equal(editId.ref.kind, "file", "the kind is inferred from the target");
+	const editRef = book.prepareArguments(deepFreeze({ target: "file", action: "edit", ref: { id: "f1", version: "a".repeat(64) }, oldText: "a", newText: "b" }));
+	assert.equal(editRef.ref.version, "a".repeat(64));
+	assert.throws(() => book.prepareArguments({ target: "file", action: "edit", id: "f1", ref: { id: "f2" }, oldText: "a", newText: "b" }), /matching `id` and `ref\.id`/);
 });
 
 test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
@@ -1013,9 +1055,21 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	assert.match(taskRes.output[0].text, /Clean task report\./);
 	assert.doesNotMatch(taskRes.output[0].text, /Internal checkpoint/);
 
-	// Prompts accurately reflect the flat `book` schema with no stale `operation` or `placementId` instructions.
-	const fullPrompt = `${systemPrompt({ root })}\n${TOOLS.book}\n${TASK_HANDOFF}`;
-	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`/);
+	// Prompts accurately reflect first-class `read` and `shelf` plus flat `book`, with no stale `<shelf-ask>`, `target=shelf`, or `file read` instructions.
+	const fullPrompt = [
+		systemPrompt({ root }),
+		TOOLS.read,
+		TOOLS.shelf,
+		TOOLS.book,
+		LOOK_NOTE,
+		CHANGE_NOTE("p1", "Edit file", { commands: "sandbox", network: false }),
+		HANDOFF_IN_TURN("test"),
+		HANDOFF_NOTE("test"),
+		TASK_HANDOFF,
+	].join("\n");
+	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`|target=shelf|target="shelf"|file read|Should I shelf|asked when I read|asked whether to shelf/);
+	assert.match(TOOLS.read, /shelf/);
+	assert.match(TOOLS.shelf, /action/);
 });
 
 test("prepend: the user's own markdown is read before the prompt — core first, brain second; nothing when absent", (t) => {
@@ -1049,103 +1103,34 @@ test("prepend: the user's own markdown is read before the prompt — core first,
 	assert.equal(crlf.includes("\r"), false);
 });
 
-// ─── The read gate: one read per reply, then the shelf question ─────────────
+// ─── The read gate: one transient read per reply, directed at `shelf` ────────
 
-import { beginShelfGate, readGateCheck, takeShelfAsk, settleShelfAsk, parseShelfDecision, dressShelfAsk, SHELF_ASK_OPEN } from "../src/shelf-ask.mjs";
+import { beginReadGate, readGateCheck, withoutShelfAsk } from "../src/read-gate.mjs";
 
-const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c${path}`, name: "book", arguments: { target: "file", action: "read", path } });
+const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c-${path}`, name: "read", arguments: { path } });
+const shelfCall = (path, id) => ({ type: "toolCall", id: id ?? `s-${path}`, name: "shelf", arguments: { action: "add", path } });
 
-test("read gate: the first file read of a reply is returned, the rest are refused, and the question rides the read that came back", () => {
+test("read gate: first `read` in a reply passes, further `read` calls point at `shelf`, and parallel `shelf` calls are never gated", () => {
 	const id = "gate-first";
-	const message = { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md"), readCall("c.md")] };
-	beginShelfGate(id, message);
+	const message = { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md"), shelfCall("c.md"), shelfCall("d.md"), readCall("e.md")] };
+	beginReadGate(id, message);
+	assert.equal(readGateCheck(id, readCall("a.md")), undefined, "the first file read runs");
+	assert.equal(readGateCheck(id, shelfCall("c.md")), undefined, "shelf calls are never gated");
+	assert.equal(readGateCheck(id, shelfCall("d.md")), undefined, "multiple shelf calls in one reply all run");
+	const refusedB = readGateCheck(id, readCall("b.md"));
+	assert.match(refusedB, /b\.md was not read/);
+	assert.match(refusedB, /Call `shelf` \(action="add"\)/);
+	assert.match(readGateCheck(id, readCall("e.md")), /e\.md was not read/);
+	// A reply with no `read` clears the gate.
+	beginReadGate(id, { role: "assistant", timestamp: 2, content: [shelfCall("f.md")] });
 	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
-	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
-	assert.match(readGateCheck(id, readCall("c.md")), /c\.md was not returned/);
-	// A refusal carries no question,
-	assert.equal(takeShelfAsk(id, readCall("b.md"), { isError: true }), undefined, "a refusal never carries the question");
-	// and neither does a result from a call that is not one of the reply's reads.
-	assert.equal(takeShelfAsk(id, { type: "toolCall", id: "shell-1", name: "shell", arguments: {} }, { isError: false }), undefined);
-	// The read that came back does.
-	const ask = takeShelfAsk(id, readCall("a.md"), { isError: false });
-	assert.match(ask, /<shelf-ask>/);
-	assert.match(ask, /1  a\.md  \(read this reply\)/);
-	assert.match(ask, /2  b\.md {2}\(not returned\)/);
-	assert.match(ask, /3  c\.md {2}\(not returned\)/);
-	assert.match(ask, /not answering shelves none/);
-	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: false }), undefined, "the question rides a once");
-	// A reply without file reads clears the gate.
-	beginShelfGate(id, { role: "assistant", timestamp: 2, content: [{ type: "text", text: "noted" }] });
-	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: false }), undefined);
 });
 
-test("read gate: when no read comes back cleanly, the last read of the reply carries the question", () => {
-	const id = "gate-all-fail";
-	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md")] });
-	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
-	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
-	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: true }), undefined, "not before the round's reads are all in");
-	const ask = takeShelfAsk(id, readCall("b.md"), { isError: true });
-	assert.match(ask, /<shelf-ask>/, "the last read carries it rather than no one");
+test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped cleanly", () => {
+	const legacy = "file body\n\n<shelf-ask>\nShould I shelf index.html? Yes or no.\n</shelf-ask>\n";
+	assert.equal(withoutShelfAsk(legacy), "file body");
+	assert.equal(withoutAdditions(legacy), "file body");
 });
-
-test("read gate: a single read that fails asks nothing — there is nothing to weigh", () => {
-	const id = "gate-single-fail";
-	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("broken.md")] });
-	assert.equal(readGateCheck(id, readCall("broken.md")), undefined);
-	assert.equal(takeShelfAsk(id, readCall("broken.md"), { isError: true }), undefined);
-});
-
-test("read gate: a single read asks the yes/no question about the one file", () => {
-	const id = "gate-single";
-	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("solo.md")] });
-	assert.equal(readGateCheck(id, readCall("solo.md")), undefined);
-	const ask = takeShelfAsk(id, readCall("solo.md"), { isError: false });
-	assert.match(ask, /Should I shelf solo\.md\? Yes or no/);
-	assert.doesNotMatch(ask, /by number/);
-});
-
-test("read gate: a yes shelves the files, numbers pick, a no shelves none", (t) => {
-	const { root, brainDir } = fresh(t);
-	writeFileSync(join(root, "x.md"), "alpha\n");
-	writeFileSync(join(root, "y.md"), "beta\n");
-	const mk = (id, files) => {
-		beginShelfGate(id, { role: "assistant", timestamp: 1, content: files.map((f, i) => readCall(f, `c${i}`)) });
-		for (const f of files) readGateCheck(id, readCall(f, `c${files.indexOf(f)}`));
-		takeShelfAsk(id, readCall(files[0], "c0"), { isError: false });
-	};
-	const main = ROOT_CONVERSATION_ID;
-	mk(main, ["x.md", "y.md"]);
-	settleShelfAsk(main, { role: "assistant", content: [{ type: "text", text: "yes" }] }, { root, brainDir });
-	assert.deepEqual(loadContext(brainDir).shelf.map((s) => s.path).sort(), ["x.md", "y.md"]);
-
-	// A no: nothing new on the shelf.
-	const id = "gate-no";
-	mk(id, ["x.md"]);
-	const before = loadContext(brainDir).shelf.length;
-	settleShelfAsk(id, { role: "assistant", content: [{ type: "text", text: "no" }] }, { root, brainDir });
-	assert.equal(loadContext(brainDir).shelf.length, before);
-
-	// Numbers pick, across an unanswered single question folded in.
-	assert.deepEqual(parseShelfDecision("yes — 2", 3), [1]);
-	assert.deepEqual(parseShelfDecision("1 3", 3), [0, 2]);
-	assert.deepEqual(parseShelfDecision("yes", 2), [0, 1]);
-	assert.deepEqual(parseShelfDecision("the renderer has 3 faces and 18 vertices", 3), []);
-	assert.deepEqual(parseShelfDecision("2d canvas", 3), []);
-});
-
-test("shelf ask: the question stays until the agent has answered, then dresses out", () => {
-	const toolResult = (text) => ({ role: "toolResult", toolName: "book", toolCallId: "c0", content: [{ type: "text", text }] });
-	const ask = `content of the read\n\n${SHELF_ASK_OPEN}\nShould I shelf it? Yes or no.\n${SHELF_ASK_OPEN.replace("shelf-ask", "/shelf-ask")}`;
-	// Nothing for the model to see yet: no assistant message after it.
-	const before = dressShelfAsk([toolResult(ask)]);
-	assert.match(text0(before), /shelf it/i);
-	// The agent answered: the question is stripped from what it sees.
-	const after = dressShelfAsk([toolResult(ask), { role: "assistant", content: [{ type: "text", text: "no" }] }]);
-	assert.doesNotMatch(text0(after), /shelf it/i);
-	assert.match(text0(after), /content of the read/, "the read itself stays");
-});
-const text0 = (messages) => messages.map((m) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((p) => p.text ?? "").join(""))).join("\n");
 
 // ─── The consult tool ────────────────────────────────────────────────────────
 

@@ -1,11 +1,14 @@
-// The `book` tool is the single interface to the agent's durable surfaces — ledger, plan, atlas, assessment,
-// context, Durable records, referenced entities and the shelf. Focused contexts may update the shared brain; only
-// the orchestrating context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs,
-// src/atlas.mjs, src/assessment.mjs and src/context.mjs; this file routes target/action calls to them. One flat
-// declaration (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
+// The `book` tool is the single interface to the agent's durable brain surfaces — ledger, plan, atlas, assessment,
+// context, reports, Durable records, and project-file mutations. Project-file reading and working-memory shelving live
+// in the top-level `read` and `shelf` tools. Focused contexts may update the shared brain; only the orchestrating
+// context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs, src/atlas.mjs,
+// src/assessment.mjs and src/context.mjs; this file routes target/action calls to them. One flat declaration
+// (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
 import { projectFiles } from "./look.mjs";
 import { ChangeError, confineWrite } from "./change.mjs";
+import { noFileRecord, runFileRead } from "./read.mjs";
+import { runShelf } from "./shelf.mjs";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
@@ -16,9 +19,8 @@ import { applyPlanOp, authorizationLine, isAuthorized, loadPlan, PlanError, save
 import { applyAtlasOp, AtlasError, findNode, loadAtlas, saveAtlas } from "../atlas.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed, pin } from "../top.mjs";
-import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
-import { charsPerTokenNow } from "../calibrate.mjs";
-import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
+import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
+import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, validateReference, contentVersion } from "../catalog.mjs";
 import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 import { USER_NAME } from "../user.mjs";
 import { clipNote, takeWarnings, warn } from "../warnings.mjs";
@@ -50,31 +52,6 @@ const normalizeArgs = (brainDir, given) => {
 };
 const isCatalogFileId = (id) => /^f(\d+|-[0-9a-f]{8}-)/i.test(String(id ?? ""));
 /**
- * A shelf ref given an ID alone: find what kind of thing it is. Files and reports are cheap to check; the tool
- * registry and the durable index are tried after, and a confined project path passed in `id` resolves to its
- * catalog file identity last. Returns the ref with its kind filled in, or undefined when nothing by that ID exists.
- */
-const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
-	let namespace;
-	try { namespace = ensureCatalog(brainDir).namespace; } catch { return undefined; }
-	const filled = { ...ref, namespace };
-	if (resolveFile(root, brainDir, { ...filled, kind: "file" }).status === "live") return { ...filled, kind: "file" };
-	if (loadReport(brainDir, ref.id) !== undefined) return { ...filled, kind: "report" };
-	for (const kind of ["schema", "message", "toolResult", "toolCall"]) {
-		try {
-			const found = await durableRecordFor(kind, ref.id, brainDir, api, callContext);
-			if (found !== undefined) return { ...filled, kind };
-		} catch { /* not this kind */ }
-	}
-	if (ref.version === undefined && !isCatalogFileId(ref.id)) {
-		try {
-			const fileRef = fileReference(root, brainDir, ref.id);
-			return { namespace: fileRef.namespace, kind: "file", id: fileRef.id };
-		} catch { /* not an existing confined project file */ }
-	}
-	return undefined;
-};
-/**
  * One source of truth for what exists: target → action → validation spec. The provider declaration (enums), the
  * local validator and the executor's dispatch all derive from this table; the tool description's capability
  * matrix is written to match it. Spec fields:
@@ -88,7 +65,6 @@ const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
  */
 const CAPABILITIES = {
 	file: {
-		read: { pathOk: true },
 		create: { fields: ["path"], stringFields: ["content"] },
 		edit: { pathOk: true, exactFields: ["oldText"], stringFields: ["newText"] },
 		remove: { pathOk: true },
@@ -153,12 +129,6 @@ const CAPABILITIES = {
 	prompt: { list: {}, read: { ref: "required" } },
 	tool: { list: {}, read: { ref: "required" } },
 	schema: { list: {}, read: { ref: "required" } },
-	shelf: {
-		list: {},
-		// The namespace and the kind are inferred from the ID alone (src/tools/book.mjs, inferShelfRef); a full reference is not needed.
-		add: { pathOk: true, refAlternative: "id or path", refInfer: true },
-		remove: { pathOk: true, refAlternative: "id or path", refInfer: true },
-	},
 };
 const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
 const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
@@ -166,11 +136,10 @@ const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
 	id: str({ minLength: 1, maxLength: 256, description: "Stable ID of the entity. Pass top-level `id` instead unless pinning `version`." }),
 	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
-	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred when omitted: from the target, or for target=shelf from what the ID is." })),
+	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred from the target when omitted." })),
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
-const noFileRecord = (id) => `There is no file record for ID ${JSON.stringify(String(id ?? ""))}. Pass project-relative \`path\`, or use a file ID from \`book file create\` ("File id: f1") or \`book file read\` ("· file f1 @<64 hex>").`;
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
 /** Append any "this was clipped for you" notes raised while the call ran. Every tool call drains, once. */
 const withNotes = (result) => {
@@ -178,41 +147,6 @@ const withNotes = (result) => {
 	if (notes.length === 0) return result;
 	return { ...result, output: [...(result?.output ?? []), { type: "text", text: notes.map((note) => `note: ${note}`).join("\n") }] };
 };
-function renderReadSelection(bytes, path, range, id, version) {
-	let text;
-	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-	catch { throw new Error("file is not valid UTF-8 text"); }
-	const lines = text.split("\n");
-	if (lines.at(-1) === "") lines.pop();
-	let from = 1;
-	let to = Math.min(lines.length, POLICY.limits.look.readDefaultLines);
-	if (range !== undefined && String(range).trim() !== "") {
-		const match = /^(\d+)\s*(?:-|to|\.\.)\s*(\d+)$/.exec(String(range).trim());
-		if (!match) throw new Error('range must look like "10-80"');
-		from = Number(match[1]);
-		to = Number(match[2]);
-		if (from < 1 || to < from || to - from + 1 > POLICY.limits.look.readMaxLines) throw new Error(`range must be ${POLICY.limits.look.readMaxLines} lines or fewer, starting at line 1 or later`);
-		if (from > lines.length && lines.length > 0) throw new Error(`file has ${lines.length} lines; line ${from} does not exist`);
-		to = Math.min(to, lines.length);
-	}
-	const clip = POLICY.limits.look.lineChars;
-	// A read returns at most about READ_TOKEN_CEILING tokens: a huge file is read in window-sized reads, not in one.
-	const ceiling = POLICY.limits.look.readTokenCeiling;
-	let ceilingHit = false;
-	let taken = 0;
-	const body = [];
-	for (const line of lines.slice(Math.max(0, from - 1), to)) {
-		const shown = line.length > clip ? `${line.slice(0, clip)} …[line cut: ${line.length} characters]` : line;
-		const cost = Math.ceil(shown.length / charsPerTokenNow()) + 1;
-		if (body.length > 0 && taken + cost > ceiling) { ceilingHit = true; break; }
-		taken += cost;
-		body.push(shown);
-	}
-	const last = from + body.length - 1;
-	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
-	const more = last < lines.length ? `\n${ceilingHit ? `(stopped at the ~${ceiling}-token read ceiling; ` : "("}${lines.length - last} more lines; ask for range ${last + 1}-${Math.min(lines.length, last + POLICY.limits.look.readDefaultLines)})` : "";
-	return `== ${path} (lines ${from}-${Math.max(from - 1, last)} of ${lines.length}) · file ${id}${version === undefined ? "" : ` @${version}`}\n${body.join("\n")}${more}`;
-}
 const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
 
 // ─── Error-attached guidance (Q3, 2026-11-15) ───────────────────────────────
@@ -237,10 +171,9 @@ const ACTION_GUIDE = {
 	},
 	file: {
 		create: "path and content — a new file keeps at most the line cap (see the session's `writeLines`); the rest is not written and the result says so. The result names the new file's `File id:`",
-		read: "path or id (from a create/read header `· file f1`); range optional",
 		edit: "id or path, oldText and newText",
 		remove: "id or path",
-		rebind: "id, path and expectedVersion — a `file read` header shows `· file f1 @<64 hex>`: the id and the digest",
+		rebind: "id, path and expectedVersion — a `read` header shows `· file f1 @<64 hex>`: the id and the digest",
 	},
 	atlas: {
 		add: "name and gist — detail, files and links optional; the node comes back with its `c<N>` id",
@@ -261,10 +194,6 @@ const ACTION_GUIDE = {
 		note: "text (what to keep, with file paths and line numbers)",
 		collapse: "optional text",
 	},
-	shelf: {
-		add: "id or path — range and handOn optional",
-		remove: "id (placement sh1, target id, or 'all') or path",
-	},
 };
 const guideFor = (target, action) => ACTION_GUIDE[target]?.[action];
 /** Append the one-line field summary to a failure result, when one exists. Success results pass through unchanged. */
@@ -283,13 +212,7 @@ const withGuide = (target, action, result) => {
 	}) };
 };
 
-function currentShelf(brainDir, conversationId, main) {
-	const store = loadContext(brainDir);
-	return main ? store.shelf : (store.tasks[conversationId]?.shelf ?? []);
-}
-
 const reportVersion = (body) => createHash("sha256").update(body).digest("hex");
-const DURABLE_REF_KINDS = new Set(["message", "toolCall", "toolResult"]);
 const DURABLE_TARGETS = new Set(["conversation", "message", "toolCall", "toolResult", "prompt", "tool", "schema"]);
 // Lists are hard-capped and paged with an opaque cursor; the cap is policy, the cursor is base64url JSON.
 const LIST_CURSOR_MAX_BYTES = POLICY.limits.book.listCursorTokens * 4;
@@ -414,31 +337,9 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		const output = nested.structuredOutput;
 		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
 	}
+	// Unadvertised transcript-replay fallback: new calls go through the top-level `read` tool.
 	if (target === "file" && action === "read") {
-		let ref = args.ref;
-		try {
-			if (ref === undefined) {
-				if (typeof args.path !== "string" || args.path.trim() === "") return fail(`file ${action} needs \`id\` or explicit project-relative \`path\`.`);
-				ref = fileReference(root, brainDir, args.path);
-			}
-		} catch (error) { return fail(`Could not resolve the file reference: ${error.message}.`); }
-		if (!validateReference(ref) || ref.kind !== "file") return fail("Invalid file reference; expected at least an `id`.");
-		let result = resolveFile(root, brainDir, ref);
-		if (result.status !== "live" && result.error === "No catalog record exists for this file identity." && ref.version === undefined && !isCatalogFileId(ref.id)) {
-			try {
-				ref = fileReference(root, brainDir, ref.id);
-				result = resolveFile(root, brainDir, ref);
-			} catch { /* keep missing-record error */ }
-		}
-		const readablePinned = ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
-		const record = result.record;
-		if (result.status !== "live" && !readablePinned) return fail(`${result.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`}`);
-		if (result.bytes.byteLength > POLICY.limits.look.fileBytes) return fail(`The file is ${count(result.bytes.byteLength)} bytes, over the ${count(POLICY.limits.look.fileBytes)}-byte read limit. Ask for a smaller range with shelf.add.`);
-		if (result.bytes.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0)) return fail("This file appears to be binary and cannot be returned as text.");
-		let selected;
-		try { selected = renderReadSelection(result.bytes, record.path, args.range, ref.id, result.resolvedVersion ?? result.currentVersion); }
-		catch (error) { return fail(`Cannot read the requested selection: ${error.message}.`); }
-		return textResult(`${selected}${readablePinned ? `\n(a pinned historical version; the current content differs)` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
+		return runFileRead({ root, brainDir }, args);
 	}
 	if (DURABLE_TARGETS.has(target)) {
 		if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
@@ -732,102 +633,9 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			return textResult(applyContextRowAction(brainDir, ref.id, rowAction, undefined, api.taskId), { status: action === "remove" ? "deleted" : "live", ref: { ...current, version } });
 		} catch (error) { return fail(`Report ${action} refused: ${error.message}.`); }
 	}
-	if (target === "shelf" && action === "list") {
-		const items = currentShelf(brainDir, api.conversationId, main);
-		return textResult(items.length === 0 ? "Shelf is empty." : items.map((item) => `${shelfLabel(item)} [placement ${item.id}]${item.target ? ` → ${JSON.stringify(item.target)}` : ""}`).join("\n"), { placements: items.map((item) => item.id) });
-	}
-	if (target === "shelf" && action === "add") {
-		let ref = args.ref;
-		let path = args.path;
-		let pinnedDurable;
-		if (ref !== undefined) {
-			if (ref.kind === undefined) {
-				const inferred = await inferShelfRef(ref, root, brainDir, api, callContext);
-				if (inferred === undefined) return fail(`Nothing with the ID "${ref.id}" is a file, a report, a schema or a durable record; nothing was added. Give the ref a kind to say what it is.`);
-				ref = inferred;
-			}
-			if (!validateReference(ref)) return fail("Invalid shelf target reference.");
-			if (ref.kind === "file") {
-				let resolved = resolveFile(root, brainDir, ref);
-				if (resolved.status !== "live" && resolved.error === "No catalog record exists for this file identity." && ref.version === undefined && !isCatalogFileId(ref.id)) {
-					try {
-						const fileRef = fileReference(root, brainDir, ref.id);
-						ref = { namespace: fileRef.namespace, kind: "file", id: fileRef.id };
-						resolved = resolveFile(root, brainDir, ref);
-					} catch { /* keep missing-record error */ }
-				}
-				if (resolved.status !== "live") return fail(`Cannot shelf file: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "The reference is not current."}`}`);
-				path = resolved.record.path;
-			} else if (ref.kind === "report") {
-			const verified = await runUniversal({ root, brainDir, config, engine, gate }, { target: "report", action: "read", ref }, api, callContext);
-			if (verified.isError) return verified;
-			path = `report:${ref.id}`;
-		} else if (ref.kind === "schema") {
-			if (typeof ref.version !== "string") return fail("A schema shelf placement needs an exact version-pinned schema reference.");
-			const retained = readReferenceVersion(brainDir, ref);
-			if (retained === undefined) {
-				// Explicit pin: retaining the current registry version here makes the pin self-sufficient.
-				let current;
-				try { current = await durableRecordFor("schema", ref.id, brainDir, api, callContext); }
-				catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
-				const currentNamespace = nativeReference(brainDir, "schema", ref.id).namespace;
-				if (ref.namespace !== currentNamespace) return fail("Schema reference belongs to another brain-store namespace.");
-				if (current === undefined || current.version !== ref.version) return fail("The pinned schema version is unavailable and is not the current one; no shelf placement was added.");
-				try { retainReferenceVersion(brainDir, ref, current.value); }
-				catch (error) { return fail(`The schema version could not be retained: ${error.message}.`); }
-			}
-		} else if (DURABLE_REF_KINDS.has(ref.kind)) {
-			// The render path cannot reach the Durable store, so the placement is backed by the verified content at add time.
-			const durable = await durableRecordFor(ref.kind, ref.id, brainDir, api, callContext);
-			if (durable === undefined) return fail(`${ref.kind} ${ref.id} is unavailable (missing or soft-forgotten); nothing was shelved.`);
-			if (ref.version !== undefined && ref.version !== durable.version) return fail(`Stale ${ref.kind} reference: requested ${ref.version}, current ${durable.version}. Re-list and pin the current version.`);
-			pinnedDurable = { record: durable, ref: { namespace: ref.namespace, kind: ref.kind, id: ref.id, version: ref.version ?? durable.version } };
-		} else return unsupported("shelf", "add for this reference kind");
-		}
-		if (ref?.kind !== "schema" && !DURABLE_REF_KINDS.has(ref?.kind ?? "") && (typeof path !== "string" || path.trim() === "")) return fail("shelf add needs a file reference or explicit project-relative path.");
-		const mine = currentShelf(brainDir, api.conversationId, main);
-		let picked;
-		if (pinnedDurable !== undefined) {
-			picked = shelfReferenceItem(pinnedDurable.ref, JSON.stringify(pinnedDurable.record.value, null, 2), brainDir, mine);
-		} else {
-			try { picked = shelfItem(root, ref?.kind === "schema" ? ref : path, args.range, brainDir, mine); }
-			catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }
-		}
-		const item = { ...picked.item, ...(ref ? { target: ref } : {}) };
-		persistShelfSnapshot(brainDir, item, picked.backing);
-		const handOn = !main && args.handOn === true;
-		updateContext(brainDir, (next) => {
-			const list = main ? next.shelf : (taskState(next, api.conversationId).shelf ??= []);
-			const at = list.findIndex((entry) => entry.id === item.id);
-			if (at < 0) list.push({ ...item, ...(handOn ? { handOn: true } : {}) });
-			else list[at] = { ...item, ...(handOn ? { handOn: true } : {}) };
-		});
-		return textResult(`Added ${shelfLabel(item)} to the shelf as placement ${item.id}; ${count(picked.tokens)} rendered tokens are in view now.\n\n${picked.item.snapshot}`, { placement: item.id, ref: item.target });
-	}
-	if (target === "shelf" && action === "remove") {
-		const wanted = String(args.id ?? args.ref?.id ?? args.path ?? "").trim();
-		if (!wanted) return withGuide("shelf", "remove", fail("shelf remove needs `id` or `path`."));
-		if (loadContext(brainDir).appliedOperations?.includes(String(api.taskId))) {
-			cleanupShelfSnapshots(brainDir, [{ id: wanted, type: "file" }]);
-			return textResult(`Removed shelf placement ${wanted}; the target identity remains unchanged.`, { removedPlacement: wanted, replay: true });
-		}
-		const mine = currentShelf(brainDir, api.conversationId, main);
-		const normalizedWanted = wanted.replace(/^\.\//, "");
-		const gone = wanted === "all"
-			? mine
-			: mine.filter((item) => item.id === wanted || item.target?.id === wanted || item.ref?.id === wanted || shelfLabel(item) === wanted || item.path === wanted || item.path === normalizedWanted);
-		if (gone.length === 0) {
-			return fail(`No shelf item ${JSON.stringify(wanted)} exists in this context.${mine.length > 0 ? ` On it: ${mine.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.` : " The shelf is empty."}`);
-		}
-		const removedIds = new Set(gone.map((item) => item.id));
-		updateContext(brainDir, (next) => {
-			if (main) next.shelf = next.shelf.filter((item) => !removedIds.has(item.id));
-			else taskState(next, api.conversationId).shelf = mine.filter((item) => !removedIds.has(item.id));
-			next.appliedOperations = [...new Set([...(next.appliedOperations ?? []), String(api.taskId)])].slice(-POLICY.limits.context.operationReplay);
-		});
-		cleanupShelfSnapshots(brainDir, gone);
-		const label = gone.map((item) => item.id).join(", ");
-		return textResult(`Removed shelf placement ${label}; the target identity remains unchanged.`, { removedPlacement: gone.length === 1 ? gone[0].id : gone.map((item) => item.id) });
+	// Unadvertised transcript-replay fallback: new calls go through the top-level `shelf` tool.
+	if (target === "shelf") {
+		return runShelf({ root, brainDir, config }, action, args, api, callContext);
 	}
 	return unsupported(target, action);
 }
@@ -1103,12 +911,11 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 export function bookTool({ root, brainDir, config, engine, gate }) {
 	/** One flat declaration: the provider grammar stays a root-level object (llama.cpp/Qwen-safe), closed enums, everything optional except target and action. */
 	const validationSchema = obj({
-		target: str({ enum: UNIVERSAL_TARGETS, description: "The surface to act on: file, report, ledger, plan, atlas, assessment, context, shelf, or a Durable record family." }),
+		target: str({ enum: UNIVERSAL_TARGETS, description: "The surface to act on: file (create/edit/remove/rebind), report, ledger, plan, atlas, assessment, context, or a Durable record family. Use top-level `read` and `shelf` to inspect or pin files." }),
 		action: str({ enum: UNIVERSAL_ACTIONS, description: "One action on that target. Unsupported target/action pairs fail closed." }),
-		id: opt(str({ minLength: 1, maxLength: 256, description: "Stable ID of the item to act on (plan p1, ledger g1/q1/n1, atlas c1 or node name, file f1, report t1, shelf sh1, Durable record). Points at the live version." })),
+		id: opt(str({ minLength: 1, maxLength: 256, description: "Stable ID of the item to act on (plan p1, ledger g1/q1/n1, atlas c1 or node name, file f1, report t1, Durable record). Points at the live version." })),
 		ref: opt(REFERENCE_SCHEMA),
-		path: opt(str({ description: "Project-relative file path for file create/read/edit/remove/rebind, shelf add/remove, or atlas look." })),
-		range: opt(str({ description: 'File line selection such as "10-80"; omitted means the default window.' })),
+		path: opt(str({ description: "Project-relative file path for file create/edit/remove/rebind or atlas look." })),
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
 		text: opt(str({ description: "Body text for ledger add/edit/done, plan add/edit/done, assessment write, or context note/collapse." })),
 		kind: opt(str({ enum: Object.values(POLICY.enums.ledgerKind), description: "Ledger entry kind on ledger add: goal, question, or note." })),
@@ -1131,7 +938,6 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
 		newText: opt(str({ description: "Replacement passage in file edit (empty string deletes oldText)." })),
-		handOn: opt(bool({ description: "When adding to the shelf from a focus, hand the placement to the shared shelf on return." })),
 		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition (required on file rebind; omit elsewhere for the live version)." })),
 		planItem: opt(str({ description: "Optional authorized change plan item ID on file create/edit/remove; inferred from the active change focus when omitted." })),
 	});
@@ -1147,8 +953,6 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		}
 		const problems = [];
 		if (args.ref !== undefined && !validateReference(args.ref)) {
-			// Where the kind can be inferred (the shelf: from what the ID is), an id-carrying ref is enough;
-			// the executor resolves it and says precisely when it cannot.
 			const idOnly = spec.refInfer === true && typeof args.ref === "object" && args.ref !== null && nonEmpty(args.ref.id);
 			if (!idOnly) return { problems: [spec.refInfer === true ? "id or path" : "`id` (or `ref` with `id`)"] };
 		}
@@ -1166,6 +970,14 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		description: describe("book"),
 		parameters: validationSchema,
 		prepareArguments(args) {
+			if (args !== null && typeof args === "object") {
+				if (args.target === "shelf") {
+					throw new Error('Validation failed for tool "book": the shelf is now the top-level `shelf` tool — call `shelf` with action="add" | "remove" | "list", `id` or `path`, and optional `range`.');
+				}
+				if (args.target === "file" && args.action === "read") {
+					throw new Error('Validation failed for tool "book": reading project files is now the top-level `read` tool — call `read` with `path` or `id` and optional `range`, or `shelf` (action="add") to keep several files in view. Supported book actions for file: create, edit, remove, rebind.');
+				}
+			}
 			const result = validate.parse(args);
 			if (!result.ok) {
 				const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");

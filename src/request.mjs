@@ -19,7 +19,7 @@
 //                                       the very end of the request, after the state and windows blocks
 import { POLICY } from "./config.mjs";
 import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, textOf, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
-import { dressShelfAsk } from "./shelf-ask.mjs";
+import { withoutShelfAsk } from "./read-gate.mjs";
 import { isNote, withoutQuietWakes } from "./wake.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "./state.mjs";
 import { STAMP, stamp, took } from "./time.mjs";
@@ -93,7 +93,7 @@ const TIMES = new RegExp(`\\n\\n\\[((?:sent|noted) ${STAMP}|task ended ${STAMP},
 
 /** Text as it is stored: without anything this file adds. */
 export function withoutAdditions(text) {
-	const stripped = withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, ""));
+	const stripped = withoutShelfAsk(withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, "")));
 	return stripped.startsWith(USER_SPEAKER) ? stripped.slice(USER_SPEAKER.length) : stripped;
 }
 
@@ -112,9 +112,7 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 	let kept = withoutQuietWakes(messages);
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
 	kept = dressMain(kept, brainDir);
-	// A one-shot question about shelving rides the results of a round of reads; once the agent has answered it, it is dressed out.
-	kept = dressShelfAsk(kept);
-	// Read results are ephemeral: every read but the newest as one line here, the newest's content at the very end.
+	// File-read results are ephemeral: every successful read but the newest as one line here, the newest's content at the very end.
 	const ephemeral = dressReads(kept);
 	kept = ephemeral.messages;
 	let focus;
@@ -141,10 +139,10 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 			}
 			fired = wakes?.noteShown() ?? [];
 		}
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: true, conversationId }) }));
 	} else {
-		// A focus is a live agent too: it gets the lines about the context itself (how full it is, the shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
+		// A focus is a live agent too: it gets the lines about the context itself (how full it is, its own + inherited shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
+		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: false, conversationId }) }));
 	}
 	// The windows come before the newest read of all, in a task's request too: they change from one request to
 	// the next, and a task that left a command running sees how it is doing each time it thinks.

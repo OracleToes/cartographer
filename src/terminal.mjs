@@ -100,9 +100,26 @@ export function describeCall(call, describeRef) {
 			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
 		}
 		case "read": {
-			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
-			const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
-			return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
+			if (args.paths !== undefined) {
+				const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
+				const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
+				return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
+			}
+			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
+				? args.ref
+				: (typeof args.id === "string" && args.id !== "" ? { kind: "file", id: args.id } : undefined);
+			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
+			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
+			return `read ${oneLine(String(target), POLICY.limits.terminal.callSummary.readPaths)}${range}`.trim();
+		}
+		case "shelf": {
+			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
+			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
+				? args.ref
+				: (typeof args.id === "string" && args.id !== "" ? { id: args.id } : undefined);
+			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
+			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
+			return `shelf ${[action, oneLine(String(target), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}${range}`.trim();
 		}
 		case "search":
 			return `search /${oneLine(args.pattern, POLICY.limits.terminal.callSummary.searchPattern)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
@@ -151,6 +168,7 @@ export function describeResult(message) {
 	if (message.toolName === "book" && message.details?.target === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
 	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
 	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
+	if (message.toolName === "shelf") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.context);
 	// The storyteller: how long it took, how much it wrote — in the receipt's own words. Where the answer stands is said in the opened row.
 	if (message.toolName === "consult" && !message.isError) {
 		const tokens = typeof message.details?.tokens === "number" && Number.isFinite(message.details.tokens) ? `${Math.round(message.details.tokens).toLocaleString("en-US")} tokens` : "";

@@ -58,7 +58,7 @@ export function homeOf(name, args = {}) {
 	if (name === "plan") return { tab: "carto", view: "plan" };
 	if (name === "ledger") return { tab: "carto", view: "ledger" };
 	if (name === "assess") return { tab: "context", view: "window" };
-	if (name === "context") return { tab: "context" };
+	if (name === "context" || name === "shelf") return { tab: "context" };
 	return undefined;
 }
 

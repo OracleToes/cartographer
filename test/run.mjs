@@ -1308,35 +1308,47 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(messages[4].content[0].text, big, "the stored messages are not changed");
 });
 
-test("context: read results are ephemeral — all but the newest leave one line, and the newest stands at the end of the request", async () => {
+test("context: file-read results are ephemeral — successful reads collapse to the newest at <read-tail>, while failed reads and brain reads never evict it", async () => {
 	const { dressReads, splitReadTail, withReadTail, withoutReadTail } = await import("../src/context.mjs");
 	const { withoutAdditions } = await import("../src/request.mjs");
 	const rawText = (message) => message.content[0].text;
 	const text = (role, words, more = {}) => ({ role, content: [{ type: "text", text: words }], ...more });
 	const convo = [
 		text("user", "read two files"),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "book", arguments: { target: "file", action: "read", path: "a.js" } }] },
-		text("toolResult", "== a.js (lines 1-2 of 2)\n1  alpha\n2  beta", { toolName: "book", toolCallId: "r1" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: { path: "a.js" } }] },
+		text("toolResult", "== a.js (lines 1-2 of 2) · file f1 @0000\nalpha\nbeta", { toolName: "read", toolCallId: "r1" }),
 		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "book", arguments: { target: "ledger", action: "read" } }] },
 		text("toolResult", "{ \"entries\": [] }", { toolName: "book", toolCallId: "r2" }),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r3", name: "book", arguments: { target: "file", action: "read", ref: { id: "f9" }, range: "1-40" } }] },
-		text("toolResult", "== c.js (lines 1-40 of 300)\n1  gamma", { toolName: "book", toolCallId: "r3" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r3", name: "read", arguments: { id: "f9", range: "1-40" } }] },
+		text("toolResult", "== c.js (lines 1-40 of 300) · file f9 @1111\ngamma", { toolName: "read", toolCallId: "r3" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r4", name: "read", arguments: { path: "missing.js" } }] },
+		text("toolResult", "<harness>[error] No file at missing.js.</harness>", { toolName: "read", toolCallId: "r4", isError: true }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r5", name: "book", arguments: { target: "atlas", action: "read", id: "c1" } }] },
+		text("toolResult", "{ \"id\": \"c1\" }", { toolName: "book", toolCallId: "r5" }),
 	];
 	const { messages, tail } = dressReads(convo);
-	// The earlier reads of any target are one line each; the newest one leaves its content for the tail.
-	assert.match(rawText(messages[2]), /no longer in view — file read a\.js/);
-	assert.match(rawText(messages[4]), /no longer in view — ledger read/);
-	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*file read f9/);
-	assert.equal(tail, "== c.js (lines 1-40 of 300)\n1  gamma");
-	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2)\n1  alpha\n2  beta", "the stored messages are not changed");
+	// Earlier successful file reads leave one line; brain reads and failed file reads stay inline and never evict the newest file read.
+	assert.match(rawText(messages[2]), /no longer in view — read a\.js/);
+	assert.equal(rawText(messages[4]), "{ \"entries\": [] }", "ledger read stays inline");
+	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*read f9 \(lines 1-40\)/);
+	assert.match(rawText(messages[8]), /No file at missing\.js/, "failed read stays inline");
+	assert.equal(rawText(messages[10]), "{ \"id\": \"c1\" }", "atlas read after the file read does not evict the file read");
+	assert.equal(tail, "== c.js (lines 1-40 of 300) · file f9 @1111\ngamma");
+	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2) · file f1 @0000\nalpha\nbeta", "the stored messages are not changed");
 	// Deterministic: the same request is dressed the same way.
 	assert.equal(dressReads(convo).tail, tail);
+	// Legacy stored `book` `file read` entries with `<shelf-ask>` still collapse cleanly with `<shelf-ask>` stripped.
+	const legacy = [
+		{ role: "assistant", content: [{ type: "toolCall", id: "l1", name: "book", arguments: { target: "file", action: "read", path: "old.js" } }] },
+		text("toolResult", "== old.js (lines 1-1 of 1)\nconst x = 1;\n\n<shelf-ask>\nShould I shelf old.js? Yes or no.\n</shelf-ask>", { toolName: "book", toolCallId: "l1" }),
+	];
+	assert.equal(dressReads(legacy).tail, "== old.js (lines 1-1 of 1)\nconst x = 1;");
 	// A non-read action is not a read.
 	const noReads = [text("assistant", "thinking", {}), text("toolResult", "done", { toolName: "book", toolCallId: "x" })];
 	assert.equal(dressReads(noReads).tail, undefined, "no reads, no tail");
 	// A result already folded keeps the line it was folded under (it carries the id).
 	const folded = [
-		{ role: "assistant", content: [{ type: "toolCall", id: "r9", name: "read", arguments: { paths: ["d.js"] } }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "r9", name: "read", arguments: { path: "d.js" } }] },
 		text("toolResult", "[s9: I dropped this result. It was: read d.js, about 40 tokens. Call again if I need it.]", { toolName: "read", toolCallId: "r9" }),
 	];
 	const dressedFolded = dressReads(folded);
@@ -1471,7 +1483,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	const read = chat.lines(80).find((line) => line.kind === "call" && line.spans.some(([part]) => part.includes("read roll.py")));
 	chat.toggleRow(read.item, read.row);
 	has(text(), "│ ✓ read roll.py  → 3 lines\n  │   == roll.py (lines 1-2 of 2)\n  │   1  import random\n  │   2  print(1)", "a call opens to its result, in place");
-	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("book", { target: "file", action: "read" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, undefined, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, a command in Shells, the plan in Carto; a read opens where it stands");
+	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("shelf", { action: "add" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, { tab: "carto", view: "hands" }, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, shelf in Hands, a command in Shells, the plan in Carto; a read opens where it stands");
 
 	// With the notes hidden, the note rows are gone and the calls stay.
 	chat.setThinking(false);

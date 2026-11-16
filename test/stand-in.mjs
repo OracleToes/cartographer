@@ -73,6 +73,7 @@ const textOf = (message) => {
 		.replace(new RegExp(`<context>\n${ESC}[\\s\\S]*?\n</context>\n*`, "g"), "")
 		.replace(/\n\n\[s\d+ · about [\d,]+ tokens\]$/g, "")
 		.replace(/\n\nThis report is kept as t\d+\./g, "")
+		.replace(/\n*<read-tail>\n[\s\S]*$/g, "")
 		.replace(new RegExp(`\n*<windows>\n${ESC}[\\s\\S]*?\n</windows>`, "g"), "")
 		.replace(new RegExp(`\n*<state>\n${ESC}[\\s\\S]*?\n</state>`, "g"), "")
 		.replace(new RegExp(`<project>\n${ESC}[\\s\\S]*?\n</project>\n*`, "g"), "")
@@ -103,7 +104,7 @@ function lookCall(directive) {
 			},
 		};
 	}
-	const [, name, rest] = /^(read|search|list|write|edit|task|ledger|plan|atlas|assess|wake|sleep|chat|ask|return|context|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
+	const [, name, rest] = /^(read|shelf|search|list|write|edit|task|ledger|plan|atlas|assess|wake|sleep|chat|ask|return|context|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
 	const breaks = (text) => text.replaceAll("\\n", "\n");
 	if (name === "write") {
 		const [path, content = ""] = rest.split(" <<< ");
@@ -120,6 +121,7 @@ function lookCall(directive) {
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
 	// context: {"action":"shelve","path":"a.txt"}
 	if (name === "context") return { name: "context", args: JSON.parse(rest) };
+	if (name === "shelf") return { name: "shelf", args: JSON.parse(rest) };
 	if (name === "sleep") return { name: "sleep", args: {} };
 	if (name === "chat") return { name: "chat", args: { text: rest } };
 	if (name === "ask") {
@@ -128,10 +130,13 @@ function lookCall(directive) {
 	}
 	if (name === "return") return { name: "return", args: JSON.parse(rest) };
 	if (name === "read") {
-		const [, paths, offset, limit] = /^(.*?)(?:\s+@(\d+)(?:\+(\d+))?)?$/.exec(rest);
+		const [, target, offset, limit] = /^(.*?)(?:\s+@(\d+)(?:\+(\d+))?)?$/.exec(rest);
+		const start = offset ? Number(offset) : undefined;
+		const end = start !== undefined && limit ? start + Number(limit) - 1 : start;
+		const range = start !== undefined ? `${start}-${end}` : undefined;
 		return {
 			name: "read",
-			args: { paths: paths.split(",").map((path) => path.trim()), ...(offset ? { offset: Number(offset) } : {}), ...(limit ? { limit: Number(limit) } : {}) },
+			args: { path: target.trim(), ...(range ? { range } : {}) },
 		};
 	}
 	if (name === "search") {
@@ -153,7 +158,7 @@ function mainCalls(text) {
 		// A \n in the brief is a line break, a \\n stays a \n for the task's own directives.
 		if (task) calls.push({ name: "task", args: { brief: task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n"), ...(task[1] ? { item: task[1] } : {}) } });
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
-		else if (/^(ledger|plan|atlas|assess|window|wake|context|ask|return)[:[]/.test(part)) calls.push(lookCall(part));
+		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|context|ask|return)[:[]/.test(part)) calls.push(lookCall(part));
 		else if (part === "sleep") calls.push({ name: "sleep", args: {} });
 	}
 	return calls.filter((call) => call !== undefined);

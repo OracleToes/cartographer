@@ -993,14 +993,35 @@ export function droppable(messages) {
 }
 
 /**
- * The lines the state block adds about the context: how full it is, and what on the shelf is not as shown.
- * @param {{ used?: number, window: number }} size  used: the server's count for the last reply
+ * Merge the main shelf inherited at fork time with a focus's own shelf placements (focus entries win on collision).
  */
-export function contextLines(brainDir, root, { used, window }) {
+function effectiveShelfFor(store, main, conversationId) {
+	if (main !== false) return { activeShelf: store.shelf, shown: store.front?.shelf ?? [], deferred: store.front?.left ?? [] };
+	const focus = conversationId !== undefined ? store.tasks[conversationId] : undefined;
+	const focusShelf = Array.isArray(focus?.shelf) ? focus.shelf : [];
+	const merged = store.shelf.map((inherited) => focusShelf.find((local) => local.id === inherited.id || sameShelfItem(local, inherited)) ?? inherited);
+	for (const local of focusShelf) {
+		if (!merged.some((entry) => entry.id === local.id || sameShelfItem(entry, local))) merged.push(local);
+	}
+	const frontShown = store.front?.shelf ?? [];
+	const cutShown = Array.isArray(focus?.cutShelf) ? focus.cutShelf : [];
+	const shown = frontShown.map((inherited) => cutShown.find((local) => local.id === inherited.id || sameShelfItem(local, inherited)) ?? inherited);
+	for (const local of cutShown) {
+		if (!shown.some((entry) => entry.id === local.id || sameShelfItem(entry, local))) shown.push(local);
+	}
+	return { activeShelf: merged, shown, deferred: store.front?.left ?? [] };
+}
+
+/**
+ * The lines the state block adds about the context: how full it is, and what on the shelf is not as shown.
+ * @param {{ used?: number, window: number, main?: boolean, conversationId?: string }} size  used: the server's count for the last reply
+ */
+export function contextLines(brainDir, root, { used, window, main = true, conversationId }) {
 	const store = loadContext(brainDir);
+	const { activeShelf, shown, deferred } = effectiveShelfFor(store, main, conversationId);
 	const lines = [];
 	if (Number.isFinite(used) && used > 0) lines.push(`My context holds about ${count(used)} of ${count(window)} tokens.`);
-	if (store.shelf.length > 0) lines.push(shelfFillLine(root, brainDir, store.shelf, window));
+	if (activeShelf.length > 0) lines.push(shelfFillLine(root, brainDir, activeShelf, window));
 	// Folding by the agent: it sees exactly which reports stand in view in full, with their size, so it can
 	// decide when each has had its bookkeeping done and fold it to its one-line record (recallable by id).
 	const visibleRows = store.front?.rows ?? composedRows(store).filter((record) => record.archived !== true);
@@ -1020,25 +1041,23 @@ export function contextLines(brainDir, root, { used, window }) {
 		if (leaving.length > 0) lines.push(`Rows leaving context at the next boundary: ${leaving.map((id) => `${id} (${store.rows.some((row) => row.id === id) ? "archived" : "deleted"})`).join(", ")}.`);
 		if (priorOrder.join("\0") !== nextOrder.join("\0")) lines.push(`Rows reordered for the next boundary: ${nextOrder.join(", ")}.`);
 	}
-	const shown = store.front?.shelf ?? [];
-	const deferred = store.front?.left ?? [];
-	const waiting = store.shelf.filter((item) => !shown.some((entry) => sameShelfItem(entry, item)) && !deferred.some((entry) => entry.id === item.id && entry.hash === hashOf(item.snapshot ?? "")));
-	const updated = store.shelf.filter((item) => shown.some((entry) => sameShelfItem(entry, item) && typeof item.snapshot === "string" && entry.hash !== hashOf(item.snapshot)));
-	const stillDeferred = store.shelf.filter((item) => deferred.some((entry) => entry.id === item.id && entry.hash === hashOf(item.snapshot ?? "")));
-	const leaving = shown.filter((entry) => !store.shelf.some((item) => sameShelfItem(item, entry)));
+	const waiting = activeShelf.filter((item) => !shown.some((entry) => sameShelfItem(entry, item)) && !deferred.some((entry) => entry.id === item.id && entry.hash === hashOf(item.snapshot ?? "")));
+	const updated = activeShelf.filter((item) => shown.some((entry) => sameShelfItem(entry, item) && typeof item.snapshot === "string" && entry.hash !== hashOf(item.snapshot)));
+	const stillDeferred = activeShelf.filter((item) => deferred.some((entry) => entry.id === item.id && entry.hash === hashOf(item.snapshot ?? "")));
+	const leaving = shown.filter((entry) => !activeShelf.some((item) => sameShelfItem(item, entry)));
 	if (waiting.length > 0 || updated.length > 0) {
 		lines.push("New or updated shelf snapshots, in view now and carried into the next collapse:");
 		for (const item of [...waiting, ...updated]) lines.push(shelfIdLine(shelfText(root, item, brainDir), item));
 	}
 	if (leaving.length > 0) lines.push(`Taken off my shelf, gone from view at the next collapse: ${leaving.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
-	if (store.shelf.length > 0) lines.push(`Shelf items (stable ID; unshelve by ID or path): ${store.shelf.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
+	if (activeShelf.length > 0) lines.push(`Shelf items (stable ID; unshelve by ID or path): ${activeShelf.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	if (stillDeferred.length > 0) lines.push(`Shelved items not shown because they did not fit the shelf's space remain available by ID: ${stillDeferred.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
-	const missingSources = store.shelf.filter((item) => item.ref === undefined && liveShelfSource(root, item)?.content === undefined);
+	const missingSources = activeShelf.filter((item) => item.ref === undefined && liveShelfSource(root, item)?.content === undefined);
 	const backedSources = missingSources.filter((item) => readShelfSnapshot(brainDir, item) !== undefined);
 	const unbackedSources = missingSources.filter((item) => !backedSources.includes(item));
 	if (backedSources.length > 0) lines.push(`Source files missing or unreadable; their full shelf snapshots remain available under these shelf IDs: ${backedSources.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
 	if (unbackedSources.length > 0) lines.push(`Source files missing or unreadable, and no full backing snapshot is available (only the legacy rendered view remains): ${unbackedSources.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
-	const changes = store.shelf.flatMap((item) => {
+	const changes = activeShelf.flatMap((item) => {
 		if (typeof item.snapshot !== "string") return [];
 		const current = shelfIdLine(resolveShelfText(root, item, brainDir), item);
 		if (current === item.snapshot) return [];
@@ -1046,7 +1065,7 @@ export function contextLines(brainDir, root, { used, window }) {
 	});
 	if (changes.length > 0) {
 		// One line per changed file (O3): the diff is a tool call away — re-shelve the file or read it — not prompt cargo.
-		lines.push("Shelved files changed since their snapshots (the snapshots stay as they were until collapse; I read the file or re-shelve it for the difference):");
+		lines.push("Shelved files changed since their snapshots (the snapshots stay as they were until collapse; I call `read` or `shelf` with action=\"add\" to refresh):");
 		for (const { item, current } of changes) {
 			// The stored snapshot is the rendered view, whose header line (`(lines a-b of N)`) changes on every line-count edit: diff the raw file text instead when it is available, and fall back to the rendered view otherwise.
 			const raw = rawShelf(root, item, brainDir);
@@ -1072,19 +1091,20 @@ export function reportsInView(messages) {
 const withText = (message, text) => ({ ...message, content: [{ type: "text", text }] });
 
 // ─── Read results are ephemeral ───────────────────────────────────────────
-// Each new read takes the content of every earlier read out of view: what a read leaves in its place is one line
-// saying what was read, so it stays one read away. The newest read stands at the very end of the request instead of
-// where it was made, after everything else including the state and windows blocks. Keeping several files in view is
-// the shelf's job (`book target=shelf action=add`), not the conversation's. The stored messages are never touched:
-// this is dressing for the request, as for everything else in this file.
+// Each new successful file read takes the content of every earlier file read out of view: what an earlier read leaves
+// in its place is one line saying what was read, so it stays one read away. Failed or blocked reads stay inline and
+// never evict the file in view; `book` reads of brain records stay inline too. The newest file read stands at the very
+// end of the request, after everything else including the state and windows blocks. Keeping several files in view
+// together is the `shelf` tool's job (`shelf` with action="add"), not the conversation's.
 
 /** The tag that opens the tail block of a request: the newest read, moved to the end. */
 const READ_TAIL = "<read-tail>";
+const LEGACY_SHELF_ASK_BLOCK = /\n*<shelf-ask>[\s\S]*?<\/shelf-ask>\n?/g;
 
 const flatWords = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
 /** The one line a read leaves in its place, saying it is no longer in view. */
-const evictedReadLine = (call) => `[the result of this read is no longer in view — ${flatWords(callWords(call))}. Read it again to see it; keep it with \`book\` (target=shelf, action=add) if it must stay in view.]`;
+const evictedReadLine = (call) => `[the result of this read is no longer in view — ${flatWords(callWords(call))}. Call \`read\` to see it again, or \`shelf\` (action="add") to keep it in view.]`;
 
 /** The one line a read leaves in its place, saying where its content stands instead. */
 const movedReadLine = (call) => `[the result of this read stands at the end of the request, after everything else — ${flatWords(callWords(call))}.]`;
@@ -1122,11 +1142,17 @@ export function withReadTail(messages, tail) {
 	return [...messages, { role: "user", content: [{ type: "text", text: `${READ_TAIL}\n${tail}` }] }];
 }
 
+const isEphemeralFileReadCall = (call) =>
+	call?.name === "read" || (call?.name === "book" && call.arguments?.target === "file" && call.arguments?.action === "read");
+
+const isErrorToolResult = (message) =>
+	message?.isError === true || /^(?:<harness>\s*)?\[error\]/i.test(textOf(message).trim());
+
 /**
- * Read results, dressed for one request: every read but the newest becomes one line saying what was read (any
- * target, any size; a result already folded keeps its id and is left alone), and the newest stands at the tail of
- * the request instead of where it was made. A read is one whose result answers a call of `read`, or of `book` with
- * action `read`. The stored messages are not changed.
+ * File-read results, dressed for one request: every successful file read but the newest becomes one line saying what
+ * was read (a result already folded keeps its id and is left alone), and the newest stands at the tail of the request
+ * instead of where it was made. Failed or blocked file reads stay inline where they failed and never evict an earlier
+ * read; `book` reads of brain records stay inline as well. The stored messages are not changed.
  * @param {readonly any[]} messages
  * @returns {{ messages: any[], tail?: string }} the dressed messages, and the newest read's content to move to the end
  */
@@ -1136,24 +1162,31 @@ export function dressReads(messages) {
 		if (message.role !== "assistant") continue;
 		for (const call of callsOf(message)) calls.set(call.id, call);
 	}
+	const cleaned = messages.map((message) => {
+		if (message.role !== "toolResult") return message;
+		const raw = textOf(message);
+		if (!raw.includes("<shelf-ask>")) return message;
+		return withText(message, raw.replace(LEGACY_SHELF_ASK_BLOCK, ""));
+	});
 	const readAt = [];
-	for (const [index, message] of messages.entries()) {
+	for (const [index, message] of cleaned.entries()) {
 		if (message.role !== "toolResult") continue;
 		const call = calls.get(message.toolCallId);
-		if (call === undefined) continue;
-		if (call.name === "read" || (call.name === "book" && call.arguments?.action === "read")) readAt.push(index);
+		if (call === undefined || !isEphemeralFileReadCall(call)) continue;
+		if (isErrorToolResult(message)) continue;
+		readAt.push(index);
 	}
-	if (readAt.length === 0) return { messages };
+	if (readAt.length === 0) return { messages: cleaned };
 	const newest = readAt.at(-1);
 	const reads = new Set(readAt);
 	// A result already folded by a task keeps the line it was folded under (that line carries its id).
 	const folded = (message) => /^\[s\d+: /.test(textOf(message));
-	const out = messages.map((message, index) => {
+	const out = cleaned.map((message, index) => {
 		if (!reads.has(index)) return message;
 		if (folded(message)) return message;
 		return withText(message, index === newest ? movedReadLine(calls.get(message.toolCallId)) : evictedReadLine(calls.get(message.toolCallId)));
 	});
-	const newestMessage = messages[newest];
+	const newestMessage = cleaned[newest];
 	if (folded(newestMessage)) return { messages: out };
 	return { messages: out, tail: textOf(newestMessage) };
 }
@@ -1234,7 +1267,16 @@ export function stepsOf(messages) {
 export function callWords(call) {
 	if (call === undefined) return "a call";
 	const args = call.arguments ?? {};
-	if (call.name === "read") return `read ${[].concat(args.paths ?? []).join(", ")}${args.offset !== undefined ? ` from line ${args.offset}` : ""}`;
+	if (call.name === "read") {
+		if (args.paths !== undefined) return `read ${[].concat(args.paths ?? []).join(", ")}${args.offset !== undefined ? ` from line ${args.offset}` : ""}`;
+		const target = args.path ?? args.id ?? args.ref?.id ?? "";
+		return `read ${oneLine(String(target), POLICY.limits.context.bookWordsChars)}${args.range ? ` lines ${args.range}` : ""}`.trim();
+	}
+	if (call.name === "shelf") {
+		const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
+		const what = args.path ?? args.id ?? args.ref?.id ?? "";
+		return `shelf ${action}${what === "" ? "" : ` ${oneLine(String(what), POLICY.limits.context.bookWordsChars)}`}${args.range ? ` lines ${args.range}` : ""}`.trim();
+	}
 	if (call.name === "search") return `search /${oneLine(args.pattern, POLICY.limits.context.searchPatternChars)}/${args.path ? ` in ${args.path}` : ""}`;
 	if (call.name === "list") return `list ${args.path ?? "."}`;
 	if (call.name === "write" || call.name === "edit") return `${call.name} ${args.path ?? ""}`;
@@ -1252,21 +1294,24 @@ export function callWords(call) {
  * The earlier reads that a new read makes pointless: the same files, and the new one shows at least the same lines.
  * Only where it pays: the old copy is large, and what the server must read again for it is not much more.
  * @param {ReturnType<typeof stepsOf>} steps  the steps before the new read
- * @param {{ paths?: string[] | string, offset?: number, limit?: number }} args  the new read's arguments
+ * @param {{ path?: string, id?: string, range?: string, paths?: string[] | string, offset?: number, limit?: number }} args  the new read's arguments
  * @param {Record<string, string>} dropped  what is replaced already
  * @returns {string[]} step ids
  */
 export function supersededBy(steps, args, dropped = {}) {
-	const paths = new Set([].concat(args.paths ?? []));
-	const whole = args.offset === undefined && args.limit === undefined;
+	const readTargets = (a) => (a?.paths !== undefined ? [].concat(a.paths ?? []) : [a?.path ?? a?.id].filter((entry) => typeof entry === "string" && entry !== ""));
+	const paths = new Set(readTargets(args));
+	if (paths.size === 0) return [];
+	const whole = args.offset === undefined && args.limit === undefined && args.range === undefined;
 	const ids = [];
 	let behind = 0;
 	for (const result of [...steps.results].reverse()) {
 		const old = result.call;
 		const size = dropped[result.id] === undefined ? result.tokens : 0;
 		if (old?.name === "read" && !result.isError && dropped[result.id] === undefined) {
-			const oldPaths = [].concat(old.arguments?.paths ?? []);
-			const covered = oldPaths.length > 0 && oldPaths.every((path) => paths.has(path)) && (whole || (old.arguments?.offset === args.offset && old.arguments?.limit === args.limit));
+			const oldPaths = readTargets(old.arguments);
+			const sameSlice = whole || (args.range !== undefined ? old.arguments?.range === args.range : old.arguments?.offset === args.offset && old.arguments?.limit === args.limit);
+			const covered = oldPaths.length > 0 && oldPaths.every((path) => paths.has(path)) && sameSlice;
 			if (covered && result.tokens >= POLICY.limits.context.usefulResultTokens && behind <= result.tokens * POLICY.limits.context.reuseRatio) ids.push(result.id);
 		}
 		behind += size;
@@ -1279,7 +1324,7 @@ export function supersededBy(steps, args, dropped = {}) {
  * @param {string} root
  * @param {{ contextWindow: number }} config
  * @param {NonNullable<ReturnType<typeof stepsOf>>} steps
- * @param {{ notes?: string[], shelf?: object[] }} state
+ * @param {{ notes?: string[], shelf?: object[], cutShelf?: object[] }} state
  * @param {{ reason: string }} input
  */
 export function taskBlock(root, brainDir, config, steps, state, { reason }) {
@@ -1295,6 +1340,7 @@ export function taskBlock(root, brainDir, config, steps, state, { reason }) {
 	const done = steps.results.slice(-POLICY.limits.context.resultRows).map((result) => `${result.id} ${callWords(result.call)} → ${result.isError ? "failed: " : ""}${oneLine(result.first, POLICY.limits.context.resultFirstChars)}`);
 	const shelf = shelfBlock(root, state.shelf ?? [], shelfSpace(config?.contextWindow), brainDir);
 	state.shelf = shelf.items;
+	state.cutShelf = shelf.shown.map(({ item, hash }) => ({ ...item, hash }));
 	return [
 		NOTE_OPEN,
 		`${HEAD} ${reason}, so my steps up to here (${steps.replies === 1 ? "1 reply" : `${steps.replies} replies`}, ${steps.results.length === 1 ? "1 call" : `${steps.results.length} calls`}) were collapsed: their results are no longer in view. I am still the task, and the brief above still holds. What I kept:`,
