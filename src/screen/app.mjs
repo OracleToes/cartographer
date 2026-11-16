@@ -460,7 +460,8 @@ export async function runScreen(session, options, runTerminal) {
 
 		const second = [];
 		const size = core.contextSize();
-		const windowSize = options.contextWindow;
+		// /model re-fits the window while running; options.config is the shared object that follows it.
+		const windowSize = options.config?.contextWindow ?? options.contextWindow;
 		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
 		const { plan, ledger, waits, requests } = readBrain();
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
@@ -529,7 +530,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted });
+			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
 		if (id === "context.hands") return handsView({ root, brainDir });

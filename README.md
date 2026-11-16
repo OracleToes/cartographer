@@ -271,7 +271,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `plan  2 change items wait for you` | Those change items are requests; approve them with `/approve p1 p2` |
 | `requests  4 requests wait for you` | `/requests` lists them: change items and questions of taste |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: change items run without `/approve` |
-| `● model  model-a → model-b` | You switched the model with `/model`: the conversation goes on where it was, and a task forked after runs on the new one |
+| `● model  model-a → model-b · context 65536 tokens` | You switched the model with `/model`: the conversation goes on where it was, a task forked after runs on the new one, and the context window follows the new model (never above the settings' `contextWindow`) |
 | `context … · … read for this answer` | How full the context is, and how many tokens the server had to read rather than reuse for the last answer |
 
 | Command | |
@@ -286,7 +286,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a plan item is done, an entry of the books is settled, a node is confirmed |
 | `/delete ID …` | Remove a report for good: its record line and its file. Nothing recalls it again |
 | `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
-| `/model`, `/model NAME` | The models the server serves, and which is on; a name or a number from the list switches. A task forked after runs on it too |
+| `/model`, `/model NAME` | The models the server serves, each with its own window where the server reports one, and which is on; a name or a number from the list switches. A task forked after runs on it too, and the context window follows |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, whether its change items are approved, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
@@ -347,7 +347,7 @@ carto --here                             # use the current folder as the project
 carto --url URL --model NAME             # another server or model for this run
 ```
 
-The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on.
+The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on. The context window is one of the settings: at startup it is narrowed to what the server says (`meta.n_ctx`) when that is less than `contextWindow`, and `/model` does the same on a switch — the window becomes the smaller of `contextWindow` in the settings and the new model's own limit, and the collapse threshold, the reply budget, the shelf's soft cap (half of it), and the display all follow. `/model` lists each served model's limit, warns when `chatWindow` is more than half of the window it switches to, and never raises the window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
 
 ### Which folder is the project
 
