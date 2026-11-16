@@ -145,6 +145,9 @@ const REFERENCE_SCHEMA = obj({
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
+/** A file's id is not its name; tell the agent where the real one comes from. */
+const fileIdHint = (id) => `An id is not a file's name (${JSON.stringify(String(id ?? ""))} is not one). A file's ID comes from the book file create result ("File id: f1") or from a \`book file read\` of the path (the read header says "· file f1 @<64 hex>").`;
+const noFileRecord = (id) => `There is no file record for ID ${JSON.stringify(String(id ?? ""))}. ${fileIdHint(id)}`;
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
 /** Append any "this was clipped for you" notes raised while the call ran. Every tool call drains, once. */
 const withNotes = (result) => {
@@ -152,7 +155,7 @@ const withNotes = (result) => {
 	if (notes.length === 0) return result;
 	return { ...result, output: [...(result?.output ?? []), { type: "text", text: notes.map((note) => `note: ${note}`).join("\n") }] };
 };
-function renderReadSelection(bytes, path, range, id) {
+function renderReadSelection(bytes, path, range, id, version) {
 	let text;
 	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
 	catch { throw new Error("file is not valid UTF-8 text"); }
@@ -185,7 +188,7 @@ function renderReadSelection(bytes, path, range, id) {
 	const last = from + body.length - 1;
 	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
 	const more = last < lines.length ? `\n${ceilingHit ? `(stopped at the ~${ceiling}-token read ceiling; ` : "("}${lines.length - last} more lines; ask for range ${last + 1}-${Math.min(lines.length, last + POLICY.limits.look.readDefaultLines)})` : "";
-	return `== ${path} (lines ${from}-${Math.max(from - 1, last)} of ${lines.length}) · file ${id}\n${body.join("\n")}${more}`;
+	return `== ${path} (lines ${from}-${Math.max(from - 1, last)} of ${lines.length}) · file ${id}${version === undefined ? "" : ` @${version}`}\n${body.join("\n")}${more}`;
 }
 const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
 
@@ -208,6 +211,13 @@ const ACTION_GUIDE = {
 	},
 	assessment: {
 		write: "operation { text }: the whole assessment; it replaces the current one",
+	},
+	file: {
+		create: "path and content — the result names the new file's `File id:`",
+		read: "a path, or the file `ref` ({ id }) from a create/read header — the header of a path read shows `· file f1`; range optional",
+		edit: "the file `ref` ({ id }), oldText and newText — an `id` alone names the live version",
+		remove: "the file `ref` ({ id })",
+		rebind: "the file `ref` ({ id }), `path` and `expectedVersion` — a `file read` header shows `· file f1 @<64 hex>`: the id and the digest",
 	},
 	atlas: {
 		add: "name and gist — detail, files and links optional; the node comes back with its `c<N>` id",
@@ -328,7 +338,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail(`file ${action} requires a stable file ref; paths alone are not mutation targets. An \`id\` alone is enough: { \"id\": \"f1\" }.`);
 		if (args.expectedVersion !== undefined && (typeof args.expectedVersion !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedVersion))) return fail("`expectedVersion` must be a 64-character SHA-256 digest, or be omitted: the file's ID always points at the live version.");
 		const resolved = resolveFile(root, brainDir, args.ref);
-		if (resolved.status !== "live") return fail(`File ${action} refused: resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`);
+		if (resolved.status !== "live") return fail(`File ${action} refused: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(args.ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`}`);
 		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file ${action}: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was ${action === "remove" ? "removed" : "changed"}.`);
 		filePath = resolved.record.path;
 		// The ID points at the live version; the version handed to the nested call is resolved here, never asked of the agent.
@@ -356,11 +366,11 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		const result = resolveFile(root, brainDir, ref);
 		const readablePinned = ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
 		const record = result.record;
-		if (result.status !== "live" && !readablePinned) return fail(`File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`);
+		if (result.status !== "live" && !readablePinned) return fail(`${result.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`}`);
 		if (result.bytes.byteLength > POLICY.limits.look.fileBytes) return fail(`The file is ${count(result.bytes.byteLength)} bytes, over the ${count(POLICY.limits.look.fileBytes)}-byte read limit. Ask for a smaller range with shelf.add.`);
 		if (result.bytes.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0)) return fail("This file appears to be binary and cannot be returned as text.");
 		let selected;
-		try { selected = renderReadSelection(result.bytes, record.path, args.range, ref.id); }
+		try { selected = renderReadSelection(result.bytes, record.path, args.range, ref.id, result.resolvedVersion ?? result.currentVersion); }
 		catch (error) { return fail(`Cannot read the requested selection: ${error.message}.`); }
 		return textResult(`${selected}${readablePinned ? `\n(a pinned historical version; the current content differs)` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
 	}
@@ -643,7 +653,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			if (!validateReference(ref)) return fail("Invalid shelf target reference.");
 			if (ref.kind === "file") {
 				const resolved = resolveFile(root, brainDir, ref);
-				if (resolved.status !== "live") return fail(`Cannot shelf file: resolver status ${resolved.status}. ${resolved.error ?? "The reference is not current."}`);
+				if (resolved.status !== "live") return fail(`Cannot shelf file: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "The reference is not current."}`}`);
 				path = resolved.record.path;
 		} else if (ref.kind === "report") {
 			const verified = await runUniversal({ root, brainDir, config, engine, gate }, { target: "report", action: "read", ref }, api, callContext);

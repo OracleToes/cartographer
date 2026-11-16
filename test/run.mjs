@@ -365,8 +365,8 @@ test("change: the paths a task may write to", () => {
 	assert.deepEqual(readdirSync(outside), ["target.txt"], "and nothing was created there");
 	assert.equal(confineWrite(root, brain, "./src/../src/math.js").rel, "src/math.js", "a path is brought to its plain form");
 
-	assert.equal(writeOne(root, brain, "notes/a.txt", "one\ntwo\n"), "Wrote notes/a.txt: 2 lines, a new file.");
-	assert.equal(writeOne(root, brain, "notes/a.txt", "one\ntwo\nthree"), "Wrote notes/a.txt: 3 lines, replacing a file of 2 lines.");
+	assert.match(writeOne(root, brain, "notes/a.txt", "one\ntwo\n"), /^Wrote notes\/a\.txt: 2 lines, a new file\. File id: f\d+ \(to read or change it: \{ "id": "f\d+" \}\)\.$/);
+	assert.match(writeOne(root, brain, "notes/a.txt", "one\ntwo\nthree"), /^Wrote notes\/a\.txt: 3 lines, replacing a file of 2 lines\. File id: f\d+ /);
 	assert.equal(editOne(root, brain, "notes/a.txt", "two\nthree", "2"), "Edited notes/a.txt: 2 lines from line 2 replaced by 1 line.");
 	assert.equal(editOne(root, brain, "notes/a.txt", "\n2", ""), "Edited notes/a.txt: 2 lines from line 1 replaced by 0 lines.");
 	assert.equal(readFileSync(join(root, "notes/a.txt"), "utf8"), "one", "the file after the edits");

@@ -85,7 +85,8 @@ export function writeOne(root, brainDir, given, content, options = {}) {
 		if (options.newOnly === true && error.code === "EEXIST") throw new ChangeError(`${path.rel} was created by another operation; nothing was overwritten`);
 		throw error;
 	}
-	try { fileReference(root, brainDir, path.rel); }
+	let ref;
+	try { ref = fileReference(root, brainDir, path.rel); }
 	catch (error) {
 		try {
 			if (had === undefined) unlinkSync(path.abs);
@@ -95,7 +96,7 @@ export function writeOne(root, brainDir, given, content, options = {}) {
 		}
 		throw new ChangeError(`The stable file identity could not be recorded (${error.message}); the file was restored and nothing was changed.`);
 	}
-	return `Wrote ${path.rel}: ${plural(lines, "line")}, ${had === undefined ? "a new file" : `replacing a file of ${plural(had, "line")}`}.`;
+	return `Wrote ${path.rel}: ${plural(lines, "line")}, ${had === undefined ? "a new file" : `replacing a file of ${plural(had, "line")}`}. File id: ${ref.id} (to read or change it: { "id": "${ref.id}" }).`;
 }
 
 /**
