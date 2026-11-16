@@ -1,6 +1,6 @@
 # The prompt rewrite — plan and record
 
-**Status:** implemented 2026-11-15 (code and offline suite green: 37 passed, 0 failed, 1 skipped). Live testing by the user pending — no live claim is made until it happens.
+**Status:** implemented 2026-11-15 (code and offline suite green: 37 passed, 0 failed, 1 skipped). Live testing by the user pending — no live claim is made until it happens. **Addendum 2026-11-16:** the books this period mentions (`assessment`/`practice`, `assess`, `carto-books.json`) were retired — the assessment is one whole text written through `book` (target=assessment, action=write), and the practice book is gone. Atlas node `kind` is also gone. Suite green at the time of the addendum: 55 unit + 48 integration passed, 1 skipped.
 
 This document plans (and records the decisions behind) the full rewrite of every agent-facing prompt surface. `docs/design.md` is the source of Intent; this file is the working plan for one deliberate piece of work against that intent. It is kept, not folded back into design.md.
 
