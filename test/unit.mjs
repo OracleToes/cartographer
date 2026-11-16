@@ -23,6 +23,7 @@ import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { stateBlock } from "../src/state.mjs";
+import { noteKey } from "../src/wake.mjs";
 import { describeCall } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
@@ -41,6 +42,15 @@ const fresh = (t) => {
 	return { root, brainDir };
 };
 const NOW = "2026-11-15T00:00:00.000Z";
+
+// ─── The wake notes ──────────────────────────────────────────────────────────
+
+test("wake: the same note is the same note ignoring layout and case", () => {
+	assert.equal(noteKey("The roller is\n   broken  again"), noteKey("the ROLLER is broken again"));
+	assert.notEqual(noteKey("The roller is broken"), noteKey("The roller is still broken"), "different words are a different note");
+	assert.equal(noteKey(""), noteKey("   \n "), "empty and whitespace-only are the same key");
+	assert.notEqual(noteKey(""), noteKey("x"));
+});
 
 // ─── The ledger ─────────────────────────────────────────────────────────────
 

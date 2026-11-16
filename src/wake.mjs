@@ -23,6 +23,15 @@ const textOf = (message) => (typeof message?.content === "string" ? message.cont
 /** Whether a stored message is one of these notes, and not something the user wrote. */
 export const isNote = (message) => textOf(message).startsWith(`${OPEN}\n${HEAD}`);
 
+/**
+ * What two notes are the same note for the loop check: the words, not the layout and not the case.
+ * Two notes are the same note when they carry the same words in the same order, ignoring runs of
+ * whitespace and case. It does not read meaning — a reworded note is a different note — so the loop
+ * check is a floor under a runaway run of the *same* note, never a ceiling on notes in general;
+ * the stretch is bounded regardless by the reply limit.
+ */
+export const noteKey = (text) => String(text ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+
 const first = (command) => {
 	const line = String(command ?? "").split("\n")[0];
 	return line.length > POLICY.limits.wakes.noteSummaryChars ? `${line.slice(0, POLICY.limits.wakes.noteSummaryChars)}…` : line;

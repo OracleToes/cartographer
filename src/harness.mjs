@@ -18,7 +18,7 @@ import { stamp } from "./time.mjs";
 import { chatTool } from "./tools/chat.mjs";
 import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs";
 import { createEngine } from "./engine.mjs";
-import { isNoChat, isNote, noted } from "./wake.mjs";
+import { isNoChat, isNote, noted, noteKey } from "./wake.mjs";
 import { dressRequest } from "./request.mjs";
 import { beginShelfGate, readGateCheck, settleShelfAsk, takeShelfAsk } from "./shelf-ask.mjs";
 import { loadTop, pin } from "./top.mjs";
@@ -405,9 +405,11 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					const step = steps.get(id) ?? { key: undefined, n: 0 };
 					const limit = main ? config.mainTurns : config.taskTurns;
 					const text = textOfAnswer(answer);
+					// The same note, word for word (ignoring layout and case), written again and again: the run ends.
+					const key = noteKey(text);
 					const last = lastNote.get(id);
-					const times = last?.text === text ? last.times + 1 : 1;
-					lastNote.set(id, { text, times });
+					const times = last?.key === key ? last.times + 1 : 1;
+					lastNote.set(id, { key, times, text });
 					if (times >= LOOP_MAX) {
 						ends.set(id, { why: "same-note", times, empty: text === "" });
 						notify({ type: "same-note", conversationId: id, main, times, empty: text === "" });
