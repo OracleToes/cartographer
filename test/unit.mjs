@@ -42,6 +42,8 @@ import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { beginCasePhase, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, noteCaseMessage, readyCase, renderCaseForSynthesis, stopCase, synthesizeCase } from "../src/case.mjs";
+import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
+import { sandboxArgs } from "../src/sandbox.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -707,12 +709,93 @@ test("shell: a read-only inline run with a cross-action argument still runs, and
 
 test("shell: TOOLS.shell distinguishes the confined inline lane from an authorized direct move", () => {
 	assert.match(TOOLS.shell, /Inline commands from the orchestrating context always use the read-only lane; in direct mode that lane still needs working bubblewrap and is refused without it\./);
-	assert.match(TOOLS.shell, /A declared change move is different: in direct mode it runs directly under its live move token even when bubblewrap is unavailable/);
+	assert.match(TOOLS.shell, /A declared change move is different in direct mode: it runs directly under its live move token with detection-only final checkpoint scope checking/);
+	assert.match(TOOLS.shell, /private disposable source copy/i);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
 });
 
+test("stage: a sandbox command candidate cannot touch the live tree before its approved promotion", (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	mkdirSync(join(root, ".git"), { recursive: true });
+	writeFileSync(join(root, "src", "format.mjs"), "export const value = 1;\n");
+	writeFileSync(join(root, ".git", "secret"), "not source\n");
+	writeFileSync(join(brainDir, "private"), "not source\n");
+	const stage = createStage({ root });
+	t.after(() => disposeStage(stage));
+	assert.equal(existsSync(join(stage.work, ".git")), false, "the source projection excludes git metadata");
+	assert.equal(existsSync(join(stage.work, ".brain")), false, "the source projection excludes the durable brain");
+	writeFileSync(join(stage.work, "src", "format.mjs"), "export const value = 2;\n");
+	assert.equal(readFileSync(join(root, "src", "format.mjs"), "utf8"), "export const value = 1;\n", "the stage copy cannot mutate the live source before promotion");
+	const candidate = collectStageCandidate(stage);
+	assert.deepEqual(candidate.changes.map(({ path, status }) => ({ path, status })), [{ path: "src/format.mjs", status: "changed" }]);
+	const prepared = prepareStagePromotion({ root, brainDir, record: stage, targets: ["src/format.mjs"], fileOpsLimit: 1 });
+	const applied = applyStagePromotion(prepared);
+	assert.deepEqual(applied.changes, [{ path: "src/format.mjs", status: "changed", added: 1, removed: 1 }], "the candidate is a normal bounded file change only after validation");
+	assert.equal(readFileSync(join(root, "src", "format.mjs"), "utf8"), "export const value = 2;\n");
+	assert.equal(disposeStage(stage).removed, true, "normal completion removes the private stage root");
+	assert.equal(existsSync(stage.root), false);
+});
+
+test("stage: the sandbox launch binds only the disposable work tree writable and blocks the brain without network", (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(root, "source.txt"), "source\n");
+	const stage = createStage({ root });
+	t.after(() => disposeStage(stage));
+	const launch = sandboxArgs({ root: stage.work, target: "/work", cwd: "/work", brainDir, sandboxHome: stage.home, bindBrain: false, hide: [brainDir, join(root, ".git")] });
+	const pairs = launch.args.join("\u0000");
+	assert.match(pairs, /--bind\u0000.*\/work\u0000\/work/, "the stage work copy is the writable project-shaped mount");
+	assert.match(pairs, /--tmpfs\u0000.*\.brain/, "the live durable brain is covered after the system read-only bind");
+	assert.ok(launch.args.includes("--unshare-net"), "network is off unless the move explicitly enables it");
+	assert.doesNotMatch(pairs, new RegExp(`--bind\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the live project is never rebound writable");
+});
+
+test("stage: stale, forbidden, out-of-target, and oversized candidate paths are refused without promotion", (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "one.mjs"), "export const one = 1;\n");
+	writeFileSync(join(root, "src", "two.mjs"), "export const two = 2;\n");
+	const wrongTarget = createStage({ root });
+	t.after(() => disposeStage(wrongTarget));
+	writeFileSync(join(wrongTarget.work, "src", "one.mjs"), "export const one = 3;\n");
+	assert.throws(() => prepareStagePromotion({ root, brainDir, record: wrongTarget, targets: ["src/two.mjs"], fileOpsLimit: 1 }), /outside this move's declared targets/);
+	assert.equal(readFileSync(join(root, "src", "one.mjs"), "utf8"), "export const one = 1;\n");
+
+	const forbidden = createStage({ root });
+	t.after(() => disposeStage(forbidden));
+	mkdirSync(join(forbidden.work, ".brain"), { recursive: true });
+	writeFileSync(join(forbidden.work, ".brain", "bypass"), "no\n");
+	assert.throws(() => collectStageCandidate(forbidden), /forbidden .brain/);
+
+	const stale = createStage({ root });
+	t.after(() => disposeStage(stale));
+	writeFileSync(join(stale.work, "src", "one.mjs"), "export const one = 4;\n");
+	writeFileSync(join(root, "src", "two.mjs"), "export const two = 5;\n");
+	assert.throws(() => prepareStagePromotion({ root, brainDir, record: stale, targets: ["src/one.mjs"], fileOpsLimit: 1 }), /live project changed after this command stage was materialized/);
+	assert.equal(readFileSync(join(root, "src", "one.mjs"), "utf8"), "export const one = 1;\n", "a stale candidate never overwrites the live source");
+});
+
+test("stage: a failed promotion restores every earlier live path and cleans its disposable root", (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src", "nested"), { recursive: true });
+	writeFileSync(join(root, "src", "a.mjs"), "export const a = 1;\n");
+	writeFileSync(join(root, "src", "nested", "b.mjs"), "export const b = 1;\n");
+	const stage = createStage({ root });
+	writeFileSync(join(stage.work, "src", "a.mjs"), "export const a = 2;\n");
+	writeFileSync(join(stage.work, "src", "nested", "b.mjs"), "export const b = 2;\n");
+	const prepared = prepareStagePromotion({ root, brainDir, record: stage, targets: ["src/a.mjs", "src/nested/b.mjs"], fileOpsLimit: 2 });
+	// This mimics a concurrent filesystem failure after the whole candidate was validated: the first path has
+	// already landed when the second's parent becomes a file. The staged apply must put the first one back.
+	rmSync(join(root, "src", "nested"), { recursive: true, force: true });
+	writeFileSync(join(root, "src", "nested"), "not a folder\n");
+	assert.throws(() => applyStagePromotion(prepared), StageError);
+	assert.equal(readFileSync(join(root, "src", "a.mjs"), "utf8"), "export const a = 1;\n", "the first promoted path was rolled back");
+	assert.equal(disposeStage(stage).removed, true, "a failed promotion still cleans its own stage root");
+	assert.equal(existsSync(stage.root), false);
+});
+
 test("shell: a live move owns its window, spends command starts, and loses stop authority when its revision changes", async (t) => {
-	const { brainDir } = fresh(t);
+	const { root, brainDir } = fresh(t);
 	const { plan } = loadPlan(brainDir);
 	applyPlanOp(plan, { action: "add", mode: "change", text: "Run the narrow check.", done_when: "The check is recorded." }, NOW);
 	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run npm test", done_when: "The test exits.", targets: ["src/check.mjs"], proof: "Test output.", budget: { replies: 3, fileOps: 0, commandStarts: 1 } }, NOW);
@@ -724,19 +807,25 @@ test("shell: a live move owns its window, spends command starts, and loses stop 
 	const open = new Set();
 	const result = (window, more = {}) => ({ text: "", ms: 1, reason: "time", window, cwd: ".", lines: 0, kept: 0, sandbox: true, network: false, state: "busy", ...more });
 	let stopped = 0;
+	let launched;
 	const windows = {
 		list: () => [...open].map((name) => ({ name, state: "busy" })),
-		run: async (name) => { open.add(name); return result(name); },
+		run: async (name, command, options) => { launched = { name, command, options }; open.add(name); return result(name); },
 		send: async (name) => result(name),
 		stop: async (name) => { stopped++; return result(name, { wasBusy: true, ended: true, exit: 130, state: "idle" }); },
 		close: (name) => ({ wasGone: !open.delete(name) }),
 	};
-	const tool = shellTool({ brainDir, config: { shellWait: 30 }, gate: { yolo: false }, runner: { mode: "sandbox" }, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
+	const tool = shellTool({ root, brainDir, config: { shellWait: 30 }, gate: { yolo: false }, runner: { mode: "sandbox" }, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
 	const api = { conversationId: focus, taskId: "shell-focus" };
 	const started = await tool.execute({ action: "run", command: "npm test", window: "check" }, api, {});
 	assert.equal(started.isError, false, started.output[0].text);
 	assert.equal(loadContext(brainDir).tasks[focus].commandUses, 1);
 	assert.deepEqual(loadContext(brainDir).tasks[focus].windows, ["check"]);
+	const stageReceipt = loadContext(brainDir).tasks[focus].stage;
+	assert.match(stageReceipt.id, /./, "a sandboxed change command receives a task-owned stage receipt");
+	assert.equal(launched.options.stage.id, stageReceipt.id, "the writable window receives that stage rather than the live project");
+	assert.equal(existsSync(stageReceipt.root), true, "the receipt names the disposable root until task finalization");
+	t.after(() => disposeStage(stageReceipt));
 	const sent = await tool.execute({ action: "send", window: "check", text: "q" }, api, {});
 	assert.equal(sent.isError, false, sent.output[0].text);
 	const exhausted = await tool.execute({ action: "run", command: "npm test", window: "other" }, api, {});

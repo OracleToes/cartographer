@@ -141,6 +141,9 @@ export const POLICY = freezeTree({
 		// One fixed direct-file changed-surface allowance per focus. This is deliberately policy, not configuration:
 		// it is visible to the focus and measured before every direct mutation.
 		change: { contentBytes: 1_000_000, binaryProbeChars: 8000, surfaceBytes: 24_000, surfaceLines: 240 },
+		// A normal command stage is a bounded disposable source copy, not a second project. These are fixed so a
+		// command cannot turn a small approved move into an unbounded materialization or candidate diff.
+		stage: { sourceFiles: 5000, sourceBytes: 32_000_000, fileBytes: 8_000_000, storageBytes: 40_000_000, candidateFiles: 32 },
 		consult: { contextChars: 64_000, modelChars: 128, bodyChars: 400 },
 		shellOutput: { maxBytes: 64_000, maxLines: 1000, pendingChars: 64_000 },
 		windows: { open: 4, waitSeconds: 300, keptLines: 2000, outputReadDefaultLines: 40, outputReadMaxLines: 400, commandSummaryChars: 80, partialChars: 64_000, markerChars: 4200, askLineChars: 200, startupErrorLines: 3, ptyColumns: 120, ptyRows: 40, commandPreviewLines: 5 },

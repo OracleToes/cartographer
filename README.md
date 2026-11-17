@@ -529,23 +529,27 @@ What this does not do yet:
 
 ### The sandbox
 
-Every window is a [bubblewrap](https://github.com/containers/bubblewrap) sandbox of its own, unless you switch the sandbox off (below). Inside it, a command sees the machine like this:
+Every command window is a [bubblewrap](https://github.com/containers/bubblewrap) sandbox unless you switch the sandbox off (below). A **normal change-move command** is not pointed at the live project: Cartographer first makes one private, disposable source copy for that focus, then runs its stage windows there. The live project is never writable from those windows. It sees the machine like this:
 
 | | |
 |---|---|
-| The project folder | Writable |
-| `.brain/` and `.git/` in it | Read-only. `git status`, `diff` and `log` work; committing, resetting and stashing do not, so your repository stays yours |
+| Stage work tree | The only writable project-shaped path. It is a bounded copy outside the project and `.brain/`; its candidate diff is not a project change yet |
+| Live project | At most visible through bubblewrap's read-only system view; never rebound writable |
+| `.brain/` and `.git/` of the live project | Blocked in a command stage; neither is an alternate source or write route |
+| Dependencies | A present `node_modules/` may be overlaid read-only for command resolution; it is not a candidate path |
 | The system (`/usr`, `/etc`, …) | Read-only |
-| Your home folder | Not there. In its place is a home of the sandbox's own, `<project>/.brain/home/`, which keeps what tools store there (package caches, settings) and is the same in every window |
-| Toolchains in your home folder | Read-only: every `PATH` entry that lies in your home folder, and these folders when they exist: `.nvm` `.volta` `.bun` `.deno` `.rustup` `.pyenv` `.rbenv` `.asdf` `.sdkman` `.juliaup` `.ghcup` `.dotnet` `.local/lib` `.local/share/{mise,uv,pnpm,fnm}` |
+| Your home folder | Not there. A normal window gets `<project>/.brain/home/`; a command stage gets a fresh private home that is destroyed with the stage |
+| Toolchains in your home folder | Read-only in ordinary windows: every `PATH` entry that lies in your home folder, and these folders when they exist: `.nvm` `.volta` `.bun` `.deno` `.rustup` `.pyenv` `.rbenv` `.asdf` `.sdkman` `.juliaup` `.ghcup` `.dotnet` `.local/lib` `.local/share/{mise,uv,pnpm,fnm}` |
 | `/tmp`, `/var/tmp` | The window's own: empty when it opens, gone when it closes |
 | `/run`, `/mnt`, `/media` | Empty: no sockets of your session, no other drives |
-| The network | Off, unless the window was opened by a move whose declared capability grants it |
+| The network | Off, unless the staged move's declared capability grants it |
 | Processes | Only the window's own. They end when the window is closed, and when Cartographer exits or is killed. What a command leaves in the background stays until then, as in any terminal |
 | The environment | A short fixed list (`PATH`, `HOME`, `LANG`, …). No variable of your shell is passed on |
 | Input | A terminal. A program can ask, and a change task can answer with `window` send. Programs that notice a terminal behave as they do for you: `ls` prints in columns. Colours and pagers are switched off |
 
-If a program that works in your terminal is "not found" in the sandbox, it probably lives in a part of your home folder that is not in the list above. Name its folder in the `shellRead` setting.
+At the focus boundary Cartographer closes every stage window, scans a bounded manifest-backed candidate, and checks its source digest, exact approved move revision, target list, file-operation and changed-surface limits before it writes any live path. It validates the whole candidate first and restores earlier paths if an apply fails. A stale, malformed, oversized, or out-of-target stage is discarded; a cleanup failure blocks the move; either is a durable closure gap. Direct mode below is deliberately different: it keeps detection-only final-checkpoint scope review.
+
+If a program that works in your terminal is "not found" in an ordinary sandbox window, it probably lives in a part of your home folder that is not in the list above. Name its folder in the `shellRead` setting. A command stage deliberately has no extra host read folders: its source input is the frozen stage copy and its read-only dependency overlay.
 
 **A read-only window.** The main agent runs its own commands (the tests, the lints, `git status`) in a window that is read-only like any other read: the project folder and the brain are mounted read-only there too, and the network is unreachable, whatever envelope text says. The window exists only while the sandbox is on. The window is shown with `read-only` in the windows block. A command that must write or reach the network cannot run in one; it needs a declared change move. Reading, waiting, stopping and closing work the same in it.
 
@@ -563,11 +567,9 @@ The network is decided when a window opens and stays with the window. A move wit
 
 **Output.** No command is stopped for taking long; it is left running, as described above. A call returns the first 40 lines and the last 160 of what was printed (at most 2,000 and 8,000 characters), with a line in between that says how many were left out. Colour codes are removed and a progress bar is reduced to its last state.
 
-**What undo covers.** What commands do to files is in the checkpoints like any other change: the record after the task lists it, `/diff` shows it, `/undo` takes it back. The exception is files that git ignores, such as build output, installed dependencies, an `.env` file or a local database. They are not in the checkpoints, so if a command deletes or overwrites one, `/undo` cannot bring it back. The same goes for a folder that is a git repository of its own. The agent is told this in the tool's description.
+**What undo covers.** A promoted staged candidate contains only regular, non-ignored project files that passed the ordinary move gate. Its successful promotion is then in the checkpoints like any other change: the record after the task lists it, `/diff` shows it, and `/undo` takes it back. A staged command cannot promote build output, installed dependencies, an `.env` file, a nested repository, `.git`, or `.brain`; those paths are refused rather than quietly escaping the checkpoint. The broader exception still applies in direct mode, where a command can alter ignored or outside-project files before the final checkpoint detects only project-surface consequences.
 
-When a command creates more than 40 files, the record names folders instead of files (`folder   .venv/ 931 files: 931 new`), so that it does not fill the agent's context.
-
-**After a kill.** A window that was open when Cartographer was killed ends with it, and so does what ran there. At the next start the command is not run again; the task is told that it was interrupted and may have run in part, and goes on from there, in a window opened anew. The agent's windows block says which windows are gone and what they were running.
+**After a kill.** A window that was open when Cartographer was killed ends with it, and so does what ran there. A dead process's disposable command stage is removed on the next start; no staged candidate is applied during recovery and no command is run again. The resumed task records the missing/stopped stage as a closure gap and needs a deliberate successor move if the work still matters. The agent's windows block says which windows are gone and what they were running.
 
 **Switching the sandbox off.** When the work has to reach beyond the project folder, you can let commands run without the sandbox:
 
@@ -998,7 +1000,8 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |
 | `src/plan.mjs` | Authorization envelopes and executable moves: file operations, exact-revision approval, acceptance, closure and undo |
 | `src/checkpoints.mjs` | Checkpoints in `.brain/checkpoints.git`: record, compare, undo |
-| `src/sandbox.mjs` | The bubblewrap sandbox: what a window sees, and bounding a command's output |
+| `src/sandbox.mjs` | The bubblewrap sandbox: what a window sees, disposable-stage mounts, and command-output bounds |
+| `src/stage.mjs` | Private normal-command source stages: materialization, candidate manifests, promotion, rollback, and cleanup |
 | `src/windows.mjs` | The shell windows: opening one, typing into it, waiting, reading, stopping, closing, and announcing what happens in them |
 | `src/reaper.mjs` | Ends a window's processes when the sandbox is off, also when `carto` itself was killed |
 | `src/wake.mjs` | The note that wakes the agent, and which turns such notes started are left out of a request |

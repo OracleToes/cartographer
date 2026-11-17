@@ -2,10 +2,11 @@
 // themselves are in windows.mjs; this file says what a window can reach, and bounds
 // what a command's output costs.
 //
-// A window sees the machine like this:
+// An ordinary window sees the machine like this; src/stage.mjs reuses the low-level mount builder for a normal
+// change command but gives it a disposable work tree instead of the live project:
 //
 //   the system (/usr, /etc, ...)   read-only
-//   the project directory          writable
+//   the project directory          writable in an ordinary window; a stage work copy in a normal change command
 //   <project>/.brain               read-only: the brain is Cartographer's
 //   <project>/.git                 read-only: commits are the user's
 //   the user's home folder         not there. In its place is a home of the sandbox's own,
@@ -121,19 +122,24 @@ const firstLine = (text) =>
 
 /**
  * The bubblewrap arguments and the environment for one command.
- * @param {{ root: string, brainDir: string, cwd?: string, network?: boolean, read?: string[], env?: NodeJS.ProcessEnv, readOnly?: boolean }} input
- *   root: real path of the project; cwd: a folder inside it; read: more folders to show read-only (settings)
+ * @param {{ root: string, target?: string, brainDir: string, cwd?: string, network?: boolean, read?: string[], env?: NodeJS.ProcessEnv, readOnly?: boolean, sandboxHome?: string, bindBrain?: boolean, hide?: string[], readOnlyBinds?: { source: string, target: string }[] }} input
+ *   root: host-side writable (or read-only) project-shaped tree; target/cwd: its path inside the sandbox; read: more folders to show read-only
+ *   sandboxHome: a private home for a disposable runner; bindBrain false keeps the normal brain out of that runner
+ *   hide: existing host paths covered after the system bind; readOnlyBinds: explicit overlays inside `root`
  *   readOnly: the project and the brain are bound read-only and the network is never reachable (the orchestrating context's command lane)
  * @returns {{ args: string[], env: Record<string, string>, home: string }}
  */
-export function sandboxArgs({ root, brainDir, cwd = root, network = false, read = [], env = process.env, readOnly = false }) {
+export function sandboxArgs({ root, target = root, brainDir, cwd = target, network = false, read = [], env = process.env, readOnly = false, sandboxHome: requestedHome, bindBrain = true, hide = [], readOnlyBinds = [] }) {
+	if (typeof target !== "string" || !target.startsWith("/")) throw new SandboxError("the sandbox project target must be a full path");
+	if (typeof cwd !== "string" || !cwd.startsWith("/")) throw new SandboxError("the sandbox working directory must be a full path");
 	const home = real(homedir());
 	if (home === undefined) throw new SandboxError("the home folder cannot be found");
 	// The project is bound writable after the home folder is covered; a project that contains the home folder
 	// would bring it back, writable.
 	if (inside(home, root)) throw new SandboxError(`the project directory ${root} contains your home folder, so a sandbox there would not protect it`);
-	const sandboxHome = join(brainDir, SANDBOX_HOME);
-	mkdirSync(sandboxHome, { recursive: true });
+	const sandboxHome = requestedHome ?? join(brainDir, SANDBOX_HOME);
+	if (!sandboxHome.startsWith("/")) throw new SandboxError("the sandbox home must be a full path");
+	mkdirSync(sandboxHome, { recursive: true, mode: 0o700 });
 
 	const args = ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"];
 	const hidden = HIDDEN.filter(isFolder);
@@ -159,12 +165,30 @@ export function sandboxArgs({ root, brainDir, cwd = root, network = false, read 
 	}
 	for (const path of keep) args.push("--ro-bind", path, path);
 
+	// A disposable stage still needs the system's toolchain, but not the live brain or git metadata that the
+	// read-only system bind would otherwise expose. Directories are covered with an empty mount; a git worktree's
+	// .git can be a file, so that one is replaced by /dev/null instead.
+	for (const given of hide) {
+		if (typeof given !== "string" || !given.startsWith("/")) throw new SandboxError("a hidden sandbox path must be a full path");
+		let stats;
+		try { stats = lstatSync(given); } catch { continue; }
+		if (stats.isDirectory()) args.push("--tmpfs", given);
+		else args.push("--ro-bind", "/dev/null", given);
+	}
+
 	// A read-only window sees the project, the brain and .git read-only; the sandbox home stays writable for scratch.
-	args.push(readOnly ? "--ro-bind" : "--bind", root, root);
-	args.push("--ro-bind", brainDir, brainDir);
-	// The sandbox home lies inside the brain, which was just made read-only there; at the home path it stays writable.
+	if (target !== root) args.push("--dir", target);
+	args.push(readOnly ? "--ro-bind" : "--bind", root, target);
+	if (bindBrain) args.push("--ro-bind", brainDir, brainDir);
+	// The sandbox home lies inside the brain in the normal lane, which was just made read-only there; at the home
+	// path it stays writable. A command stage supplies a separate private home outside the brain.
 	const dotGit = join(root, ".git");
-	if (existsSync(dotGit)) args.push("--ro-bind", dotGit, dotGit);
+	if (bindBrain && existsSync(dotGit)) args.push("--ro-bind", dotGit, join(target, ".git"));
+	for (const mount of readOnlyBinds) {
+		if (mount === null || typeof mount !== "object" || typeof mount.source !== "string" || typeof mount.target !== "string" || !mount.source.startsWith("/") || !mount.target.startsWith("/")) throw new SandboxError("a read-only sandbox bind needs full source and target paths");
+		if (!existsSync(mount.source) || !existsSync(mount.target)) throw new SandboxError("a read-only sandbox bind names a missing source or target");
+		args.push("--ro-bind", mount.source, mount.target);
+	}
 	args.push("--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-cgroup-try");
 	if (!network || readOnly) args.push("--unshare-net"); // a read-only window never reaches the network
 	args.push("--die-with-parent", "--new-session", "--chdir", cwd);
@@ -296,6 +320,6 @@ export function createRunner({ off = false } = {}) {
 /** One line for the user on how commands run now. */
 export function sandboxLine(runner) {
 	if (runner.mode === "direct") return "sandbox: OFF · tasks run commands directly on this machine, as you: they reach whatever you can, and the network; the main agent's commands still run in a read-only window when bubblewrap works";
-	if (runner.mode === "sandbox") return `sandbox: bubblewrap ${runner.available.version} · tasks run commands inside the project only, without network`;
+	if (runner.mode === "sandbox") return `sandbox: bubblewrap ${runner.available.version} · change commands run in disposable staged copies, without network unless their move allows it`;
 	return `no sandbox: ${runner.available.why} · tasks cannot run commands (carto --no-bwrap, or /bwrap off, runs them without one)`;
 }

@@ -16,7 +16,8 @@ import { loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../atlas.mjs";
 import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep } from "../checkpoints.mjs";
 import { addRecord, KEPT_AS, loadContext, reserveId, shelfFreshness, shelfLabel, shelfText, taskState, updateContext } from "../context.mjs";
 import { endTaskContext } from "../context.mjs";
-import { blockMove, loadPlan, reportMove, savePlan, startMove } from "../plan.mjs";
+import { blockMove, liveMove, loadPlan, reportMove, savePlan, startMove } from "../plan.mjs";
+import { applyStagePromotion, collectStageCandidate, disposeStage, prepareStagePromotion, StageError } from "../stage.mjs";
 import { CHANGE_NOTE, describe, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";
 import { USER_NAME } from "../user.mjs";
@@ -206,9 +207,10 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 						changes: details.changes,
 						commands: details.commands,
 						checkpoints: details.checkpoints,
+						staging: details.staging,
 						proof: details.proof,
 						closureGap: details.closureGap,
-						reason: details.scopeBreach ? `Changed outside declared targets: ${details.scopeBreach.join(", ")}.` : details.checkpointError ? `Checkpoint evidence failed: ${details.checkpointError}` : details.closureGap ? `Closure gap: ${details.closureGap}` : details.proofError ?? (details.done === false ? "The focus returned not done." : result.isError === true ? "The focus ended before a successful return." : undefined),
+						reason: details.scopeBreach ? `Changed outside declared targets: ${details.scopeBreach.join(", ")}.` : details.checkpointError ? `Checkpoint evidence failed: ${details.checkpointError}` : details.stageError ? `Staged command candidate failed: ${details.stageError}` : details.closureGap ? `Closure gap: ${details.closureGap}` : details.proofError ?? (details.done === false ? "The focus returned not done." : result.isError === true ? "The focus ended before a successful return." : undefined),
 					}, api.now());
 					if (recorded.changed) savePlan(brainDir, plan);
 					text += `\n\n[My record: ${recorded.line}]`;
@@ -400,45 +402,103 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				spoken = `\n\nWhile this task ran, ${USER_NAME} wrote to it:${missed}\n${heard.map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`).join("\n")}`;
 			}
 
-				// What the task changed, from the record. A program this move started cannot continue
-				// writing after its checkpoint closes, so busy windows owned by the move are closed first.
-				let record = spoken;
-				if (run.mode === POLICY.enums.planMode.change && run.before !== undefined) {
-					const owned = new Set(Array.isArray(taskRecord?.windows) ? taskRecord.windows : []);
-					const stoppedWindows = [];
-					for (const window of (windows?.list(0) ?? [])) {
-						if (!owned.has(window.name) || window.state !== POLICY.enums.windowStates.busy) continue;
-						try { windows.close(window.name); stoppedWindows.push(window.name); } catch { /* the checkpoint below still records what reached disk */ }
+					// What the task changed, from the record. A staged command owns a disposable work tree, so every one
+					// of its windows closes before its candidate is even scanned. Direct-mode windows retain the former
+					// detection-only behavior and only busy windows are closed here.
+					let record = spoken;
+					if (run.mode === POLICY.enums.planMode.change && run.before !== undefined) {
+						const owned = new Set(Array.isArray(taskRecord?.windows) ? taskRecord.windows : []);
+						const stageRecord = taskRecord?.stage;
+						const stoppedWindows = [];
+						for (const window of (windows?.list(0) ?? [])) {
+							const stageOwned = stageRecord !== undefined && window.stage === stageRecord.id;
+							if ((!stageOwned && (!owned.has(window.name) || window.state !== POLICY.enums.windowStates.busy)) || (stageOwned && !owned.has(window.name))) continue;
+							try { windows.close(window.name); stoppedWindows.push(window.name); } catch { /* the candidate/checkpoint path below still fails closed */ }
+						}
+						if (stoppedWindows.length > 0) {
+							details.closedWindows = stoppedWindows;
+							record += `\n\nClosed move-owned ${stageRecord === undefined ? "running " : "staged "}${stoppedWindows.length === 1 ? "window" : "windows"} before ${stageRecord === undefined ? "checkpointing" : "candidate collection"}: ${stoppedWindows.join(", ")}.`;
+						}
+
+						if (stageRecord !== undefined) {
+							let staging = { id: stageRecord.id, source: stageRecord.source };
+							try {
+								const canPromote = details.done === true && details.closureGap === undefined && details.proofError === undefined;
+								if (!canPromote) {
+									const candidate = collectStageCandidate(stageRecord);
+									staging = { ...staging, status: "discarded", candidate: candidate.candidate, changes: candidate.changes.map(({ path, status }) => ({ path, status })) };
+									record += `\n\nDiscarded the staged command candidate without promotion because this focus did not return a complete, evidenced move result.`;
+								} else {
+									const { plan, error } = loadPlan(brainDir);
+									const live = plan === undefined ? { error: `the plan cannot be read (${error})` } : liveMove(plan, run.move, run.revision, { yolo: gate?.yolo === true });
+									if (live.error !== undefined) throw new StageError(`The ordinary move gate refused promotion: ${live.error}`);
+									const currentTask = loadContext(brainDir).tasks[child] ?? {};
+									const prepared = prepareStagePromotion({
+										root,
+										brainDir,
+										record: stageRecord,
+										targets: live.move.targets,
+										fileOpsUsed: currentTask.fileOps ?? 0,
+										fileOpsLimit: live.move.budget?.fileOps ?? POLICY.limits.plan.moveBudget.fileOps,
+										changedSurfaceUsed: currentTask.changedSurface ?? { bytes: 0, lines: 0 },
+									});
+									const applied = applyStagePromotion(prepared);
+									updateContext(brainDir, (store) => {
+										const task = taskState(store, child);
+										task.fileOps = (task.fileOps ?? 0) + applied.files;
+										task.changedSurface = applied.surface;
+										if (applied.changes.some((change) => change.status === "deleted")) task.removedPaths = [...new Set([...(task.removedPaths ?? []), ...applied.changes.filter((change) => change.status === "deleted").map((change) => change.path)])];
+									});
+									staging = { ...staging, status: "promoted", candidate: prepared.collected.candidate, changes: applied.changes, surface: applied.surface };
+									record += applied.files === 0
+										? "\n\nThe staged command candidate was empty; no live project path was written."
+										: `\n\nPromoted the checked staged command candidate through ${run.move}'s live approved move gate: ${applied.files} ${applied.files === 1 ? "file" : "files"}, ${applied.surface.bytes} bytes and ${applied.surface.lines} lines of changed surface.`;
+								}
+							} catch (error) {
+								const message = error instanceof StageError ? error.message : `The staged candidate could not be handled: ${error.message}`;
+								details.done = false;
+								details.stageError = message;
+								details.closureGap ??= message.length > POLICY.limits.plan.proofChars ? `${message.slice(0, POLICY.limits.plan.proofChars - 1).trimEnd()}…` : message;
+								staging = { ...staging, status: "refused", error: message };
+								record += `\n\nStaged command candidate refused before live application: ${message}`;
+							} finally {
+								const cleanup = disposeStage(stageRecord);
+								staging.cleanup = cleanup;
+								if (!cleanup.removed) {
+									details.done = false;
+									const message = `The disposable command stage could not be cleaned up: ${cleanup.error}`;
+									details.stageError ??= message;
+									details.closureGap ??= message.length > POLICY.limits.plan.proofChars ? `${message.slice(0, POLICY.limits.plan.proofChars - 1).trimEnd()}…` : message;
+									record += `\n\n${message}`;
+								}
+								details.staging = staging;
+							}
+						}
+						try {
+							const after = (await api.memo("after", callContext)) ?? (await api.memo("after", checkpoint(root, brainDir, `after ${run.move ?? run.item}`), callContext));
+							details.checkpoints = { before: run.before, after };
+							details.changes = changesBetween(root, brainDir, run.before, after);
+							const outside = details.changes.filter((change) => !Array.isArray(run.targets) || !run.targets.includes(change.path));
+							if (outside.length > 0) {
+								details.scopeBreach = outside.map((change) => change.path);
+								details.done = false;
+								record += `\n\nMove scope breach: ${outside.map((change) => change.path).join(", ")} ${outside.length === 1 ? "is" : "are"} outside ${run.move}'s declared targets. The move is blocked and cannot be accepted.`;
+							}
+							// What windows did during the task is in that record. From here on they count for themselves again.
+							windows?.takeActive();
+							record +=
+								details.changes.length === 0
+									? `\n\nMy record: no file ${run.direct ? "of the project " : ""}was changed during this task.`
+									: `\n\nMy record of the files changed during this task:\n${changeRecord(details.changes).join("\n")}`;
+							// Without the sandbox a command can change what the checkpoints do not hold.
+							if (run.direct) record += "\nThe sandbox was off for this task. The record covers the project directory only: what a command changed outside it is not listed here and cannot be undone.";
+						} catch (error) {
+							if (!(error instanceof CheckpointError)) throw error;
+							details.done = false;
+							details.checkpointError = error.message;
+							record += `\n\nMy record could not keep what this task changed: ${error.message}. The move is blocked and cannot be accepted.`;
+						}
 					}
-					if (stoppedWindows.length > 0) {
-						details.closedWindows = stoppedWindows;
-						record += `\n\nClosed move-owned running ${stoppedWindows.length === 1 ? "window" : "windows"} before checkpointing: ${stoppedWindows.join(", ")}.`;
-					}
-				try {
-					const after = (await api.memo("after", callContext)) ?? (await api.memo("after", checkpoint(root, brainDir, `after ${run.move ?? run.item}`), callContext));
-					details.checkpoints = { before: run.before, after };
-					details.changes = changesBetween(root, brainDir, run.before, after);
-					const outside = details.changes.filter((change) => !Array.isArray(run.targets) || !run.targets.includes(change.path));
-					if (outside.length > 0) {
-						details.scopeBreach = outside.map((change) => change.path);
-						details.done = false;
-						record += `\n\nMove scope breach: ${outside.map((change) => change.path).join(", ")} ${outside.length === 1 ? "is" : "are"} outside ${run.move}'s declared targets. The move is blocked and cannot be accepted.`;
-					}
-					// What windows did during the task is in that record. From here on they count for themselves again.
-					windows?.takeActive();
-					record +=
-						details.changes.length === 0
-							? `\n\nMy record: no file ${run.direct ? "of the project " : ""}was changed during this task.`
-							: `\n\nMy record of the files changed during this task:\n${changeRecord(details.changes).join("\n")}`;
-					// Without the sandbox a command can change what the checkpoints do not hold.
-					if (run.direct) record += "\nThe sandbox was off for this task. The record covers the project directory only: what a command changed outside it is not listed here and cannot be undone.";
-					} catch (error) {
-						if (!(error instanceof CheckpointError)) throw error;
-						details.done = false;
-						details.checkpointError = error.message;
-						record += `\n\nMy record could not keep what this task changed: ${error.message}. The move is blocked and cannot be accepted.`;
-					}
-			}
 
 			if (details.closureGap !== undefined) record += `\n\nClosure gap: ${details.closureGap} The move is blocked and cannot be accepted.`;
 			if (details.proofError !== undefined) record += `\n\nMove evidence missing: ${details.proofError} The move is blocked and cannot be accepted.`;
@@ -491,7 +551,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				return fail(`I ended the task: ${what}\n${wrote}\nIf the work is still needed, start another task whose brief says how to avoid this.${record}`, details);
 			}
 			if (returned === undefined) return fail(`The focus ended without calling \`return\`, so there is no report and its move is blocked.\n${wrote}\nPlan a narrower successor move.${record}`, details);
-			const completed = details.done === true && details.scopeBreach === undefined && details.checkpointError === undefined && details.closureGap === undefined && details.proofError === undefined;
+				const completed = details.done === true && details.scopeBreach === undefined && details.checkpointError === undefined && details.stageError === undefined && details.closureGap === undefined && details.proofError === undefined;
 			const state = run.move === undefined
 				? (completed ? "\n\n[My record: the inspect focus returned done.]" : "\n\n[My record: the inspect focus returned not done.]")
 				: (completed

@@ -35,6 +35,7 @@ import { noteCaseMessage } from "./case.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
+import { cleanupStaleStages } from "./stage.mjs";
 import { traceFile, watchTrace } from "./trace.mjs";
 import { createStreamFreeze } from "./stream.mjs";
 import { loadAtlas, observeAtlas, saveAtlas } from "./atlas.mjs";
@@ -268,6 +269,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const textOfAnswer = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();
 	// The question the agent waits on (src/asks.mjs).
 	const asks = createAsks({ config });
+	// A prior crashed process leaves no usable stage: discard only its own dead-process disposable roots before
+	// this session can reconstruct a focus. Ordinary project and brain paths are never touched here.
+	cleanupStaleStages({ root });
 	// The shell windows of this session (src/windows.mjs). They end with the program.
 	const windows = createWindows({ root, brainDir, config, runner });
 	// The wake triggers the agent has set (src/wakes.mjs). They are kept from one start to the next.
@@ -324,7 +328,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		bookTool({ root, brainDir, config, engine, gate }),
 		...lookTools(root),
 		...changeTools({ root, brainDir, gate }),
-		shellTool({ config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		shellTool({ root, config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
 		consultTool({ root, brainDir, config }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),

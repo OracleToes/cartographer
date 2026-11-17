@@ -346,6 +346,7 @@ export function reportMove(plan, id, revision, result, now) {
 		...(Array.isArray(result?.changes) ? { changes: result.changes } : {}),
 		...(Array.isArray(result?.commands) ? { commands: result.commands } : {}),
 		...(ownObject(result?.checkpoints) ? { checkpoints: result.checkpoints } : {}),
+		...(ownObject(result?.staging) ? { staging: result.staging } : {}),
 		...(typeof result?.proof === "string" && flat(result.proof) !== "" ? { proof: flat(result.proof) } : {}),
 		...(typeof result?.closureGap === "string" && flat(result.closureGap) !== "" ? { closureGap: flat(result.closureGap) } : {}),
 		...(typeof result?.reason === "string" ? { reason: result.reason } : {}),
