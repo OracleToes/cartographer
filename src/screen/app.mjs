@@ -1169,11 +1169,7 @@ export async function runScreen(session, options, runTerminal) {
 	const activate = ({ to, jump = false } = {}) => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
-		if (line.kind === "live") {
-			chat.toggleLive(line.liveDepth, to);
-			// A live stream should keep following its newest text after it was deliberately opened.
-			return void chatScroll.scrollToEnd();
-		}
+		if (line.kind === "live") return void inPlace(() => chat.toggleLive(line.liveDepth, to));
 		else if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
 		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
