@@ -90,7 +90,7 @@ const currentShelf = (brainDir, conversationId, main) => {
 };
 
 /**
- * Infer a shelf target kind from an ID alone: catalog file, report, storyteller thread, Durable record,
+ * Infer a shelf target kind from an ID alone: catalog file, report, consultation thread, Durable record,
  * or confined project-relative path passed in `id`.
  */
 export async function inferShelfRef(ref, root, brainDir, api, callContext) {
@@ -159,7 +159,7 @@ export async function runShelf({ root, brainDir, config }, action, args, api, ca
 			if (ref.kind === undefined) {
 				const inferred = await inferShelfRef(ref, root, brainDir, api, callContext);
 				if (inferred === undefined) {
-					return fail(`Nothing with the ID "${ref.id}" is a file, a report, a story, a schema or a durable record; nothing was added. Pass a project-relative \`path\`, or give \`ref.kind\` to say what it is.`);
+					return fail(`Nothing with the ID "${ref.id}" is a file, a report, a consultation transcript, a schema or a durable record; nothing was added. Pass a project-relative \`path\`, or give \`ref.kind\` to say what it is.`);
 				}
 				ref = inferred;
 			}

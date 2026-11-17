@@ -367,7 +367,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
 					const run = await runOf(runs, api, hookContext);
 					// A case phase is a bounded same-model evidence context, not another user-facing agent and not a route
-					// to the external storyteller. Participation arrives through the durable case queue instead of ask.
+					// to the external consultation model. Participation arrives through the durable case queue instead of ask.
 					if (run.caseId !== undefined && ["chat", "ask", "consult"].includes(call.name)) {
 						return { block: "A bounded evidence phase stays inside its frozen same-model case: it does not chat, ask, or consult. The user can write into the case queue, and I return one private artifact to the main context." };
 					}

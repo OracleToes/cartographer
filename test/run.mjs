@@ -1979,13 +1979,13 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
 });
 
-test("screen: a consult call folds to one line, and opens to the whole story — the context, the question, and the answer under its thread", async () => {
+test("screen: a consult call folds to one line, and opens to the full consultation transcript — context, question, and answer under its thread", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const thread = "st-20261116-053946-a1b2";
 	const roundOne = [
 		"<!-- storyteller v1 -->",
-		"The storyteller — one long problem, kept whole",
+		"Consultation transcript — one long problem, kept whole",
 		"",
 		"Model: MythosNano",
 		"Started: 2026-11-16T05:39:46.000Z",
@@ -2020,43 +2020,43 @@ test("screen: a consult call folds to one line, and opens to the whole story —
 	chat.user("Is the roller sound?");
 	chat.entry(0, reply([call("c1", "consult", { question: "Is the roller sound?", context: "The roller rolls one die.\nThe user suspects it is unfair." })], 1));
 	clock += 72_000;
-	chat.entry(0, result("c1", "consult", `The storyteller took 1 m 12 s (9,001 output tokens). The story stands under thread ${thread}; shelved as placement sh1 (12,340 rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so. A story is not a record: check the work against a test or a proof, and apply it yourself. I can ask on with \`thread: "${thread}"\` — the storyteller sees the original question and its answer — for as long as the work needs.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
-	chat.entry(0, reply([call("c2", "chat", { text: "It rolls once; ask the storyteller, and it says twice." })], 2));
+	chat.entry(0, result("c1", "consult", `The consultation took 1 m 12 s (9,001 output tokens). The consultation transcript stands under thread ${thread}; shelved as placement sh1 (12,340 rendered tokens); beyond what the shelf renders, the consultation transcript remains in the brain and the state block says so. This is advisory material, not an authoritative verdict: assess its assumptions and proposals, verify factual or technical claims against relevant sources, tests, or proof before acting, and keep decisions of taste with the user. I can continue with \`thread: "${thread}"\`; the consultation model sees the original question and its answer.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
+	chat.entry(0, reply([call("c2", "chat", { text: "It rolls once; the consultation proposes rolling twice." })], 2));
 
 	// Folded: one line for the run, and the line says whose work it was; nothing of the answer stands until it is opened.
-	has(text(), "▸ 1 call · Is the roller sound? · 1m 12s", "once something is said, the run is one line, and the line says what the storyteller was asked");
-	hasNot(text(), "the storyteller  Is the roller sound?", "the call's own line is folded away with the run");
+	has(text(), "▸ 1 call · Is the roller sound? · 1m 12s", "once something is said, the run is one line, and the line says what the consultation was asked");
+	hasNot(text(), "consultation  Is the roller sound?", "the call's own line is folded away with the run");
 	hasNot(text(), "Roll twice", "the answer is not shown until the call is opened");
 	hasNot(text(), "It is not.", "and the receipt never carried it either");
 
-	// The run opened: the call is one line — who was asked, what, how long it took, how much it wrote, where the story stands.
+	// The run opened: the call is one line — what was asked, how long it took, and how much it wrote.
 	chat.toggle(chat.lines(80).find((line) => line.kind === "group").item);
-	has(text(), "the storyteller  Is the roller sound?  → 1 m 12 s · 9,001 tokens", "opened, the call line says who was asked, what, how long it took and how much it wrote");
+	has(text(), "consultation  Is the roller sound?  → 1 m 12 s · 9,001 tokens", "opened, the call line says what the consultation was asked, how long it took and how much it wrote");
 	hasNot(text(), "Roll twice", "the answer stands behind the call");
 
-	// Opened: the whole story stands in the row, read from the brain under its thread, never from the session.
+	// Opened: the full consultation transcript stands in the row, read from the brain under its thread, never from the session.
 	const consultRow = chat.lines(80).find((line) => line.kind === "call");
 	chat.toggleRow(consultRow.item, consultRow.row);
 	const opened = text();
-	has(opened, `the story stands under thread ${thread} · 1 round`, "the opened row names the thread, never a path");
+	has(opened, `the consultation transcript stands under thread ${thread} · 1 round`, "the opened row names the thread, never a path");
 	has(opened, "round 1 · 2026-11-16 05:39 UTC", "the round is labelled");
 	has(opened, "what I sent — the context", "the ask says what was sent");
 	has(opened, "The roller rolls one die.", "the context of the call");
 	has(opened, "The user suspects it is unfair.", "all of it");
 	has(opened, "what I asked — the question", "and what was asked");
 	has(opened, "Is the roller sound?", "the question in full");
-	has(opened, "what the storyteller answered", "and what came back");
-	has(opened, "It is not. Roll twice, not once, or the die never lands on six.", "the answer, from the story it stands in");
+	has(opened, "what the consultation answered", "and what came back");
+	has(opened, "It is not. Roll twice, not once, or the die never lands on six.", "the answer, from the transcript it stands in");
 	hasNot(opened, "Shelved as placement", "the receipt is not repeated inside the opened row");
 
-	// y copies the whole story: the context, the question and the answer, not just the one line.
+	// y copies the full consultation: the context, the question and the answer, not just the one line.
 	const copied = chat.textOf(consultRow.item, consultRow.row);
-	has(copied, `The story stands under thread ${thread}`, "the copied text carries the thread");
+	has(copied, `The consultation transcript stands under thread ${thread}`, "the copied text carries the thread");
 	has(copied, "The roller rolls one die.", "the copied text carries the context");
 	has(copied, "Is the roller sound?", "the question");
 	has(copied, "Roll twice, not once", "and the answer");
 
-	// A follow-up is its own call; the story grew under the same thread, and its row reads the whole of it.
+	// A follow-up is its own call; the transcript grew under the same thread, and its row reads the whole of it.
 	stories[thread] = roundOne.replace(/\s+$/, "\n\n") + [
 		"## Round 2 — 2026-11-16T06:10:02.000Z",
 		"Elapsed: 0 m 41 s · 640 output tokens · finish: stop",
@@ -2074,48 +2074,48 @@ test("screen: a consult call folds to one line, and opens to the whole story —
 	].join("\n");
 	chat.entry(0, reply([call("c3", "consult", { question: "Why twice?", thread })], 3));
 	clock += 41_000;
-	chat.entry(0, result("c3", "consult", `Round 2. The storyteller took 0 m 41 s (640 output tokens). The story (2 rounds) stands under thread ${thread}; shelved as placement sh1 (12,410 rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so. A story is not a record: check it against a test or a proof. Ask on with \`thread: "${thread}"\` while a refutable doubt remains — the storyteller sees the whole exchange — or let it rest.`, { details: { consult: true, thread, rounds: 2, placement: "sh1", tokens: 640, finish: "stop", seconds: 41 } }));
+	chat.entry(0, result("c3", "consult", `Round 2. The consultation took 0 m 41 s (640 output tokens). The consultation transcript (2 rounds) stands under thread ${thread}; shelved as placement sh1 (12,410 rendered tokens); beyond what the shelf renders, the consultation transcript remains in the brain and the state block says so. This remains advisory material, not an authoritative verdict: assess it and verify factual or technical claims before acting. Continue with \`thread: "${thread}"\` when another focused pass would resolve a material uncertainty; the consultation model sees the whole exchange.`, { details: { consult: true, thread, rounds: 2, placement: "sh1", tokens: 640, finish: "stop", seconds: 41 } }));
 	const consultLines = chat.lines(80).filter((line) => line.kind === "call" && line.spans.some(([part]) => String(part).includes("Why twice?")));
 	const secondRow = consultLines.at(-1);
 	chat.toggleRow(secondRow.item, secondRow.row);
 	const opened2 = text();
-	has(opened2, `the story stands under thread ${thread} · 2 rounds`, "the follow-up row reads the story, both rounds");
+	has(opened2, `the consultation transcript stands under thread ${thread} · 2 rounds`, "the follow-up row reads the transcript, both rounds");
 	has(opened2, "round 1 · 2026-11-16 05:39 UTC", "the first round stands in it");
 	has(opened2, "round 2 · 2026-11-16 06:10 UTC", "and so does the second");
 	has(opened2, "Why twice?", "the follow-up question");
 	has(opened2, "Once lands on six only half the time.", "the follow-up answer");
 
-	// A missing story is said as such, not as an empty answer: a fresh chat cannot read a thread the brain no longer holds.
+	// A missing transcript is said as such, not as an empty answer: a fresh chat cannot read a thread the brain no longer holds.
 	delete stories[thread];
 	const gone = createChat({ now: () => clock, readStory: (id) => stories[id] });
 	gone.entry(0, reply([call("c9", "consult", { question: "Is the roller sound?", context: "" })], 1));
-	gone.entry(0, result("c9", "consult", `The storyteller took 1 m 12 s. The story stands under thread ${thread}.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
+	gone.entry(0, result("c9", "consult", `The consultation took 1 m 12 s. The consultation transcript stands under thread ${thread}.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
 	gone.toggle(gone.lines(80).find((line) => line.kind === "group").item);
 	const goneRow = gone.lines(80).find((line) => line.kind === "call");
 	gone.toggleRow(goneRow.item, goneRow.row);
-	has(gone.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "is gone from the brain", "a story that is gone is said as gone");
+	has(gone.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "from the brain", "a consultation transcript that is gone is said as gone");
 
 	// A failed consult shows why it failed, once, where the answer would stand.
 	const failed = createChat({ now: () => clock, readStory: (id) => stories[id] });
 	failed.entry(0, reply([call("c8", "consult", { question: "Is the roller sound?", context: "" })], 1));
-	failed.entry(0, result("c8", "consult", "The storyteller refused the call: HTTP 500. boom", { isError: true }));
+	failed.entry(0, result("c8", "consult", "The consultation model refused the call: HTTP 500. boom", { isError: true }));
 	failed.toggle(failed.lines(80).find((line) => line.kind === "group").item);
 	const failedRow = failed.lines(80).find((line) => line.kind === "call");
 	failed.toggleRow(failedRow.item, failedRow.row);
 	const failedText = failed.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	has(failedText, "why it failed", "a failed consult says why");
 	has(failedText, "HTTP 500", "with what the endpoint said");
-	hasNot(failedText, "what the storyteller answered", "and no empty answer section under it");
+	hasNot(failedText, "what the consultation answered", "and no empty answer section under it");
 
-	// A consult that fails carries no answer section and no story; the harness line stands alone.
+	// A consult that fails carries no answer section and no transcript; the harness line stands alone.
 	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
 });
 
-test("screen: while the storyteller writes, Work shows the tail of its draft, and wipes it when the answer lands", async () => {
+test("screen: while a consultation writes, Work shows the tail of its draft, and wipes it when the answer lands", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const thread = "st-20261116-053946-a1b2";
-	const stories = { [thread]: "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: Mythos-nano\nStarted: 2026-11-16T05:39:46.000Z\n\n## Round 1 — 2026-11-16T05:39:46.000Z\nElapsed: 0 m 12 s · finish: stop\n\nQuestion:\n```text\nq?\n```\n\nAnswer:\n```text\nIt is not. Roll twice.\n```\n" };
+	const stories = { [thread]: "<!-- storyteller v1 -->\nConsultation transcript — one long problem, kept whole\n\nModel: Mythos-nano\nStarted: 2026-11-16T05:39:46.000Z\n\n## Round 1 — 2026-11-16T05:39:46.000Z\nElapsed: 0 m 12 s · finish: stop\n\nQuestion:\n```text\nq?\n```\n\nAnswer:\n```text\nIt is not. Roll twice.\n```\n" };
 	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
 	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
@@ -2126,18 +2126,18 @@ test("screen: while the storyteller writes, Work shows the tail of its draft, an
 	chat.entry(0, reply([call("c1", "consult", { question: "q?", context: "" })], 1));
 	// The draft streams in through the harness's live slot, a bounded tail — nothing from the session.
 	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six" }]);
-	has(text(), "… the storyteller", "while it runs, the call line shows the waiting mark");
+	has(text(), "… consultation", "while it runs, the call line shows the waiting mark");
 	has(text(), "No. The uniform() call modulo six", "and the draft as far as it has come");
 	clock += 3000;
 	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six biases toward 1 and 2. Draw with rejection." }]);
 	has(text(), "biases toward 1 and 2. Draw with", "the tail grows as it writes");
 	has(text(), "rejection.", "wrapped onto the next row like everything else");
-	assert.equal(chat.doing().what, "the storyteller is writing", "the strip says whose words those are");
+	assert.equal(chat.doing().what, "the consultation is writing", "the strip says whose words those are");
 	// The answer lands: the tool result stands, the tail is gone.
 	clock += 2000;
-	chat.entry(0, result("c1", "consult", `The storyteller took 0 m 05 s (40 output tokens). The story stands under thread ${thread}; shelved as placement sh1.`, { details: { consult: true, thread, rounds: 1, tokens: 40, finish: "stop", seconds: 5 } }));
+	chat.entry(0, result("c1", "consult", `The consultation took 0 m 05 s (40 output tokens). The consultation transcript stands under thread ${thread}; shelved as placement sh1.`, { details: { consult: true, thread, rounds: 1, tokens: 40, finish: "stop", seconds: 5 } }));
 	chat.liveTools(0, []);
-	hasNot(text(), "modulo six", "once the answer lands, the draft leaves the tab — the story holds it");
+	hasNot(text(), "modulo six", "once the answer lands, the draft leaves the tab — the transcript holds it");
 	has(text(), "→ 0 m 05 s · 40 tokens", "and the call line keeps how long it took and how much it wrote");
 });
 

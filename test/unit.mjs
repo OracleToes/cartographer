@@ -59,6 +59,23 @@ test("prompt: the sleep checklist names the person whose message may be waiting"
 	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
 });
 
+test("prompt: consult is a bounded long-form consultation, not only a refutable storyteller", () => {
+	const prompt = systemPrompt({ root: "/project" });
+	assert.match(TOOLS.consult, /separate long-form consultation/i);
+	assert.match(TOOLS.consult, /alternative designs or plans, critique, derivation, explanation, or synthesis/i);
+	assert.match(TOOLS.consult, /not an authoritative record or verdict/i);
+	assert.match(TOOLS.consult, /no tools, project access, or independent project memory/i);
+	assert.match(TOOLS.consult, /Cartographer-managed `thread`/i);
+	assert.ok(TOOLS.consult.includes(`${USER_NAME}'s choices of taste`));
+	assert.doesNotMatch(TOOLS.consult, /storyteller|refutable hard question/i);
+	assert.match(prompt, /opens a separate, long-form consultation/i);
+	assert.doesNotMatch(prompt, /storyteller/i, "the system prompt no longer narrows consult to a storyteller role");
+	assert.match(TOOLS.case, /supplied-context, long-form consultation/i, "case guidance distinguishes its evidence phases from consultation");
+	assert.match(TOOLS.shelf, /consultation threads/i);
+	const fallback = consultTool({ root: "/project", brainDir: "/project/.brain", config: {} });
+	assert.equal(fallback.description, TOOLS.consult, "the standalone tool declaration cannot drift from the harness prompt");
+});
+
 test("harness: a cached inspect brief restores its look contract", () => {
 	assert.deepEqual(runFromBrief({ mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2 }), {
 		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
@@ -1925,14 +1942,14 @@ test("consult: one plain chat completion, the answer in a file, shelved", async 
 	assert.equal(sent.model, "MythosNano");
 	assert.equal(sent.max_tokens, 40960);
 	assert.equal(sent.temperature, 0.6);
-	assert.equal(sent.stream, true, "the story streams token by token");
+	assert.equal(sent.stream, true, "the consultation streams token by token");
 	assert.equal(sent.stream_options?.include_usage, true, "and asks the server for usage at the end");
 	assert.equal("tools" in sent, false, "no tool definitions are sent");
 	assert.equal(sent.messages.length, 1);
 	assert.equal(sent.messages[0].role, "user");
 	assert.ok(sent.messages[0].content.endsWith("What is the answer?"), "the question is last");
 	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
-	// The answer lands in the brain under a thread; the question stands in the story for whoever reads it later.
+	// The answer lands in the brain under a thread; the question stands in the transcript for whoever reads it later.
 	const thread = result.details.thread;
 	assert.match(thread, /^st\d+$/, "a fresh story mints the short thread marker, like every other id");
 	assert.equal(result.details.rounds, 1);
@@ -1942,7 +1959,7 @@ test("consult: one plain chat completion, the answer in a file, shelved", async 
 	assert.ok(file.includes("finish: stop"));
 	assert.equal(result.output[0].text.includes(".brain"), false, "the receipt never names a path");
 	assert.equal(result.output[0].text.includes("storyteller/"), false, "the receipt never names the file");
-	// Shelved for the main agent as a story reference; the receipt names the placement, not the answer.
+	// Shelved for the main agent as a consultation reference; the receipt names the placement, not the answer.
 	const store = loadContext(brainDir);
 	assert.equal(store.shelf.length, 1);
 	assert.equal(store.shelf[0].ref.type, "story");
@@ -2038,7 +2055,7 @@ test("consult: the stream is read the way llama.cpp frames it — pings, CRLF, a
 	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("It is 42."));
 });
 
-test("consult: a story that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
+test("consult: a consultation transcript that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const encoder = new TextEncoder();
 	const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: "It is not. Roll twice." }, finish_reason: null }] })}\n\n`;
@@ -2059,7 +2076,7 @@ test("consult: a story that breaks mid-answer leaves the partial in the file, ma
 	assert.equal(result.isError, true, "a broken story is an error");
 	assert.match(result.output[0].text, /broke off mid-answer/);
 	const file = readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8");
-	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the story");
+	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the consultation transcript");
 	assert.match(file, /broke off mid-answer/, "and says it broke off");
 	const store = loadContext(brainDir);
 	assert.equal(store.shelf.length, 1, "the partial is shelved all the same");
@@ -2081,7 +2098,7 @@ test("consult: a server that refuses stream_options is asked again without it", 
 	assert.equal(calls[1].stream_options, undefined, "without stream_options the second time");
 });
 
-test("consult: a server that answers with one plain JSON body all the same reads the story out of it", async (t) => {
+test("consult: a server that answers with one plain JSON body still records the consultation transcript", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: "42." }, finish_reason: "stop" }], usage: { completion_tokens: 7 } }), { status: 200, headers: { "content-type": "application/json" } });
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
@@ -2096,10 +2113,10 @@ test("consult: a timeout is reported as a timeout and writes nothing", async (t)
 	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, true);
 	assert.match(result.output[0].text, /did not answer within 1800 seconds/);
-	assert.equal(existsSync(join(brainDir, "storyteller")), false, "no story is written");
+	assert.equal(existsSync(join(brainDir, "storyteller")), false, "no consultation transcript is written");
 });
 
-test("consult: a follow-up carries the whole story — the original question and the answer — and appends its round", async (t) => {
+test("consult: a follow-up carries the full consultation transcript — the original question and answer — and appends its round", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const calls = [];
 	const fetchImpl = async (url, init) => {
@@ -2115,7 +2132,7 @@ test("consult: a follow-up carries the whole story — the original question and
 	assert.equal(second.isError, undefined, second.output[0].text);
 	assert.equal(second.details.thread, thread, "the follow-up keeps the same thread");
 	assert.equal(second.details.rounds, 2);
-	// The storyteller sees round one whole: the context, the question, the answer — then this question.
+	// The consultation model sees round one whole: the context, the question, the answer — then this question.
 	const sent = calls[1];
 	assert.equal(sent.messages.length, 3);
 	assert.equal(sent.messages[0].role, "user");
@@ -2133,7 +2150,7 @@ test("consult: a follow-up carries the whole story — the original question and
 	assert.ok(file.includes("Roll twice") && file.includes("Once lands on six"));
 	// One placement on the shelf, re-shelved with the whole exchange; no path and no model name in it.
 	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1, "the story is one placement, re-shelved, not minted twice");
+	assert.equal(store.shelf.length, 1, "the consultation transcript is one placement, re-shelved, not minted twice");
 	assert.equal(store.shelf[0].ref.type, "story");
 	assert.equal(store.shelf[0].ref.id, thread);
 	assert.ok(store.shelf[0].snapshot.includes("Is the roller sound?"));
@@ -2141,13 +2158,13 @@ test("consult: a follow-up carries the whole story — the original question and
 	assert.ok(store.shelf[0].snapshot.includes("Why twice?"));
 	assert.ok(store.shelf[0].snapshot.includes("Once lands on six"));
 	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance or the path");
-	// The round-two receipt says where in the story it stands, and never carries the answer.
+	// The round-two receipt says where in the consultation transcript it stands, and never carries the answer.
 	assert.match(second.output[0].text, /^Round 2\./);
 	assert.ok(second.output[0].text.includes(`thread: "${thread}"`));
 	assert.doesNotMatch(second.output[0].text, /Once lands on six/);
 });
 
-test("consult: a fresh round-two of the same story re-uses the placement id", async (t) => {
+test("consult: a fresh second consultation round re-uses the placement id", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let n = 0;
 	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
@@ -2160,19 +2177,19 @@ test("consult: a fresh round-two of the same story re-uses the placement id", as
 	assert.ok(loadContext(brainDir).shelf[0].snapshot.includes("Answer 1.") && loadContext(brainDir).shelf[0].snapshot.includes("Answer 2."));
 });
 
-test("consult: a thread that is not a storyteller thread is refused before anything is asked", async (t) => {
+test("consult: a thread that is not a consultation thread is refused before anything is asked", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let called = 0;
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
 	for (const bad of ["../etc/passwd", "st-20261115", "st-20261115-143022-XYZ!", "story:st-20261115-143022-k7q2", `/abs/path/st-20261115-143022-k7q2`]) {
 		const result = await tool.execute({ question: "q?", thread: bad }, consultApi(ROOT_CONVERSATION_ID), undefined);
 		assert.equal(result.isError, true, bad);
-		assert.match(result.output[0].text, /not a thread the storyteller minted/);
+		assert.match(result.output[0].text, /not a valid consultation thread/);
 	}
 	assert.equal(called, 0, "a bad thread never reaches the endpoint");
 });
 
-test("consult: fresh stories mint short thread markers from the folder, and legacy markers stay valid", async (t) => {
+test("consult: fresh consultations mint short thread markers from the folder, and legacy markers stay valid", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let n = 0;
 	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
@@ -2194,17 +2211,17 @@ test("consult: fresh stories mint short thread markers from the folder, and lega
 	assert.equal(fourth.details.thread, "st3");
 });
 
-test("consult: a well-formed thread with no story behind it is refused before anything is asked", async (t) => {
+test("consult: a well-formed thread with no consultation transcript behind it is refused before anything is asked", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let called = 0;
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
 	const result = await tool.execute({ question: "q?", thread: "st-20261115-000000-zzzz" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /No story stands under thread st-20261115-000000-zzzz/);
+	assert.match(result.output[0].text, /No consultation transcript stands under thread st-20261115-000000-zzzz/);
 	assert.equal(called, 0);
 });
 
-test("consult: a story file that does not parse is refused, never guessed at", async (t) => {
+test("consult: a consultation transcript that does not parse is refused, never guessed at", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const id = "st-20261115-000000-a1b2";
 	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
@@ -2213,11 +2230,11 @@ test("consult: a story file that does not parse is refused, never guessed at", a
 	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
 	const result = await tool.execute({ question: "follow up?", thread: id }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /cannot be read as a story/);
+	assert.match(result.output[0].text, /consultation transcript under thread .* cannot be read/);
 	assert.equal(called, 0, "a broken story never reaches the endpoint");
 });
 
-test("consult: a follow-up whose story grows is sent the whole conversation — round one is not re-sent by the agent", async (t) => {
+test("consult: a follow-up whose transcript grows is sent the whole conversation — round one is not re-sent by the agent", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const calls = [];
 	const fetchImpl = async (url, init) => {
@@ -2239,7 +2256,7 @@ test("consult: a follow-up whose story grows is sent the whole conversation — 
 	assert.equal(second.details.rounds, 2);
 });
 
-test("consult: a story survives a question that carries its own fenced blocks and labels", async (t) => {
+test("consult: a consultation transcript survives a question that carries its own fenced blocks and labels", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const calls = [];
 	const tricky = "It failed with:\n\nQuestion:\n```text\nAnswer:\n```\n\n## Round 99 — fake\n\nWhat does it print?";
@@ -2255,7 +2272,7 @@ test("consult: a story survives a question that carries its own fenced blocks an
 	assert.equal(sent.messages[1].content, "The exit code is 1.\n```\nb ```\nDone.");
 });
 
-test("consult: a server refusing an over-long conversation is said as such — the story outgrew the storyteller", async (t) => {
+test("consult: a server refusing an over-long consultation says its transcript outgrew model capacity", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let call = 0;
 	const fetchImpl = async () => {
@@ -2268,11 +2285,11 @@ test("consult: a server refusing an over-long conversation is said as such — t
 	const thread = first.details.thread;
 	const second = await tool.execute({ question: "Go on.", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(second.isError, true);
-	assert.match(second.output[0].text, /outgrown what the storyteller can hold/);
-	assert.match(second.output[0].text, /let it rest, or begin a new one with the crux/);
+	assert.match(second.output[0].text, /consultation transcript has outgrown what the model can hold/);
+	assert.match(second.output[0].text, /let it rest, or begin a new consultation with the crux/);
 	assert.doesNotMatch(second.output[0].text, /consultModel/, "an overflow is not a model-name problem");
-	// Round one overflow names the ask, not a story:
+	// Round one overflow names the ask, not a transcript:
 	const solo = await consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => new Response("prompt is too long: 99999 tokens", { status: 400 }) }).execute({ question: "x".repeat(50000) }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(solo.isError, true);
-	assert.match(solo.output[0].text, /outgrew what the storyteller can hold/);
+	assert.match(solo.output[0].text, /outgrew what the consultation model can hold/);
 });

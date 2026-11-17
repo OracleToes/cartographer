@@ -137,7 +137,7 @@ export function describeCall(call, describeRef) {
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
 
 		case "consult":
-			return `the storyteller  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
+			return `consultation  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
 		case "wake":
 			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
@@ -179,7 +179,7 @@ export function describeResult(message) {
 	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
 	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
 	if (message.toolName === "shelf") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.context);
-	// The storyteller: how long it took, how much it wrote — in the receipt's own words. Where the answer stands is said in the opened row.
+	// The consultation: how long it took and how much it wrote. Where its transcript stands is said in the opened row.
 	if (message.toolName === "consult" && !message.isError) {
 		const tokens = typeof message.details?.tokens === "number" && Number.isFinite(message.details.tokens) ? `${Math.round(message.details.tokens).toLocaleString("en-US")} tokens` : "";
 		const seconds = typeof message.details?.seconds === "number" && Number.isFinite(message.details.seconds)
@@ -571,7 +571,7 @@ export async function runTerminal(session, options) {
 		checkRepeat(writing, depth);
 		if (ui !== undefined) {
 			ui.live(depth, writing);
-			// What the tools are saying while they run: the storyteller's draft, as far as the harness keeps it.
+			// What the tools are saying while they run: a consultation draft, as far as the harness keeps it.
 			ui.liveTools?.(depth, live?.tools);
 			return;
 		}

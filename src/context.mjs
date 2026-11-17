@@ -701,7 +701,7 @@ const pinnedText = (brainDir, ref) => {
 };
 const snapshotText = (brainDir, item) => readShelfSnapshot(brainDir, item);
 const SHELF_RESOLVERS = {
-	// A story stands in the brain whole; the shelf carries the exchange for whoever asked. The path is never shown.
+	// A consultation transcript remains in the brain; the shelf carries the exchange for whoever asked. The path is never shown.
 	story: (brainDir, ref, item) => {
 		if (!STORY_ID.test(String(ref.id))) return undefined;
 		const raw = readStory(brainDir, ref.id);

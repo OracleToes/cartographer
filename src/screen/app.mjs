@@ -282,7 +282,7 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// For a consult row in Work: the story is read from the brain under its thread, never from the session.
+	// For a consult row in Work: the consultation transcript is read from the brain under its thread, never from the session.
 	const readStoryRaw = (thread) => readStory(brainDir, thread);
 	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw });
 	const askColors = () => {

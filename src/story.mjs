@@ -1,20 +1,20 @@
-// The storyteller's stories, one file per story under .brain/storyteller/.
+// Consultation transcripts, one legacy-named file per thread under .brain/storyteller/.
 //
-// A story is the whole exchange between the agent and the storyteller: round after round of
-// question and answer, kept whole in one file so a follow-up carries everything that was said.
-// The agent never sees the path — only the `thread` marker (st1, st2, …); the file is provenance
-// and backing, and the shelf carries the exchange itself. The format is strict on purpose: the
-// writer and the reader below are the same code path, and a file that does not parse is a story
-// that cannot be continued, said as such — never guessed at.
+// A transcript is the whole exchange between the agent and the consultation model: round after
+// round of question and answer, kept whole so a follow-up carries everything that was said. The
+// agent never sees the path — only the `thread` marker (st1, st2, …); the file is provenance and
+// backing, and the shelf carries the exchange itself. The format is strict on purpose: the writer
+// and reader below are the same code path, and a file that does not parse cannot be continued.
+// The legacy directory and v1 marker remain stable so existing threads keep working.
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /** The marker the agent passes as `thread`, as both a regex and the source of it (the `consult` parameter builds its schema pattern from it). It carries no path and no meaning beyond identity.
- *  New stories mint the short, standard marker — `st1`, `st2`, … — from the next free number in the folder, like every other id here. Markers minted before 2026-11-16 (`st-20261115-143022-k7q2`) stay valid. */
+ *  New consultations mint the short, standard marker — `st1`, `st2`, … — from the next free number in the folder, like every other id here. Markers minted before 2026-11-16 (`st-20261115-143022-k7q2`) stay valid. */
 export const STORY_ID_PATTERN = "st(\\d+|-\\d{8}-\\d{6}-[a-z0-9]{4})";
 export const STORY_ID = new RegExp(`^${STORY_ID_PATTERN}$`);
-const SCHEMA_LINE = "<!-- storyteller v1 -->";
-const TITLE = "The storyteller — one long problem, kept whole";
+const SCHEMA_LINE = "<!-- storyteller v1 -->"; // Kept so existing durable threads remain readable.
+const TITLE = "Consultation transcript — one long problem, kept whole";
 
 export class StoryError extends Error {}
 
@@ -31,13 +31,13 @@ const nextStoryId = (dir) => {
 	return `st${highest + 1}`;
 };
 
-/** Where the story lives. Never handed to the agent: the thread is the address. */
+/** Where the transcript lives. Never handed to the agent: the thread is the address. */
 export const storyPath = (brainDir, id) => {
-	if (!STORY_ID.test(String(id ?? ""))) throw new StoryError(`Not a thread the storyteller minted: ${String(id ?? "")}`);
+	if (!STORY_ID.test(String(id ?? ""))) throw new StoryError(`Not a valid consultation thread: ${String(id ?? "")}`);
 	return join(brainDir, "storyteller", `${id}.md`);
 };
 
-/** The stored file as text, or undefined when no story stands under the thread. */
+/** The stored transcript as text, or undefined when no consultation stands under the thread. */
 export const readStory = (brainDir, id) => {
 	let path;
 	try {
@@ -82,13 +82,13 @@ const readFence = (lines, from) => {
 const ROUND_HEADER = /^## Round (\d+) — (.+)$/;
 
 /**
- * Parse a story file back into rounds, in order. Throws StoryError on anything that does not
- * read as a story — a hand-edited or broken file is refused, never guessed at.
+ * Parse a consultation transcript back into rounds, in order. Throws StoryError on anything that
+ * does not read as one — a hand-edited or broken file is refused, never guessed at.
  * @returns {{ rounds: { at: string, context: string, question: string, answer: string }[] }}
  */
 export function parseStory(raw) {
 	const lines = String(raw ?? "").split("\n");
-	if (lines[0]?.trim() !== SCHEMA_LINE) throw new StoryError("the file is not a storyteller story (no v1 marker)");
+	if (lines[0]?.trim() !== SCHEMA_LINE) throw new StoryError("the file is not a consultation transcript (no v1 marker)");
 	const rounds = [];
 	let i = 1;
 	while (i < lines.length) {
@@ -141,8 +141,8 @@ export const renderRounds = (rounds, startAt = 1) => rounds.map((round, index) =
 	fenceBlock("Answer", round.answer),
 ].join("\n")).join("\n\n");
 
-/** The clean text the shelf carries: the exchange itself, with no thread to a path and no names. */
-export const renderStory = (rounds) => `The storyteller\n\n${renderRounds(rounds.map(({ meta, ...round }) => round))}`;
+/** The clean text the shelf carries: the exchange itself, with no thread to a path or model label. */
+export const renderStory = (rounds) => `Consultation transcript\n\n${renderRounds(rounds.map(({ meta, ...round }) => round))}`;
 
 const atomicWrite = (path, content) => {
 	const temp = `${path}.${process.pid}.tmp`;
@@ -151,7 +151,7 @@ const atomicWrite = (path, content) => {
 };
 
 /**
- * Begin a story file holding its first round. Returns { id, path }. Fails loudly when no id is free.
+ * Begin a transcript file holding its first round. Returns { id, path }. Fails loudly when no id is free.
  */
 export function createStory(brainDir, { model, at, round }) {
 	const dir = join(brainDir, "storyteller");
@@ -181,8 +181,8 @@ export function createStory(brainDir, { model, at, round }) {
 }
 
 /**
- * Append a round to an existing story, atomically. Returns the round number. The file is parsed
- * first, so a broken story is refused rather than grown.
+ * Append a round to an existing transcript, atomically. Returns the round number. The file is parsed
+ * first, so a broken transcript is refused rather than grown.
  */
 export function appendRound(brainDir, id, round) {
 	const path = storyPath(brainDir, id);

@@ -26,11 +26,11 @@ import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
 const LIVE_ROWS = POLICY.limits.screen.chatLiveRows;
-/** How many rows of a call body or storyteller tail are shown while it is being written. */
+/** How many rows of a call body or consultation tail are shown while it is being written. */
 const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
 /** How many rows of live reasoning stay in Chat until it is opened deliberately. */
 const LIVE_NOTE_ROWS = POLICY.limits.screen.notePreviewLines;
-/** The most of the context sent to the storyteller that an opened consult row shows; the question always shows in full. */
+/** The most of the context sent to the consultation model that an opened consult row shows; the question always shows in full. */
 const CONTEXT_MAX = Math.floor(POLICY.limits.screen.chatDetailChars / 2);
 /** The most of one result that is kept for opening it in place. */
 const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
@@ -99,9 +99,9 @@ function previewTail(text, cols, rows) {
 /**
  * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readStory: reads the story under a thread (st1, st2, …); for a consult row, so the whole exchange can be shown from
- *   the story itself, without keeping that text in the session. Without it, a consult row
- *   opens to the call and its outcome only.
+ *   readStory: reads the durable consultation transcript under a thread (st1, st2, …), so a consult row can show the
+ *   whole exchange without keeping that text in the session. Without it, a consult row opens to the call and its
+ *   outcome only.
  */
 export function createChat({ now = () => Date.now(), markdown, describeRef, readStory } = {}) {
 	/** @type {any[]} */
@@ -144,10 +144,10 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 	};
 
 	/**
-	 * What a consult row holds, assembled once and kept: the rounds from the story the call belongs to (never from
-	 * the session — the exchange is large and belongs in the brain exactly once), the thread marker from the call's
-	 * details, and the call's own ask as the fallback when no story stands behind it (a failed call, or a thread the
-	 * brain no longer holds).
+	 * What a consult row holds, assembled once and kept: the rounds from its durable transcript (never from the
+	 * session — the exchange is large and belongs in the brain exactly once), the thread marker from the call's
+	 * details, and the call's own ask as the fallback when no consultation transcript stands behind it (a failed
+	 * call, or a thread the brain no longer holds).
 	 */
 	const shortWhen = (at) => `${String(at ?? "").slice(0, 16).replace("T", " ")} UTC`;
 	const storyOf = (row) => {
@@ -382,7 +382,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			}
 			// The call that runs now: inside a task, the task's own call and not the task.
 			const row = running.filter((entry) => entry !== taskRow).at(-1);
-			if (row?.name === "consult") return { what: "the storyteller is writing", depth: row.depth, task };
+			if (row?.name === "consult") return { what: "the consultation is writing", depth: row.depth, task };
 			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars), depth: row.depth, task };
 			if (taskRow !== undefined) return { what: "between two steps", depth: 1, task };
 			return undefined;
@@ -510,14 +510,14 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					return;
 				}
 				if (row.name === "consult") {
-					// The storyteller: the call opens to the whole exchange — what I asked, and what it answered.
+					// The consultation: the call opens to the whole transcript — what I asked and what it answered.
 					add(callLine(row), { ...ref, kind: "call" });
 					if (row.state === "running") {
-						// Its words as they come: the tail the harness keeps, not the story (the round lands in the brain when it finishes).
+						// Its words as they come: the tail the harness keeps, not the transcript (the round lands in the brain when it finishes).
 						const tail = toolTails.get(row.id);
 						if (tail !== undefined) {
 							const indentLive = row.depth > 0 ? "  │   " : "    ";
-							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the story is on its way to the brain", "faint"]], { ...ref, kind: "detail" });
+							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the consultation is on its way to the brain", "faint"]], { ...ref, kind: "detail" });
 							const shown = wrap(tail.text.replace(/\s+$/, ""), inner - width(indentLive));
 							for (const piece of shown.slice(-POLICY.limits.screen.chatLiveTextRows)) add([[indentLive, "faint"], [piece, "muted"]], { ...ref, kind: "detail" });
 						}
@@ -530,7 +530,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						};
 						const story = storyOf(row);
 						const clippedContext = (text) => (text.length > CONTEXT_MAX ? `${text.slice(0, CONTEXT_MAX)}\n… (${text.length - CONTEXT_MAX} more characters of context)` : text);
-						if (story.thread !== undefined) add([[indent, "faint"], [`the story stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
+						if (story.thread !== undefined) add([[indent, "faint"], [`the consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
 						if (story.rounds !== undefined) {
 							for (const [index, round] of story.rounds.entries()) {
 								section(`round ${index + 1} · ${shortWhen(round.at)}`);
@@ -540,7 +540,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 								}
 								section("what I asked — the question");
 								body(round.question === "" ? "(the question is not in the call)" : round.question);
-								section("what the storyteller answered");
+								section("what the consultation answered");
 								body(round.answer);
 							}
 							if (row.state === "failed") {
@@ -560,10 +560,10 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 							body(plain(row.receipt ?? ""));
 							return;
 						}
-						section("what the storyteller answered");
-						if (row.state === "running") body("(the storyteller is still writing; the answer lands in the story when it finishes)", "faint");
-						else if (story.unparsable) body(`(the story under thread ${story.thread} cannot be read as a story; the answer stood there)`, "faint");
-						else if (story.missing) body(story.thread === undefined ? "(the answer is not in the session, and no thread was named)" : `(the story under thread ${story.thread} is gone from the brain; the answer stood there)`, "faint");
+						section("what the consultation answered");
+						if (row.state === "running") body("(the consultation is still writing; the answer lands in its transcript when it finishes)", "faint");
+						else if (story.unparsable) body(`(the consultation transcript under thread ${story.thread} cannot be read; the answer stood there)`, "faint");
+						else if (story.missing) body(story.thread === undefined ? "(the answer is not in the session, and no thread was named)" : `(the consultation transcript under thread ${story.thread} is gone from the brain; the answer stood there)`, "faint");
 						else body("(no answer stands behind this call)", "faint");
 					}
 					return;
@@ -755,17 +755,17 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				if (row?.name === "consult") {
 					const story = storyOf(row);
 					const parts = [row.label];
-					if (story.thread !== undefined) parts.push(`The story stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`);
+					if (story.thread !== undefined) parts.push(`The consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`);
 					if (story.rounds !== undefined) {
 						for (const [index, round] of story.rounds.entries()) {
 							parts.push("", `Round ${index + 1} — ${shortWhen(round.at)}`);
 							if (round.context !== "") parts.push("", "What I sent — the context", "", round.context);
-							parts.push("", "What I asked — the question", "", round.question === "" ? "(the question is not in the call)" : round.question, "", "What the storyteller answered", "", round.answer);
+							parts.push("", "What I asked — the question", "", round.question === "" ? "(the question is not in the call)" : round.question, "", "What the consultation answered", "", round.answer);
 						}
 						return parts.join("\n");
 					}
 					if (story.context !== "") parts.push("", "What I sent — the context", "", story.context);
-					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the storyteller answered", "", story.unparsable ? `(the story under thread ${story.thread} cannot be read as a story; the answer stood there)` : story.missing ? `(the story under thread ${story.thread} is gone from the brain; the answer stood there)` : "(the answer is not in the session)");
+					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the consultation answered", "", story.unparsable ? `(the consultation transcript under thread ${story.thread} cannot be read; the answer stood there)` : story.missing ? `(the consultation transcript under thread ${story.thread} is gone from the brain; the answer stood there)` : "(the answer is not in the session)");
 					return parts.join("\n");
 				}
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
