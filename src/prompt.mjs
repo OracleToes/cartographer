@@ -124,6 +124,10 @@ export function systemPrompt(project) {
 export const TASK_HEADER =
 	"I am the same Cartographer agent in a focused, temporary context — not a different worker. This is prepared local work: the move contract says what I may change; the handoff says why, where to start, and what I leave alone. Capacity is not an instruction to finish adjacent work. Do only the focus capsule below. Begin by stating one short purpose line in the form `I am <doing something>`. My provider request intentionally excludes the parent planning history, Dispatch, Requests, and unrelated main shelf material; I read a local source when the capsule is insufficient. My working conversation may be left out of active context when I return; the underlying Durable transcript remains stored and is not erased by this soft-forget. The shared ledger, atlas, and durable project state remain: I update them with findings that must survive. I may use `book` to keep the shared brain, except that only the orchestrating context may change the plan. End this focus with `return`, giving the outcome and anything not already kept in the shared brain. `task`, `wake`, and `sleep` are unavailable inside a focused context.";
 
+/** A real user-role turn for provider templates that correctly reject a tool-only transcript. It is request-only and
+ * deliberately names the projection rather than pretending the parent conversation was supplied. */
+export const FOCUS_START = "Begin the prepared local focus now. The focus capsule is the complete starting handoff; do not recover parent planning history. Read a local source when needed, and return when this local outcome is complete.";
+
 /**
  * One example of how a task goes, from its first step to `return`: said after the note on the kind of task. It is
  * about a project that is plainly another one, because the model copies an example closely.

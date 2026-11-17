@@ -681,6 +681,7 @@ const plannedTitle = (part) => {
 	if (part.kind === "generated-windows") return "Generated windows block";
 	if (part.kind === "transient-read-tail") return "Current read batch · transient";
 	if (part.kind === "focus-capsule") return "Prepared focus capsule · captured handoff";
+	if (part.kind === "focus-start") return "Focused task start query · request-only";
 	return `${part.role ?? "active"} message from active conversation`;
 };
 

@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { droppable, dressTask, KEPT_AS, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { TASK_HEADER } from "../src/prompt.mjs";
+import { FOCUS_START, TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
 import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, loadAtlas, nodeChanges, nodeHashes, NODES_MAX, renderOutline, saveAtlas, staleNodes } from "../src/atlas.mjs";
@@ -758,7 +758,7 @@ test("plan: network belongs to a change envelope, but each move must declare its
 
 // ─── Looking: only inside the project ───────────────────────────────────────
 
-test("task: a change focus executes the cached declared move contract and returns stated proof for review", async () => {
+test("task: a change focus executes the cached declared move contract through an isolated provider continuation", async () => {
 	const root = makeProject("move-contract", { git: false });
 	configure(root, { initiate: false });
 	const { brainDir } = setUpBrain(root);
@@ -783,9 +783,16 @@ test("task: a change focus executes the cached declared move contract and return
 		assert.equal(move.reported.claimed, true);
 		assert.equal(move.reported.proof, "Stand-in observed the task results above.", "proof is stored separately from the report claim");
 		assert.deepEqual(move.reported.changes, [], "checkpoint evidence is kept even for a read-only execution step");
-		const contractRequest = server.requests.map((request) => request.messages.map(rawText).join("\n")).find((text) => text.includes("Move contract:\nread: src/main.js"));
+		const contractRequest = server.requests.find((request) => request.messages.some((message) => rawText(message).includes("Move contract:\nread: src/main.js")));
 		assert.ok(contractRequest, "the child received the stored move action, not a broad new brief");
-		assert.match(contractRequest, /Required proof: The read output names the entry point\./);
+		const capsuleAt = contractRequest.messages.findIndex((message) => message.role === "tool" && rawText(message).startsWith(TASK_HEADER));
+		assert.ok(capsuleAt > 0, "the focused provider request carries the prepared capsule");
+		assert.equal(contractRequest.messages[capsuleAt - 1]?.role, "user", "the focused provider request has the user-role query its chat template requires");
+		assert.equal(rawText(contractRequest.messages[capsuleAt - 1]), FOCUS_START, "the continuation is request-only rather than replayed parent chat");
+		const focusOnly = contractRequest.messages.filter((message) => message.role !== "system").map(rawText).join("\n");
+		assert.doesNotMatch(focusOnly, /ignore this free-form text/, "the parent request is not replayed into the focus");
+		assert.match(focusOnly, /Required proof: The read output names the entry point\./);
+		assert.ok(server.requests.some((request) => request.messages.some((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.function?.name === "read"))), "the focus continues past its capsule with a normal focus-local read call");
 	} finally {
 		await server.close();
 	}
