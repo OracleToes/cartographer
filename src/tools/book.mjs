@@ -108,6 +108,10 @@ const CAPABILITIES = {
 		link: { ref: "required" },
 		unlink: { ref: "required" },
 		confirm: { confirmOk: true },
+		focus: { focusOk: true, fields: ["reason"] },
+		unfocus: {},
+		archive: { ref: "required" },
+		restore: { ref: "required" },
 		remove: { ref: "required" },
 		rename: { ref: "required", fields: ["to"] },
 		look: { lookOk: true },
@@ -189,6 +193,10 @@ const ACTION_GUIDE = {
 		confirm: "id (or node name) — or several via `names`",
 		link: "id (or node name), plus `files` (paths) and/or `links` (node names or ids)",
 		unlink: "id (or node name), plus `files` (paths) and/or `links` (node names or ids) to take off",
+		focus: "id or name for a node, or path for a project file/folder, plus a short reason; it stays until focus is replaced or unfocus clears it",
+		unfocus: "no other fields — clears only the explicit atlas focus, not a running move's temporary targets",
+		archive: "id (or node name) — keeps it reversibly outside the active map",
+		restore: "id (or node name) — returns an archived node to the active map",
 		remove: "id (or node name)",
 		look: "id, name, or path (a node id such as c3, a node name, or a project path)",
 		tree: "anchor and/or depth (folder of the project; anchor '.' is the root)",
@@ -247,7 +255,7 @@ const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "context"]);
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
 	plan: new Set(["add", "edit", "done", "remove", "before", "clear", "addMove", "editMove", "acceptMove"]),
-	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove", "rename"]),
+	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "focus", "unfocus", "archive", "restore", "remove", "rename"]),
 	context: new Set(["archive", "restore"]),
 };
 function listBrainRecords(target, brainDir) {
@@ -549,7 +557,12 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		}
 		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
 		if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
-		const needsRef = action !== "add" && !(target === "plan" && (action === "clear" || action === "addMove")) && !(target === "atlas" && action === "confirm" && args.ref === undefined);
+		const atlasOwnTarget = target === "atlas" && (
+			(action === "confirm" && args.ref === undefined)
+			|| (action === "focus" && args.ref === undefined)
+			|| action === "unfocus"
+		);
+		const needsRef = action !== "add" && !(target === "plan" && (action === "clear" || action === "addMove")) && !atlasOwnTarget;
 		let current;
 		if (needsRef) {
 			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
@@ -570,6 +583,8 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			const atlasOp = {
 				action,
 				...(needsRef ? { name: current.record.id } : args.name !== undefined ? { name: args.name } : {}),
+				...(args.path !== undefined ? { path: args.path } : {}),
+				...(args.reason !== undefined ? { reason: args.reason } : {}),
 				...(args.gist !== undefined ? { gist: args.gist } : {}),
 				...(args.detail !== undefined ? { detail: args.detail } : {}),
 				...(args.files !== undefined ? { files: args.files } : {}),
@@ -577,7 +592,6 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 				...(args.to !== undefined ? { to: args.to } : {}),
 				...(args.names !== undefined ? { names: args.names } : {}),
 			};
-			const { plan } = loadPlan(brainDir);
 			try {
 				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
 				if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
@@ -965,6 +979,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		links: opt(arr(str(), { description: "Related atlas node names or IDs on add/edit/link/unlink." })),
 		to: opt(str({ description: "New node name on atlas rename." })),
 		names: opt(arr(str(), { description: "Multiple atlas node names or IDs on atlas confirm." })),
+		reason: opt(str({ description: "Short reason for an explicit atlas focus. Focus persists until another focus or atlas unfocus clears it." })),
 		anchor: opt(str({ description: 'Project folder to root the file tree at on atlas tree ("." resets to the project root).' })),
 		depth: opt(int({ minimum: 1, maximum: 6, description: "Directory levels (1-6) to draw on atlas tree." })),
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
@@ -990,6 +1005,7 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		if (spec.ref === "required" && args.ref === undefined) problems.push("`id`");
 		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "`id` or `path`");
 		if (spec.confirmOk && args.ref === undefined && !nonEmpty(args.name) && !(Array.isArray(args.names) && args.names.some(nonEmpty))) problems.push("`id` (or `names`)");
+		if (spec.focusOk && args.ref === undefined && !nonEmpty(args.name) && !nonEmpty(args.path)) problems.push("`id`, `name` or `path`");
 		if (spec.lookOk && args.ref === undefined && !nonEmpty(args.name) && !nonEmpty(args.path)) problems.push("`id`, `name` or `path`");
 		for (const field of spec.fields ?? []) if (!nonEmpty(args[field])) problems.push(field);
 		for (const field of spec.exactFields ?? []) if (typeof args[field] !== "string" || args[field] === "") problems.push(field);

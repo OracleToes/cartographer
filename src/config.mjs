@@ -24,7 +24,7 @@ const freezeTree = (value) => {
 	return value;
 };
 
-const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close", rename: "rename" });
+const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", restore: "restore", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", focus: "focus", unfocus: "unfocus", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close", rename: "rename" });
 const LEDGER_KIND = freezeTree({ goal: "goal", question: "question", note: "note" });
 const PLAN_MODE = freezeTree({ look: "look", change: "change" });
 const WAKE_KIND = freezeTree({ time: "time", file: "file", window: "window" });
@@ -118,7 +118,13 @@ export const POLICY = freezeTree({
 	limits: {
 		ledger: { textChars: 400, openEntries: 40, closedEntriesKept: 50 },
 		plan: { itemChars: 300, items: 30, moves: 120, targets: 4, proofChars: 300, moveTurns: { look: 4, change: 6, max: 8 }, moveBudget: { fileOps: 4, commandStarts: 2 } },
-		atlas: { nameChars: 80, gistChars: 400, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
+		atlas: {
+			nameChars: 80, gistChars: 400, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000,
+			// Attention is part of the atlas, not a user-tuned feature. Work epochs advance only at a meaningful
+			// completed observation batch; the numbers keep the active map small without exposing another control panel.
+			attention: { focusReasonChars: 240, gaps: 32, hotEpochs: 1, warmEpochs: 6, candidateEpochs: 12, listed: 8, candidates: 6 },
+		},
+
 		assessment: { textChars: 3000 },
 		context: { callsTokens: 1000, recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, operationReplay: 256, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
 		git: { errorChars: 400, maxBufferBytes: 256 * 1024 * 1024, checkoutBatchItems: 200, undoTimestampToleranceMs: 1000, checkpointBufferBytes: 64 * 1024 * 1024 },
@@ -224,7 +230,7 @@ export const POLICY = freezeTree({
 		windowWaitReasons: WINDOW_WAIT_REASON,
 		ledgerNonGoalKinds: [LEDGER_KIND.question, LEDGER_KIND.note],
 		wakeActions: [ACTION.set, ACTION.remove],
-		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree, rename: ACTION.rename },
+		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree, rename: ACTION.rename, focus: ACTION.focus, unfocus: ACTION.unfocus, archive: ACTION.archive, restore: ACTION.restore },
 		atlasAuthors: { main: "main", task: "task", user: "user" },
 		shellAction: { run: ACTION.run, read: ACTION.read, wait: ACTION.wait, send: ACTION.send, stop: ACTION.stop, close: ACTION.close },
 		shellActions: [ACTION.run, ACTION.read, ACTION.wait, ACTION.send, ACTION.stop, ACTION.close],

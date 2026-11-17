@@ -71,11 +71,16 @@ export function archiveRow(brainDir, id) {
 		savePlan(brainDir, plan);
 		return `${id} archived: the ${found.what === "plan move" ? "move" : "envelope"} leaves the plan as the agent reads it, and waits in the file; /unarchive brings it back.`;
 	}
-	const { atlas } = loadAtlas(brainDir);
-	const node = atlas.nodes.find((entry) => entry.name === id);
-	node.archived = true;
-	saveAtlas(brainDir, atlas);
-	return `${id} archived: the node leaves the outline as the agent reads it, and waits in the file; /unarchive brings it back.`;
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.archive, name: id }, { now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error) {
+		if (error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
 }
 
 /** The reverse of `archiveRow`: the row stands in what the agent reads again. @returns the line to show */
@@ -98,11 +103,16 @@ export function unarchiveRow(brainDir, id) {
 		savePlan(brainDir, plan);
 		return `${id} is back in the plan as the agent reads it.`;
 	}
-	const { atlas } = loadAtlas(brainDir);
-	const node = atlas.nodes.find((entry) => entry.name === id);
-	delete node.archived;
-	saveAtlas(brainDir, atlas);
-	return `${id} is back in the outline as the agent reads it.`;
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.restore, name: id }, { now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error) {
+		if (error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
 }
 
 /**
@@ -135,13 +145,14 @@ export function dropRow(brainDir, id) {
 	}
 	const { atlas, error } = loadAtlas(brainDir);
 	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
-	const at = atlas.nodes.findIndex((entry) => entry.name === id);
-	if (at < 0) return `There is no node ${id}. /atlas lists the nodes.`;
-	atlas.nodes.splice(at, 1);
-	let links = 0;
-	for (const other of atlas.nodes) if (other.links.includes(id)) { other.links = other.links.filter((link) => link !== id); links++; }
-	saveAtlas(brainDir, atlas);
-	return `${id} is gone for good: the node is out of the graph${links > 0 ? `, and ${links === 1 ? "1 link" : `${links} links`} to it went with it` : ""}, and nothing of it is said to the agent.`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.remove, name: id }, { now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return `${id} is gone for good: ${result.line} Nothing of it is said to the agent.`;
+	} catch (error) {
+		if (error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
 }
 
 /**

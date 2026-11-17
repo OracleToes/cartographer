@@ -2,7 +2,7 @@
 //
 // Returns exact UTF-8 lines with no line numbers (so what is seen matches `file edit`), stamped with the catalog
 // file ID and SHA-256 digest (`· file f1 @<64 hex>`). Successful reads from one assistant reply form one bounded
-// batch at `<read-tail>`; the next successful batch replaces it. Keeping files beyond that replacement belongs to
+// batch at `<read-tail>`; a later successful batch removes the prior batch from active view. Keeping files beyond that belongs to
 // `shelf`.
 import { defineTool } from "@earendil-works/pi-durable";
 import { compile, obj, opt, str } from "@earendil-works/pi-schema";
@@ -108,6 +108,7 @@ export function runFileRead({ root, brainDir }, args, { tokenCeiling } = {}) {
 	} catch (error) { return fail(`Cannot read the requested selection: ${error.message}.`); }
 	return textResult(`${selected}${readablePinned ? "\n(a pinned historical version; the current content differs)" : ""}`, {
 		ref: result.ref ?? ref,
+		path: record.path,
 		status: result.status,
 		version: result.resolvedVersion ?? result.currentVersion,
 	});

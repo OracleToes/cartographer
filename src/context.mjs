@@ -1206,8 +1206,8 @@ const LEGACY_SHELF_ASK_BLOCK = /\n*<shelf-ask>[\s\S]*?<\/shelf-ask>\n?/g;
 
 const flatWords = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
-/** The one line a read leaves in its place when a later successful batch replaced it. */
-const evictedReadLine = (call) => `[the result of this read is no longer in view — ${flatWords(callWords(call))}. A later successful read batch replaced it. Call \`read\` in a later batch to see it again, or \`shelf\` (action="add") it before that.]`;
+/** The one line a read leaves in its place when a later successful batch removes it from active view. */
+const evictedReadLine = (call) => `[the result of this read is no longer in active view — ${flatWords(callWords(call))}. A later successful read batch removed the prior batch from active view. Call \`read\` in a later batch to see it again, or deliberately preserve it on \`shelf\` (action="add") before that.]`;
 
 /** The one line a read leaves in its place, saying where its content stands instead. */
 const movedReadLine = (call) => `[the result of this read stands in the current read batch at the end of the request — ${flatWords(callWords(call))}.]`;
@@ -1217,7 +1217,7 @@ const readBatchTail = (entries) => {
 	const listed = entries.map(({ call }) => flatWords(callWords(call))).join(", ");
 	return [
 		`Current read batch: ${listed}. This is the only transient file content in view.`,
-		"The next successful read batch replaces this whole batch. That replaces only this transient tail; it is not a context collapse. Before that, I shelf source material I need afterward or write lasting conclusions to the shared ledger, atlas or assessment.",
+		"A later successful read batch removes the prior batch from active view. That changes only this transient tail; it is not a context collapse. Before that happens, I deliberately preserve source material I need afterward on the shelf or write lasting conclusions to the shared ledger, atlas or assessment.",
 		"",
 		...entries.map(({ message }) => textOf(message)),
 	].join("\n");

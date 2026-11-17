@@ -74,7 +74,18 @@ The automatic out-of-brain focus dispatch (`externalWork`) and the `mainLooks` r
 - **The ceiling does not wait for a tool round.** The collapse is normally decided after a round of tool results (`afterMainCall`); a stretch of plain replies never reaches one. Since 2026-11-16 the plain-reply path checks the same line itself: at it, the run ends, the rest path collapses with a forced marker even with nothing droppable (the reset costs one re-read of what was kept), and the task path checks before every request. A notes-only run is never allowed to grow the window without limit.
 - **Nothing is lost, anything is forgettable.** Soft-forget (message edit) is the confirmed contract, unchanged: the agent may drop its messages from view; the Durable transcript remains, append-only, forensically recoverable. Reclaiming storage is a separate lifecycle, not this design's job (see Open).
 
-## 8. The shared brain — one engine, two doors
+## 8. Atlas attention — claims stay durable, work gets a bounded trail
+
+The atlas graph is durable project knowledge. Its attention record is a bounded derived trail, stored beside the graph but never used as evidence that a claim is true, false, archiveable, or removable.
+
+- A nonempty factual batch advances one bounded work epoch. Successful deliberate reads and shelf placements, explicit Atlas use, task/checkpoint changes, file drift, and broken links may supply facts. The interpretation is centralized in Atlas rather than being independently re-scored by tools or screens.
+- An observed active node is direct hot. Its inbound or outbound neighbours are warm for exactly one graph hop; warmth does not recurse. A touched project path that maps to no active node remains a visible mapping gap rather than causing a guessed node to be created.
+- Verification pressure is independent: staleness, missing fingerprints, broken graph links, and mapping gaps belong under `Needs checking` even when the related node is hot. The next action is re-read, verify, relink, or map — not an automatic factual rewrite.
+- Explicit focus is a durable lens on one existing node or confined project path, with a short reason and author. It persists until `focus` visibly replaces it or `unfocus` clears it. A running declared move adds only a temporary target overlay and never replaces the lens.
+- Cold isolated nodes can be explained archive candidates only. Active work shows their count, while idle/maintenance work may show their detail. Archive is reversible, confirmation re-heats, and removal requires deliberate verification; nothing decay-related auto-archives or auto-removes a claim.
+- The request-tail local text map is the one projection for focus, active work, hot, nearby, mapping gaps, checking pressure, and candidates. It is freshly derived; the frozen top-of-context graph/tree remains structural and cache-friendly.
+
+## 9. The shared brain — one engine, two doors
 
 The pair-programmer dyad has a mechanical consequence: **the UI and the agent must be clients of the same operation engine, not two implementations of overlapping gestures.**
 
@@ -83,14 +94,14 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 - Concretely, the brain on screen gets the parity the agent has and lacks today: authorization envelopes and moves with their revision, targets, proof, capabilities, budget and lifecycle state, ledger edits, atlas nodes, the assessment, reports, shelf placements — all editable in place, all with the same preconditions (expectedVersion) and the same messages. The user gardens the brain as fluently as the agent does.
 - The chat remains the steering wheel: always available, reaches the agent immediately (it interrupts a turn naturally via the next result), and every user/agent message stays editable by both parties.
 
-## 9. What the harness guarantees, always
+## 10. What the harness guarantees, always
 
 - Declared moves are the only way project files change; approval is per exact move revision and async; checkpoints bracket every change focus; `/undo` reopens that move as a fresh unapproved revision; `.git/` and `.brain/` are never written by change foci; project-root confinement including symlinks; sandboxed commands by default with per-move network control. Shell scope is checked from the final checkpoint diff rather than claimed as preventative confinement.
-- The agent cannot brick anything it does not own: it cannot touch the user's `.git`, cannot edit the plan of *its own* program directory without a project there (and it has no standing duty to edit its own harness at all — see §10), cannot erase the transcript.
+- The agent cannot brick anything it does not own: it cannot touch the user's `.git`, cannot edit the plan of *its own* program directory without a project there (and it has no standing duty to edit its own harness at all — see §11), cannot erase the transcript.
 - Every failure is actionable: local validators fail closed with a message naming the exact field at fault; unresolved references report their status (`live | stale | deleted | …`); unsupported operations list what *is* supported. If the 27B fails, it fails in one round trip with the fix in hand — never a silent swallow.
 - Nothing is lost silently: soft-forget never claims erasure; the checkpoint journal contradicts any task that claims a change it did not make.
 
-## 10. What this design deletes or parks
+## 11. What this design deletes or parks
 
 - **Stage 6 clusters** (recency-reordered user-area memory summaries): consciously deferred; the substance of the deferral stands. **DECIDED 2026-11-16, and shipped the same day: the collapsed block is typed, mechanically, with a local hour:minute on every line — the record and the salient notes chronological, a structured shelf listing before the contents, the talk verbatim and capped at `chatWindow` with each saying minute-stamped, and one line per call of the stretch (minute · call → outcome, the newest that fit under `callsTokens`). No model writes any of it; the keep-set is unchanged, so this is §7 with better typography, not Stage 6. The Context tab shows the same objects as rows with the verbs they carry elsewhere.** The user chose this deliberately, knowing the tension; it is not evidence for unparking Stage 6.
 - **The handoff ask** before non-user-initiated collapse: the 0.6B-era metacognition gate. **DECIDED 2026-11-15 (O1): opt-in (`handoffQuestion`), never the default.**
@@ -99,7 +110,7 @@ The pair-programmer dyad has a mechanical consequence: **the UI and the agent mu
 - **Recursive self-improvement as a standing duty**: cut (user-confirmed). The agent maps and maintains *the project it is aimed at*. Its own harness is fixed furniture unless the user aims it at the install directory deliberately, in which case changes still go through the same declared-move gate.
 - **Plugins**: not built, not designed here. **Retention/prune lifecycle** for old transcript (separate, unresolved; explicit user conversation before any design). For the record, what grows on a long goal with nothing ever reclaimed: the Durable transcript, the catalog, and the index memo under `.brain/catalog/`. Parked until the user wants it designed; the cost is visible and the mitigation is none. **Stage 8-scale verification**: deferred; to be reconsidered only with live evidence from a real session.
 
-## 11. Decisions (small, explicit)
+## 12. Decisions (small, explicit)
 
 Decided items are marked **DECIDED** with their date; the rest stay open.
 
@@ -111,10 +122,10 @@ O5. **A read-only command lane for the orchestrator — DECIDED 2026-11-15: yes.
 O6. **Measurement gate.** May a live 27B session be used as acceptance evidence, or is it observational only (observation + manual review; no pass/fail claims)?
 I1. **Initiation — DECIDED 2026-11-15.** A config setting and a `/command` toggle govern whether the agent self-initiates on start and after wakes with nothing owed; it self-initiates by **default**. (Not prompt-only, and not a forced startup note.)
 
-## 12. What does not change
+## 13. What does not change
 
 The identity catalog and `{ namespace, kind, id, version }` envelope; expected-version semantics and stale-write refusal; idempotent replay; the namespace/fork policy; `.cartoignore` discovery semantics; soft-forget's transcript-preserving contract; checkpoints/undo; plan exclusivity for the orchestrator; wake/sleep exclusivity; the Requests view and the approval flow; the ledger limits; chat as a tool of both contexts. None of this is relitigated here; all of it is the substrate the charter stands on.
 
-## 13. Honesty policy
+## 14. Honesty policy
 
 Every change verifies offline first (`node --check`, module imports, stub probes, no live model claims). Live evidence is gathered once, deliberately, on a throwaway project, and reported as what it is: one session, one model, one project. Nothing in this design is verified by assertion. Where the design is wrong, a live session is how we find out.

@@ -13,7 +13,7 @@
 // waits for its user; its working conversation will be forgotten when it leaves view.
 import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
-import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
+import { activeMoveOverlays, attentionSnapshot, fileMarks, linkedCount, loadAtlas, renderAttention } from "./atlas.mjs";
 import { loadLedger, open, renderLedger } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, movesOf, reportedMoves, runnableMoves, renderPlan } from "./plan.mjs";
 import { requestLines } from "./requests.mjs";
@@ -242,7 +242,7 @@ export function windowLines(windows, tail = {}) {
 }
 
 /** The tree, and what the atlas holds that the copy at the top of the context does not. */
-function atlasText(brainDir, root, config, now) {
+function atlasText(brainDir, root, config, now, task) {
 	const { atlas, error } = loadAtlas(brainDir);
 	const tree = treeSection(root, atlas?.view, { marks: atlas ? fileMarks(atlas) : undefined, depth: config?.treeDepth });
 	const head = `Tree\n${tree.text}\n\nAtlas\n`;
@@ -265,10 +265,10 @@ function atlasText(brainDir, root, config, now) {
 		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("I rewrote the assessment since that copy: my `book` call holds the text that counts.");
 		else lines.push(`The assessment was edited outside this conversation since that copy, probably by ${USER_NAME}. It now reads:\n${assessment.text}`);
 	}
-	const stale = staleNodes(root, atlas, now);
-	if (stale.length > 0) {
-		lines.push(`May be out of date: ${stale.slice(0, POLICY.limits.terminal.staleNodes).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > POLICY.limits.terminal.staleNodes ? `; and ${stale.length - POLICY.limits.terminal.staleNodes} more` : ""}. I have a task check each against its files, then rewrite the node, or confirm it when it still holds.`);
-	}
+	const { plan } = loadPlan(brainDir);
+	const active = activeMoveOverlays(plan);
+	const local = renderAttention(attentionSnapshot(root, atlas, { active, now }), { idle: active.length === 0 && task === undefined });
+	if (local !== "") lines.push(local);
 	return `${head}${lines.join("\n")}\n\n`;
 }
 
@@ -286,7 +286,7 @@ export function stateBlock(brainDir, runner, more = {}) {
 	const now = more.now ?? Date.now();
 	const { ledger, error } = loadLedger(brainDir);
 	const { plan, error: planError } = loadPlan(brainDir);
-	const front = `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now)}`;
+	const front = `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now, more.task)}`;
 	let body;
 	if (ledger === undefined) {
 		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, the ledger cannot be shown or changed.`;

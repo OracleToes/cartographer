@@ -241,7 +241,7 @@ export async function runShelf({ root, brainDir, config }, action, args, api, ca
 		const percent = Math.round((totalTokens / shelfSpace(config?.contextWindow)) * 100);
 		return textResult(
 			`Added ${shelfLabel(item)} to the shelf as placement ${item.id} (about ${count(picked.tokens)} tokens; shelf at ${percent}% of capacity, shown in the state block and carried through collapse).`,
-			{ placement: item.id, ref: item.target, tokens: picked.tokens },
+			{ placement: item.id, ref: item.target, paths: item.type === "file" && typeof item.path === "string" ? [item.path] : [], tokens: picked.tokens },
 		);
 	}
 	if (action === "remove") {

@@ -1,7 +1,7 @@
 // A reply's project-file reads are one transient batch.
 //
 // `dressReads` puts every successful read from the newest such reply together at the end of the next request. A
-// batch is deliberately short-lived: the next successful batch replaces all of it, while `shelf` is the explicit
+// batch is deliberately short-lived: a later successful batch removes the prior batch from active view, while `shelf` is the explicit
 // place for files that must survive a later batch or a collapse. This module keeps the batch bounded before disk is
 // read, and gives every permitted call an even share of the existing read-output ceiling.
 import { POLICY } from "./config.mjs";

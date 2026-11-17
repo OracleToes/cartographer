@@ -21,7 +21,7 @@ import { createRefDescriber } from "./refs.mjs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
-import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
+import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
@@ -1175,7 +1175,9 @@ export async function runTerminal(session, options) {
 						"  /report   the last task's report in full; /report t12 shows a kept one",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
-						"  /atlas    the tree as the agent sees it, the graph's nodes, and where the file is",
+						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
+						"  /focus TARGET reason    set an explicit atlas focus on a node id/name or project path",
+						"  /unfocus  clear the explicit atlas focus (a running move's targets remain temporary)",
 						"  /assessment  the agent's summary of the project, and where the file is",
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
 						"  /requests what waits for you: declared move revisions and questions of taste",
@@ -1289,6 +1291,43 @@ export async function runTerminal(session, options) {
 				line(dim(`  ${planPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
+			case "focus": {
+				if (argument === undefined || tail === "") {
+					line("  /focus needs a node id/name or project path, then a short reason. Example: /focus c3 trace the request path");
+					return true;
+				}
+				const { atlas, error } = loadAtlas(options.brainDir);
+				if (atlas === undefined) {
+					line(`! The atlas cannot be read: ${error}`);
+					return true;
+				}
+				try {
+					const node = findNode(atlas, argument);
+					const result = applyAtlasOp(atlas, node === undefined ? { action: POLICY.enums.atlasActions.focus, path: argument, reason: tail } : { action: POLICY.enums.atlasActions.focus, name: node.id, reason: tail }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+					if (result.changed) saveAtlas(options.brainDir, atlas);
+					line(result.line);
+				} catch (error) {
+					if (error instanceof AtlasError) line(`! ${error.message}`);
+					else throw error;
+				}
+				return true;
+			}
+			case "unfocus": {
+				const { atlas, error } = loadAtlas(options.brainDir);
+				if (atlas === undefined) {
+					line(`! The atlas cannot be read: ${error}`);
+					return true;
+				}
+				try {
+					const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.unfocus }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+					if (result.changed) saveAtlas(options.brainDir, atlas);
+					line(result.line);
+				} catch (error) {
+					if (error instanceof AtlasError) line(`! ${error.message}`);
+					else throw error;
+				}
+				return true;
+			}
 			case "atlas": {
 				const { atlas, error } = loadAtlas(options.brainDir);
 				line(bold("Tree"));
@@ -1296,10 +1335,12 @@ export async function runTerminal(session, options) {
 				if (atlas === undefined) line(`! The graph cannot be read: ${error}`);
 				else {
 					line(bold(`Graph: ${atlasSummary(atlas)}`));
+					const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
+					const local = renderAttention(attentionSnapshot(options.root, atlas, { active: overlays }), { idle: !busy && overlays.length === 0 });
+					if (local !== "") line(local);
 					if (atlas.nodes.length > 0) line(renderOutline(atlas, Number.POSITIVE_INFINITY));
-					for (const node of staleNodes(options.root, atlas)) line(`  may be out of date: ${node.name} (${node.why.join(", ")})`);
 				}
-				line(dim(`  ${atlasPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
+				line(dim(`  ${atlasPath(options.brainDir)} · /focus TARGET reason sets a lens; /unfocus clears it; edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "assessment": {
@@ -1847,9 +1888,10 @@ export async function runTerminal(session, options) {
 	const atlasLine = () => {
 		const { atlas, error } = loadAtlas(options.brainDir);
 		if (atlas === undefined) return line(`! The atlas cannot be read: ${error}. Repair the file; until then the agent cannot use its graph.`);
-		const stale = atlas.nodes.length > 0 ? staleNodes(options.root, atlas).length : 0;
+		const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
+		const attention = attentionSummary(attentionSnapshot(options.root, atlas, { active: overlays }));
 		const assessment = loadAssessment(options.brainDir);
-		line(dim(`atlas: ${atlasSummary(atlas)}${stale > 0 ? `, ${stale} may be out of date` : ""} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
+		line(dim(`atlas: ${atlasSummary(atlas)}${attention === "" ? "" : ` · ${attention}`} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
 	};
 
 	// ─── Start ──────────────────────────────────────────────────────────────

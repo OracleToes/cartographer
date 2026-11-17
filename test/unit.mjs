@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { contextWindowLimits, POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
-import { loadAtlas, saveAtlas } from "../src/atlas.mjs";
+import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
 import { createRefDescriber } from "../src/refs.mjs";
 import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate, editRow } from "../src/ops.mjs";
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
@@ -433,6 +433,61 @@ test("atlas: a graph written before ids existed gets them, deterministically, an
 	assert.deepEqual(loadAtlas(brainDir).atlas.nodes.map((node) => node.id), ["c1", "c7", "c2"], "and what was saved is what is read back");
 });
 
+test("atlas attention: focus, one-hop heat, gaps, decay and archive candidates stay separate from map truth", (t) => {
+	const { brainDir, root } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "entry.mjs"), "export const entry = 1;\n");
+	writeFileSync(join(root, "src", "nearby.mjs"), "export const nearby = 1;\n");
+	writeFileSync(join(root, "src", "unmapped.mjs"), "export const unmapped = 1;\n");
+	const { atlas } = loadAtlas(brainDir);
+	const who = { root, now: NOW, by: POLICY.enums.atlasAuthors.main, main: true, files: () => ["src/entry.mjs", "src/nearby.mjs", "src/unmapped.mjs"] };
+	applyAtlasOp(atlas, { action: "add", name: "entry", gist: "The entry path.", files: ["src/entry.mjs"], links: ["nearby"] }, who);
+	applyAtlasOp(atlas, { action: "add", name: "nearby", gist: "The direct neighbour.", files: ["src/nearby.mjs"] }, who);
+	applyAtlasOp(atlas, { action: "add", name: "orphan", gist: "A leaf no one uses." }, who);
+	const entry = atlas.nodes.find((node) => node.name === "entry");
+	applyAtlasOp(atlas, { action: "focus", path: "src/entry.mjs", reason: "Start at the file boundary." }, who);
+	const focused = applyAtlasOp(atlas, { action: "focus", name: entry.id, reason: "Trace request delivery." }, who);
+	assert.match(focused.line, /Focus changed from src\/entry\.mjs to c1 entry/, "a replacement is explicit rather than silently inferred from work");
+	observeAtlas(atlas, [{ kind: "read", paths: ["src/entry.mjs", "src/unmapped.mjs"] }], { at: NOW });
+	const active = activeMoveOverlays({ moves: [
+		{ id: "m1", status: POLICY.enums.moveStatus.running, targets: ["src/entry.mjs"] },
+		{ id: "m2", status: POLICY.enums.moveStatus.open, targets: ["src/nearby.mjs"] },
+	] });
+	assert.deepEqual(active, [{ kind: "move", paths: ["src/entry.mjs"], label: "m1 targets src/entry.mjs" }], "only a running declared move becomes a temporary overlay");
+	let snapshot = attentionSnapshot(root, atlas, { active });
+	assert.equal(snapshot.focus.label, "entry");
+	assert.deepEqual(snapshot.hot.map((entry) => entry.node.name), ["entry"]);
+	assert.deepEqual(snapshot.warm.map((entry) => entry.node.name), ["nearby"], "only one graph hop is warmed");
+	assert.deepEqual(snapshot.gaps.map((gap) => gap.path), ["src/unmapped.mjs"], "an active, unmapped path is a gap rather than an invented node");
+	assert.match(renderAttention(snapshot), /Focus: entry/);
+	assert.match(renderAttention(snapshot), /Mapping gaps/);
+
+	writeFileSync(join(root, "src", "entry.mjs"), "export const entry = 200;\n");
+	snapshot = attentionSnapshot(root, atlas, { active: { kind: "task", label: "m1 targets src/entry.mjs", paths: ["src/entry.mjs"] } });
+	assert.deepEqual(snapshot.care.map((entry) => entry.node.name), ["entry"], "file drift is care pressure, not ordinary warmth");
+
+	for (let round = 0; round < POLICY.limits.atlas.attention.candidateEpochs; round++) observeAtlas(atlas, [{ kind: "read", paths: ["src/entry.mjs"] }], { at: NOW });
+	snapshot = attentionSnapshot(root, atlas);
+	assert.deepEqual(snapshot.gaps.map((gap) => gap.path), ["src/unmapped.mjs"], "a persisted mapping gap stays visible until an existing node covers it");
+	assert.deepEqual(snapshot.candidates.map((candidate) => candidate.node.name), ["orphan"], "only a cold unreferenced leaf becomes a reversible archive candidate");
+	assert.match(renderAttention(snapshot, { idle: true }), /Cold candidates: 1/);
+	applyAtlasOp(atlas, { action: "archive", name: "orphan" }, who);
+	assert.equal(attentionSnapshot(root, atlas).candidateCount, 0, "archiving resolves the candidate without removing the node");
+	applyAtlasOp(atlas, { action: "restore", name: "orphan" }, who);
+	assert.equal(atlas.nodes.find((node) => node.name === "orphan").archived, undefined);
+	applyAtlasOp(atlas, { action: "rename", name: "entry", to: "delivery" }, who);
+	assert.equal(attentionSnapshot(root, atlas).focus.label, "delivery", "focus follows the stable node id through a rename");
+
+	saveAtlas(brainDir, atlas);
+	const reloaded = loadAtlas(brainDir).atlas;
+	assert.equal(reloaded.view.focus.target.id, entry.id, "focus and attention survive a restart by durable id");
+	applyAtlasOp(reloaded, { action: "archive", name: "delivery" }, who);
+	assert.equal(reloaded.view.focus.target.id, entry.id, "archiving never silently clears an explicit focus lens");
+	assert.match(renderAttention(attentionSnapshot(root, reloaded)), /archived; restore it to make it active/);
+	assert.throws(() => applyAtlasOp(reloaded, { action: "remove", name: "delivery" }, who), /explicit focus/, "removal asks for an explicit clear or replacement first");
+	assert.equal(fileMarks(reloaded).has("src/entry.mjs"), false, "an archived node leaves the active tree marks too");
+});
+
 test("atlas: the ref system takes the node, end to end through the book tool", async (t) => {
 	const { brainDir, root } = fresh(t);
 	mkdirSync(join(root, "src"), { recursive: true });
@@ -446,6 +501,12 @@ test("atlas: the ref system takes the node, end to end through the book tool", a
 	assert.ok(!added.isError, added.output[0].text);
 	const id = loadAtlas(brainDir).atlas.nodes[0].id;
 	assert.match(id, /^c\d+$/, "the node came back with a c-id");
+	const focused = await tool.execute(tool.prepareArguments({ target: "atlas", action: "focus", id, reason: "Trace the source boundary." }), api(), undefined);
+	assert.ok(!focused.isError, focused.output[0].text);
+	assert.equal(loadAtlas(brainDir).atlas.view.focus.target.id, id, "a book call can persist a node lens by its stable id");
+	const cleared = await tool.execute(tool.prepareArguments({ target: "atlas", action: "unfocus" }), api(), undefined);
+	assert.ok(!cleared.isError, cleared.output[0].text);
+	assert.equal(loadAtlas(brainDir).atlas.view.focus, undefined, "unfocus clears only the explicit lens");
 	const listed = await tool.execute({ target: "atlas", action: "list" }, api(), undefined);
 	assert.match(listed.output[0].text, new RegExp(`"id": "${id}"`), "and `list` returns a ref to it");
 	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", id }), api(), undefined);
@@ -1410,7 +1471,8 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	].join("\n");
 	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`|target=shelf|target="shelf"|`file read`|target\s*=\s*"?file"?[^.\n]*action\s*=\s*"?read"?|Should I shelf|asked when I read|asked whether to shelf/);
 	assert.match(TOOLS.read, /read batch/);
-	assert.match(TOOLS.read, /next successful read batch replaces/);
+	assert.match(TOOLS.read, /later successful read batch removes the prior batch from active view/);
+	assert.match(TOOLS.read, /deliberately preserve source material/);
 	assert.match(TOOLS.read, /shared ledger, atlas or assessment/);
 	assert.match(LOOK_NOTE, /retain lasting conclusions in the shared ledger, atlas or assessment/);
 	assert.match(CHANGE_NOTE({ item: "p1", move: "m1", revision: 1, text: "Edit file", doneWhen: "The file is updated.", proof: "A check.", targets: ["src/file.mjs"] }), /keep lasting findings before return/);

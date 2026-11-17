@@ -1390,8 +1390,8 @@ test("context: file-read results are ephemeral — successful reply batches repl
 	assert.match(rawText(messages[8]), /No file at missing\.js/, "failed read stays inline");
 	assert.equal(rawText(messages[10]), "{ \"id\": \"c1\" }", "atlas read after the file read does not evict the file read");
 	assert.match(tail, /^Current read batch: read f9 lines 1-40\. This is the only transient file content in view\./);
-	assert.match(tail, /next successful read batch replaces this whole batch\. That replaces only this transient tail; it is not a context collapse\./);
-	assert.match(tail, /shelf source material I need afterward or write lasting conclusions to the shared ledger, atlas or assessment\./);
+	assert.match(tail, /later successful read batch removes the prior batch from active view\. That changes only this transient tail; it is not a context collapse\./);
+	assert.match(tail, /deliberately preserve source material I need afterward on the shelf or write lasting conclusions to the shared ledger, atlas or assessment\./);
 	assert.match(tail, /== c\.js \(lines 1-40 of 300\) · file f9 @1111\ngamma$/);
 	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2) · file f1 @0000\nalpha\nbeta", "the stored messages are not changed");
 	// Deterministic: the same request is dressed the same way.
@@ -1450,7 +1450,7 @@ test("context: successful reads from one reply stay together in call order until
 
 	const later = call("r-later", "main.js");
 	const replaced = dressReads([...first, { role: "assistant", content: [later] }, text("== main.js (lines 1-1 of 1) · file f4 @ddd\nboot();", { toolName: "read", toolCallId: later.id })]);
-	for (const at of [2, 3, 4]) assert.match(replaced.messages[at].content[0].text, /later successful read batch replaced it/, "the entire earlier batch leaves together");
+	for (const at of [2, 3, 4]) assert.match(replaced.messages[at].content[0].text, /later successful read batch removed the prior batch from active view/, "the entire earlier batch leaves together");
 	assert.match(replaced.tail, /^Current read batch: read main\.js\./);
 	assert.doesNotMatch(replaced.tail, /index\.html|dice\.js|smoke-p2\.js/, "only the new batch remains at the tail");
 });
@@ -1481,6 +1481,29 @@ test("harness: one reply's admitted reads share a tail batch, the ninth is refus
 		assert.match(tails[1], /^<read-tail>\nCurrent read batch: read src\/main\.js\./);
 		assert.doesNotMatch(tails[1], /batch file [1-8]/, "the later successful batch replaces all earlier file content together");
 		assert.equal(server.asides.length, 0, "batch turnover does not create a collapse question or read-ahead request");
+	} finally {
+		await server.close();
+	}
+});
+
+test("atlas attention: a completed read and shelf batch publishes one durable mapping epoch", async () => {
+	const root = makeProject("atlas-attention-publisher", { git: false });
+	configure(root, { initiate: false });
+	const { brainDir } = setUpBrain(root);
+	const { atlas } = loadAtlas(brainDir);
+	applyAtlasOp(atlas, { action: "add", name: "entry", gist: "The main entry point.", files: ["src/main.js"] }, { root, now: "2026-11-16T00:00:00.000Z", by: "main", main: true });
+	saveAtlas(brainDir, atlas);
+	const before = atlas.attention.epoch;
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, ["-p", 'task: read: src/main.js +++ shelf: {"action":"add","path":"src/math.js"} || then think']);
+		ok(result, "atlas attention publisher");
+		const persisted = loadAtlas(brainDir).atlas;
+		const entry = persisted.nodes.find((node) => node.name === "entry");
+		assert.equal(persisted.attention.epoch, before + 1, "one completed reply batch advances attention once, not once per tool result");
+		assert.equal(persisted.attention.nodes[entry.id].kind, "read", "the successful deliberate read heats its existing node");
+		assert.equal(persisted.attention.gaps["src/math.js"].kind, "shelf", "a successful shelf placement records an unmapped path as a gap instead of inventing a node");
+		assert.equal(persisted.nodes.length, 1, "observations never create an Atlas claim");
 	} finally {
 		await server.close();
 	}

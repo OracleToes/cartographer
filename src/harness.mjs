@@ -35,6 +35,7 @@ import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
 import { traceFile, watchTrace } from "./trace.mjs";
 import { createStreamFreeze } from "./stream.mjs";
+import { loadAtlas, observeAtlas, saveAtlas } from "./atlas.mjs";
 import { USER_NAME, USER_HEAD } from "./user.mjs";
 
 const PROVIDER = "local";
@@ -226,6 +227,36 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		return lines.length === 0 ? undefined : [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });
+	// Tools report plain, successful facts; the atlas alone maps a path to an existing node or keeps an unmapped
+	// path as a gap. This hook is deliberately the one publisher rather than a second score in each tool.
+	const atlasFacts = (call, result) => {
+		const details = result?.details ?? {};
+		if (call.name === "read" && result?.isError !== true && typeof details.path === "string") return [{ kind: "read", paths: [details.path] }];
+		if (call.name === "shelf" && call.arguments?.action === "add" && result?.isError !== true && Array.isArray(details.paths)) return [{ kind: "shelf", paths: details.paths }];
+		if (call.name === "task" && Array.isArray(details.changes) && details.changes.length > 0) return [{ kind: "checkpoint", paths: details.changes.map((change) => change?.path).filter((path) => typeof path === "string") }];
+		return [];
+	};
+	const atlasFactsInRound = new Map();
+	const publishAtlasFacts = (call, result, api) => {
+		const facts = atlasFacts(call, result);
+		const id = api.conversationId;
+		if (facts.length > 0) atlasFactsInRound.set(id, [...(atlasFactsInRound.get(id) ?? []), ...facts]);
+		// A response can call several reads or shelf adds. They are one factual batch and therefore one work epoch,
+		// even when Durable happens to complete their individual calls in a different order.
+		const last = [...(waiting.get(id) ?? new Map()).values()].every((open) => open <= 0);
+		if (!last) return;
+		const batch = atlasFactsInRound.get(id) ?? [];
+		atlasFactsInRound.delete(id);
+		if (batch.length === 0) return;
+		try {
+			const { atlas } = loadAtlas(brainDir);
+			if (atlas === undefined) return;
+			const observed = observeAtlas(atlas, batch, { at: new Date(api.now()).toISOString() });
+			if (observed.changed) saveAtlas(brainDir, atlas);
+		} catch {
+			// A map edited into an unreadable shape must not change whether the factual tool call itself succeeds.
+		}
+	};
 	const textOfAnswer = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();
 	// The question the agent waits on (src/asks.mjs).
 	const asks = createAsks({ config });
@@ -335,10 +366,13 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					}
 					return undefined;
 				},
-				afterTool: async (call, result, api) => {
+					afterTool: async (call, result, api) => {
 					if (call.parent !== undefined) return undefined;
 					const looped = loopCheck(call, result, api);
 					const out = looped ?? result;
+					// loopCheck has decremented this call; publishing now makes the final result of a reply commit the
+					// whole factual batch as one epoch rather than one epoch per independently completed call.
+					publishAtlasFacts(call, out, api);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
 						const id = api.conversationId;
