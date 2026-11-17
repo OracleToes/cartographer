@@ -61,13 +61,14 @@ export const TABS = [
 	{ id: "context", name: "Model" },
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
-const VIEWS = {
+export const VIEWS = {
 	carto: [
 		{ id: "atlas", name: "Atlas" },
 		{ id: "ledger", name: "Ledger" },
 		{ id: "plan", name: "Plan" },
 		{ id: "requests", name: "Requests" },
 		{ id: "tree", name: "Tree" },
+		{ id: "hands", name: "Current shared brain" },
 	],
 	diff: [
 		{ id: "last", name: "Last step" },
@@ -83,11 +84,10 @@ const VIEWS = {
 		{ id: "main", name: "Main sent" },
 		{ id: "preview", name: "Next preview" },
 		{ id: "parts", name: "Current accounting" },
-		{ id: "hands", name: "Current brain" },
 	],
 };
-/** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.preview", "context.parts", "context.hands"];
+/** Every view of every tab but Talk and Work, by the name it is kept under. */
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -163,9 +163,9 @@ export const KEYS_HELP = [
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
 	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk, a submitted message or delivered agent speech; private work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Current brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current brain)",
+	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain)",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
-	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
+	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
 	"  :                type a command",
@@ -498,6 +498,7 @@ export async function runScreen(session, options, runTerminal) {
 		"carto.plan": "t done · n new · v archive · d delete · e edit",
 		"carto.requests": "a approve · n deny · d forget · e edit",
 		"carto.tree": "Enter fold · y copy · e edit",
+		"carto.hands": "f fold · v archive · d delete · x unshelve · e edit",
 		"diff.last": "Enter open · y copy · e edit",
 		"diff.session": "Enter open · y copy · e edit",
 		"diff.git": "Enter open · y copy · e edit",
@@ -508,7 +509,6 @@ export async function runScreen(session, options, runTerminal) {
 		"context.preview": "Enter open · y copy",
 		"context.parts": "Enter open · + all · y copy",
 		work: "j k move · Enter open · y copy",
-		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
 	};
 	const legend = () => {
 		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
@@ -534,6 +534,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
 		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
 		if (id === "carto.tree") return treeView(env, isOpen);
+		if (id === "carto.hands") return handsView({ root, brainDir });
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
 		if (id === "shells.list") return shellsView(env);
 		if (id === "shells.out") return shellsOutView(env, state.shell);
@@ -543,7 +544,6 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		if (id === "context.preview") return previewView(pageOf(id).preview);
 		if (id === "context.parts") return accountingView(pageOf(id).text ?? "  …");
-		if (id === "context.hands") return handsView({ root, brainDir });
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -815,7 +815,8 @@ export async function runScreen(session, options, runTerminal) {
 		refresh(viewId(), true);
 	};
 	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
-	const editContext = () => {
+	/** e in Model, or on a Current shared brain record that has its own source. */
+	const editCurrent = () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
 		switch (item.editKind) {
@@ -1126,7 +1127,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const edit = () => {
 		if (chatTab()) return editChat();
-		if (state.tab === "context") return editContext();
+		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		if (BOOK_VIEWS[viewId()] !== undefined) {
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
@@ -1139,7 +1140,7 @@ export async function runScreen(session, options, runTerminal) {
 	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
 	const editInEditor = () => {
 		if (chatTab()) return editChat();
-		if (state.tab === "context") return editContext();
+		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		const book = BOOK_VIEWS[viewId()];
 		if (book !== undefined) {
 			const item = pageOf().list.selected();
@@ -1307,8 +1308,8 @@ export async function runScreen(session, options, runTerminal) {
 			// In Plan, n on an envelope declares one child move; elsewhere it opens the book's new-entry box.
 			if (key === "n" && viewId() === "carto.plan" && rowKey?.startsWith("envelope:")) return void openMoveBox(bookId);
 			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void openAddBox(BOOK_VIEWS[viewId()]);
-			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
-			if (key === "a" && viewId() === "context.hands") {
+			// In Current shared brain, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
+			if (key === "a" && viewId() === "carto.hands") {
 				setMode("type");
 				prompt.insertTextAtCursor("/shelve ");
 				return;
@@ -1445,7 +1446,7 @@ export async function runScreen(session, options, runTerminal) {
 		fileHint() {
 			if (state.tab === "context") return undefined;
 			const item = pageOf()?.list.selected();
-			const file = item?.target?.file ?? fileOf(viewId());
+			const file = item?.target?.file ?? item?.path ?? fileOf(viewId());
 			if (file === undefined) return undefined;
 			const rel = relative(root, file) || ".";
 			// Where e opens the small box on the row's fields (said in the strip below), the editor is E; anywhere else, e is the editor.

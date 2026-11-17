@@ -2144,6 +2144,20 @@ test("screen: the Next preview is explicit that its request plan was not sent", 
 	assert.match(accounting.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /neither a sent provider payload nor a promise of the next request/, "current accounting has its own temporal boundary");
 });
 
+test("screen: Current shared brain lives in Carto, not Model", async () => {
+	const [{ TABS, VIEWS }, { handsView }] = await Promise.all([
+		import("../src/screen/app.mjs"),
+		import("../src/screen/views.mjs"),
+	]);
+	assert.deepEqual(TABS.map((tab) => tab.name), ["Talk", "Work", "Carto", "Diff", "Shells", "Model"], "the top-level tabs name speech, private work, live brain, and provider inspection separately");
+	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
+	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
+	const current = handsView({ root: scratch, brainDir: join(scratch, "empty-current-brain") });
+	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");
+	has(header, "Current shared brain", "the live scope is named in the view itself");
+	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");
+});
+
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
 	const { contextView } = await import("../src/screen/views.mjs");
 	// Exactly what dressRequest produces after a read batch: the blocks are glued to the result, and the current batch stands at the very end.

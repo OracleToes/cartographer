@@ -7,8 +7,8 @@
 //
 // The Model tab is the one that is not read from a file. Its sent pane shows the frozen provider payload captured
 // immediately before dispatch: the system prompt, tools, then messages, with Cartographer's additions as parts of
-// their own. Response material belongs below a plain `not sent` boundary. Current brain state has its own view; a
-// sent snapshot is never rebuilt from it.
+// their own. Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto;
+// a sent snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -745,19 +745,21 @@ export const isFolder = (path) => {
 	}
 };
 
-// ─── The user's hands on the context ────────────────────────────────────────
+// ─── Current shared brain ───────────────────────────────────────────────────
 
 /**
- * The Context tab's fourth view: what the agent keeps with `shelf` and `book` context actions — the shelf and reports —
- * with the same operations offered to the user: a report folds out of view or comes back (f), a file comes off
- * the shelf (x), a file is shelved (a, which puts /shelve in the prompt). The typed commands /fold, /recall,
- * /shelve, /unshelve and /collapse do the same things from the prompt.
+ * Carto's current shared-brain view: what the agent keeps with `shelf` and `book` context actions — the shelf and
+ * reports — with the same operations offered to the user. These are live brain records, never children of a frozen
+ * sent request. A report folds out of view or comes back (f), a file comes off the shelf (x), and a file is shelved
+ * with a, which puts /shelve in the prompt. The typed commands /fold, /recall, /shelve, /unshelve and /collapse do
+ * the same things from the prompt.
  * @param {{ root: string, brainDir: string }} env
  */
 export function handsView({ root, brainDir }) {
 	const store = loadContext(brainDir);
 	const header = [
-		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and reports of finished work; salient notes live in the Ledger view", "muted"]],
+		[["Current shared brain", "bold"], ["  ·  live shelf and reports; not part of any sent provider request", "muted"]],
+		[["Your hands on what the agent keeps", "muted"], ["  ·  salient notes live in the Ledger view", "muted"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
