@@ -103,7 +103,10 @@ const nextShelfId = (brainDir, existing = []) => {
 		const store = loadContext(brainDir);
 		for (const item of store.shelf ?? []) scan(item);
 		if (Array.isArray(store.front?.shelf)) for (const item of store.front.shelf) scan(item);
-		for (const task of Object.values(store.tasks ?? {})) for (const item of task?.shelf ?? []) scan(item);
+		for (const task of Object.values(store.tasks ?? {})) {
+			for (const item of task?.shelf ?? []) scan(item);
+			for (const evidence of task?.evidence ?? []) scan(evidence?.item);
+		}
 	} catch { /* an unreadable store mints from the in-flight list alone */ }
 	try {
 		for (const file of readdirSync(join(brainDir, "shelf"))) {
