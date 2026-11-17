@@ -64,7 +64,7 @@ ctx ▮▮▮▯▯▯▯▯ 41k/100k · 1 goal · plan 2/5 · approved · 1 win
 
 | Tab | What it shows |
 |---|---|
-| **1 Chat** | What you and the agent say to each other, in full. What the agent does in between is folded: a run of calls is one line, `▸ 14 calls · t3 · 1m 12s`. The run that is going on is open by itself and shows its newest calls, and the reply that is being written is shown as it grows, whatever it holds: a note, a message to you, or the arguments of a call, such as the file a `write` is about to create |
+| **1 Chat** | What you and the agent say to each other, in full. What the agent does in between is folded: a run of calls is one line, `▸ 14 calls · t3 · 1m 12s`. The run that is going on is open by itself and shows its newest calls, and the reply that is being written is shown as it grows, whatever it holds: a note, a message to you, or the arguments of a call, such as the file a `write` is about to create. Long live reasoning keeps its newest two rows and says how many earlier rows are folded; select it and press Enter, or click it, to open the whole stream as it grows |
 | **2 Carto** | The agent's brain, one view at a time: Atlas (the graph, a node to a line), Ledger, Plan, Tree (the project's files, with folders that open), Assessment |
 | **3 Diff** | What was changed, a file to a line, each opening to its own part of the patch: by the last step, in this session, or against the project's own git `HEAD` |
 | **4 Shells** | The shell windows, live: what runs in each and for how long. Opened, a window shows its newest lines as they come; the Output view shows one window the way a terminal emulator does, its newest lines at the bottom |
@@ -84,7 +84,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | `1` to `5` | Go to a tab |
 | `[` and `]` | The previous and the next view inside Carto, Diff, Shells and Context (`H` and `L` do the same) |
 | `j`, `k` | Move down and up over the items. `g` and `G` go to the first and the last |
-| Enter, Space, `o` | Open what is selected, or fold it. `l` opens, `h` folds. In Chat, Enter on a call goes to the tab where that work lives (`write` and `edit` to Diff, `shell` and `window` to Shells, `plan`, `ledger`, `atlas` and `assess` to Carto, `context` to Context); a `read`, `search`, `list` or `task` opens in place to what it returned. In Shells, Enter on a window opens the Output view, and Enter there goes back to the list |
+| Enter, Space, `o` | Open what is selected, or fold it. `l` opens, `h` folds. In Chat, Enter on a long live reasoning stream opens its whole growing text; Enter on a call goes to the tab where that work lives (`write` and `edit` to Diff, `shell` and `window` to Shells, `plan`, `ledger`, `atlas` and `assess` to Carto, `context` to Context); a `read`, `search`, `list` or `task` opens in place to what it returned. In Shells, Enter on a window opens the Output view, and Enter there goes back to the list |
 | `+` and `-` | Open everything, fold everything (`zR` and `zM` do the same) |
 | Ctrl-D, Ctrl-U | Scroll half a page. Ctrl-F and Ctrl-B a page, Ctrl-E and Ctrl-Y a row |
 | `/` | Search the tab that shows. Enter or Down goes to the next match, Up to the one before, Esc closes the search |

@@ -26,8 +26,10 @@ import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
 const LIVE_ROWS = POLICY.limits.screen.chatLiveRows;
-/** How many rows of the reply that is being written are shown. */
+/** How many rows of a call body or storyteller tail are shown while it is being written. */
 const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
+/** How many rows of live reasoning stay in Chat until it is opened deliberately. */
+const LIVE_NOTE_ROWS = POLICY.limits.screen.notePreviewLines;
 /** The most of the context sent to the storyteller that an opened consult row shows; the question always shows in full. */
 const CONTEXT_MAX = Math.floor(POLICY.limits.screen.chatDetailChars / 2);
 /** The most of one result that is kept for opening it in place. */
@@ -64,6 +66,8 @@ export function homeOf(name, args = {}) {
 
 const textOf = (message) => (typeof message?.content === "string" ? message.content : (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""));
 const thinkingOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "thinking" ? [part.thinking ?? ""] : [])).join("\n");
+/** What the live note shows and copies: the model's reasoning followed by its ordinary text. */
+const noteOf = (message) => [thinkingOf(message), textOf(message)].filter((part) => part.trim() !== "").join("\n");
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?/, "").trim();
 /** The argument of a call that is worth watching while it is written: the longest text in it. */
@@ -74,6 +78,13 @@ function bodyOf(call) {
 		if (typeof args[key] === "string" && args[key].length > best.length) best = args[key];
 	}
 	return best;
+}
+
+/** The newest rows of a live reply, with how many earlier rows the compact view leaves out. */
+function previewTail(text, cols, rows) {
+	const wrapped = wrap(text, cols);
+	const omitted = Math.max(0, wrapped.length - rows);
+	return { lines: wrapped.slice(omitted), omitted };
 }
 
 /**
@@ -205,7 +216,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			for (const message of entry.model ?? []) {
 				if (message.role === "assistant") {
 					live.delete(depth);
-					const notes = [thinkingOf(message), textOf(message)].filter((part) => part.trim() !== "").join("\n").trim();
+					const notes = noteOf(message).trim();
 					const calls = message.stopReason === "length" ? [] : callsOf(message);
 					if (notes !== "") {
 						// A note of the main agent with no call beside it stands on its own; any other is a row of the run.
@@ -265,8 +276,17 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				return;
 			}
 			const before = live.get(depth);
-			live.set(depth, { message, since: before?.message.timestamp === message.timestamp ? before.since : now() });
+			const sameReply = before?.message.timestamp === message.timestamp;
+			live.set(depth, { message, since: sameReply ? before.since : now(), open: sameReply && before.open === true });
 			touch();
+		},
+		/** Open or fold the full live reasoning stream at one conversation depth. */
+		toggleLive(depth, to) {
+			const entry = live.get(depth);
+			if (entry === undefined) return false;
+			entry.open = to ?? !entry.open;
+			touch();
+			return true;
 		},
 		/** What the running tools at this depth are saying, as far as the harness keeps it: a bounded tail of each. */
 		liveTools(depth, slots) {
@@ -335,7 +355,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
 			touch();
 		},
-		/** Open every run of calls, or fold them all with what was opened inside them. */
+		/** Open every run of calls and the live reasoning stream, or fold them all with what was opened inside them. */
 		setAll(open) {
 			for (const item of items) {
 				if (item.type !== "group") continue;
@@ -343,6 +363,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				if (!open) for (const row of item.rows) row.open = false;
 				item.rev = (item.rev ?? 0) + 1;
 			}
+			for (const entry of live.values()) entry.open = open;
 			touch();
 		},
 		/** The colours have changed: what was rendered with the old ones is rendered again. */
@@ -589,18 +610,32 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				for (const line of own) out.push(line);
 				before = item.type;
 			}
-			// What is being written now, whatever it is.
+			// What is being written now, whatever it is. A long reasoning stream is a small, named tail until it is
+			// deliberately opened; then its whole text continues to grow in place. The state belongs only to this live reply.
 			for (const depth of [...live.keys()].sort((a, b) => a - b)) {
-				const { message } = live.get(depth);
+				const current = live.get(depth);
+				const { message } = current;
 				const indent = depth > 0 ? "  │ " : "";
-				const notes = [thinkingOf(message), textOf(message)].filter((part) => part.trim() !== "").join("\n");
+				const thoughts = thinkingOf(message);
+				const notes = noteOf(message);
 				const calls = callsOf(message);
 				// Inside a task, what is written belongs to the task's run, and has its background.
 				const block = depth > 0 ? { bg: "bgTool" } : {};
 				if (depth === 0 && (notes.trim() !== "" || calls.length > 0) && before !== "note") blank();
 				if (notes.trim() !== "" && thinking) {
-					const text = wrap(notes, inner - width(indent) - 2);
-					for (const piece of text.slice(-(calls.length > 0 ? 2 : LIVE_TEXT_ROWS))) add([[`${indent}┊ `, "faint"], [piece, "note italic"]], { kind: "live", ...block });
+					const room = inner - width(indent) - 2;
+					const full = current.open ? wrap(notes, room) : undefined;
+					const preview = current.open ? undefined : previewTail(notes, room, LIVE_NOTE_ROWS);
+					const pieces = full ?? preview.lines;
+					const omitted = preview?.omitted ?? 0;
+					const expandable = current.open || omitted > 0;
+					const ref = expandable ? { item: `live:${depth}`, kind: "live", liveDepth: depth, ...block } : { kind: "live", ...block };
+					if (expandable) {
+						const kind = thoughts.trim() === "" ? "note" : "thinking";
+						const lines = current.open ? `${full.length} ${full.length === 1 ? "line" : "lines"} · Enter folds` : `${omitted} earlier ${omitted === 1 ? "line" : "lines"} · Enter opens all`;
+						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${kind} · ${lines}`, "faint"]], ref);
+					}
+					for (const piece of pieces) add([[`${indent}┊ `, "faint"], [piece, "note italic"]], ref);
 				} else if (notes.trim() !== "" && calls.length === 0) add([[`${indent}┊ `, "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
 				for (const call of calls) {
 					if (call.name === "chat") {
@@ -621,6 +656,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 
 		/** The text of one item, for copying. */
 		textOf(key, rowIndex) {
+			const liveKey = /^live:(\d+)$/.exec(String(key));
+			if (liveKey !== null) {
+				const message = live.get(Number(liveKey[1]))?.message;
+				return message === undefined ? "" : noteOf(message);
+			}
 			const item = items.find((entry) => entry.key === key);
 			if (item === undefined) return "";
 			if (item.type === "block") return item.text;

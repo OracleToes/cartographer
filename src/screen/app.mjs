@@ -154,7 +154,7 @@ export const KEYS_HELP = [
 	"  1 to 5           go to a tab",
 	"  [ and ]          the previous and the next view inside Carto, Diff and Context (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter on a call goes to the tab where that work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter opens a long live reasoning stream or takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
@@ -1169,7 +1169,12 @@ export async function runScreen(session, options, runTerminal) {
 	const activate = ({ to, jump = false } = {}) => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
-		if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
+		if (line.kind === "live") {
+			chat.toggleLive(line.liveDepth, to);
+			// A live stream should keep following its newest text after it was deliberately opened.
+			return void chatScroll.scrollToEnd();
+		}
+		else if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
 		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
@@ -1192,7 +1197,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		copy(chat.textOf(line.item, line.row), "message", line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : "that message");
+		copy(chat.textOf(line.item, line.row), "message", line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : line.kind === "live" ? "that live reasoning" : "that message");
 	};
 
 	// ─── The commands mode ───────────────────────────────────────────────────

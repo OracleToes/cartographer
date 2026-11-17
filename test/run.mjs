@@ -1641,6 +1641,44 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	assert.equal(chat.lastAgent(), "It rolls one die.");
 });
 
+test("screen: long live reasoning names its compact tail, opens in Chat, and resets when it finishes", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const chat = createChat();
+	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const thought = Array.from({ length: 10 }, (_entry, index) => `thought ${index + 1}`).join("\n");
+	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: thought }] });
+	const compact = text();
+	has(compact, "▸ thinking · 8 earlier lines · Enter opens all", "a long stream names what is left out and how to open it");
+	has(compact, "thought 10", "the newest reasoning stays visible");
+	hasNot(compact, "thought 1\n", "the old reasoning does not make the preview grow");
+	const live = chat.lines(40).find((line) => line.kind === "live" && line.liveDepth === 0);
+	assert.ok(live, "the compact stream is selectable in Chat");
+	chat.setAll(true);
+	has(text(), "▾ thinking · 10 lines · Enter folds", "open all opens the live stream too");
+	chat.setAll(false);
+	has(text(), "▸ thinking · 8 earlier lines · Enter opens all", "fold all returns it to the compact tail");
+	assert.equal(chat.toggleLive(live.liveDepth, true), true, "the selected live stream opens");
+	has(text(), "▾ thinking · 10 lines · Enter folds\n┊ thought 1", "opening shows the beginning as well as the tail");
+	assert.equal(chat.textOf("live:0"), thought, "copying the live stream takes its whole reasoning");
+	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought 11` }] });
+	has(text(), "▾ thinking · 11 lines · Enter folds", "an opened stream stays open as it grows");
+	has(text(), "thought 11", "the growing stream includes its new reasoning");
+	chat.setThinking(false);
+	has(text(), "thinking… (Ctrl-T shows it)", "Ctrl-T hides the live reasoning");
+	hasNot(text(), "thought 11", "the hidden stream does not leave its open text behind");
+	chat.setThinking(true);
+	has(text(), "▾ thinking · 11 lines · Enter folds\n┊ thought 1", "showing thinking again keeps the deliberate open state");
+	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought 11` }] }] });
+	hasNot(text(), "Enter folds", "the completed reply has no live expansion control");
+	has(text(), "┊ thought 1", "the completed reasoning stands as its saved message");
+	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
+	const next = Array.from({ length: 5 }, (_entry, index) => `next ${index + 1}`).join("\n");
+	chat.live(0, { timestamp: 10, content: [{ type: "thinking", thinking: next }] });
+	has(text(), "▸ thinking · 3 earlier lines · Enter opens all", "the next reply starts folded again");
+	chat.live(0, undefined);
+	hasNot(text(), "next 5", "removing a live reply removes its expansion state and preview");
+});
+
 test("screen: a consult call folds to one line, and opens to the whole story — the context, the question, and the answer under its thread", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
