@@ -1,6 +1,6 @@
 # Proposal: same-model consultation conference
 
-**Status:** refined design proposal only — no runtime behavior changes in this document.
+**Status:** approved target contract; runtime implementation has not begun. `docs/plan.md` owns delivery sequence and migration gates, while the README continues to describe the currently shipped legacy behavior until cutover.
 **Date:** 2026-11-16
 
 ## Decision summary

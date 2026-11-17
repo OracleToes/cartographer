@@ -1,6 +1,6 @@
 # Atlas attention — heat, decay, and focus
 
-**Status:** restored and verified implementation record, 2026-11-16. Permanent removal is a deliberate operating protocol, not a durable confirmation-receipt subsystem.
+**Status:** restored, verified Atlas baseline, and closed delivery slice, 2026-11-16. Permanent removal is a deliberate operating protocol, not a durable confirmation-receipt subsystem.
 
 The durable Atlas graph records project knowledge. Its attention data is a bounded,
 derived work trail beside that graph. Attention never proves a node true or false,
