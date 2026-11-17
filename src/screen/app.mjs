@@ -111,7 +111,7 @@ const COMMANDS = [
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["case", "bounded evidence cases; /case c1 shows one, /case stop c1 ends one", ["stop"]],
+	["case", "bounded evidence cases; /case c1 shows one docket, witness budget, and final report; /case stop c1 ends one", ["stop"]],
 	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],

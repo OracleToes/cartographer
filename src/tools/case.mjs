@@ -3,9 +3,9 @@
 // then resume that blind context once for a controlled constructor packet. No phase is an
 // agent, vote, or independent corroborator; separation is only controlled visibility and objective.
 import { configure, defineTool } from "@earendil-works/pi-durable";
-import { arr, obj, opt, str } from "@earendil-works/pi-schema";
+import { arr, obj, opt, str, unknown } from "@earendil-works/pi-schema";
 import { POLICY } from "../config.mjs";
-import { CASE_ID_PATTERN, CASE_PHASES, CASE_FLOW_PHASES, CaseError, beginCasePhase, createCase, finishCasePhase, hasCaseFlow, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, phaseOf, readyCase, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, stopCase, synthesizeCase } from "../case.mjs";
+import { CASE_ID_PATTERN, CASE_PHASES, CASE_FLOW_PHASES, CaseError, beginCasePhase, createCase, finishCasePhase, hasCaseFlow, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, phaseOf, readyCase, recordWitnessDocket, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, renderWitnessDocket, renderWitnessInputs, stopCase, synthesizeCase } from "../case.mjs";
 import { endTaskContext, loadContext, taskState, updateContext } from "../context.mjs";
 import { SIBLING_AFTER, SIBLING_BEFORE, TASK_HEADER, describe } from "../prompt.mjs";
 import { selectedEvidence } from "./task.mjs";
@@ -31,25 +31,28 @@ function phaseBrief(caseFile, phase, participant = []) {
 		lines.push("", "Visibility boundary", "The construction artifact, its digest, summary, and citations are deliberately absent. I do not reconstruct or assume them; I seek counterexamples, missing conditions, and alternatives from the capsule and project sources alone.");
 	}
 	if (phase.id === "witness") {
-		const previous = caseFile.phases.filter((entry) => entry.id !== "witness");
-		lines.push("", "Earlier artifacts to check, not to trust");
-		for (const entry of previous) {
-			const artifact = entry.artifact;
-			if (artifact === undefined) lines.push(`  ${entry.name}: no returned artifact.`);
-			else {
-				const artifactText = typeof artifact.rendering === "string" ? artifact.rendering : String(artifact.text ?? "");
-				const state = artifact.kind === "failure" ? "no structured return" : artifact.done === true ? "returned done" : artifact.done === false ? "returned not done" : entry.status;
-				lines.push(`  ${entry.name} · ${state} · sha256 ${artifact.digest}${artifact.clipped ? " · clipped by the v1 storage bound" : ""}\n${artifactText.split("\n").map((line) => `    ${line}`).join("\n")}`);
+		if (hasCaseFlow(caseFile)) lines.push("", renderWitnessDocket(caseFile), "", renderWitnessInputs(caseFile), "", "Witness boundary", "I see only the frozen capsule, this main-owned docket, sealed earlier artifacts, and the receipts cited there. I do not see participant messages, the parent conversation, a shell, or any generic project source. I may call only an exact read/search/list input listed in the docket; every admitted source call spends its durable docket budget.");
+		else {
+			const previous = caseFile.phases.filter((entry) => entry.id !== "witness");
+			lines.push("", "Earlier artifacts to check, not to trust");
+			for (const entry of previous) {
+				const artifact = entry.artifact;
+				if (artifact === undefined) lines.push(`  ${entry.name}: no returned artifact.`);
+				else {
+					const artifactText = typeof artifact.rendering === "string" ? artifact.rendering : String(artifact.text ?? "");
+					const state = artifact.kind === "failure" ? "no structured return" : artifact.done === true ? "returned done" : artifact.done === false ? "returned not done" : entry.status;
+					lines.push(`  ${entry.name} · ${state} · sha256 ${artifact.digest}${artifact.clipped ? " · clipped by the v1 storage bound" : ""}\n${artifactText.split("\n").map((line) => `    ${line}`).join("\n")}`);
+				}
 			}
 		}
 	}
-	if (participant.length > 0) {
+	if (participant.length > 0 && !(hasCaseFlow(caseFile) && phase.id === "witness")) {
 		lines.push("", "Participant input routed to this phase");
 		for (const message of participant) lines.push(`  [${message.id}] ${message.text}`);
 		lines.push("  These are direction from the user, recorded with this case. They do not enlarge the frozen evidence capsule or grant project-write authority.");
 	}
 	if (caseFile.version === 2) {
-		lines.push("", "Structured return artifact", `I call \`return\` with a short \`report\`, \`done\`, and the required \`artifact\` object. Its fields are candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty${phase.id === "falsify-cross-exam" ? ", and cross_examination" : ""}. A direct observation cites a frozen source id or an immutable receipt id from my own read/search/list result; a prior phase artifact is only a claim under review, never primary evidence. I use empty arrays where a category has none, name any closure gap inside artifact.closure_gaps, and return done false when it has one. The durable artifact is the schema-validated object and deterministic rendering, not my free-form report.`);
+		lines.push("", "Structured return artifact", `I call \`return\` with a short \`report\`, \`done\`, and the required \`artifact\` object. Its fields are candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty${phase.id === "falsify-cross-exam" ? ", and cross_examination" : ""}${hasCaseFlow(caseFile) && phase.id === "witness" ? ", and witness_assessment" : ""}. A direct observation cites a frozen source id or an immutable receipt id from my own read/search/list result; a prior phase artifact is only a claim under review, never primary evidence. I use empty arrays where a category has none, name any closure gap inside artifact.closure_gaps, and return done false when it has one. The durable artifact is the schema-validated object and deterministic rendering, not my free-form report.`);
 	} else {
 		lines.push("", "Return artifact", "I call `return` with done true only if I completed this phase's stated artifact. My report says what I observed, what I inferred, and what remains uncertain. I do not state a final supported/refuted/unresolved conclusion: that belongs only to the main context after all artifacts return.");
 	}
@@ -176,7 +179,7 @@ export function caseTool({ root, brainDir, config, active }) {
 			// Messages queued while one phase ended are part of this phase's initial capsule; anything arriving after
 			// this point goes through the next tool result, the same timing contract as a task message. The controlled
 			// cross-examination is the sole exception: it deliberately resumes the sealed blind falsifier context.
-			initial = caseFile.messages.filter((message) => message.route === "queued" && message.delivery === undefined);
+			initial = hasCaseFlow(caseFile) && phase.id === "witness" ? [] : caseFile.messages.filter((message) => message.route === "queued" && message.delivery === undefined);
 			if (hasCaseFlow(caseFile) && phase.id === "falsify-cross-exam") {
 				const deliveredTo = caseFile.flow.crossPacket?.delivery?.conversationId;
 				if (typeof deliveredTo !== "string" || deliveredTo === "") throw new CaseError(`Case ${caseId}'s controlled cross-examination packet has not reached the blind falsifier context.`);
@@ -196,7 +199,7 @@ export function caseTool({ root, brainDir, config, active }) {
 		} else if (phase.status !== "active") {
 			return phase;
 		} else {
-			initial = caseFile.messages.filter((message) => message.phase === phase.id && message.delivery === undefined);
+			initial = hasCaseFlow(caseFile) && phase.id === "witness" ? [] : caseFile.messages.filter((message) => message.phase === phase.id && message.delivery === undefined);
 		}
 		if (child === undefined) child = phase.conversationId;
 		if (hasCaseFlow(caseFile) && phase.id === "falsify-cross-exam" && typeof child === "string") child = (await phaseConversation(api, callContext, caseId, phase.id)) ?? child;
@@ -286,14 +289,18 @@ export function caseTool({ root, brainDir, config, active }) {
 			let first = loadCase(brainDir, id);
 			if (first.case === undefined) throw new CaseError(first.error);
 			if (hasCaseFlow(first.case)) {
-				// C2 stops at the durable main-owned witness boundary. The constructor and blind pass may run, then the
-				// packet is appended only after the sealed blind artifact before the same falsifier context continues.
+				// C2 stops at the durable main-owned witness boundary. C3 may continue only after the main records one
+				// docket; its witness remains an isolated, source-bounded phase and never gains shell/change authority.
 				for (;;) {
 					const loaded = loadCase(brainDir, id);
 					if (loaded.case === undefined) throw new CaseError(loaded.error);
 					if (loaded.case.status !== "running") break;
 					const state = loaded.case.flow.state;
-					if (state === "awaiting-witness-specification" || state === "witness" || state === "ready-for-synthesis") break;
+					if (state === "awaiting-witness-specification") break;
+					if (state === "ready-for-synthesis") {
+						readyCase(brainDir, id, { at: api.now() });
+						break;
+					}
 					const wanted = CASE_FLOW_PHASES.find((entry) => entry.id === state);
 					if (wanted === undefined) throw new CaseError(`Case ${id} has unsupported flow state ${state}.`);
 					if (state === "falsify-cross-exam") await appendCrossPacket(brainDir, loaded.case, api, callContext);
@@ -328,7 +335,7 @@ export function caseTool({ root, brainDir, config, active }) {
 		name: "case",
 		description: describe("case"),
 		parameters: obj({
-			action: str({ enum: ["start", "resume", "synthesize"], description: "start a bounded evidence case, resume a durable running case, or record the main context's synthesis." }),
+			action: str({ enum: ["start", "resume", "witness", "synthesize"], description: "start a bounded evidence case, resume it, record the one main-owned witness docket, or record the main context's final case-level report." }),
 			question: opt(str({ maxLength: POLICY.limits.case.questionChars, description: "On start: one narrow refutable question. The same frozen capsule feeds every phase." })),
 			claim: opt(str({ maxLength: POLICY.limits.case.questionChars, description: "On start: the exact claim to test. Omit only when the question itself is the claim." })),
 			context: opt(str({ maxLength: POLICY.limits.case.contextChars, description: "On start: compact facts, constraints, and source locations that the phases may not guess. It is frozen with the case." })),
@@ -336,10 +343,15 @@ export function caseTool({ root, brainDir, config, active }) {
 			constraints: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.ledgerTextChars }), { maxItems: POLICY.limits.case.constraints, description: "On start: constraints that narrow interpretation without granting authority." })),
 			non_goals: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.ledgerTextChars }), { maxItems: POLICY.limits.case.constraints, description: "On start: explicit non-goals for the frozen capsule." })),
 			shelf: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { maxItems: POLICY.limits.case.evidenceItems, description: "On start: selected main-shelf placement IDs to freeze into the evidence capsule as primary sources. Omit for none." })),
-			id: opt(str({ pattern: `^${CASE_ID_PATTERN}$`, description: "On resume or synthesize: the durable case id, such as c1." })),
-			outcome: opt(str({ enum: ["supported", "refuted", "unresolved"], description: "On synthesize: the main context's evidence-weighted conclusion." })),
-			report: opt(str({ maxLength: POLICY.limits.case.synthesisChars, description: "On synthesize: why the phase artifacts and concrete witness support that conclusion; agreement is not a vote." })),
-			residual: opt(str({ maxLength: POLICY.limits.case.residualChars, description: "On synthesize: what remains uncertain or untested." })),
+			id: opt(str({ pattern: `^${CASE_ID_PATTERN}$`, description: "On resume, witness, or synthesize: the durable case id, such as c1." })),
+			docket: opt(unknown({ description: "On witness: one structured main-owned witness specification, source-only direct observation, or documented closure gap. A specification names target_claims, method, allowed_inputs, expected_discriminator, unresolved_if, and budget.source_calls. Allowed tool calls are exact read/search/list inputs; no shell or write authority exists." })),
+			outcome: opt(str({ enum: ["supported", "refuted", "unresolved", "needs_user_input"], description: "On synthesize: the main context's evidence-weighted conclusion or a precisely blocked successor boundary." })),
+			report: opt(str({ maxLength: POLICY.limits.case.synthesisChars, description: "On synthesize: one durable case-level evidence report; agreement is not a vote." })),
+			residual: opt(str({ maxLength: POLICY.limits.case.residualChars, description: "On unresolved synthesize: remaining uncertainty." })),
+			closure_gap: opt(str({ maxLength: POLICY.limits.case.witnessTextChars, description: "On unresolved synthesize: an exact remaining dependency." })),
+			budget_limit: opt(str({ maxLength: POLICY.limits.case.witnessTextChars, description: "On unresolved synthesize: the exact exhausted witness budget." })),
+			blocking_question: opt(str({ maxLength: POLICY.limits.case.witnessTextChars, description: "On needs_user_input: the one exact question that blocks this capsule." })),
+			successor_boundary: opt(str({ maxLength: POLICY.limits.case.witnessTextChars, description: "On needs_user_input: what a newly linked successor capsule must freshly capture rather than inherit." })),
 		}),
 		executionMode: "sequential",
 		// A start/replay finds its durable case and phase contexts again; synthesis itself is idempotent only by an
@@ -350,8 +362,19 @@ export function caseTool({ root, brainDir, config, active }) {
 				if (args.action === "synthesize") {
 					const id = String(args.id ?? "").trim();
 					if (id === "") return fail("`synthesize` needs the case `id`.");
-					const result = synthesizeCase(brainDir, id, { outcome: args.outcome, report: args.report, residual: args.residual, at: api.now() });
-					return { output: [{ type: "text", text: `Case ${id} is recorded as ${result.synthesis.outcome}. Its durable synthesis now stands in cases/${id}.json. This is my evidence-weighted conclusion, not a phase vote.${result.synthesis.residual ? ` Residual uncertainty: ${result.synthesis.residual}` : ""}` }], details: { case: id, status: result.status, outcome: result.synthesis.outcome } };
+					const result = synthesizeCase(brainDir, id, { outcome: args.outcome, report: args.report, residual: args.residual, closureGap: args.closure_gap, budgetLimit: args.budget_limit, blockingQuestion: args.blocking_question, successorBoundary: args.successor_boundary, at: api.now() });
+					const report = result.synthesis;
+					const blocked = report.outcome === "needs_user_input" ? ` Blocking question: ${report.blockingQuestion} New successor-capsule boundary: ${report.successor.boundary}` : "";
+					return { output: [{ type: "text", text: `Case ${id} is recorded as ${report.outcome}. Its durable case-level report stands in cases/${id}.json. This is my evidence-weighted conclusion, not a phase vote.${report.residual ? ` Residual uncertainty: ${report.residual}` : ""}${blocked}` }], details: { case: id, status: result.status, outcome: report.outcome, witnesses: report.witnesses } };
+				}
+				if (args.action === "witness") {
+					const id = String(args.id ?? "").trim();
+					if (id === "") return fail("`witness` needs the case `id`.");
+					if (args.docket === undefined) return fail("`witness` needs one structured main-owned `docket`: a specification, source-only direct observation, or closure-gap.");
+					recordWitnessDocket(brainDir, id, args.docket, { at: api.now() });
+					const completed = await runCase(id, api, callContext);
+					const text = completed.status === "ready" ? renderCaseForSynthesis(completed) : renderCase(completed);
+					return { output: [{ type: "text", text }], details: { case: id, status: completed.status, witness: completed.flow?.witness?.id, phases: completed.phases.map((phase) => ({ id: phase.id, status: phase.status, conversationId: phase.conversationId })) } };
 				}
 				let id;
 				if (args.action === "start") {
@@ -368,11 +391,11 @@ export function caseTool({ root, brainDir, config, active }) {
 				} else if (args.action === "resume") {
 					id = String(args.id ?? "").trim();
 					if (id === "") return fail("`resume` needs the case `id`.");
-				} else return fail("`action` is start, resume, or synthesize.");
+				} else return fail("`action` is start, resume, witness, or synthesize.");
 				const before = loadCase(brainDir, id);
 				if (before.case === undefined) return fail(before.error);
 				if (before.case.status === "ready") return { output: [{ type: "text", text: renderCaseForSynthesis(before.case) }], details: { case: id, status: before.case.status } };
-				if (before.case.status === "synthesized" || before.case.status === "stopped") return { output: [{ type: "text", text: renderCase(before.case) }], details: { case: id, status: before.case.status, ...(before.case.synthesis?.outcome ? { outcome: before.case.synthesis.outcome } : {}) } };
+				if (["synthesized", "needs-user-input", "stopped"].includes(before.case.status)) return { output: [{ type: "text", text: renderCase(before.case) }], details: { case: id, status: before.case.status, ...(before.case.synthesis?.outcome ? { outcome: before.case.synthesis.outcome } : {}) } };
 				const completed = await runCase(id, api, callContext);
 				const text = completed.status === "ready"
 					? renderCaseForSynthesis(completed)

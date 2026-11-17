@@ -42,7 +42,7 @@ import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
-import { appendCaseReceipt, beginCasePhase, CaseError, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, noteCaseMessage, readyCase, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, stopCase, synthesizeCase } from "../src/case.mjs";
+import { admitWitnessSourceTool, appendCaseReceipt, beginCasePhase, CaseError, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, noteCaseMessage, readyCase, recordWitnessDocket, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, renderWitnessDocket, stopCase, synthesizeCase } from "../src/case.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { sandboxArgs } from "../src/sandbox.mjs";
 
@@ -66,6 +66,23 @@ const caseArtifact = (candidate, values = {}) => ({
 	uncertainty: [],
 	...values,
 });
+
+const advanceToWitnessBoundary = (brainDir, id, at = 1) => {
+	beginCasePhase(brainDir, id, "construct", { conversationId: `${id}-construct`, at });
+	finishCasePhase(brainDir, id, "construct", { returned: true, done: true, artifact: caseArtifact(`${id} constructor candidate`) }, { at: at + 1 });
+	beginCasePhase(brainDir, id, "falsify-blind", { conversationId: `${id}-blind`, at: at + 2 });
+	finishCasePhase(brainDir, id, "falsify-blind", { returned: true, done: true, artifact: caseArtifact(`${id} blind artifact`) }, { at: at + 3 });
+	const afterBlind = loadCase(brainDir, id).case;
+	markCrossExaminationPacketDelivered(brainDir, id, { conversationId: `${id}-blind`, entryId: `${id}-cross-entry`, packetDigest: afterBlind.flow.crossPacket.textDigest, at: at + 4 });
+	beginCasePhase(brainDir, id, "falsify-cross-exam", { conversationId: `${id}-blind`, at: at + 5 });
+	finishCasePhase(brainDir, id, "falsify-cross-exam", { returned: true, done: false, artifact: caseArtifact(`${id} cross artifact`, {
+		citations: [{ ref: "phase:construct", kind: "claim" }],
+		closure_gaps: ["No source has yet discriminated the candidate."],
+		uncertainty: ["The candidate remains unresolved."],
+		cross_examination: [{ claim: "construct:candidate", disposition: "unresolved", text: "The bounded cross pass has no independent discriminator.", citations: ["phase:construct"] }],
+	}) }, { at: at + 6 });
+	return loadCase(brainDir, id).case;
+};
 
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
@@ -91,6 +108,14 @@ test("prompt: consult is a bounded long-form consultation, not only a refutable 
 	assert.equal(fallback.description, TOOLS.consult, "the standalone tool declaration cannot drift from the harness prompt");
 });
 
+test("prompt: case describes the main-owned bounded witness and report boundary", () => {
+	assert.match(TOOLS.case, /main context.*exactly one `witness` docket/i);
+	assert.match(TOOLS.case, /exact docketed read\/search\/list input/i);
+	assert.match(TOOLS.case, /needs_user_input.*exact blocking question/i);
+	assert.match(TOOLS.case, /participant prose.*kept outside the isolated witness/i);
+	assert.doesNotMatch(TOOLS.case, /witness\/synthesis transition is not yet/i);
+});
+
 test("harness: a cached inspect brief restores its look contract", () => {
 	assert.deepEqual(runFromBrief({ mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2 }), {
 		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
@@ -105,7 +130,10 @@ test("case: a frozen capsule keeps phase artifacts and participant routes withou
 	const created = createCase(brainDir, {
 		question: "Does the fixture support the stated invariant?",
 		context: "Only the selected snapshot and source reads count as evidence.",
-		evidence: [{ placement: "sh1", label: "fixture", source: { path: "src/math.js" }, digest: sha256("export const witness = true;"), item: { snapshot: "export const witness = true;" } }],
+		evidence: [
+			{ placement: "sh1", label: "fixture", source: { path: "src/math.js" }, digest: sha256("export const witness = true;"), item: { snapshot: "export const witness = true;" } },
+			{ placement: "sh2", label: "undeclared witness source", source: { path: "src/other.js" }, digest: sha256("export const other = false;"), item: { snapshot: "export const other = false;" } },
+		],
 		at: 100,
 	});
 	assert.equal(created.id, "c1");
@@ -160,7 +188,51 @@ test("case: a frozen capsule keeps phase artifacts and participant routes withou
 	assert.throws(() => readyCase(brainDir, "c1", { at: 180 }), /witness specification/, "phase count cannot manufacture a ready synthesis outcome");
 	assert.throws(() => synthesizeCase(brainDir, "c1", { outcome: "unresolved", report: "No witness specification exists yet.", at: 190 }), /only a ready case/, "only the main context after the later witness transition may name a truth outcome");
 
-	const stopped = createCase(brainDir, { question: "Can this second case be stopped?", at: 200 });
+	// C3: the main owns exactly one bounded witness docket. It gates exact source calls, keeps participant input out
+	// of the witness, and gives a supported/refuted report a concrete settling witness rather than phase agreement.
+	noteCaseMessage(brainDir, "c1", "This late participant line belongs to the main context, not the isolated witness.", { at: 191 });
+	const docket = recordWitnessDocket(brainDir, "c1", {
+		kind: "specification",
+		target_claims: ["construct:candidate"],
+		method: "read",
+		allowed_inputs: [{ kind: "source", ref: "s1" }, { kind: "tool-call", tool: "read", input: { path: "src/math.js" } }],
+		expected_discriminator: "The specified source read either supports or refutes the constructor candidate.",
+		unresolved_if: "The bounded source check cannot discriminate the candidate.",
+		budget: { source_calls: 1 },
+	}, { at: 192 });
+	assert.equal(docket.id, "w1");
+	let witnessing = loadCase(brainDir, "c1").case;
+	assert.equal(witnessing.flow.state, "witness", "a main-owned specification is the only route into the witness phase");
+	assert.equal(witnessing.messages.at(-1).afterCase, true, "participant prose is retained for the main context rather than entering witness inputs");
+	assert.match(renderWitnessDocket(witnessing), /0\/1 admitted source calls/, "inspection exposes the fixed witness source budget before it is spent");
+	assert.equal(admitWitnessSourceTool(brainDir, "c1", "witness", "read", { path: "src/other.js" }, { at: 193 }).allowed, false, "an unlisted source read is refused before project bytes are inspected");
+	beginCasePhase(brainDir, "c1", "witness", { conversationId: "phase-witness", at: 194 });
+	const lateWitnessMessage = noteCaseMessage(brainDir, "c1", "A line arriving during witness work stays with the main report.", { at: 194.5, phase: "witness" });
+	assert.equal(lateWitnessMessage.entry.afterCase, true, "a message arriving during the isolated witness is durable main-context provenance, not an active witness input");
+	assert.equal(lateWitnessMessage.entry.route, "queued");
+	assert.equal(appendCaseReceipt(brainDir, "c1", "witness", { tool: "read", arguments: { path: "src/other.js" }, output: "export const other = false;", at: 194.75 }), undefined, "an undeclared witness read cannot be persisted as a receipt even if an internal caller tries to append it");
+	assert.equal(admitWitnessSourceTool(brainDir, "c1", "witness", "read", { path: "src/math.js" }, { at: 195 }).allowed, true, "the exact docketed source read is admitted once");
+	const witnessReceipt = appendCaseReceipt(brainDir, "c1", "witness", { tool: "read", arguments: { path: "src/math.js" }, output: "export const witness = true;", at: 196 });
+	assert.equal(admitWitnessSourceTool(brainDir, "c1", "witness", "read", { path: "src/math.js" }, { at: 197 }).allowed, false, "the durable witness source-call budget cannot be bypassed with a repeated exact call");
+	assert.throws(() => finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, artifact: caseArtifact("witness without the required classification", { citations: [{ ref: "phase:construct", kind: "claim" }] }) }, { at: 198 }), /missing required field witness_assessment/, "a witness cannot fall back to an ordinary artifact without settling its named target");
+	assert.throws(() => finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, artifact: caseArtifact("witness bypasses its source list", {
+		observations: [{ kind: "direct", text: "An undeclared frozen source cannot become witness evidence.", citations: ["s2"] }],
+		citations: [{ ref: "phase:construct", kind: "claim" }, { ref: "s2", kind: "source" }],
+		witness_assessment: [{ claim: "construct:candidate", disposition: "supports", text: "This attempted conclusion uses an undeclared source.", citations: ["s2"] }],
+	}) }, { at: 198 }), /outside the main-owned witness docket/, "the witness artifact cannot cite another frozen source merely because the capsule displays it");
+	finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, artifact: caseArtifact("witness check", {
+		observations: [{ kind: "direct", text: "The bounded source read retained the expected fixture value.", citations: [witnessReceipt.id] }],
+		citations: [{ ref: "phase:construct", kind: "claim" }, { ref: witnessReceipt.id, kind: "receipt" }],
+		witness_assessment: [{ claim: "construct:candidate", disposition: "supports", text: "The exact docketed read supports the candidate in this bounded fixture.", citations: [witnessReceipt.id] }],
+	}) }, { at: 199 });
+	assert.equal(loadCase(brainDir, "c1").case.flow.state, "ready-for-synthesis", "only a completed witness advances the flow to the final main report boundary");
+	readyCase(brainDir, "c1", { at: 200 });
+	const supported = synthesizeCase(brainDir, "c1", { outcome: "supported", report: "The one named witness settles the only material constructor claim in the bounded fixture.", at: 201 });
+	assert.equal(supported.synthesis.witnesses[0], "w1", "a supported report names the concrete witness rather than phase agreement");
+	assert.match(renderCase(supported), /Main case-level report: supported/, "case inspection exposes the one durable main report");
+	assert.match(renderCase(supported), /Scratch\/candidate patch: unavailable/, "case inspection cannot misdescribe C3 as a live-project or scratch patch path");
+
+	const stopped = createCase(brainDir, { question: "Can this second case be stopped?", at: 210 });
 	beginCasePhase(brainDir, stopped.id, "construct", { conversationId: "phase-stop", at: 201 });
 	const halted = stopCase(brainDir, stopped.id, { at: 202, why: "user stopped it" });
 	assert.equal(halted.status, "stopped");
@@ -169,6 +241,54 @@ test("case: a frozen capsule keeps phase artifacts and participant routes withou
 	assert.equal(lateReturn.status, "stopped", "a late ordinary return cannot revive the stopped active phase");
 	assert.equal(lateReturn.artifact.done, undefined, "a stopped case never presents the raced report as a completed artifact");
 	assert.equal(loadCase(brainDir, stopped.id).case.status, "stopped", "the case-level stop remains durable after the race");
+});
+
+test("case C3: a closure gap or source-only main observation has one durable report boundary", (t) => {
+	const { brainDir } = fresh(t);
+	const sourceText = "export const answer = 42;\n";
+	const source = {
+		id: "s1",
+		role: "primary",
+		label: "frozen answer fixture",
+		capture: { status: "captured", origin: { kind: "project-file" }, locator: { path: "src/math.js", from: 1, to: 1 }, digest: sha256(sourceText), at: 1, freshness: "current" },
+		content: sourceText,
+	};
+	const blocked = createCase(brainDir, { question: "Does a missing user fact block this case?", sources: [source], at: 1 });
+	advanceToWitnessBoundary(brainDir, blocked.id, 10);
+	recordWitnessDocket(brainDir, blocked.id, { kind: "closure-gap", target_claims: ["construct:candidate"], closure_gap: "The exact production input is not in the frozen capsule." }, { at: 20 });
+	readyCase(brainDir, blocked.id, { at: 21 });
+	assert.throws(() => synthesizeCase(brainDir, blocked.id, { outcome: "supported", report: "Phase agreement cannot settle this gap.", at: 22 }), /cannot be recorded without a witness/, "supported cannot turn phase agreement or a closure gap into a witness");
+	assert.throws(() => synthesizeCase(brainDir, blocked.id, { outcome: "refuted", report: "Phase agreement cannot settle this gap.", at: 22 }), /cannot be recorded without a witness/, "refuted has the same named-witness boundary");
+	assert.throws(() => synthesizeCase(brainDir, blocked.id, { outcome: "needs_user_input", report: "The production input is missing.", at: 22 }), /exact blocking question/, "needs_user_input cannot omit the precise user question and successor-capsule boundary");
+	const needsInput = synthesizeCase(brainDir, blocked.id, {
+		outcome: "needs_user_input",
+		report: "The retained cross artifact cannot substitute for the missing production input.",
+		blockingQuestion: "Which exact production input should the successor capsule freeze?",
+		successorBoundary: "Capture that user-provided input as a new primary source; do not mutate this capsule.",
+		at: 23,
+	});
+	assert.equal(needsInput.status, "needs-user-input");
+	assert.deepEqual(needsInput.synthesis.witnesses, [], "a documented closure gap does not masquerade as a witness");
+	assert.match(renderCase(needsInput), /Blocking question: Which exact production input/, "terminal inspection renders the durable user-input boundary rather than a fabricated conclusion");
+
+	const direct = createCase(brainDir, { question: "Does the frozen source directly support the simple candidate?", sources: [source], at: 30 });
+	advanceToWitnessBoundary(brainDir, direct.id, 40);
+	recordWitnessDocket(brainDir, direct.id, {
+		kind: "main-observation",
+		target_claims: ["construct:candidate"],
+		method: "source",
+		allowed_inputs: [{ kind: "source", ref: "s1" }],
+		expected_discriminator: "The frozen source itself either has the asserted export or not.",
+		unresolved_if: "The frozen text does not name the asserted export.",
+		budget: { source_calls: 0 },
+		observation: "The frozen source text contains the directly named export.",
+		citations: [{ ref: "s1", kind: "source" }],
+		assessment: [{ claim: "construct:candidate", disposition: "supports", text: "The explicit frozen source supports the sole candidate claim.", citations: ["s1"] }],
+	}, { at: 50 });
+	const directReady = readyCase(brainDir, direct.id, { at: 51 });
+	const directReport = synthesizeCase(brainDir, direct.id, { outcome: "supported", report: "The one source-only direct observation names w1 and settles the sole material claim.", at: 52 });
+	assert.equal(directReady.flow.witness.kind, "main-observation");
+	assert.deepEqual(directReport.synthesis.witnesses, ["w1"], "a narrowly scoped main direct observation uses the same durable witness identity without new project authority");
 });
 
 test("case v2: frozen provenance and schema-validated artifacts reject source confusion without rewriting v1", (t) => {

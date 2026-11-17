@@ -16,7 +16,7 @@ The former working documents describe several different pieces of work. Their st
 | --- | --- | --- | --- |
 | Talk, Work, Model, request snapshots, and truthful mutations | Shipped through the former four implementation stages | `planRequest()` separates pure planning from send effects; `engine.sending()` freezes provider payloads; the Model views separate Sent, Since, Raw payload, Preview, and current accounting; Talk uses Durable identities rather than equal text. | Baseline, not an active feature slice. |
 | State-led dispatch, focus capsules, and normal writable-command staging | Shipped | Main-only `Dispatch` is in `src/state.mjs`; focus projection and captured shelf evidence are in `src/request.mjs`, `src/context.mjs`, and `src/tools/task.mjs`; direct file operations have atomic changed-surface accounting in `src/tools/change.mjs`; `src/stage.mjs` materializes a disposable command candidate and promotes it only through the live move gate. | Baseline. Direct mode remains intentionally detection-only. |
-| Bounded evidence cases | v1 is shipped; C1 capsule/artifact v2 and C2 blind/cross transition are shipped; C3–C4 remain | `src/case.mjs` and `src/tools/case.mjs` preserve v1 and C1-v2 lifecycle compatibility; new v2 cases persist frozen provenance, schema-validated artifacts, phase-local receipts, a sealed blind pass, and a controlled same-context constructor packet. | Continue sequentially with C3; do not represent C2 as a main-owned witness docket, final synthesis, or scratch execution. |
+| Bounded evidence cases | v1 is shipped; C1 capsule/artifact v2, C2 blind/cross transition, and C3 main-owned witness/report flow are shipped; C4 remains | `src/case.mjs`, `src/tools/case.mjs`, and `src/harness.mjs` preserve v1 and C1-v2 lifecycle compatibility; new flow cases persist frozen provenance, schema-validated artifacts, phase-local receipts, a sealed blind pass, a controlled same-context constructor packet, one durable witness docket, bounded witness-call admission, and one main case-level report. | Continue sequentially with C4 only after a proven stricter confinement primitive; do not represent C3 as scratch execution. |
 | Long-form external consultation | Shipped as a separate, supplied-context advisory lane | `consult` wording, durable thread handling, screen rendering, and tests are current. | Keep it distinct; evaluate an explicit escalation policy only in E1. |
 | Atlas heat and focus | Shipped | `src/atlas.mjs`, `src/state.mjs`, and coverage for direct-hot, warm, care, mapping gaps, and reversible archive candidates. | Baseline. The stale public “not here yet” claim is removed with this consolidation. |
 
@@ -29,13 +29,13 @@ The audit is backed by the following implementation commits, in addition to the 
 - `94d4d8e` and `04293ec` — evidence-case v1 and its lifecycle hardening; and
 - `1642852` — long-form `consult` clarification without conflating it with same-model case work.
 
-The current offline suite passes **109 unit tests and 68 ported integration tests**; two bubblewrap confinement checks are skipped on this machine because `bwrap` is unavailable. A skip is not treated as a passing sandbox observation.
+The current offline suite passes **111 unit tests and 69 ported integration tests**; two bubblewrap confinement checks are skipped on this machine because `bwrap` is unavailable. The current `npm test` run reported all green in 9.5 seconds within its ten-second watchdog; a skip is not treated as a passing sandbox observation.
 
 ### 1.1 What is deliberately not claimed as complete
 
 The remaining safety/evidence gap matters more than another prompt rewrite:
 
-1. **C3–C4 and E1 remain design contracts, not runtime behavior.** C1/C2 now enforce versioned provenance capsules and structured artifacts plus a sealed blind pass and controlled cross-examination, but cases cannot yet record a main-owned witness docket or execute a test/trace/reproduction witness, have no disposable scratch space, and have no benchmark-backed `consult` escalation rule.
+1. **C4 and E1 remain design contracts, not runtime behavior.** C1–C3 now enforce versioned provenance capsules and structured artifacts, a sealed blind pass and controlled cross-examination, one main-owned witness docket, bounded source-only witness admission, and a durable main report. Cases still have no disposable scratch space and no benchmark-backed `consult` escalation rule.
 
 Sandboxed normal change commands now use a per-focus disposable source stage. Its candidate diff is validated against the current approved move, source digest, targets, operation/surface limits, and checkpoint path before promotion; direct mode remains explicitly user-selected detection-only execution. This stage is not case scratch and supplies no case authority.
 
@@ -148,7 +148,7 @@ construct
   → falsify-blind
   → falsify-cross-exam
   → awaiting-witness-specification
-  → witness | documented closure gap
+  → main-owned docket: isolated witness | source-only direct observation | documented closure gap
   → ready-for-synthesis
 ```
 
@@ -156,17 +156,17 @@ construct
 
 The cross artifact adds `cross_examination`: one classification for every material constructor claim (the candidate and explicitly inferential observations), each as `confirmed-flaw`, `failed-challenge`, or `unresolved` with citations. Confirmed/failed classifications require frozen-source or same-phase-receipt evidence; unresolved classifications retain the constructor as a claim under review and require an exact closure gap. The constructor gets no default rhetorical rebuttal loop. A case remains one agent under controlled visibility, not a debate or vote. Case phases remain blocked from shell windows, shared-brain/shelf writes, nested work, `chat`, `ask`, and `consult`.
 
-After cross-examination the durable state is `awaiting-witness-specification`; C2 deliberately cannot start `witness`, mark a case ready, or synthesize from phase count. `/case` exposes the subphase, blind seal, and constructor-packet delivery. Stop/timeout behavior still blocks later phases; resume finds a sealed artifact/packet rather than replaying a completed blind pass.
+At C2 completion the durable state is `awaiting-witness-specification`; C2 itself could not start `witness`, mark a case ready, or synthesize from phase count. C3 subsequently adds only the main-owned docket transition. `/case` exposes the subphase, blind seal, and constructor-packet delivery. Stop/timeout behavior still blocks later phases; resume finds a sealed artifact/packet rather than replaying a completed blind pass.
 
 **Verified exit evidence:** unit tests cover packet-gated cross start, blind seal/digest, same-context delivery receipt, required per-claim classifications, unresolved/claimed citation rules, stop races, and refusal to synthesize before the later witness boundary. Integration fixtures prove the blind request excludes constructor prose and digest byte-for-byte; one cross request carries the recorded constructor packet after the persisted blind seal, reuses the blind context, retains a cross-local receipt, and pauses awaiting witness specification. Restart, stop, and timeout fixtures remain green. `npm test` passed with 109 unit tests and 68 ported integration tests; two bubblewrap confinement checks skipped because `bwrap` is unavailable; total 8.9 seconds under the ten-second budget.
 
 ### C3 — Main-owned witness, synthesis, report, and visible state
 
-**Status:** depends on C2; still no scratch execution.
+**Status:** completed 2026-11-16; still no scratch execution. C3 records one canonical main-owned witness docket after C2's cross boundary, invokes only a bounded source-capable witness specified by that docket, and persists the only final case-level report.
 
-After cross-examination, the main context receives a bounded witness docket. It records exactly one witness specification—or a closure gap—before the witness stage runs. A specification names target claim, method, allowed inputs, expected discriminator, budget, and what result would still be unresolved.
+After cross-examination, the main context receives a bounded witness docket. It records exactly one witness specification, source-only direct observation, or closure gap. A specification names target claims, method, exact allowed inputs, expected discriminator, budget, and what result would still be unresolved.
 
-The witness stage sees only the capsule, sealed structured artifacts, cited receipts, and specification. It may perform a specified read/source/trace/proof check and produce a receipt. It cannot read the parent conversation, use a generic shell, mutate the project, or synthesize the outcome. A narrowly scoped main-context direct observation may use the same witness schema; it gains no new authority from the case.
+An isolated witness sees only the capsule, sealed structured artifacts, cited receipts, and specification. It may perform only a specified exact `read`, `search`, or `list` check; the harness admits and charges it before project bytes are read. It cannot read the parent conversation, use a generic shell, mutate the project, or synthesize the outcome. A narrowly scoped main-context direct observation uses the same durable witness schema over named frozen sources or retained receipts; it gains no new authority from the case.
 
 Main-context synthesis is the only point with these outcomes:
 
@@ -174,9 +174,9 @@ Main-context synthesis is the only point with these outcomes:
 - `unresolved`, with residual uncertainty, a closure gap, or a budget limit; or
 - `needs_user_input`, with an exact blocking question and a linked successor-capsule boundary.
 
-Produce one durable case-level report, not durable persona chatter. `/case` and the screen expose capsule source roles/freshness, current subphase, the blind boundary, budget use, participant routing, witness state, closure gaps, retained artifacts, and final witness ids. A candidate patch is visibly outside the live project.
+Produce one durable case-level report, not durable persona chatter. `/case` and the screen expose capsule source roles/freshness, current subphase, the blind boundary, budget use, participant routing, witness state, closure gaps, retained artifacts, and final witness ids. C3 has no scratch or candidate patch; `/case` says that no case path has live-project change authority. Any later candidate patch remains visibly outside the live project.
 
-**Exit evidence:** a supported/refuted synthesis without a witness is refused; `needs_user_input` cannot omit its exact question; the report never treats agreement as corroboration; v1 inspection and `/case stop` remain compatible; screen/terminal tests show the same durable state.
+**Verified exit evidence:** unit coverage refuses a supported/refuted report without a settling witness, rejects an omitted witness assessment, an unlisted/exhausted source call, an undeclared receipt append, or an artifact citation outside the docket, requires `needs_user_input` to carry its exact question and successor boundary, proves closure-gap and source-only main-observation paths, and preserves v1 inspection plus `/case stop`. An end-to-end stand-in integration shelves a frozen source, records the main docket, verifies an intervening parent-conversation sentinel is absent from witness requests, refuses an undeclared witness read before bytes are read, charges the one admitted exact read, accepts the witness assessment, records `supported`, and verifies that `/case` renders the durable report and witness id. Prompt, README, screen help, state, and terminal wording now expose only this source-bounded witness/report behavior; no scratch authority is claimed.
 
 ### C4 — Isolated case scratch witness
 
@@ -249,4 +249,4 @@ These items remain visible so that they are not accidentally reintroduced as “
 
 ## Next slice
 
-S1–S2, C1, and C2 are complete. Continue with C3's main-owned witness docket, witness transition, final report, and synthesis authority, preserving v1 and pre-C2 v2 inspection plus C1 capsule/artifact and C2 blind-packet immutability. Do not add scratch execution ahead of C4.
+S1–S2 and C1–C3 are complete. C4 may begin only with a proven low-level confinement primitive that meets its stricter isolated-scratch contract; preserve v1 and pre-C2 v2 inspection plus C1 capsule/artifact, C2 blind-packet, and C3 main-owned witness/report immutability. Do not reuse normal change authority, the generic sandbox arguments, or persistent command windows as case scratch.

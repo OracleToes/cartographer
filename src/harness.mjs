@@ -31,7 +31,7 @@ import { shellTool } from "./tools/shell.mjs";
 import { consultTool } from "./tools/consult.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { caseTool } from "./tools/case.mjs";
-import { appendCaseReceipt, noteCaseMessage } from "./case.mjs";
+import { admitWitnessSourceTool, appendCaseReceipt, noteCaseMessage } from "./case.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
@@ -270,8 +270,17 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const caseSourceTool = (tool) => ({
 		...tool,
 		execute: async (args, api, callContext) => {
+			const run = loadContext(brainDir).tasks[api.conversationId];
+			if (typeof run?.caseId === "string" && typeof run?.phase === "string") {
+				try {
+					const admitted = admitWitnessSourceTool(brainDir, run.caseId, run.phase, tool.name, args, { at: api.now() });
+					if (admitted.applicable && !admitted.allowed) return { isError: true, output: [{ type: "text", text: `Witness source call refused: ${admitted.reason}` }] };
+				} catch (error) {
+					return { isError: true, output: [{ type: "text", text: `Witness source call refused: ${String(error?.message ?? error)}` }] };
+				}
+			}
 			const result = await tool.execute(args, api, callContext);
-			const receipt = recordCaseReceipt(loadContext(brainDir).tasks[api.conversationId], { name: tool.name, arguments: args }, result, api.now());
+			const receipt = recordCaseReceipt(run, { name: tool.name, arguments: args }, result, api.now());
 			return withCaseReceipt(result, receipt);
 		},
 	});

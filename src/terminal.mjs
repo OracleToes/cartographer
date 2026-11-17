@@ -85,9 +85,11 @@ export function describeCall(call, describeRef) {
 		case "case":
 			return args.action === "synthesize"
 				? `case ${oneLine(args.id, POLICY.limits.terminal.callSummary.taskBrief)}  synthesize ${args.outcome ?? ""}`.trim()
-				: args.action === "resume"
-					? `case ${oneLine(args.id, POLICY.limits.terminal.callSummary.taskBrief)}  resume`.trim()
-					: `case  ${oneLine(args.question, POLICY.limits.terminal.callSummary.taskBrief)}`;
+				: args.action === "witness"
+					? `case ${oneLine(args.id, POLICY.limits.terminal.callSummary.taskBrief)}  witness`.trim()
+					: args.action === "resume"
+						? `case ${oneLine(args.id, POLICY.limits.terminal.callSummary.taskBrief)}  resume`.trim()
+						: `case  ${oneLine(args.question, POLICY.limits.terminal.callSummary.taskBrief)}`;
 		case "shell": {
 			// A command typed into a window, or one of the window actions; run is the default and needs no name of its own.
 			if (args.action !== undefined && args.action !== POLICY.enums.shellAction.run) {
@@ -713,7 +715,7 @@ export async function runTerminal(session, options) {
 			// An unreadable stretch: show what the watch happens to hold rather than nothing.
 		}
 		if (entries.length === 0) return;
-		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.sibling");
+		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.case-cross-exam" || entry.kind === "carto.sibling");
 		const at = found < 0 ? 0 : found;
 		const own = depth === 0 ? entries : entries.slice(at);
 		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
@@ -784,7 +786,7 @@ export async function runTerminal(session, options) {
 		// The main agent's history is not replayed. A task is shown from its brief on.
 		let newest = watch.value.entries.at(-1)?.id ?? 0;
 		if (depth > 0) {
-			const briefs = watch.value.entries.filter((entry) => entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.sibling");
+			const briefs = watch.value.entries.filter((entry) => entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.case-cross-exam" || entry.kind === "carto.sibling");
 			newest = briefs.at(-1)?.id ?? newest;
 		}
 		const handle = async (value) => {
@@ -1183,7 +1185,7 @@ export async function runTerminal(session, options) {
 					[
 						"  /thinking  show or hide what the agent thinks and notes for itself (/thinking on, /thinking off; Ctrl-T does the same)",
 						"  /report   the last task's report in full; /report t12 shows a kept one",
-						"  /case     active and recent bounded evidence cases; /case c1 shows its durable phase and participant provenance; /case stop c1 stops it and interrupts an active phase",
+						"  /case     active and recent bounded evidence cases; /case c1 shows its durable phase, witness docket/budget, report and participant provenance; /case stop c1 stops it and interrupts an active phase",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
 						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
@@ -1270,7 +1272,7 @@ export async function runTerminal(session, options) {
 				else {
 					line(`  ${bold("Evidence cases")}`);
 					for (const entry of cases) line(entry.error === undefined ? `    ${caseStatusLine(entry)}` : `    ${entry.id} · unreadable: ${entry.error}`);
-					line(dim("  /case c1 shows the capsule, phase artifacts and participant provenance; /case stop c1 stops a running one."));
+					line(dim("  /case c1 shows the capsule, phase artifacts, witness docket/budget, final report and participant provenance; /case stop c1 stops a running one."));
 				}
 				return true;
 			}

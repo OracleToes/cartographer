@@ -887,6 +887,49 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 	}
 });
 
+test("case C3: the main-owned witness docket bounds source access and the final report names its witness", async () => {
+	const root = makeProject("evidence-case-witness", { git: false });
+	configure(root, { initiate: false });
+	const docket = {
+		kind: "specification",
+		target_claims: ["construct:candidate"],
+		method: "read",
+		allowed_inputs: [{ kind: "source", ref: "s1" }, { kind: "tool-call", tool: "read", input: { path: "src/math.js" } }],
+		expected_discriminator: "The exact source read either supports or refutes the constructor candidate.",
+		unresolved_if: "The one allowed source read does not discriminate the candidate.",
+		budget: { source_calls: 1 },
+	};
+	const server = await startStandIn({ tokenDelayMs: 0, caseSteps: { witness: ["read: src/main.js", "read: src/math.js"] } });
+	try {
+		const result = await cartoOnTerminal(root, server, [], [
+			["Set one up in", ""],
+			["Type a message", `shelf: ${JSON.stringify({ action: "add", path: "src/math.js" })} || case: ${JSON.stringify({ question: "Does src/main.js call the exported add function?", shelf: ["sh1"] })}`],
+			["awaiting-witness-specification", "PARENT-WITNESS-EXCLUSION-SENTINEL"],
+			["OK", `case witness: c1 ${JSON.stringify(docket)}`],
+			["ready for my case-level report", `case synthesize: c1 ${JSON.stringify({ outcome: "supported", report: "The one docketed witness, not phase agreement, settles the sole material candidate claim." })}`],
+			["Case c1 is recorded as supported.", "/case c1"],
+			["Main case-level report: supported.", "/quit"],
+		]);
+		if (result === undefined) return "python3 is needed for a terminal";
+		ok(result, "running an isolated bounded witness");
+		has(result.screen, "Main case-level report: supported.", "/case renders the durable final report through the terminal");
+		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
+		assert.equal(evidence.status, "synthesized");
+		assert.equal(evidence.flow.witness.id, "w1");
+		assert.deepEqual(evidence.synthesis.witnesses, ["w1"], "the final report names its settling witness rather than a count of phase artifacts");
+		assert.equal(evidence.flow.witness.usage.sourceCalls, 1, "the one admitted source call is durably charged to the witness docket");
+		const witnessRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Witness boundary"));
+		assert.ok(witnessRequests.length >= 2, "the witness retried after one refused undeclared source call");
+		const witnessBrief = witnessRequests[0].messages.map(rawText).join("\n");
+		assert.match(witnessBrief, /read {"path":"src\/math\.js"}/, "the witness receives only the exact source input the main docket named");
+		assert.doesNotMatch(witnessBrief, /Participant input routed to this phase/, "the witness does not receive ambient participant prose");
+		assert.doesNotMatch(witnessRequests.map((request) => request.messages.map(rawText).join("\n")).join("\n"), /PARENT-WITNESS-EXCLUSION-SENTINEL/, "the isolated witness request does not inherit an intervening parent-conversation line");
+		assert.match(witnessRequests[1].messages.map(rawText).join("\n"), /Witness source call refused: The read call is outside case c1's exact main-owned witness docket/, "an attempted generic project read is refused before the bounded witness can continue");
+	} finally {
+		await server.close();
+	}
+});
+
 test("case v2: source reads append immutable phase receipts outside the frozen capsule", async () => {
 	const root = makeProject("evidence-case-receipt", { git: false });
 	configure(root, { initiate: false });

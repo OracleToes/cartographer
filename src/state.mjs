@@ -122,11 +122,12 @@ function dispatch(ledger, plan, brainDir, root, yolo = false) {
 	} else lines.push("Main shelf: empty.");
 	try {
 		const cases = listCases(brainDir);
-		const openCases = cases.filter((entry) => entry.error === undefined && (entry.status === "running" || entry.status === "ready"));
+		const openCases = cases.filter((entry) => entry.error === undefined && (entry.status === "running" || entry.status === "ready" || entry.status === "needs-user-input"));
 		const broken = cases.filter((entry) => entry.error !== undefined);
 		if (openCases.length > 0) {
 			lines.push(`Evidence cases: ${openCases.slice(0, POLICY.limits.state.listedNames).map(caseStatusLine).join("; ")}${openCases.length > POLICY.limits.state.listedNames ? `; and ${openCases.length - POLICY.limits.state.listedNames} more` : ""}.`);
-			if (openCases.some((entry) => entry.status === "ready")) lines.push("A ready case is not concluded yet: I weigh its artifacts myself, then call `case` with synthesize and supported, refuted, or unresolved.");
+			if (openCases.some((entry) => entry.status === "ready")) lines.push("A ready case is not concluded yet: I weigh its artifacts myself, then call `case` with synthesize and supported, refuted, unresolved, or needs_user_input.");
+			if (openCases.some((entry) => entry.status === "needs-user-input")) lines.push("A case has an exact recorded blocking question and successor-capsule boundary; I ask that question rather than pretending the case settled itself.");
 		}
 		if (broken.length > 0) lines.push(`Evidence cases unreadable: ${broken.slice(0, POLICY.limits.state.listedNames).map((entry) => entry.id).join(", ")}.`);
 	} catch {

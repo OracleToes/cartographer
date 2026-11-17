@@ -11,7 +11,7 @@ export const CASE_VERSION = 2;
 export const CASE_ID_PATTERN = "c\\d+";
 export const CASE_ID = new RegExp(`^${CASE_ID_PATTERN}$`);
 // Version-one records and C1's already-written v2 records retain this original three-phase layout.
-// New v2 records carry `flow.version: 2`, which separates the blind and cross-examination passes.
+// New v2 records carry `flow.version: 2`, which separates blind/cross examination and records the later main-owned witness docket.
 export const CASE_PHASES = Object.freeze([
 	{ id: "construct", name: "construction", objective: "Construct the narrowest account the frozen evidence supports. State assumptions, observations and the exact claim separately; do not call it confirmed." },
 	{ id: "falsify", name: "blind falsification", objective: "Search the frozen evidence and project for a counterexample, missing condition, or alternate explanation. The construction artifact is intentionally not visible here." },
@@ -25,7 +25,7 @@ export const CASE_FLOW_PHASES = Object.freeze([
 	{ id: "witness", name: "concrete witness", objective: "Make one concrete check against the project or frozen evidence only after the main context supplies a witness specification. Distinguish what was observed from what it implies; it may support neither earlier artifact." },
 ]);
 
-const CASE_STATUSES = new Set(["running", "ready", "synthesized", "stopped"]);
+const CASE_STATUSES = new Set(["running", "ready", "synthesized", "needs-user-input", "stopped"]);
 const FLOW_STATES = new Set(["construct", "falsify-blind", "falsify-cross-exam", "awaiting-witness-specification", "witness", "ready-for-synthesis"]);
 const PHASE_STATUSES = new Set(["queued", "active", "complete", "ended", "stopped"]);
 const MESSAGE_ROUTES = new Set(["active", "queued"]);
@@ -35,6 +35,11 @@ const LEDGER_KINDS = new Set(["observation", "claim", "source-gap", "receipt"]);
 const ARTIFACT_CITATION_KINDS = new Set(["source", "receipt", "claim"]);
 const OBSERVATION_KINDS = new Set(["direct", "inference"]);
 const CROSS_DISPOSITIONS = new Set(["confirmed-flaw", "failed-challenge", "unresolved"]);
+const WITNESS_DISPOSITIONS = new Set(["supports", "refutes", "unresolved"]);
+const WITNESS_KINDS = new Set(["specification", "main-observation", "closure-gap"]);
+const WITNESS_METHODS = new Set(["read", "search", "list", "source", "trace", "proof"]);
+const WITNESS_INPUT_KINDS = new Set(["source", "receipt", "tool-call"]);
+const REPORT_OUTCOMES = new Set(["supported", "refuted", "unresolved", "needs_user_input"]);
 const RECEIPT_TOOLS = new Set(["read", "search", "list"]);
 const HEX = /^[a-f0-9]{64}$/;
 const SOURCE_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -160,6 +165,7 @@ function baseCheck(caseFile) {
 /** v1 stays exactly a free-form historical format; do not migrate or rewrite it on read. */
 function normalizeV1(caseFile) {
 	baseCheck(caseFile);
+	need(caseFile.status !== "needs-user-input", "only a flow-enabled v2 case may carry needs-user-input status");
 	phaseTemplateCheck(caseFile, CASE_PHASES);
 	return caseFile;
 }
@@ -329,10 +335,11 @@ function receiptOutputChars(ledger) {
 	return ledger.reduce((total, entry) => total + (entry.kind === "receipt" ? entry.output.length : 0), 0);
 }
 
-function artifactData(raw, phase) {
+function artifactData(caseFile, raw, phase) {
 	need(plain(raw), "A case phase must return a structured artifact object.");
 	const cross = isCrossExamination(phase);
-	const required = ["candidate", "observations", "assumptions", "citations", "falsifiers", "proposed_witness", "closure_gaps", "uncertainty", ...(cross ? ["cross_examination"] : [])];
+	const witness = usesCaseFlow(caseFile) && phase?.id === "witness";
+	const required = ["candidate", "observations", "assumptions", "citations", "falsifiers", "proposed_witness", "closure_gaps", "uncertainty", ...(cross ? ["cross_examination"] : []), ...(witness ? ["witness_assessment"] : [])];
 	for (const name of required) need(Object.hasOwn(raw, name), `The structured artifact is missing required field ${name}.`);
 	for (const name of Object.keys(raw)) need(required.includes(name), `The structured artifact has unsupported field ${name}.`);
 	const candidate = compact(raw.candidate);
@@ -384,7 +391,8 @@ function artifactData(raw, phase) {
 		})
 		: undefined;
 	if (crossExamination !== undefined) need(crossExamination.length <= caseLimits().crossChallenges, `The cross-examination has more than ${caseLimits().crossChallenges} challenges.`);
-	const data = { candidate, observations, assumptions, citations, falsifiers, proposedWitness, closureGaps, uncertainty, ...(crossExamination === undefined ? {} : { crossExamination }) };
+	const witnessAssessment = witness ? normalizeWitnessAssessment(caseFile, raw.witness_assessment) : undefined;
+	const data = { candidate, observations, assumptions, citations, falsifiers, proposedWitness, closureGaps, uncertainty, ...(crossExamination === undefined ? {} : { crossExamination }), ...(witnessAssessment === undefined ? {} : { witnessAssessment }) };
 	need(JSON.stringify(data).length <= caseLimits().artifactChars, `The structured artifact exceeds the ${caseLimits().artifactChars.toLocaleString("en-US")} character storage bound.`);
 	return data;
 }
@@ -403,6 +411,11 @@ function artifactRendering(data) {
 		if (data.crossExamination.length === 0) lines.push("  (no material constructor claim was available to challenge)");
 		else for (const challenge of data.crossExamination) lines.push(`  ${challenge.claim} · ${challenge.disposition} · ${challenge.text} · cites ${challenge.citations.join(", ")}`);
 	}
+	if (data.witnessAssessment !== undefined) {
+		lines.push("", "Witness assessment");
+		if (data.witnessAssessment.length === 0) lines.push("  (the witness docket named no material claim)");
+		else for (const assessment of data.witnessAssessment) lines.push(`  ${assessment.claim} · ${assessment.disposition} · ${assessment.text} · cites ${assessment.citations.join(", ")}`);
+	}
 	return lines.join("\n");
 }
 
@@ -417,7 +430,8 @@ function validateArtifactCitations(caseFile, phase, data) {
 		} else if (citation.kind === "receipt") {
 			const receipt = caseFile.ledger.find((entry) => entry.id === citation.ref && entry.kind === "receipt");
 			need(receipt !== undefined, `Artifact citation ${citation.ref} is not an immutable phase-local receipt.`);
-			need(receipt.phase === phase.id, `Artifact receipt ${citation.ref} belongs to ${receipt.phase}, not this ${phase.id} phase.`);
+			const carried = usesCaseFlow(caseFile) && phase.id === "witness" && receiptIdsCitedBeforePhase(caseFile, phase).has(receipt.id);
+			need(receipt.phase === phase.id || carried, `Artifact receipt ${citation.ref} belongs to ${receipt.phase}, not this ${phase.id} phase or its sealed witness inputs.`);
 		} else {
 			const claimSource = caseFile.capsule.sources.find((entry) => entry.id === citation.ref && entry.role === "claim");
 			const phaseMatch = /^phase:([a-z][a-z0-9-]*)$/.exec(citation.ref)?.[1];
@@ -456,12 +470,33 @@ function validateArtifactCitations(caseFile, phase, data) {
 		if (challenges.some((challenge) => challenge.disposition === "unresolved")) need(data.closureGaps.length > 0, "An unresolved controlled cross-examination classification needs an exact closure gap.");
 		if (expected.length > 0) need(citations.get("phase:construct")?.kind === "claim", "A controlled cross-examination must cite the recorded constructor artifact as a claim under review.");
 	}
+	if (usesCaseFlow(caseFile) && phase.id === "witness") {
+		const docket = caseFile.flow.witness;
+		need(docket?.kind === "specification", "A witness artifact needs a recorded main-owned witness specification.");
+		for (const citation of data.citations) {
+			if (citation.kind === "source") need(witnessAllowsSource(docket, citation.ref), `Witness artifact source ${citation.ref} is outside the main-owned witness docket.`);
+			if (citation.kind === "receipt") {
+				const receipt = caseFile.ledger.find((entry) => entry.id === citation.ref && entry.kind === "receipt");
+				need(receipt !== undefined && (receipt.phase === phase.id ? witnessAllowsToolReceipt(docket, receipt) : witnessAllowsCarriedReceipt(docket, receipt.id)), `Witness artifact receipt ${citation.ref} is outside the main-owned witness docket.`);
+			}
+		}
+		const assessments = data.witnessAssessment ?? [];
+		for (const assessment of assessments) {
+			for (const ref of assessment.citations) {
+				const citation = citations.get(ref);
+				need(citation !== undefined, `Witness assessment ${assessment.claim} cites ${ref}, but that ref is absent from artifact citations.`);
+				if (assessment.disposition !== "unresolved") need(citation.kind === "source" || citation.kind === "receipt", `Witness assessment ${assessment.claim} needs direct cited evidence for ${assessment.disposition}.`);
+			}
+		}
+		if (assessments.some((assessment) => assessment.disposition === "unresolved")) need(data.closureGaps.length > 0, "An unresolved witness assessment needs an exact closure gap.");
+		if (docket.targetClaims.length > 0) need(citations.get("phase:construct")?.kind === "claim", "A witness assessment must cite the constructor artifact as a claim under review.");
+	}
 }
 
 function freezeArtifact(caseFile, phase, raw, { done, at } = {}) {
 	need(typeof done === "boolean", "A structured case artifact needs the return done boolean.");
 	need(finite(at), "A structured case artifact needs a finite capture time.");
-	const data = artifactData(raw, phase);
+	const data = artifactData(caseFile, raw, phase);
 	validateArtifactCitations(caseFile, phase, data);
 	need(!(done && data.closureGaps.length > 0), "A structured artifact with closure_gaps must return done: false.");
 	const rendering = artifactRendering(data);
@@ -492,7 +527,7 @@ function checkStoredArtifact(caseFile, phase) {
 		return;
 	}
 	need(typeof artifact.done === "boolean" && plain(artifact.data), `Phase ${phase.id} structured artifact is invalid.`);
-	const data = artifactData({
+	const data = artifactData(caseFile, {
 		candidate: artifact.data.candidate,
 		observations: artifact.data.observations,
 		assumptions: artifact.data.assumptions,
@@ -502,6 +537,7 @@ function checkStoredArtifact(caseFile, phase) {
 		closure_gaps: artifact.data.closureGaps,
 		uncertainty: artifact.data.uncertainty,
 		...(isCrossExamination(phase) ? { cross_examination: artifact.data.crossExamination } : {}),
+		...(usesCaseFlow(caseFile) && phase.id === "witness" ? { witness_assessment: artifact.data.witnessAssessment } : {}),
 	}, phase);
 	need(sameJson(data, artifact.data), `Phase ${phase.id} structured artifact data is non-canonical.`);
 	validateArtifactCitations(caseFile, phase, data);
@@ -520,6 +556,49 @@ function materialConstructorClaims(caseFile) {
 		if (observation.kind === "inference") claims.push({ id: `construct:inference:${index + 1}`, text: observation.text });
 	}
 	return claims;
+}
+
+const materialClaimIds = (caseFile) => materialConstructorClaims(caseFile).map((claim) => claim.id);
+
+function receiptIdsCitedBeforePhase(caseFile, phase) {
+	const definitions = phaseDefinitions(caseFile);
+	const before = definitions.findIndex((entry) => entry.id === phase.id);
+	const ids = new Set();
+	for (const definition of definitions.slice(0, Math.max(0, before))) {
+		const prior = phaseOf(caseFile, definition.id);
+		if (prior?.artifact?.kind !== "structured") continue;
+		for (const citation of prior.artifact.data.citations ?? []) if (citation.kind === "receipt") ids.add(citation.ref);
+	}
+	return ids;
+}
+
+function normalizeClaimAssessments(raw, expectedClaims, label = "Witness assessment") {
+	need(Array.isArray(raw), `${label} is invalid.`);
+	need(raw.length === expectedClaims.length, `${label} must classify every target claim exactly once.`);
+	need(raw.length <= caseLimits().witnessClaims, `${label} exceeds its ${caseLimits().witnessClaims} claim bound.`);
+	const expected = new Set(expectedClaims);
+	const entries = raw.map((entry, index) => {
+		need(plain(entry), `${label} ${index + 1} is invalid.`);
+		const fields = ["claim", "disposition", "text", "citations"];
+		for (const field of fields) need(Object.hasOwn(entry, field), `${label} ${index + 1} is missing ${field}.`);
+		for (const field of Object.keys(entry)) need(fields.includes(field), `${label} ${index + 1} has unsupported field ${field}.`);
+		const claim = compact(entry.claim);
+		need(expected.has(claim), `${label} ${claim || index + 1} is not an exact target claim.`);
+		const disposition = String(entry.disposition);
+		need(WITNESS_DISPOSITIONS.has(disposition), `${label} ${claim} has an invalid disposition.`);
+		const text = compact(entry.text);
+		need(text !== "" && text.length <= caseLimits().witnessTextChars, `${label} ${claim} has invalid text.`);
+		const citations = boundedStrings(entry.citations, `${label} ${claim}.citations`, { maxItems: caseLimits().citations, maxChars: 64, allowEmpty: false });
+		return { claim, disposition, text, citations };
+	});
+	need(new Set(entries.map((entry) => entry.claim)).size === entries.length, `${label} repeats a target claim.`);
+	return entries;
+}
+
+function normalizeWitnessAssessment(caseFile, raw) {
+	const docket = caseFile.flow?.witness;
+	need(docket?.kind === "specification", "A witness artifact needs a recorded main-owned witness specification.");
+	return normalizeClaimAssessments(raw, docket.targetClaims);
 }
 
 /** The exact user-visible packet the harness appends to the same falsifier context after blind storage. */
@@ -568,11 +647,196 @@ function packetMeta(caseFile, at) {
 	};
 }
 
+function normalizeWitnessCitationList(raw, label) {
+	need(Array.isArray(raw) && raw.length <= caseLimits().citations, `${label} citations are invalid.`);
+	const citations = raw.map((citation, index) => {
+		need(plain(citation), `${label} citation ${index + 1} is invalid.`);
+		need(Object.keys(citation).every((key) => ["ref", "kind"].includes(key)), `${label} citation ${index + 1} has unsupported fields.`);
+		const ref = compact(citation.ref);
+		const kind = String(citation.kind);
+		need(ref !== "" && ref.length <= 64, `${label} citation ${index + 1} has invalid ref.`);
+		need(ARTIFACT_CITATION_KINDS.has(kind), `${label} citation ${index + 1} has invalid kind.`);
+		return { ref, kind };
+	});
+	need(new Set(citations.map((citation) => citation.ref)).size === citations.length, `${label} cites one ref more than once.`);
+	return citations;
+}
+
+function normalizeWitnessToolInput(tool, raw, index) {
+	need(plain(raw), `Witness allowed tool input ${index + 1} is invalid.`);
+	const input = jsonCopy(raw, `Witness allowed tool input ${index + 1}`, caseLimits().sourceMetadataChars);
+	const fields = Object.keys(input);
+	const own = (name) => Object.hasOwn(input, name);
+	if (tool === "read") {
+		need(fields.every((key) => ["path", "range", "version"].includes(key)) && own("path"), `Witness allowed read input ${index + 1} must name one exact project path.`);
+		const path = compact(input.path);
+		need(path !== "" && path.length <= caseLimits().sourceMetadataChars, `Witness allowed read input ${index + 1} has invalid path.`);
+		const range = own("range") ? compact(input.range) : undefined;
+		const version = own("version") ? compact(input.version) : undefined;
+		need(range === undefined || (range !== "" && range.length <= 64), `Witness allowed read input ${index + 1} has invalid range.`);
+		need(version === undefined || HEX.test(version), `Witness allowed read input ${index + 1} has invalid version.`);
+		return { path, ...(range === undefined ? {} : { range }), ...(version === undefined ? {} : { version }) };
+	}
+	if (tool === "search") {
+		need(fields.every((key) => ["pattern", "path", "glob", "ignore_case", "max"].includes(key)) && own("pattern"), `Witness allowed search input ${index + 1} must name one exact pattern.`);
+		const pattern = compact(input.pattern);
+		need(pattern !== "" && pattern.length <= caseLimits().sourceMetadataChars, `Witness allowed search input ${index + 1} has invalid pattern.`);
+		const path = own("path") ? compact(input.path) : undefined;
+		const glob = own("glob") ? compact(input.glob) : undefined;
+		const ignoreCase = own("ignore_case") ? input.ignore_case : undefined;
+		const max = own("max") ? input.max : undefined;
+		need(path === undefined || (path !== "" && path.length <= caseLimits().sourceMetadataChars), `Witness allowed search input ${index + 1} has invalid path.`);
+		need(glob === undefined || (glob !== "" && glob.length <= caseLimits().sourceMetadataChars), `Witness allowed search input ${index + 1} has invalid glob.`);
+		need(ignoreCase === undefined || typeof ignoreCase === "boolean", `Witness allowed search input ${index + 1} has invalid ignore_case.`);
+		need(max === undefined || (Number.isInteger(max) && max >= 1 && max <= POLICY.limits.look.searchMax), `Witness allowed search input ${index + 1} has invalid max.`);
+		return { pattern, ...(path === undefined ? {} : { path }), ...(glob === undefined ? {} : { glob }), ...(ignoreCase === undefined ? {} : { ignore_case: ignoreCase }), ...(max === undefined ? {} : { max }) };
+	}
+	need(tool === "list", `Witness allowed tool input ${index + 1} has unsupported tool ${tool}.`);
+	need(fields.every((key) => ["path", "depth"].includes(key)) && own("path"), `Witness allowed list input ${index + 1} must name one exact project path.`);
+	const path = compact(input.path);
+	const depth = own("depth") ? input.depth : undefined;
+	need(path !== "" && path.length <= caseLimits().sourceMetadataChars, `Witness allowed list input ${index + 1} has invalid path.`);
+	need(depth === undefined || (Number.isInteger(depth) && depth >= 1 && depth <= POLICY.limits.tree.maxDepth), `Witness allowed list input ${index + 1} has invalid depth.`);
+	return { path, ...(depth === undefined ? {} : { depth }) };
+}
+
+function normalizeWitnessInputs(raw, caseFile) {
+	need(Array.isArray(raw) && raw.length <= caseLimits().witnessInputs, "Witness allowed_inputs are invalid.");
+	const carriedReceipts = citedReceiptIds(caseFile);
+	const inputs = raw.map((entry, index) => {
+		need(plain(entry), `Witness allowed input ${index + 1} is invalid.`);
+		const kind = String(entry.kind);
+		need(WITNESS_INPUT_KINDS.has(kind), `Witness allowed input ${index + 1} has invalid kind.`);
+		if (kind === "source") {
+			need(Object.keys(entry).every((key) => ["kind", "ref"].includes(key)), `Witness allowed source ${index + 1} has unsupported fields.`);
+			const ref = compact(entry.ref);
+			need(caseFile.capsule.sources.some((source) => source.id === ref), `Witness allowed source ${ref || index + 1} is not frozen in this case.`);
+			return { kind, ref };
+		}
+		if (kind === "receipt") {
+			need(Object.keys(entry).every((key) => ["kind", "ref"].includes(key)), `Witness allowed receipt ${index + 1} has unsupported fields.`);
+			const ref = compact(entry.ref);
+			need(RECEIPT_ID.test(ref) && carriedReceipts.has(ref), `Witness allowed receipt ${ref || index + 1} is not cited by a sealed earlier artifact.`);
+			return { kind, ref };
+		}
+		need(Object.keys(entry).every((key) => ["kind", "tool", "input"].includes(key)) && Object.hasOwn(entry, "tool") && Object.hasOwn(entry, "input"), `Witness allowed tool call ${index + 1} needs tool and input.`);
+		const tool = String(entry.tool);
+		need(RECEIPT_TOOLS.has(tool), `Witness allowed tool call ${index + 1} has unsupported tool.`);
+		return { kind, tool, input: normalizeWitnessToolInput(tool, entry.input, index) };
+	});
+	need(new Set(inputs.map((entry) => JSON.stringify(entry))).size === inputs.length, "Witness allowed_inputs repeats one entry.");
+	return inputs;
+}
+
+function normalizeWitnessTargets(raw, caseFile) {
+	const available = materialClaimIds(caseFile);
+	const targets = boundedStrings(raw, "Witness target_claims", { maxItems: caseLimits().witnessClaims, maxChars: 64, allowEmpty: available.length === 0 });
+	const known = new Set(available);
+	for (const target of targets) need(known.has(target), `Witness target claim ${target} is not a recorded material constructor claim.`);
+	return available.filter((target) => targets.includes(target));
+}
+
+function normalizeWitnessDocket(raw, caseFile, { at } = {}) {
+	need(plain(raw), "A witness docket must be a structured object.");
+	need(finite(at), "A witness docket needs a finite capture time.");
+	const kind = String(raw.kind);
+	need(WITNESS_KINDS.has(kind), "A witness docket kind is specification, main-observation, or closure-gap.");
+	const targetClaims = normalizeWitnessTargets(raw.target_claims, caseFile);
+	if (kind === "closure-gap") {
+		const allowed = new Set(["kind", "target_claims", "closure_gap"]);
+		for (const key of Object.keys(raw)) need(allowed.has(key), `A witness closure gap has unsupported field ${key}.`);
+		const closureGap = compact(raw.closure_gap);
+		need(closureGap !== "" && closureGap.length <= caseLimits().witnessTextChars, "A witness closure gap is missing or oversized.");
+		const canonical = { version: 1, id: "g1", kind, targetClaims, closureGap, at };
+		return { ...canonical, digest: digest(canonical) };
+	}
+	const allowed = new Set(["kind", "target_claims", "method", "allowed_inputs", "expected_discriminator", "unresolved_if", "budget", ...(kind === "main-observation" ? ["observation", "citations", "assessment"] : [])]);
+	for (const key of Object.keys(raw)) need(allowed.has(key), `A witness ${kind} has unsupported field ${key}.`);
+	const method = String(raw.method);
+	need(WITNESS_METHODS.has(method), "A witness method is read, search, list, source, trace, or proof.");
+	const allowedInputs = normalizeWitnessInputs(raw.allowed_inputs, caseFile);
+	need(allowedInputs.length > 0 || targetClaims.length === 0, "A witness specification needs at least one allowed input.");
+	const expectedDiscriminator = compact(raw.expected_discriminator);
+	const unresolvedIf = compact(raw.unresolved_if);
+	need(expectedDiscriminator !== "" && expectedDiscriminator.length <= caseLimits().witnessTextChars, "A witness expected_discriminator is missing or oversized.");
+	need(unresolvedIf !== "" && unresolvedIf.length <= caseLimits().witnessTextChars, "A witness unresolved_if is missing or oversized.");
+	need(plain(raw.budget) && Object.keys(raw.budget).every((key) => key === "source_calls"), "A witness budget needs only source_calls.");
+	const sourceCalls = raw.budget.source_calls;
+	need(Number.isInteger(sourceCalls) && sourceCalls >= 0 && sourceCalls <= caseLimits().witnessSourceCalls, `A witness source_calls budget is between 0 and ${caseLimits().witnessSourceCalls}.`);
+	const toolCalls = allowedInputs.filter((entry) => entry.kind === "tool-call");
+	if (["read", "search", "list"].includes(method)) {
+		need(toolCalls.length > 0 && toolCalls.every((entry) => entry.tool === method), `A ${method} witness needs only explicitly allowed ${method} calls.`);
+		need(sourceCalls > 0, `A ${method} witness needs a positive source_calls budget.`);
+	} else {
+		need(toolCalls.length === 0 && sourceCalls === 0, `A ${method} witness has no generic project-source tool authority.`);
+	}
+	if (kind === "specification") {
+		const canonical = { version: 1, id: "w1", kind, targetClaims, method, allowedInputs, expectedDiscriminator, unresolvedIf, budget: { sourceCalls }, at };
+		return { ...canonical, digest: digest(canonical), usage: { sourceCalls: 0 } };
+	}
+	need(["source", "trace", "proof"].includes(method), "A main-context direct observation is source, trace, or proof only.");
+	const observation = compact(raw.observation);
+	need(observation !== "" && observation.length <= caseLimits().witnessTextChars, "A main-context direct observation is missing or oversized.");
+	const citations = normalizeWitnessCitationList(raw.citations, "Main witness observation");
+	const allowable = new Set(allowedInputs.filter((entry) => entry.kind !== "tool-call").map((entry) => entry.ref));
+	need(citations.length > 0 && citations.every((citation) => (citation.kind === "source" || citation.kind === "receipt") && allowable.has(citation.ref)), "A main-context direct observation cites only its explicit frozen-source or retained-receipt inputs.");
+	for (const citation of citations) {
+		if (citation.kind === "source") {
+			const source = caseFile.capsule.sources.find((entry) => entry.id === citation.ref);
+			need(source?.role !== "claim" && source?.capture.status === "captured", `Main witness source ${citation.ref} is not direct frozen evidence.`);
+		} else need(caseFile.ledger.some((entry) => entry.id === citation.ref && entry.kind === "receipt") && citedReceiptIds(caseFile).has(citation.ref), `Main witness receipt ${citation.ref} is not a sealed retained input.`);
+	}
+	const assessment = normalizeClaimAssessments(raw.assessment, targetClaims, "Main witness assessment");
+	for (const entry of assessment) {
+		for (const ref of entry.citations) {
+			const citation = citations.find((candidate) => candidate.ref === ref);
+			need(citation !== undefined, `Main witness assessment ${entry.claim} cites ${ref}, but that ref is absent from its direct observation.`);
+			if (entry.disposition !== "unresolved") need(citation.kind === "source" || citation.kind === "receipt", `Main witness assessment ${entry.claim} needs direct cited evidence for ${entry.disposition}.`);
+		}
+	}
+	const canonical = { version: 1, id: "w1", kind, targetClaims, method, allowedInputs, expectedDiscriminator, unresolvedIf, budget: { sourceCalls }, observation: { text: observation, citations, assessment }, at };
+	return { ...canonical, digest: digest(canonical) };
+}
+
+function witnessDocketRaw(docket) {
+	if (docket.kind === "closure-gap") return { kind: docket.kind, target_claims: docket.targetClaims, closure_gap: docket.closureGap };
+	return {
+		kind: docket.kind,
+		target_claims: docket.targetClaims,
+		method: docket.method,
+		allowed_inputs: docket.allowedInputs,
+		expected_discriminator: docket.expectedDiscriminator,
+		unresolved_if: docket.unresolvedIf,
+		budget: { source_calls: docket.budget?.sourceCalls },
+		...(docket.kind === "main-observation" ? { observation: docket.observation?.text, citations: docket.observation?.citations, assessment: docket.observation?.assessment } : {}),
+	};
+}
+
+function checkWitnessDocket(caseFile, docket) {
+	need(plain(docket), "its main-owned witness docket is invalid");
+	const normalized = normalizeWitnessDocket(witnessDocketRaw(docket), caseFile, { at: docket.at });
+	const usage = docket.kind === "specification" ? docket.usage : undefined;
+	if (usage !== undefined) need(plain(usage) && Object.keys(usage).every((key) => key === "sourceCalls") && Number.isInteger(usage.sourceCalls) && usage.sourceCalls >= 0 && usage.sourceCalls <= docket.budget.sourceCalls, "its witness source-call usage is invalid");
+	need(sameJson({ ...normalized, ...(usage === undefined ? {} : { usage }) }, docket), "its main-owned witness docket is non-canonical");
+	return docket;
+}
+
+const witnessAllowsSource = (docket, ref) => docket?.allowedInputs?.some((input) => input.kind === "source" && input.ref === ref) === true;
+const witnessAllowsCarriedReceipt = (docket, ref) => docket?.allowedInputs?.some((input) => input.kind === "receipt" && input.ref === ref) === true;
+function witnessAllowsToolReceipt(docket, receipt) {
+	try {
+		const input = normalizeWitnessToolInput(receipt.tool, receipt.input, 0);
+		return docket?.allowedInputs?.some((entry) => entry.kind === "tool-call" && entry.tool === receipt.tool && sameJson(entry.input, input)) === true;
+	} catch {
+		return false;
+	}
+}
+
 function flowShape(caseFile) {
 	if (caseFile.flow === undefined) return undefined;
 	need(plain(caseFile.flow) && caseFile.flow.version === CASE_FLOW_VERSION, "its case flow version is invalid");
 	need(FLOW_STATES.has(caseFile.flow.state), "its case flow state is invalid");
-	const allowed = new Set(["version", "state", "blind", "crossPacket"]);
+	const allowed = new Set(["version", "state", "blind", "crossPacket", "witness"]);
 	for (const key of Object.keys(caseFile.flow)) need(allowed.has(key), `its case flow has unsupported field ${key}`);
 	return caseFile.flow;
 }
@@ -608,13 +872,13 @@ function checkCaseFlow(caseFile) {
 	if (caseFile.status === "stopped") return flow;
 	if (flow.state === "construct") {
 		need(["queued", "active"].includes(construct.status) && blind.status === "queued" && cross.status === "queued" && witness.status === "queued", "its construct flow transition is invalid");
-		need(flow.blind === undefined && flow.crossPacket === undefined, "its construct flow has future-pass data");
+		need(flow.blind === undefined && flow.crossPacket === undefined && flow.witness === undefined, "its construct flow has future-pass data");
 		return flow;
 	}
 	need(terminalPhase(construct), "its case flow advanced before construction ended");
 	if (flow.state === "falsify-blind") {
 		need(["queued", "active"].includes(blind.status) && cross.status === "queued" && witness.status === "queued", "its blind falsification flow transition is invalid");
-		need(flow.blind === undefined && flow.crossPacket === undefined, "its blind falsification flow has cross-examination data before sealing");
+		need(flow.blind === undefined && flow.crossPacket === undefined && flow.witness === undefined, "its blind falsification flow has cross-examination data before sealing");
 		return flow;
 	}
 	need(terminalPhase(blind), "its case flow advanced before blind falsification ended");
@@ -622,27 +886,98 @@ function checkCaseFlow(caseFile) {
 	checkPacketMeta(caseFile, flow.crossPacket);
 	if (flow.state === "falsify-cross-exam") {
 		need(["queued", "active"].includes(cross.status) && witness.status === "queued", "its controlled cross-examination flow transition is invalid");
+		need(flow.witness === undefined, "its controlled cross-examination flow has a premature witness docket.");
 		if (cross.status !== "queued") need(flow.crossPacket.delivery !== undefined && cross.conversationId === flow.crossPacket.delivery.conversationId, "its controlled cross-examination began before packet delivery");
 		return flow;
 	}
 	need(terminalPhase(cross), "its case flow advanced before controlled cross-examination ended");
 	need(flow.crossPacket.delivery !== undefined && cross.conversationId === flow.crossPacket.delivery.conversationId, "its controlled cross-examination has no durable packet delivery");
 	if (flow.state === "awaiting-witness-specification") {
-		need(witness.status === "queued", "its case awaits a witness specification with a started witness");
+		need(witness.status === "queued" && flow.witness === undefined, "its case awaits one main-owned witness docket with no started witness");
 		return flow;
 	}
+	const docket = checkWitnessDocket(caseFile, flow.witness);
 	if (flow.state === "witness") {
-		need(["queued", "active"].includes(witness.status), "its witness flow transition is invalid");
+		need(docket.kind === "specification" && ["queued", "active"].includes(witness.status), "its witness flow transition is invalid");
 		return flow;
 	}
-	need(flow.state === "ready-for-synthesis" && terminalPhase(witness), "its ready-for-synthesis flow transition is invalid");
+	need(flow.state === "ready-for-synthesis", "its case flow has an invalid terminal state.");
+	if (docket.kind === "specification") need(terminalPhase(witness), "its ready-for-synthesis flow has an unfinished witness specification.");
+	else need(witness.status === "queued", "its direct observation or closure gap must not impersonate a started witness phase.");
 	return flow;
+}
+
+function witnessAssessmentForReport(caseFile, docket) {
+	if (docket.kind === "main-observation") return docket.observation.assessment;
+	if (docket.kind !== "specification") return undefined;
+	const phase = phaseOf(caseFile, "witness");
+	return phase.status === "complete" && phase.artifact?.kind === "structured" ? phase.artifact.data.witnessAssessment : undefined;
+}
+
+function expectedWitnessIds(caseFile, docket) {
+	if (docket.kind === "closure-gap") return [];
+	if (docket.kind === "main-observation") return [docket.id];
+	const phase = phaseOf(caseFile, "witness");
+	return terminalPhase(phase) ? [docket.id] : [];
+}
+
+function flowReportCanonical(caseFile, raw) {
+	need(plain(raw), "its durable case-level report is invalid");
+	const allowed = new Set(["version", "at", "outcome", "report", "witnesses", "residual", "closureGap", "budgetLimit", "blockingQuestion", "successor", "digest"]);
+	for (const key of Object.keys(raw)) need(allowed.has(key), `its durable case-level report has unsupported field ${key}`);
+	need(raw.version === 1 && finite(raw.at), "its durable case-level report version or time is invalid");
+	const outcome = String(raw.outcome);
+	need(REPORT_OUTCOMES.has(outcome), "its durable case-level report outcome is invalid");
+	const report = compact(raw.report);
+	need(report !== "" && report.length <= caseLimits().synthesisChars, "its durable case-level report text is missing or oversized");
+	const witnesses = boundedStrings(raw.witnesses, "Case-level report witnesses", { maxItems: 1, maxChars: 64 });
+	const residual = raw.residual === undefined ? undefined : compact(raw.residual);
+	const closureGap = raw.closureGap === undefined ? undefined : compact(raw.closureGap);
+	const budgetLimit = raw.budgetLimit === undefined ? undefined : compact(raw.budgetLimit);
+	need(residual === undefined || (residual !== "" && residual.length <= caseLimits().residualChars), "its case-level residual uncertainty is invalid");
+	need(closureGap === undefined || (closureGap !== "" && closureGap.length <= caseLimits().witnessTextChars), "its case-level closure gap is invalid");
+	need(budgetLimit === undefined || (budgetLimit !== "" && budgetLimit.length <= caseLimits().witnessTextChars), "its case-level budget limit is invalid");
+	const docket = checkWitnessDocket(caseFile, caseFile.flow.witness);
+	need(sameJson(witnesses, expectedWitnessIds(caseFile, docket)), "its durable case-level report names the wrong final witness ids");
+	if (outcome === "supported" || outcome === "refuted") {
+		need(docket.kind !== "closure-gap", `${outcome} cannot be recorded without a witness.`);
+		const allClaims = materialClaimIds(caseFile);
+		need(sameJson(docket.targetClaims, allClaims), `${outcome} requires one witness docket that targets every material constructor claim.`);
+		const assessments = witnessAssessmentForReport(caseFile, docket);
+		need(Array.isArray(assessments) && assessments.length === allClaims.length && assessments.every((entry) => entry.disposition !== "unresolved"), `${outcome} requires a completed witness assessment that settles every material constructor claim.`);
+		const candidate = assessments.find((entry) => entry.claim === "construct:candidate");
+		need(candidate?.disposition === (outcome === "supported" ? "supports" : "refutes"), `${outcome} needs the witness assessment for construct:candidate to ${outcome === "supported" ? "support" : "refute"} it.`);
+	}
+	if (outcome === "unresolved") need(residual !== undefined || closureGap !== undefined || budgetLimit !== undefined || docket.kind === "closure-gap", "An unresolved case-level report needs residual uncertainty, a closure gap, or a budget limit.");
+	const blockingQuestion = raw.blockingQuestion === undefined ? undefined : compact(raw.blockingQuestion);
+	let successor;
+	if (outcome === "needs_user_input") {
+		need(blockingQuestion !== undefined && blockingQuestion !== "" && blockingQuestion.length <= caseLimits().witnessTextChars, "A needs_user_input report needs one exact blocking question.");
+		need(plain(raw.successor) && Object.keys(raw.successor).every((key) => ["predecessor", "question", "boundary"].includes(key)), "A needs_user_input report needs one successor-capsule boundary.");
+		const question = compact(raw.successor.question);
+		const boundary = compact(raw.successor.boundary);
+		need(raw.successor.predecessor === caseFile.id && question === blockingQuestion && boundary !== "" && boundary.length <= caseLimits().witnessTextChars, "A needs_user_input successor must link this case, its exact question, and a bounded new-capsule boundary.");
+		successor = { predecessor: caseFile.id, question, boundary };
+	} else need(blockingQuestion === undefined && raw.successor === undefined, "Only a needs_user_input report carries a blocking question and successor boundary.");
+	const canonical = { version: 1, at: raw.at, outcome, report, witnesses, ...(residual === undefined ? {} : { residual }), ...(closureGap === undefined ? {} : { closureGap }), ...(budgetLimit === undefined ? {} : { budgetLimit }), ...(blockingQuestion === undefined ? {} : { blockingQuestion }), ...(successor === undefined ? {} : { successor }) };
+	need(typeof raw.digest === "string" && HEX.test(raw.digest) && raw.digest === digest(canonical), "its durable case-level report digest does not match");
+	return { ...canonical, digest: raw.digest };
+}
+
+function checkFlowReport(caseFile) {
+	if (!usesCaseFlow(caseFile)) return;
+	if (caseFile.status === "synthesized" || caseFile.status === "needs-user-input") {
+		const report = flowReportCanonical(caseFile, caseFile.synthesis);
+		need((caseFile.status === "needs-user-input") === (report.outcome === "needs_user_input"), "its durable case-level report outcome does not match the case status");
+		need(sameJson(report, caseFile.synthesis), "its durable case-level report is non-canonical");
+	} else need(caseFile.synthesis === undefined, "its running or ready flow case has a premature case-level report");
 }
 
 function normalizeV2(caseFile) {
 	baseCheck(caseFile);
 	need(caseFile.version === CASE_VERSION, `its version ${JSON.stringify(caseFile.version)} is not supported`);
 	const flow = flowShape(caseFile);
+	need(flow !== undefined || caseFile.status !== "needs-user-input", "only a flow-enabled v2 case may carry needs-user-input status");
 	phaseTemplateCheck(caseFile, flow === undefined ? CASE_PHASES : CASE_FLOW_PHASES);
 	need(typeof caseFile.claim === "string" && compact(caseFile.claim) !== "", "it has no frozen claim");
 	need(finite(caseFile.createdAt) && finite(caseFile.updatedAt), "it has invalid case times");
@@ -675,6 +1010,7 @@ function normalizeV2(caseFile) {
 	need(Number.isInteger(caseFile.nextLedger) && caseFile.nextLedger === nextLedgerNumber(ledger), "its next evidence ledger id is invalid.");
 	for (const phase of caseFile.phases) checkStoredArtifact(caseFile, phase);
 	checkCaseFlow(caseFile);
+	checkFlowReport(caseFile);
 	return caseFile;
 }
 
@@ -853,8 +1189,9 @@ export function noteCaseMessage(brainDir, id, value, { at = Date.now(), phase } 
 	return updateCase(brainDir, id, (caseFile) => {
 		if (caseFile.status !== "running") return { accepted: false, reason: `Case ${id} is ${caseFile.status}; it is no longer receiving phase input.` };
 		if (caseFile.messages.length >= messageLimit()) return { accepted: false, reason: `Case ${id} already holds ${messageLimit()} participant messages, its fixed provenance limit.` };
-		const current = typeof phase === "string" ? caseFile.phases.find((entry) => entry.id === phase && entry.status === "active") : undefined;
-		const entry = { id: `u${caseFile.nextMessage++}`, at, text: said, route: current === undefined ? "queued" : "active", ...(current === undefined ? {} : { phase: current.id }) };
+		const isolatedWitness = usesCaseFlow(caseFile) && (caseFile.flow.state === "witness" || phase === "witness");
+		const current = isolatedWitness ? undefined : typeof phase === "string" ? caseFile.phases.find((entry) => entry.id === phase && entry.status === "active") : undefined;
+		const entry = { id: `u${caseFile.nextMessage++}`, at, text: said, route: current === undefined ? "queued" : "active", ...(current === undefined ? {} : { phase: current.id }), ...(isolatedWitness ? { unreadBy: "witness", afterCase: true } : {}) };
 		caseFile.messages.push(entry);
 		return { accepted: true, entry: copy(entry) };
 	});
@@ -887,6 +1224,12 @@ export function appendCaseReceipt(brainDir, id, phaseId, { tool, arguments: args
 		if (caseFile.version !== CASE_VERSION) return undefined;
 		const phase = phaseOf(caseFile, phaseId);
 		if (phase.status !== "active" || caseFile.status !== "running") return undefined;
+		// The harness normally refuses this before the source tool reads. Keep receipt persistence equally strict so a
+		// manually invoked or replayed append cannot later turn an undeclared witness read into durable direct evidence.
+		if (usesCaseFlow(caseFile) && phase.id === "witness") {
+			const docket = caseFile.flow.witness;
+			if (docket?.kind !== "specification" || !witnessAllowsToolReceipt(docket, { tool: sourceTool, input })) return undefined;
+		}
 		if (caseFile.ledger.length >= caseLimits().ledgerEntries) return undefined;
 		const appendGap = (text) => {
 			const gap = { id: `l${caseFile.nextLedger}`, kind: "source-gap", text, citations: [], at };
@@ -972,6 +1315,46 @@ export function markCrossExaminationPacketDelivered(brainDir, id, { conversation
 	});
 }
 
+/** The main context alone selects the one witness specification, direct source observation, or closure gap after C2. */
+export function recordWitnessDocket(brainDir, id, docket, { at = Date.now() } = {}) {
+	return updateCase(brainDir, id, (caseFile) => {
+		need(usesCaseFlow(caseFile) && caseFile.flow.state === "awaiting-witness-specification", `Case ${id} is not awaiting one main-owned witness docket.`);
+		const value = normalizeWitnessDocket(docket, caseFile, { at });
+		caseFile.flow.witness = value;
+		caseFile.flow.state = value.kind === "specification" ? "witness" : "ready-for-synthesis";
+		// A witness may see only the frozen capsule, sealed artifacts, cited receipts, and this docket. Participant
+		// messages stay exact durable provenance for the main context rather than becoming an ambient witness input.
+		for (const message of caseFile.messages) {
+			if (message.delivery !== undefined) continue;
+			delete message.phase;
+			message.route = "queued";
+			message.unreadBy ??= "witness";
+			message.afterCase = true;
+		}
+		return copy(value);
+	});
+}
+
+/** Admit one exact source-tool call named by a main-owned witness specification, spending its durable call budget
+ * before the tool can inspect project bytes. Non-witness phases retain their existing C1/C2 source behavior. */
+export function admitWitnessSourceTool(brainDir, id, phaseId, tool, args, { at = Date.now() } = {}) {
+	const loaded = loadCase(brainDir, id);
+	if (loaded.case === undefined) throw new CaseError(loaded.error);
+	if (!usesCaseFlow(loaded.case) || phaseId !== "witness") return { applicable: false, allowed: true };
+	return updateCase(brainDir, id, (caseFile) => {
+		const phase = phaseOf(caseFile, phaseId);
+		const docket = caseFile.flow.witness;
+		if (caseFile.status !== "running" || caseFile.flow.state !== "witness" || phase.status !== "active" || docket?.kind !== "specification") return { applicable: true, allowed: false, reason: `Case ${id}'s witness source authority is no longer active.` };
+		let input;
+		try { input = normalizeWitnessToolInput(String(tool), args, 0); } catch (error) { return { applicable: true, allowed: false, reason: error.message }; }
+		const allowed = docket.allowedInputs.some((entry) => entry.kind === "tool-call" && entry.tool === tool && sameJson(entry.input, input));
+		if (!allowed) return { applicable: true, allowed: false, reason: `The ${tool} call is outside case ${id}'s exact main-owned witness docket.` };
+		if (docket.usage.sourceCalls >= docket.budget.sourceCalls) return { applicable: true, allowed: false, reason: `Case ${id}'s witness source-call budget of ${docket.budget.sourceCalls} is exhausted.` };
+		docket.usage.sourceCalls += 1;
+		return { applicable: true, allowed: true, at };
+	});
+}
+
 /** A phase ended. Messages that had not reached its request stay queued for the next available phase. */
 export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now() } = {}) {
 	return updateCase(brainDir, id, (caseFile) => {
@@ -1014,8 +1397,12 @@ export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now()
 export function readyCase(brainDir, id, { at = Date.now() } = {}) {
 	return updateCase(brainDir, id, (caseFile) => {
 		if (caseFile.status !== "running") throw new CaseError(`Case ${id} is ${caseFile.status}, not running.`);
-		if (usesCaseFlow(caseFile) && caseFile.flow.state !== "ready-for-synthesis") throw new CaseError(`Case ${id} is ${caseFile.flow.state}; the main context has not yet recorded a witness specification or documented closure gap.`);
-		if (caseFile.phases.some((phase) => phase.status === "active" || phase.status === "queued")) throw new CaseError(`Case ${id} still has an unfinished phase.`);
+		if (usesCaseFlow(caseFile)) {
+			if (caseFile.flow.state !== "ready-for-synthesis") throw new CaseError(`Case ${id} is ${caseFile.flow.state}; the main context has not yet recorded a witness specification or documented closure gap.`);
+			const docket = checkWitnessDocket(caseFile, caseFile.flow.witness);
+			const unfinished = caseFile.phases.some((phase) => phase.status === "active" || (phase.status === "queued" && !(phase.id === "witness" && docket.kind !== "specification")));
+			if (unfinished) throw new CaseError(`Case ${id} still has an unfinished phase.`);
+		} else if (caseFile.phases.some((phase) => phase.status === "active" || phase.status === "queued")) throw new CaseError(`Case ${id} still has an unfinished phase.`);
 		caseFile.status = "ready";
 		caseFile.readyAt = at;
 		return copy(caseFile);
@@ -1025,7 +1412,7 @@ export function readyCase(brainDir, id, { at = Date.now() } = {}) {
 /** Record a stop before its active phase is interrupted; no later phase may start, and the partial record remains inspectable. */
 export function stopCase(brainDir, id, { at = Date.now(), why } = {}) {
 	return updateCase(brainDir, id, (caseFile) => {
-		if (caseFile.status === "synthesized") throw new CaseError(`Case ${id} is already synthesized.`);
+		if (["synthesized", "needs-user-input"].includes(caseFile.status)) throw new CaseError(`Case ${id} already has its durable case-level report.`);
 		caseFile.status = "stopped";
 		caseFile.stoppedAt = at;
 		if (typeof why === "string" && why.trim() !== "") caseFile.stopReason = compact(why);
@@ -1034,18 +1421,37 @@ export function stopCase(brainDir, id, { at = Date.now(), why } = {}) {
 	});
 }
 
-/** The main context's own conclusion. No phase count is turned into corroboration. */
-export function synthesizeCase(brainDir, id, { outcome, report, residual, at = Date.now() }) {
-	if (!["supported", "refuted", "unresolved"].includes(outcome)) throw new CaseError("A synthesis outcome is supported, refuted, or unresolved.");
-	const written = String(report ?? "").trim();
+/** The main context's only conclusion/report. It weighs evidence; phase count is never corroboration. */
+export function synthesizeCase(brainDir, id, { outcome, report, residual, closureGap, budgetLimit, blockingQuestion, successorBoundary, at = Date.now() }) {
+	const written = compact(report);
 	if (written === "") throw new CaseError("A synthesis needs a short report that weighs the phase artifacts.");
 	if (written.length > caseLimits().synthesisChars) throw new CaseError(`The synthesis report exceeds the ${caseLimits().synthesisChars.toLocaleString("en-US")} character case limit.`);
-	const remaining = String(residual ?? "").trim();
-	if (remaining.length > caseLimits().residualChars) throw new CaseError(`The residual uncertainty exceeds the ${caseLimits().residualChars.toLocaleString("en-US")} character case limit.`);
+	const remaining = residual === undefined ? undefined : compact(residual) || undefined;
+	const gap = closureGap === undefined ? undefined : compact(closureGap) || undefined;
+	const limit = budgetLimit === undefined ? undefined : compact(budgetLimit) || undefined;
+	const question = blockingQuestion === undefined ? undefined : compact(blockingQuestion);
+	const boundary = successorBoundary === undefined ? undefined : compact(successorBoundary);
 	return updateCase(brainDir, id, (caseFile) => {
 		if (caseFile.status !== "ready") throw new CaseError(`Case ${id} is ${caseFile.status}; only a ready case can be synthesized.`);
-		caseFile.status = "synthesized";
-		caseFile.synthesis = { at, outcome, report: written, ...(remaining === "" ? {} : { residual: remaining }) };
+		if (!usesCaseFlow(caseFile)) {
+			if (!["supported", "refuted", "unresolved"].includes(outcome)) throw new CaseError("A historical case synthesis outcome is supported, refuted, or unresolved.");
+			if (remaining !== undefined && remaining.length > caseLimits().residualChars) throw new CaseError(`The residual uncertainty exceeds the ${caseLimits().residualChars.toLocaleString("en-US")} character case limit.`);
+			caseFile.status = "synthesized";
+			caseFile.synthesis = { at, outcome, report: written, ...(remaining === undefined ? {} : { residual: remaining }) };
+			return copy(caseFile);
+		}
+		if (!REPORT_OUTCOMES.has(outcome)) throw new CaseError("A case-level report outcome is supported, refuted, unresolved, or needs_user_input.");
+		if (caseFile.flow.state !== "ready-for-synthesis") throw new CaseError(`Case ${id} is ${caseFile.flow.state}; it is not ready for the main case-level report.`);
+		const docket = checkWitnessDocket(caseFile, caseFile.flow.witness);
+		const witnesses = expectedWitnessIds(caseFile, docket);
+		const base = { version: 1, at, outcome, report: written, witnesses, ...(remaining === undefined ? {} : { residual: remaining }), ...(gap === undefined ? {} : { closureGap: gap }), ...(limit === undefined ? {} : { budgetLimit: limit }) };
+		const canonical = outcome === "needs_user_input"
+			? { ...base, blockingQuestion: question, successor: { predecessor: caseFile.id, question, boundary } }
+			: base;
+		// Reuse the stored-record validator before writing, so every live outcome follows the exact same authority proof.
+		const checked = flowReportCanonical(caseFile, { ...canonical, digest: digest(canonical) });
+		caseFile.status = outcome === "needs_user_input" ? "needs-user-input" : "synthesized";
+		caseFile.synthesis = checked;
 		return copy(caseFile);
 	});
 }
@@ -1125,10 +1531,49 @@ function renderAppendedLedgerEntry(entry, { includeOutput = false } = {}) {
 	return includeOutput ? `${head}\n${entry.output.split("\n").map((line) => `  ${line}`).join("\n")}` : head;
 }
 
+/** The main-owned witness docket, including the only source-tool calls a C3 witness may make. */
+export function renderWitnessDocket(caseFile) {
+	need(usesCaseFlow(caseFile) && caseFile.flow.witness !== undefined, "This case has no recorded main-owned witness docket.");
+	const docket = checkWitnessDocket(caseFile, caseFile.flow.witness);
+	const lines = ["Main-owned witness docket", `  ${docket.id} · ${docket.kind} · sha256 ${docket.digest}`, `  Target claims: ${docket.targetClaims.length === 0 ? "(none)" : docket.targetClaims.join(", ")}`];
+	if (docket.kind === "closure-gap") {
+		lines.push("", "Documented closure gap", `  ${docket.closureGap}`);
+		return lines.join("\n");
+	}
+	lines.push("", `Method: ${docket.method}.`, "Allowed inputs");
+	for (const input of docket.allowedInputs) {
+		if (input.kind === "tool-call") lines.push(`  ${input.tool} ${JSON.stringify(input.input)}`);
+		else lines.push(`  ${input.kind} ${input.ref}`);
+	}
+	lines.push("", "Expected discriminator", `  ${docket.expectedDiscriminator}`, "", "Still unresolved if", `  ${docket.unresolvedIf}`, "", `Budget: ${docket.usage === undefined ? 0 : docket.usage.sourceCalls}/${docket.budget.sourceCalls} admitted source calls.`);
+	if (docket.kind === "main-observation") {
+		lines.push("", "Main-context direct observation", `  ${docket.observation.text} · cites ${docket.observation.citations.map((citation) => citation.ref).join(", ")}`, "", "Assessment");
+		for (const assessment of docket.observation.assessment) lines.push(`  ${assessment.claim} · ${assessment.disposition} · ${assessment.text} · cites ${assessment.citations.join(", ")}`);
+	}
+	return lines.join("\n");
+}
+
+/** The intentionally small evidence packet a witness sees: no parent conversation, participant lines, or generic project access. */
+export function renderWitnessInputs(caseFile) {
+	need(usesCaseFlow(caseFile) && caseFile.flow.witness !== undefined, "This case has no recorded witness inputs.");
+	const lines = ["Sealed earlier artifacts"];
+	for (const definition of CASE_FLOW_PHASES.filter((phase) => phase.id !== "witness")) lines.push(phaseArtifact(caseFile, definition.id), "");
+	if (lines.at(-1) === "") lines.pop();
+	const ids = receiptIdsCitedBeforePhase(caseFile, phaseOf(caseFile, "witness"));
+	const receipts = caseFile.ledger.filter((entry) => entry.kind === "receipt" && ids.has(entry.id));
+	lines.push("", "Cited immutable receipts");
+	if (receipts.length === 0) lines.push("  (none)");
+	else for (const receipt of receipts) lines.push(renderAppendedLedgerEntry(receipt, { includeOutput: true }));
+	return lines.join("\n");
+}
+
 /** What the main context receives when it must make the only conclusion. */
 export function renderCaseForSynthesis(caseFile) {
+	const flow = usesCaseFlow(caseFile);
 	const lines = [
-		`Case ${caseFile.id} is ready for my synthesis. These are bounded artifacts from the same model in deliberately different contexts, not independent agents, votes, or corroboration. I weigh the evidence and label the result supported, refuted, or unresolved; agreement does not make a claim true.`,
+		flow
+			? `Case ${caseFile.id} is ready for my case-level report. These are bounded artifacts from the same model in deliberately different contexts, not independent agents, votes, or corroboration. I weigh evidence rather than phase agreement. Supported or refuted needs the named witness to settle every material claim; otherwise I record unresolved or needs_user_input.`
+			: `Case ${caseFile.id} is ready for my synthesis. These are bounded artifacts from the same model in deliberately different contexts, not independent agents, votes, or corroboration. I weigh the evidence and label the result supported, refuted, or unresolved; agreement does not make a claim true.`,
 		"",
 		renderCapsule(caseFile),
 		"",
@@ -1136,13 +1581,17 @@ export function renderCaseForSynthesis(caseFile) {
 	];
 	for (const phase of phaseDefinitions(caseFile)) lines.push(phaseArtifact(caseFile, phase.id), "");
 	if (lines.at(-1) === "") lines.pop();
+	if (flow && caseFile.flow.witness !== undefined) lines.push("", renderWitnessDocket(caseFile));
 	if (caseFile.version === CASE_VERSION) {
 		const added = caseFile.ledger.slice(caseFile.capsule.ledger.length);
 		const cited = citedReceiptIds(caseFile);
 		lines.push("", "Append-only evidence ledger", added.length === 0 ? "No phase-local source receipts or ledger facts were retained." : added.map((entry) => renderAppendedLedgerEntry(entry, { includeOutput: cited.has(entry.id) })).join("\n"));
 	}
-	const participation = caseFile.messages.length === 0 ? "No participant messages arrived while the case ran." : caseFile.messages.map((message) => `[${message.id} · ${stamp(message.at)} · ${message.delivery === undefined ? "not delivered before the case ended" : `offered to ${message.delivery.phase} by ${message.delivery.via}`}] ${message.text}`).join("\n");
-	lines.push("", "Participant provenance", participation, "", `I now call \`case\` with action \`synthesize\`, id \`${caseFile.id}\`, one outcome, a concise evidence-weighting report, and any residual uncertainty.`);
+	const participation = caseFile.messages.length === 0 ? "No participant messages arrived while the case ran." : caseFile.messages.map((message) => `[${message.id} · ${stamp(message.at)} · ${message.delivery === undefined ? message.afterCase ? "held outside witness inputs for the main context" : "not delivered before the case ended" : `offered to ${message.delivery.phase} by ${message.delivery.via}`}] ${message.text}`).join("\n");
+	const next = flow
+		? `I now call \`case\` with action \`synthesize\`, id \`${caseFile.id}\`, one outcome, and one concise evidence report. For unresolved I name residual uncertainty, a closure gap, or a budget limit. For needs_user_input I include the exact blocking_question and successor_boundary. I do not treat agreement as corroboration.`
+		: `I now call \`case\` with action \`synthesize\`, id \`${caseFile.id}\`, one outcome, a concise evidence-weighting report, and any residual uncertainty.`;
+	lines.push("", "Participant provenance", participation, "", next);
 	return lines.join("\n");
 }
 
@@ -1179,7 +1628,9 @@ export function renderCase(caseFile) {
 	if (usesCaseFlow(caseFile)) {
 		lines.push("", `Information flow: ${caseFile.flow.state}.`);
 		if (caseFile.flow.blind !== undefined) lines.push(`Blind pass seal: falsify-blind · sha256 ${caseFile.flow.blind.digest} · ${caseFile.flow.crossPacket?.delivery === undefined ? "constructor packet not yet delivered" : `constructor packet delivered to ${caseFile.flow.crossPacket.delivery.conversationId} as ${caseFile.flow.crossPacket.delivery.entryId}`}.`);
-		if (caseFile.flow.state === "awaiting-witness-specification") lines.push("The blind and controlled cross-examination artifacts are retained. The main context must next record one witness specification or a documented closure gap; no witness or synthesis has run.");
+		if (caseFile.flow.state === "awaiting-witness-specification") lines.push("The blind and controlled cross-examination artifacts are retained. The main context must next record exactly one witness specification, source-only direct observation, or documented closure gap; no witness or case-level report has run.");
+		if (caseFile.flow.witness !== undefined) lines.push("", renderWitnessDocket(caseFile));
+		lines.push("", "Scratch/candidate patch: unavailable in this source-only C3 flow; no case path has live-project change authority.");
 	}
 	lines.push("", "Capsule sources");
 	for (const source of caseFile.capsule.sources) lines.push(`  ${source.id}: ${source.role} · ${source.capture.status} · ${source.capture.freshness} at capture · ${sourceLocator(source)} · sha256 ${source.capture.digest ?? "unavailable"}`);
@@ -1194,10 +1645,15 @@ export function renderCase(caseFile) {
 	lines.push("", `Evidence ledger: ${caseFile.ledger.length} entries (${added.length} appended after capsule freeze).`);
 	for (const entry of added) lines.push(`  ${renderAppendedLedgerEntry(entry)}`);
 	lines.push("", `Participant messages: ${caseFile.messages.length}.`);
-	for (const message of caseFile.messages) lines.push(`  ${message.id} · ${stamp(message.at)} · ${message.delivery === undefined ? `${message.route}; not delivered` : `offered to ${message.delivery.phase} by ${message.delivery.via}`} · ${message.text}`);
+	for (const message of caseFile.messages) lines.push(`  ${message.id} · ${stamp(message.at)} · ${message.delivery === undefined ? message.afterCase ? `${message.route}; held outside witness inputs for the main context` : `${message.route}; not delivered` : `offered to ${message.delivery.phase} by ${message.delivery.via}`} · ${message.text}`);
 	if (caseFile.synthesis !== undefined) {
-		lines.push("", `Main synthesis: ${caseFile.synthesis.outcome}.`, caseFile.synthesis.report);
+		const heading = usesCaseFlow(caseFile) ? "Main case-level report" : "Main synthesis";
+		lines.push("", `${heading}: ${caseFile.synthesis.outcome}.`, caseFile.synthesis.report);
+		if (caseFile.synthesis.witnesses !== undefined) lines.push(`Final witness ids: ${caseFile.synthesis.witnesses.length === 0 ? "(none)" : caseFile.synthesis.witnesses.join(", ")}.`);
 		if (caseFile.synthesis.residual) lines.push(`Residual uncertainty: ${caseFile.synthesis.residual}`);
+		if (caseFile.synthesis.closureGap) lines.push(`Closure gap: ${caseFile.synthesis.closureGap}`);
+		if (caseFile.synthesis.budgetLimit) lines.push(`Budget limit: ${caseFile.synthesis.budgetLimit}`);
+		if (caseFile.synthesis.blockingQuestion) lines.push(`Blocking question: ${caseFile.synthesis.blockingQuestion}`, `Successor-capsule boundary: ${caseFile.synthesis.successor.boundary}`);
 	}
 	lines.push("", `Durable file: cases/${caseFile.id}.json.`);
 	return lines.join("\n");

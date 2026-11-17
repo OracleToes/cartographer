@@ -9,6 +9,8 @@
 //   task(m2): BRIEF      run declared move m2; the stored move contract supplies the brief
 //   case: QUESTION       start one bounded evidence case; case phases return named fixed artifacts
 //   case resume: c1     continue a durable running evidence case by id
+//   case witness: c1 {JSON}  record one main-owned witness docket and run only its bounded witness phase
+//   case synthesize: c1 {JSON}  record the main durable case-level report
 //   look: DIRECTIVE      call a look or change tool itself (the harness should refuse it)
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
@@ -176,7 +178,19 @@ function mainCalls(text) {
 			calls.push({ name: "task", args: task[1] ? { move: task[1] } : { brief, done_when: "The requested observation is stated in the report." } });
 		}
 		else if (/^case\s+resume:\s*\S+\s*$/.test(part)) calls.push({ name: "case", args: { action: "resume", id: part.replace(/^case\s+resume:\s*/, "").trim() } });
-		else if (part.startsWith("case:")) calls.push({ name: "case", args: { action: "start", question: part.slice(5).trim() } });
+		else if (/^case\s+witness:\s*(\S+)\s+(\{[\s\S]*\})$/.test(part)) {
+			const [, id, docket] = /^case\s+witness:\s*(\S+)\s+(\{[\s\S]*\})$/.exec(part);
+			calls.push({ name: "case", args: { action: "witness", id, docket: JSON.parse(docket) } });
+		}
+		else if (/^case\s+synthesize:\s*(\S+)\s+(\{[\s\S]*\})$/.test(part)) {
+			const [, id, report] = /^case\s+synthesize:\s*(\S+)\s+(\{[\s\S]*\})$/.exec(part);
+			calls.push({ name: "case", args: { action: "synthesize", id, ...JSON.parse(report) } });
+		}
+		else if (part.startsWith("case:")) {
+			const requested = part.slice(5).trim();
+			if (requested.startsWith("{")) calls.push({ name: "case", args: { action: "start", ...JSON.parse(requested) } });
+			else calls.push({ name: "case", args: { action: "start", question: requested } });
+		}
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
 		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));
 		else if (part === "sleep") calls.push({ name: "sleep", args: {} });
@@ -238,18 +252,21 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
 			const receiptId = /Case evidence receipt (r\d+) is durable/.exec(later.map(rawOf).join("\n"))?.[1];
 			const cross = phase === "falsify-cross-exam";
+			const witness = phase === "witness";
+			const witnessResolved = witness && receiptId !== undefined;
 			const artifact = {
 				candidate: `CASE ${phase} ARTIFACT`,
 				observations: receiptId === undefined ? [] : [{ kind: "direct", text: `The phase received immutable source receipt ${receiptId}.`, citations: [receiptId] }],
 				assumptions: [],
-				citations: cross ? [{ ref: "phase:construct", kind: "claim" }] : receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }],
+				citations: cross || witness ? [{ ref: "phase:construct", kind: "claim" }, ...(receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }])] : receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }],
 				falsifiers: [],
 				proposed_witness: "No additional witness is proposed in the stand-in fixture.",
-				closure_gaps: cross ? ["The fixture has no independent source check for the constructor candidate."] : [],
-				uncertainty: cross ? ["The constructor candidate was not independently discriminated in this fixture."] : [],
+				closure_gaps: cross || (witness && !witnessResolved) ? ["The fixture has no independent source check for the constructor candidate."] : [],
+				uncertainty: cross || (witness && !witnessResolved) ? ["The constructor candidate was not independently discriminated in this fixture."] : [],
 				...(cross ? { cross_examination: [{ claim: "construct:candidate", disposition: "unresolved", text: "No independent frozen source or phase-local receipt discriminates the constructor candidate.", citations: ["phase:construct"] }] } : {}),
+				...(witness ? { witness_assessment: [{ claim: "construct:candidate", disposition: witnessResolved ? "supports" : "unresolved", text: witnessResolved ? `The cited receipt ${receiptId} is the docketed source-level discriminator.` : "The docketed source check did not return direct evidence.", citations: [receiptId ?? "phase:construct"] }] } : {}),
 			};
-			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: !cross, artifact } }] };
+			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: cross ? false : witness ? witnessResolved : true, artifact } }] };
 		}
 		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
 			const contractAt = text.indexOf("Move contract:\n");

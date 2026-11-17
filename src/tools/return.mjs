@@ -35,6 +35,12 @@ const CASE_ARTIFACT = obj({
 		text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.artifactTextChars, description: "The exact flaw, failed challenge, or unresolved point." }),
 		citations: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: 64 }), { minItems: 1, maxItems: POLICY.limits.case.citations, description: "Artifact citation refs supporting this classification." }),
 	}), { maxItems: POLICY.limits.case.crossChallenges, description: "Required only for the controlled cross-examination phase: one classification for every material constructor claim." })),
+	witness_assessment: opt(arr(obj({
+		claim: str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: 64, description: "An exact target claim id from the main-owned witness docket." }),
+		disposition: str({ enum: ["supports", "refutes", "unresolved"], description: "The witness result for that claim; not a vote or a final synthesis." }),
+		text: str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.witnessTextChars, description: "The exact source/proof result or unresolved point." }),
+		citations: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: 64 }), { minItems: 1, maxItems: POLICY.limits.case.citations, description: "Artifact citation refs supporting this witness result." }),
+	}), { maxItems: POLICY.limits.case.witnessClaims, description: "Required only for a C3 witness phase: one assessment for every docket target claim." })),
 }, { description: "Required only in a v2 case phase. Stored as structured data and a deterministic readable rendering." });
 
 /**
@@ -95,7 +101,7 @@ export function returnTool({ root, brainDir, config }) {
 				const loaded = loadCase(brainDir, caseId);
 				if (loaded.case === undefined) return fail(`The case artifact cannot be recorded: ${loaded.error}`);
 				if (loaded.case.version === 2) {
-					if (args.artifact === undefined) return fail(`This v2 case phase must return its schema-validated \`artifact\`; a free-form report is not a durable case artifact. I return again with candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty${phaseId === "falsify-cross-exam" ? ", and cross_examination" : ""}.`);
+					if (args.artifact === undefined) return fail(`This v2 case phase must return its schema-validated \`artifact\`; a free-form report is not a durable case artifact. I return again with candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty${phaseId === "falsify-cross-exam" ? ", and cross_examination" : ""}${phaseId === "witness" && loaded.case.flow !== undefined ? ", and witness_assessment" : ""}.`);
 					try {
 						validateCaseArtifact(loaded.case, phaseId, args.artifact, { done: args.done === true });
 						artifact = JSON.parse(JSON.stringify(args.artifact));
