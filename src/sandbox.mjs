@@ -35,6 +35,13 @@ export class SandboxError extends Error {}
 /** The sandbox's own home folder, inside the brain. */
 export const SANDBOX_HOME = POLICY.sentinels.sandboxHome;
 
+/**
+ * The in-sandbox path for a disposable command stage. It deliberately lives below `/tmp`, which this sandbox
+ * replaces with a writable tmpfs before mount targets are made. The system root itself is read-only, so bwrap
+ * cannot safely create a new top-level target such as `/work` after that root bind.
+ */
+export const STAGE_WORK_DIR = "/tmp/carto-stage";
+
 /** Places that hold other people's business: each is covered by an empty folder. */
 const HIDDEN = POLICY.enums.sandboxHiddenDirs;
 

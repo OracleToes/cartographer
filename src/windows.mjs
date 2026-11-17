@@ -23,7 +23,7 @@ import { join, relative, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { killFamily } from "./reaper.mjs";
-import { HEAD_LINES, LINE_MAX, Output, QUIET, sandboxArgs, SandboxError } from "./sandbox.mjs";
+import { HEAD_LINES, LINE_MAX, Output, QUIET, sandboxArgs, SandboxError, STAGE_WORK_DIR } from "./sandbox.mjs";
 
 /** Windows open at one time. */
 export const WINDOWS_MAX = POLICY.limits.windows.open;
@@ -293,7 +293,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			network: confined ? false : mode === "direct" ? true : network,
 			sandbox: mode === "sandbox" || confined,
 			readOnly: confined,
-			...(staged ? { stage: stage.id, stageWork: stage.work, stageCwd: "/work" } : {}),
+			...(staged ? { stage: stage.id, stageWork: stage.work, stageCwd: STAGE_WORK_DIR } : {}),
 			state: POLICY.enums.windowStates.starting,
 			lines: [],
 			dropped: 0,
@@ -308,13 +308,13 @@ export function createWindows({ root, brainDir, config, runner }) {
 		let child;
 		if (mode === "sandbox" || confined) {
 			const mounted = staged
-				? (stage.mounts ?? []).map((mount) => ({ source: mount.source, target: join("/work", mount.target) }))
+				? (stage.mounts ?? []).map((mount) => ({ source: mount.source, target: join(STAGE_WORK_DIR, mount.target) }))
 				: [];
 			const sandbox = sandboxArgs(staged
 				? {
 					root: stage.work,
-					target: "/work",
-					cwd: "/work",
+					target: STAGE_WORK_DIR,
+					cwd: STAGE_WORK_DIR,
 					brainDir,
 					network,
 					read: [],
@@ -324,11 +324,15 @@ export function createWindows({ root, brainDir, config, runner }) {
 					readOnlyBinds: mounted,
 				}
 				: { root, brainDir, network: confined ? false : network, read: config.shellRead, readOnly: confined });
-			const rc = staged ? join(sandbox.home, ".cartographer-stage-rc") : join(dir, "rc");
+			// `sandbox.home` is the path visible inside bwrap; the staged home is its private host-side backing
+			// directory. Keep generated shell files in that backing directory, then name their bound path to bash.
+			const rc = staged ? join(stage.home, ".cartographer-stage-rc") : join(dir, "rc");
+			const sandboxRc = staged ? join(sandbox.home, ".cartographer-stage-rc") : rc;
 			const fileLimit = Math.max(1, Math.floor(POLICY.limits.stage.storageBytes / 512));
 			writeFileSync(rc, staged ? `${RC}\nulimit -f ${fileLimit} 2>/dev/null || true\n` : RC);
-			const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(rc)} --noediting -i`, "/dev/null"];
-			win.commandHome = staged ? sandbox.home : undefined;
+			const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(sandboxRc)} --noediting -i`, "/dev/null"];
+			win.commandHome = staged ? stage.home : undefined;
+			win.commandTarget = staged ? sandbox.home : undefined;
 			child = spawn("bwrap", [...sandbox.args, "--", ...inner], { env: sandbox.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
 		} else {
 			const rc = join(dir, "rc");
@@ -530,7 +534,9 @@ export function createWindows({ root, brainDir, config, runner }) {
 				}
 			}
 			const began = Date.now();
-			const file = win.commandHome ? join(win.commandHome, `.cartographer-stage-${name}.cmd`) : join(dir, `${name}.cmd`);
+			const commandFile = win.commandHome ? `.cartographer-stage-${name}.cmd` : `${name}.cmd`;
+			const file = win.commandHome ? join(win.commandHome, commandFile) : join(dir, commandFile);
+			const sandboxFile = win.commandTarget ? join(win.commandTarget, commandFile) : file;
 			writeFileSync(file, `${command}\n`);
 			const shown = command.split("\n");
 			push(win, `$ ${shown[0]}`);
@@ -540,7 +546,8 @@ export function createWindows({ root, brainDir, config, runner }) {
 			active.add(name);
 			record();
 			// Read from a file, so that a command with a mistake in it cannot leave bash waiting for the rest of a line.
-			win.child.stdin.write(` source ${quote(file)}\n`);
+			// A stage writes the file in its private host home and sources it through that home's bwrap bind.
+			win.child.stdin.write(` source ${quote(sandboxFile)}\n`);
 			const reason = await watch(win, { from, waitMs, signal });
 			if (reason === POLICY.enums.windowWaitReasons.stopped) await interrupt(win);
 			return report(win, reason, from, began);

@@ -44,7 +44,7 @@ import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { admitWitnessSourceTool, appendCaseReceipt, beginCasePhase, CaseError, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, noteCaseMessage, readyCase, recordWitnessDocket, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, renderWitnessDocket, stopCase, synthesizeCase } from "../src/case.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
-import { sandboxArgs } from "../src/sandbox.mjs";
+import { sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -1015,9 +1015,13 @@ test("stage: the sandbox launch binds only the disposable work tree writable and
 	writeFileSync(join(root, "source.txt"), "source\n");
 	const stage = createStage({ root });
 	t.after(() => disposeStage(stage));
-	const launch = sandboxArgs({ root: stage.work, target: "/work", cwd: "/work", brainDir, sandboxHome: stage.home, bindBrain: false, hide: [brainDir, join(root, ".git")] });
+	const launch = sandboxArgs({ root: stage.work, target: STAGE_WORK_DIR, cwd: STAGE_WORK_DIR, brainDir, sandboxHome: stage.home, bindBrain: false, hide: [brainDir, join(root, ".git")] });
 	const pairs = launch.args.join("\u0000");
-	assert.match(pairs, /--bind\u0000.*\/work\u0000\/work/, "the stage work copy is the writable project-shaped mount");
+	const stageBind = launch.args.findIndex((entry, index) => entry === "--bind" && launch.args[index + 1] === stage.work && launch.args[index + 2] === STAGE_WORK_DIR);
+	const tmpfs = launch.args.findIndex((entry, index) => entry === "--tmpfs" && launch.args[index + 1] === "/tmp");
+	const stageDir = launch.args.findIndex((entry, index) => entry === "--dir" && launch.args[index + 1] === STAGE_WORK_DIR);
+	assert.ok(stageBind >= 0, "the stage work copy is the writable project-shaped mount");
+	assert.ok(tmpfs >= 0 && stageDir > tmpfs, "the stage mount target is made inside the writable /tmp tmpfs, never under the read-only system root");
 	assert.match(pairs, /--tmpfs\u0000.*\.brain/, "the live durable brain is covered after the system read-only bind");
 	assert.ok(launch.args.includes("--unshare-net"), "network is off unless the move explicitly enables it");
 	assert.doesNotMatch(pairs, new RegExp(`--bind\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the live project is never rebound writable");

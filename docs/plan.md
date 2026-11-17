@@ -29,7 +29,7 @@ The audit is backed by the following implementation commits, in addition to the 
 - `94d4d8e` and `04293ec` — evidence-case v1 and its lifecycle hardening; and
 - `1642852` — long-form `consult` clarification without conflating it with same-model case work.
 
-The current offline suite passes **111 unit tests and 69 ported integration tests**; two bubblewrap confinement checks are skipped on this machine because `bwrap` is unavailable. The current `npm test` run reported all green in 9.5 seconds within its ten-second watchdog; a skip is not treated as a passing sandbox observation.
+The current offline suite passes **111 unit tests and 69 ported integration tests**; two bubblewrap confinement checks are skipped on this machine because `bwrap` is unavailable. The current `npm test` run reported all green in 7.8 seconds within its ten-second watchdog; a skip is not treated as a passing sandbox observation.
 
 ### 1.1 What is deliberately not claimed as complete
 
@@ -115,7 +115,7 @@ The goal is to turn the existing “compare the final checkpoint diff” detecti
 
 **Status:** completed 2026-11-16.
 
-`src/stage.mjs` creates an OS-private, random disposable work root for each sandboxed change focus. `src/tools/shell.mjs` routes its commands only to that stage; `src/windows.mjs` mounts the stage at `/work`, gives it a fresh home, hides the live brain/git paths, and makes any dependency overlay read-only. `src/tools/task.mjs` closes all stage-owned windows, records the bounded candidate manifest and receipts, rechecks the live approved move and source manifest, validates targets/operation/surface/file rules, then promotes the complete candidate or records a closure gap before checkpointing. The task report retains the staging receipt; direct mode remains clearly detection-only. Dead-process stages are cleaned on the next session start.
+`src/stage.mjs` creates an OS-private, random disposable work root for each sandboxed change focus. `src/tools/shell.mjs` routes its commands only to that stage; `src/windows.mjs` mounts it below the sandbox's fresh `/tmp` tmpfs, gives it a fresh home, hides the live brain/git paths, and makes any dependency overlay read-only. Keeping the mount target below that writable tmpfs avoids creating a top-level path beneath the read-only system-root bind. `src/tools/task.mjs` closes all stage-owned windows, records the bounded candidate manifest and receipts, rechecks the live approved move and source manifest, validates targets/operation/surface/file rules, then promotes the complete candidate or records a closure gap before checkpointing. The task report retains the staging receipt; direct mode remains clearly detection-only. Dead-process stages are cleaned on the next session start.
 
 The implementation does not broaden the command API or create a project-local scratch folder. It does not treat an exit status as a project mutation.
 

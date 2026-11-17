@@ -28,7 +28,7 @@ import { drawTree, treeSection } from "../src/tree.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
 import { confine, listProject, LookError, projectFiles, readOne, searchProject } from "../src/tools/look.mjs";
 import { findProject, setUpBrain } from "../src/project.mjs";
-import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
+import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, STAGE_WORK_DIR, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
 import { describeCall, describeResult, WAKE_BURST } from "../src/terminal.mjs";
 import { isNote, wakeNote, withoutQuietWakes } from "../src/wake.mjs";
 import { createWakes, NOTE_MAX, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
@@ -614,8 +614,10 @@ test("shell: a staged command writes only its disposable work tree before candid
 	const stage = createStage({ root });
 	const windows = windowsOf(root, brainDir);
 	try {
-		const result = await windows.run("stage", "printf 'export const add = () => 99;\\n' > src/math.js; test ! -e /work/.brain; test ! -e /work/.git; echo staged", { network: false, waitMs: 20_000, stage });
+		const result = await windows.run("stage", `printf 'export const add = () => 99;\\n' > src/math.js; test ! -e ${STAGE_WORK_DIR}/.brain; test ! -e ${STAGE_WORK_DIR}/.git; echo staged`, { network: false, waitMs: 20_000, stage });
 		assert.deepEqual([result.reason, result.exit, result.text, result.cwd, result.stage], ["done", 0, "staged", "(staged work)", stage.id], "the stage shell runs from its private work copy");
+		assert.equal(existsSync(join(stage.home, ".cartographer-stage-rc")), true, "the stage startup file stays in the private host-side stage home that bwrap binds as HOME");
+		assert.equal(existsSync(join(stage.home, ".cartographer-stage-stage.cmd")), true, "each staged command is written in that private home before the shell sources its in-sandbox bind");
 		assert.match(readFileSync(join(root, "src", "math.js"), "utf8"), /return a \+ b/, "the live project is unchanged before promotion");
 		windows.close("stage");
 		assert.deepEqual(collectStageCandidate(stage).changes.map(({ path, status }) => ({ path, status })), [{ path: "src/math.js", status: "changed" }], "only the bounded stage candidate records the formatter-like change");
