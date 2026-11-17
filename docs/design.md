@@ -1,6 +1,6 @@
 # Cartographer — the pair-programmer design
 
-**Status:** source of Intent, 2026-11-15. The direction was settled in a direct alignment conversation with the user; it supersedes the working-design documents (deleted) and the phase plans, which lived there. Planning and staging for the implementation of any given intent lives in separate planning documents (the prompt rewrite: `docs/prompt-rewrite.md`) and in git history — not here. The README documents the harness as it is.
+**Status:** source of Intent, 2026-11-15. The direction was settled in a direct alignment conversation with the user; it supersedes the working-design documents (deleted) and the phase plans, which lived there. Planning and staging for the implementation of any given intent lives in separate planning documents and in git history — not here. The README documents the harness as it is.
 
 Rules of evidence, same as everywhere in this project: no live claims until a live run exists; measurements are bytes or tokens stated as such; anything not yet verified is marked open.
 
