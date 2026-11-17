@@ -38,6 +38,7 @@ import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
 import { beginCasePhase, createCase, finishCasePhase } from "../src/case.mjs";
+import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
 
 /** The first line of every block the harness writes; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -590,6 +591,26 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		process.env.PATH = saved.PATH;
 		delete process.env.CARTO_TEST_SECRET;
 		await server.close();
+	}
+});
+
+test("shell: a staged command writes only its disposable work tree before candidate promotion", async () => {
+	const skip = NO_SANDBOX();
+	if (skip) return skip;
+	const root = makeProject("staged-command");
+	await git(root, "init", "-q");
+	const { brainDir } = setUpBrain(root);
+	const stage = createStage({ root });
+	const windows = windowsOf(root, brainDir);
+	try {
+		const result = await windows.run("stage", "printf 'export const add = () => 99;\\n' > src/math.js; test ! -e /work/.brain; test ! -e /work/.git; echo staged", { network: false, waitMs: 20_000, stage });
+		assert.deepEqual([result.reason, result.exit, result.text, result.cwd, result.stage], ["done", 0, "staged", "(staged work)", stage.id], "the stage shell runs from its private work copy");
+		assert.match(readFileSync(join(root, "src", "math.js"), "utf8"), /return a \+ b/, "the live project is unchanged before promotion");
+		windows.close("stage");
+		assert.deepEqual(collectStageCandidate(stage).changes.map(({ path, status }) => ({ path, status })), [{ path: "src/math.js", status: "changed" }], "only the bounded stage candidate records the formatter-like change");
+	} finally {
+		windows.shutdown();
+		disposeStage(stage);
 	}
 });
 
