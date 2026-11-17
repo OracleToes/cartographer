@@ -33,6 +33,7 @@ import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest, withoutAdditions } from "../src/request.mjs";
 import { createEngine } from "../src/engine.mjs";
+import { runFromBrief } from "../src/harness.mjs";
 import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -54,6 +55,14 @@ test("prompt: the sleep checklist names the person whose message may be waiting"
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
 	assert.ok(!prompt.includes("no user message waiting"));
 	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
+});
+
+test("harness: a cached inspect brief restores its look contract", () => {
+	assert.deepEqual(runFromBrief({ mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2 }), {
+		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
+	});
+	assert.deepEqual(runFromBrief({ mode: "change", network: false, move: "m3", revision: 4 }), { mode: "change", move: "m3", revision: 4 }, "only an explicit true carries network");
+	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
 });
 
 // ─── The wake notes ──────────────────────────────────────────────────────────

@@ -314,7 +314,7 @@ test("state: the block is added to the last message of a request only, and the i
 	saveLedger(dir, { version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Which port?", status: "open" }] });
 	assert.equal(
 		stateBlock(dir, undefined, { now: new Date(2026, 0, 1, 9, 5).getTime() }),
-		"<state>\n" + RECORD + " This is the current state; it supersedes any earlier copy I carry.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for " + USER_NAME + ":\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. I find out what " + USER_NAME + " wants to achieve. When we agree on it, I record it as a goal with a done-when line. I need not sit idle meanwhile: in the same reply I may start a task (no item, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.\n</state>",
+		"<state>\n" + RECORD + " This is the current state; it supersedes any earlier copy I carry.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for " + USER_NAME + ":\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. I find out what " + USER_NAME + " wants to achieve. When we agree on it, I record it as a goal with a done-when line. I need not sit idle meanwhile: in the same reply I may start an inspect focus (no move, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.\n</state>",
 	);
 });
 

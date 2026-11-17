@@ -47,6 +47,25 @@ const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes
 const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
+ * Restore the limited execution contract stored with a focus. It is read after a
+ * restart, so an inspect focus must remain inspect rather than falling through to
+ * a change default. Fields not needed at the authority boundary stay out.
+ */
+export function runFromBrief(stored) {
+	if (stored?.mode !== POLICY.enums.planMode.change && stored?.mode !== POLICY.enums.planMode.look) {
+		return { mode: POLICY.enums.planMode.look };
+	}
+	return {
+		mode: stored.mode,
+		...(stored.network === true ? { network: true } : {}),
+		...(typeof stored.move === "string" ? { move: stored.move } : {}),
+		...(Number.isInteger(stored.revision) ? { revision: stored.revision } : {}),
+		...(Array.isArray(stored.targets) ? { targets: stored.targets } : {}),
+		...(Number.isInteger(stored.turns) ? { turns: stored.turns } : {}),
+	};
+}
+
+/**
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
  * network. The brief entry at the start of the conversation says it (src/tools/task.mjs); `runs` remembers the
  * answer for this run of the program.
@@ -63,17 +82,7 @@ async function runOf(runs, api, context) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
 			if (entry.kind === "carto.brief") {
-				const stored = entry.data;
-				if (stored?.mode === POLICY.enums.planMode.change || stored?.mode === POLICY.enums.planMode.look) {
-					run = {
-						mode: stored.mode,
-						...(stored.network === true ? { network: true } : {}),
-						...(typeof stored.move === "string" ? { move: stored.move } : {}),
-						...(Number.isInteger(stored.revision) ? { revision: stored.revision } : {}),
-						...(Array.isArray(stored.targets) ? { targets: stored.targets } : {}),
-						...(Number.isInteger(stored.turns) ? { turns: stored.turns } : {}),
-					};
-				}
+				run = runFromBrief(entry.data);
 				break search;
 			}
 		}
