@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { POLICY } from "../src/config.mjs";
+import { contextWindowLimits, POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { loadAtlas, saveAtlas } from "../src/atlas.mjs";
@@ -63,6 +63,31 @@ test("harness: a cached inspect brief restores its look contract", () => {
 	});
 	assert.deepEqual(runFromBrief({ mode: "change", network: false, move: "m3", revision: 4 }), { mode: "change", move: "m3", revision: 4 }, "only an explicit true carries network");
 	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
+});
+
+test("context window: a reported capacity reserves configured reply room without raising the setting cap", () => {
+	assert.deepEqual(contextWindowLimits(100_000, 32_768, 75_000), {
+		configuredContextWindow: 100_000,
+		usableContextWindow: 42_232,
+		serverContextWindow: 75_000,
+		replyReserve: 32_768,
+	});
+	assert.deepEqual(contextWindowLimits(40_000, 32_768, 75_000), {
+		configuredContextWindow: 40_000,
+		usableContextWindow: 40_000,
+		serverContextWindow: 75_000,
+		replyReserve: 32_768,
+	}, "metadata never raises the configured cap");
+	assert.deepEqual(contextWindowLimits(100_000, 32_768, 8_192), {
+		configuredContextWindow: 100_000,
+		usableContextWindow: 4_096,
+		serverContextWindow: 8_192,
+		replyReserve: 4_096,
+	}, "a small server keeps the existing half-context split instead of losing all input room");
+	assert.deepEqual(contextWindowLimits(100_000, 32_768, undefined), {
+		configuredContextWindow: 100_000,
+		usableContextWindow: 100_000,
+	}, "without server metadata, the configured cap remains in force");
 });
 
 // ─── The wake notes ──────────────────────────────────────────────────────────

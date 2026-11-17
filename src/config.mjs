@@ -35,10 +35,11 @@ export const DEFAULTS = freezeTree({
 	model: undefined,
 	// Which name the agent calls you by, in its notes, prompts and messages. Nothing set: the OS user who launched carto.
 	user: undefined,
-	// What the server was started with (-c). Cartographer never asks for more than this.
+	// Cap on the context Cartographer keeps for a request. When a server reports its total capacity (-c), Cartographer
+	// lowers this as needed to leave room for one reply (maxTokens).
 	contextWindow: 100000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
-	// how long a file one `write` call can hold.
+	// how long a file one `write` call can hold; a reported server capacity holds this much back for the reply.
 	maxTokens: 32768,
 	// One question to the storyteller (Mythos-nano), a small long-reasoning model served by the same endpoint. llama-swap
 	// swaps it in for the agent's model for the duration; the call itself takes as long as the story takes. Empty switches it off.
@@ -284,6 +285,25 @@ export const POLICY = freezeTree({
 		userChars: 80,
 	},
 });
+
+/**
+ * Divide a model server's total context capacity between Cartographer's input and one reply.
+ * `meta.n_ctx` covers both. The configured window is an input cap only: server metadata can
+ * lower it, never raise it. A reply reserves its configured ceiling, unless that would take
+ * more than half of a small server; the existing half-context rule leaves a useful input side.
+ * Without usable server metadata, the configured cap remains all Cartographer knows.
+ */
+export function contextWindowLimits(configuredContextWindow, maxTokens, serverContextWindow) {
+	const limits = { configuredContextWindow, usableContextWindow: configuredContextWindow };
+	if (!Number.isInteger(serverContextWindow) || serverContextWindow <= 0) return limits;
+	const replyReserve = Math.min(maxTokens, Math.floor(serverContextWindow / POLICY.validation.reservedContextDivisor));
+	return {
+		...limits,
+		serverContextWindow,
+		replyReserve,
+		usableContextWindow: Math.min(configuredContextWindow, serverContextWindow - replyReserve),
+	};
+}
 
 export class ConfigError extends Error {}
 

@@ -1,7 +1,7 @@
 // `carto`, run from a project folder.
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
+import { ConfigError, contextWindowLimits, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 import { forkCatalogNamespace } from "./catalog.mjs";
@@ -59,7 +59,7 @@ function parse(argv) {
 
 /**
  * Ask the server which models it has, so a wrong address or name fails here with a plain message.
- * @returns {Promise<number | undefined>} the context size the server reports for the model, when it reports one
+ * @returns {Promise<{ context?: number, models?: string[] } | undefined>} the selected model's reported capacity and every served name
  */
 async function checkServer(config) {
 	let response;
@@ -130,13 +130,14 @@ export async function main(argv) {
 		checkProject(project.root, { allowHome: flags.here === true });
 		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
 		const config = loadConfig({ brainDir: brainPath, flags });
-		// What the settings asked for; /model re-applies it (min of it and the new model's own limit) when switching.
+		// What the settings asked for; /model re-applies this cap and reserves its reply room for the new model.
 		const configuredContextWindow = config.contextWindow;
 		const served = await checkServer(config);
+		const contextLimits = contextWindowLimits(configuredContextWindow, config.maxTokens, served?.context);
 		let contextNote = "";
-		if (served?.context !== undefined && served.context < config.contextWindow) {
-			contextNote = ` · context ${served.context} tokens (the server's limit; the settings say ${config.contextWindow})`;
-			config.contextWindow = served.context;
+		if (contextLimits.usableContextWindow !== configuredContextWindow) {
+			contextNote = ` · usable context ${contextLimits.usableContextWindow} tokens (server capacity ${contextLimits.serverContextWindow}; ${contextLimits.replyReserve} reserved for replies; settings cap ${configuredContextWindow})`;
+			config.contextWindow = contextLimits.usableContextWindow;
 		}
 		const interactive = flags.message === undefined && process.stdin.isTTY === true;
 		// A brain in the wrong folder is easy to make and annoying to notice later, so the first time is confirmed.
@@ -194,7 +195,7 @@ export async function main(argv) {
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, trace, configuredContextWindow });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, servedContextWindow: served?.context, trace, configuredContextWindow });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,

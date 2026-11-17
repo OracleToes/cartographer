@@ -1650,7 +1650,7 @@ export async function runTerminal(session, options) {
 			case "model": {
 				// The list comes from the server each time: llama-swap serves what is loaded now.
 				let served = session.servedModels ?? [config.model];
-				// The entries as listed: meta.n_ctx (llama-server) sizes the effective window on a switch.
+				// The entries as listed: meta.n_ctx is total server capacity; Cartographer reserves reply room from it on a switch.
 				let entries = [];
 				try {
 					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
@@ -1666,9 +1666,9 @@ export async function runTerminal(session, options) {
 					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
 					served.forEach((id, index) => {
 						const ctx = entries.find((entry) => entry.id === id)?.meta?.n_ctx;
-						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${Number.isInteger(ctx) && ctx > 0 ? dim(`  · ${count(ctx)} tokens`) : ""}`);
+						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${Number.isInteger(ctx) && ctx > 0 ? dim(`  · server capacity ${count(ctx)} tokens`) : ""}`);
 					});
-					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; the context window follows the new model's limit."));
+					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer leaves room for replies below each reported server capacity."));
 					return true;
 				}
 				const byNumber = /^\d+$/.test(argument) ? served[Number(argument) - 1] : undefined;
@@ -1688,13 +1688,13 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				const was = options.contextWindow;
-				options.contextWindow = effective;
-				const context = Number.isInteger(reported) && reported > 0 && effective < reported
-					? ` · context ${count(effective)} tokens (the server's limit; the settings say more)`
-					: effective !== was ? ` · context ${count(effective)} tokens (was ${count(was)})` : ` · context ${count(effective)} tokens`;
+				options.contextWindow = effective.usableContextWindow;
+				const context = effective.serverContextWindow !== undefined
+					? ` · usable context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; ${count(effective.replyReserve)} reserved for replies; settings cap ${count(effective.configuredContextWindow)})`
+					: effective.usableContextWindow !== was ? ` · usable context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · usable context ${count(effective.usableContextWindow)} tokens`;
 				line(`${bold("●")} model  ${current} → ${wanted}${context}${busy ? " · the answer being written finishes on the old one" : ""}`);
-				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective / POLICY.validation.reservedContextDivisor)
-					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective)}. It stays as set; chatWindow in the settings is the setting to lower.`));
+				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.reservedContextDivisor)
+					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective.usableContextWindow)}. It stays as set; chatWindow in the settings is the setting to lower.`));
 				return true;
 			}
 			case "fold": {

@@ -1,6 +1,6 @@
 // Opens one project's session: the Durable harness over `.brain/session.sqlite`,
 // the model provider, and the tools with the rule of who may call what.
-import { POLICY } from "./config.mjs";
+import { contextWindowLimits, POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -98,11 +98,13 @@ async function runOf(runs, api, context) {
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
  *   gate: `{ yolo }`, whether declared change moves run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace, configuredContextWindow }) {
+export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, servedContextWindow, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
-	// What the settings asked for, whatever the server said at the start. /model re-applies it per model: the
-	// effective window is never more than this, and never more than what the model's server reports (meta.n_ctx).
+	// What the settings asked for, whatever the server said at the start. /model re-applies this cap and the same
+	// output reserve per model. `config.contextWindow` is the usable input budget all Cartographer features share.
 	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
+	const initialLimits = contextWindowLimits(windowCeiling, config.maxTokens, servedContextWindow);
+	config.contextWindow = initialLimits.usableContextWindow;
 	const model = {
 		id: config.model,
 		name: config.model,
@@ -113,7 +115,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: config.contextWindow,
+		// pi-ai needs the total server capacity here, not the smaller input budget above, so its request sizing can
+		// fit maxTokens inside the model's real context. Without metadata, the configured cap is all it can know.
+		contextWindow: initialLimits.serverContextWindow ?? initialLimits.usableContextWindow,
 		maxTokens: config.maxTokens,
 		compat: {
 			supportsStore: false,
@@ -130,10 +134,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// an older model must still start (the conversation keeps the model it began with until /model changes
 	// it), and /model can switch to any of the others without a restart.
 	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
-	// One record per served model, kept by reference: a record's contextWindow is what pi-ai sizes the reply
-	// budget from, and /model updates the record it switches to (per request, not at conversation creation).
-	// A model that was never switched to starts at the ceiling; the configured one at the (possibly lowered)
-	// window the session opened with.
+	// One record per served model, kept by reference: a record's contextWindow is the server's total capacity that
+	// pi-ai sizes the reply from, and /model updates the record it switches to (per request, not at conversation
+	// creation). A model that was never switched to starts at the configured cap because no capacity is known yet.
 	const providerModels = known.map((id) => (id === config.model ? model : { ...model, id, name: id, contextWindow: windowCeiling }));
 	const provider = createProvider({
 		id: PROVIDER,
@@ -491,18 +494,17 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		 * Switch the model of the main conversation, and so of every task forked after.
 		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
 		 * @param {number} [limits.contextWindow]  its meta.n_ctx, when it says one
-		 * @returns {false | number} false when the name is not served; otherwise the effective context window it switches to
-		 *   (the smaller of the settings' ceiling and the model's own limit), which is also what the engine, the
-		 *   state block, the shelf's soft cap (half of it) and the display now use.
+		 * @returns {false | ReturnType<typeof contextWindowLimits>} false when the name is not served; otherwise the
+		 *   model's usable input window and reported capacity. The usable window is what the engine, state block,
+		 *   shelf's soft cap (half of it), and display use; pi-ai keeps the total server capacity for reply sizing.
 		 */
 		setModel: async (modelId, ctx = context, limits = {}) => {
 			if (!known.includes(modelId)) return false;
-			const reported = limits?.contextWindow;
-			const effective = Number.isInteger(reported) && reported > 0 ? Math.min(windowCeiling, reported) : windowCeiling;
+			const effective = contextWindowLimits(windowCeiling, config.maxTokens, limits?.contextWindow);
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
-			config.contextWindow = effective;
+			config.contextWindow = effective.usableContextWindow;
 			const target = providerModels.find((entry) => entry.id === modelId);
-			if (target) target.contextWindow = effective;
+			if (target) target.contextWindow = effective.serverContextWindow ?? effective.usableContextWindow;
 			return effective;
 		},
 		/** The model names the server was serving when the session opened. */

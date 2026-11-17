@@ -213,14 +213,34 @@ test("launch: a model name the server does not have is reported with the names i
 	}
 });
 
-test("launch: a llama-server run on its own answers to any name, and its context size is used when smaller", async () => {
+test("launch: a lone llama-server leaves the configured reply reserve below a reported 75k capacity", async () => {
 	const root = makeProject("lone-server", { git: false });
-	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 8192 } }] });
+	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 75_000 } }] });
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "anything", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a name the lone server does not list");
-		has(result.stdout, "context 8192 tokens (the server's limit; the settings say 100000)", "the smaller context size is used and stated");
-		has(result.stdout, "of 8.2k tokens", "and shown in the context line");
+		has(result.stdout, "usable context 42232 tokens (server capacity 75000; 32768 reserved for replies; settings cap 100000)", "the 75k capacity is distinct from Cartographer's usable context");
+		has(result.stdout, "of 42k tokens", "the usable context is shown everywhere else");
+		assert.equal(server.requests[0].max_tokens, 32768, "the provider retains total server capacity when sizing the reply");
+	} finally {
+		await server.close();
+	}
+});
+
+test("model: a 75k switch keeps reply room in the provider while every displayed context budget becomes usable", async () => {
+	const root = makeProject("model-context-window", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({ models: [
+		{ id: "stand-in", object: "model", meta: { n_ctx: 200_000 } },
+		{ id: "Qwen3.8", object: "model", meta: { n_ctx: 75_000 } },
+	] });
+	try {
+		const result = await carto(root, server, [], { input: "/model Qwen3.8\nsay: after the switch || sleep\n/quit\n" });
+		ok(result, "switching to the reported model");
+		has(result.stdout, "model  stand-in → Qwen3.8 · usable context 42k tokens (server capacity 75k; 33k reserved for replies; settings cap 100k)", "the switch distinguishes server capacity from Cartographer's usable context");
+		const request = server.requests.find((entry) => entry.model === "Qwen3.8");
+		assert.ok(request, "the next request uses the switched model");
+		assert.equal(request.max_tokens, 32768, "the provider sizes the reply against the 75k server capacity, not the smaller input budget");
 	} finally {
 		await server.close();
 	}

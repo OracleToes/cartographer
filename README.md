@@ -273,7 +273,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `plan  2 move revisions wait for you` | Those move revisions are requests; approve with `/approve m1 m2` or snapshot an envelope with `/approve p2`; name a network move or its envelope explicitly |
 | `requests  4 requests wait for you` | `/requests` lists them: move revisions and questions of taste |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: declared change moves run without `/approve` |
-| `● model  model-a → model-b · context 65536 tokens` | You switched the model with `/model`: the conversation goes on where it was, a task forked after runs on the new one, and the context window follows the new model (never above the settings' `contextWindow`) |
+| `● model  model-a → model-b · usable context 42k tokens (server capacity 75k; 33k reserved for replies; settings cap 100k)` | You switched the model with `/model`: the conversation goes on where it was, a task forked after runs on the new one, and Cartographer keeps reply room inside the reported server capacity |
 | `context … · … read for this answer` | How full the context is, and how many tokens the server had to read rather than reuse for the last answer |
 
 | Command | |
@@ -288,7 +288,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a reported move is accepted after review, an envelope closes after its children, a node is confirmed |
 | `/delete ID …` | Remove a report for good: its record line and its file. Nothing recalls it again |
 | `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
-| `/model`, `/model NAME` | The models the server serves, each with its own window where the server reports one, and which is on; a name or a number from the list switches. A task forked after runs on it too, and the context window follows |
+| `/model`, `/model NAME` | The models the server serves, each with its reported server capacity where available, and which is on; a name or a number from the list switches. A task forked after runs on it too, and Cartographer states the smaller usable context after reserving reply room |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, its authorization envelopes and move revisions, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
@@ -349,7 +349,7 @@ carto --here                             # use the current folder as the project
 carto --url URL --model NAME             # another server or model for this run
 ```
 
-The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on. The context window is one of the settings: at startup it is narrowed to what the server says (`meta.n_ctx`) when that is less than `contextWindow`, and `/model` does the same on a switch — the window becomes the smaller of `contextWindow` in the settings and the new model's own limit, and the collapse threshold, the reply budget, the shelf's soft cap (half of it), and the display all follow. `/model` lists each served model's limit, warns when `chatWindow` is more than half of the window it switches to, and never raises the window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
+The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on. A server's `meta.n_ctx` is its total capacity for the prompt and reply together, not a prompt budget. When it reports one, Cartographer reserves `maxTokens` for the reply and uses the smaller of the settings' `contextWindow` cap and what remains; on a smaller server it reserves no more than half, so an input budget remains. The collapse threshold, shelf's soft cap (half of it), state block and display use that usable context. The provider keeps the total server capacity too, so each request's reply is sized inside it. `/model` lists reported server capacities and, after a switch, states the usable context, reply reserve and settings cap. It warns when `chatWindow` is more than half of the usable window and never raises that window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
 
 ### The storyteller (Mythos-nano)
 
@@ -973,8 +973,8 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `server` | none | Address of the server, ending in `/v1` |
 | `model` | none | Model name as the server knows it |
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
-| `contextWindow` | 100000 | Context size the server was started with (`-c`) |
-| `maxTokens` | 32768 | Longest single reply, thinking included |
+| `contextWindow` | 100000 | Cap on Cartographer's usable input/context budget. A reported server capacity may lower it to leave reply room, never raise it |
+| `maxTokens` | 32768 | Longest single reply, thinking included; this much is reserved from a reported server capacity where it fits |
 | `consultModel` | `"Mythos-nano"` | Model name as llama-swap serves the consult model (the optional hard-problem solver, see [The storyteller](#the-storyteller-mythos-nano)). `""` switches it off. `CARTO_CONSULT_MODEL` overrides both settings files |
 | `consultMaxTokens` | 40960 | Longest answer a `consult` call may write — the model card's ceiling for hard problems |
 | `consultTemperature` | 0.6 | Sampling temperature for `consult` calls — the model card's recommendation for single-shot reasoning |
