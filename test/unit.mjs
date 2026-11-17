@@ -1510,6 +1510,70 @@ test("prepareArguments: book, read, and shelf repair deeply frozen harness argum
 	assert.throws(() => book.prepareArguments({ target: "file", action: "edit", id: "f1", ref: { id: "f2" }, oldText: "a", newText: "b" }), /matching `id` and `ref\.id`/);
 });
 
+test("book: target-family reads preserve their live and stale reference results", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const engine = { messagesOf: () => [], want: () => {}, callWords: () => "book" };
+	const registry = {
+		tools: () => [{
+			extension: { name: "demo" },
+			tool: { name: "echo", description: "Echo a value.", parameters: { type: "object", properties: { value: { type: "string" } } } },
+		}],
+	};
+	const tool = bookTool({ root, brainDir, config: {}, engine, gate: { yolo: false } });
+	let serial = 0;
+	const api = () => ({
+		conversationId: ROOT_CONVERSATION_ID,
+		taskId: `family-${++serial}`,
+		now: () => 1_700_000_000_000,
+		registry,
+		executeTool: async () => { throw new Error("unexpected nested tool"); },
+	});
+	const run = (args) => tool.execute(tool.prepareArguments(args), api(), undefined);
+
+	const durableList = await run({ target: "tool", action: "list" });
+	assert.equal(durableList.isError, undefined, durableList.output[0].text);
+	assert.deepEqual(durableList.details, { target: "tool", count: 1, shown: 1 });
+	assert.equal(JSON.parse(durableList.output[0].text)[0].ref.kind, "tool");
+	const durableLive = await run({ target: "tool", action: "read", id: "demo:echo" });
+	assert.equal(durableLive.isError, undefined, durableLive.output[0].text);
+	assert.deepEqual(JSON.parse(durableLive.output[0].text), { extension: "demo", name: "echo", description: "Echo a value.", schema: { type: "object", properties: { value: { type: "string" } } } });
+	assert.equal(durableLive.details.status, "live");
+	assert.equal(durableLive.details.ref.kind, "tool");
+	const durableStale = await run({ target: "tool", action: "read", ref: { id: "demo:echo", version: "0".repeat(64) } });
+	assert.equal(durableStale.isError, true);
+	assert.match(durableStale.output[0].text, /tool reference is stale: requested 0+, current [0-9a-f]{64}; the requested immutable version is unavailable/);
+
+	const added = await run({ target: "ledger", action: "add", kind: "note", text: "Keep this exact." });
+	assert.equal(added.isError, undefined, added.output[0].text);
+	const brainList = await run({ target: "ledger", action: "list" });
+	assert.equal(brainList.isError, undefined, brainList.output[0].text);
+	assert.deepEqual(brainList.details, { target: "ledger", count: 1, shown: 1 });
+	assert.equal(JSON.parse(brainList.output[0].text)[0].ref.kind, "ledger");
+	const brainLive = await run({ target: "ledger", action: "read", id: "n1" });
+	assert.equal(brainLive.isError, undefined, brainLive.output[0].text);
+	assert.equal(JSON.parse(brainLive.output[0].text).text, "Keep this exact.");
+	assert.equal(brainLive.details.status, "live");
+	assert.equal(brainLive.details.ref.kind, "ledger");
+	const brainStale = await run({ target: "ledger", action: "read", ref: { id: "n1", version: "0".repeat(64) } });
+	assert.equal(brainStale.isError, true);
+	assert.match(brainStale.output[0].text, /ledger reference is stale: requested 0+, current [0-9a-f]{64}; historical content is unavailable/);
+
+	addRecord(brainDir, { id: "t1", at: 1_700_000_000_000, mode: "look", brief: "Review routing", report: "The route stayed exact.", summary: "Routing reviewed." });
+	const reportList = await run({ target: "report", action: "list" });
+	assert.equal(reportList.isError, undefined, reportList.output[0].text);
+	assert.deepEqual(reportList.details, { target: "report", count: 1, shown: 1 });
+	assert.equal(JSON.parse(reportList.output[0].text)[0].ref.kind, "report");
+	const reportLive = await run({ target: "report", action: "read", id: "t1" });
+	assert.equal(reportLive.isError, undefined, reportLive.output[0].text);
+	assert.match(reportLive.output[0].text, /^Report t1 /);
+	assert.equal(reportLive.details.status, "live");
+	assert.equal(reportLive.details.ref.kind, "report");
+
+	const assessment = await run({ target: "assessment", action: "write", text: "The router is central." });
+	assert.equal(assessment.isError, undefined, assessment.output[0].text);
+	assert.deepEqual(assessment.details, { target: "assessment", action: "write", shown: ["assessment written, 22 characters"] });
+});
+
 test("return: a declared proof is durable and separate from the task report", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const tool = returnTool({ root, brainDir, config: {} });

@@ -277,16 +277,10 @@ function brainRecord(target, brainDir, id) {
 	return record === undefined ? undefined : { record, version: contentVersion(record) };
 }
 
-async function runUniversal({ root, brainDir, config, engine, gate }, given, api, callContext) {
-	const main = api.conversationId === ROOT_CONVERSATION_ID;
-	if (typeof given?.id === "string" && given.id.trim() !== "" && typeof given?.ref?.id === "string" && given.id.trim() !== given.ref.id.trim()) {
-		return fail("`id` and `ref.id` do not match; pass `id` alone unless pinning `ref.version`.");
-	}
-	// Tool callers may reach here without prepareArguments: normalizing again is harmless.
-	const args = normalizeArgs(brainDir, given);
-	const target = args.target;
-	const action = args.action;
-	if (target === "file" && action === "rebind") {
+/** File operations retain their focused-move gate and legacy replay read fallback. */
+async function runFileBookOperation({ root, brainDir, gate, main }, args, api, callContext) {
+	const { action } = args;
+	if (action === "rebind") {
 		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file rebind needs a stable file `id`.");
 		if (typeof args.path !== "string" || typeof args.expectedVersion !== "string") return fail("file rebind needs a new confined path and the current expectedVersion.");
 		try {
@@ -294,7 +288,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			return textResult(`Rebound the existing file identity to ${rebound.record.path}; content identity is preserved.`, { ref: rebound.ref, status: "live" });
 		} catch (error) { return fail(`File rebind refused: ${error.message}.`); }
 	}
-	if (target === "file" && ["create", "edit", "remove"].includes(action)) {
+	if (["create", "edit", "remove"].includes(action)) {
 		if (main) return fail("Project-file create/edit/remove must run in a focused change move.");
 		// A focus carries a live move token. The plan is re-read for every mutation so an
 		// edit, revoked approval, or exhausted move cannot keep spending old authority.
@@ -365,280 +359,296 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, move: task.move, change: true } };
 	}
 	// Unadvertised transcript-replay fallback: new calls go through the top-level `read` tool.
-	if (target === "file" && action === "read") {
+	if (action === "read") {
 		const tokenCeiling = readBatchAllowance(api?.conversationId, api?.callId);
 		return runFileRead({ root, brainDir }, args, tokenCeiling === undefined ? undefined : { tokenCeiling });
 	}
-	if (DURABLE_TARGETS.has(target)) {
-		if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
-			let current;
-			try { current = nativeReference(brainDir, "schema", args.ref.id); }
-			catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
-			if (args.ref.namespace !== current.namespace) return fail("Schema reference belongs to another brain-store namespace.");
-			const retained = readReferenceVersion(brainDir, args.ref);
-			if (retained !== undefined) return textResult(JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
-		}
-		if (action === "list") {
-			let records;
-			try { records = await durableSummaries(target, brainDir, api, callContext); }
-			catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
-			if (records.length === 0) return textResult(`${target} is empty in this conversation.`, { target, count: 0 });
-			let namespace;
-			try { namespace = ensureCatalog(brainDir).namespace; }
-			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
-			const items = records.map((record) => ({ ref: listRef(namespace, target, record.id, record.version), summary: summaryLine(record), provenance: record.provenance }));
-			let paged;
-			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
-			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
-		}
-		if (action === "edit" && target === "message") {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail("message edit needs a stable message ref.");
-			const currentNamespace = nativeReference(brainDir, target, args.ref.id);
-			if (args.ref.namespace !== currentNamespace.namespace) return fail("Message reference belongs to another brain-store namespace.");
-			let item;
-			try { item = await durableRecordFor("message", args.ref.id, brainDir, api, callContext); }
-			catch (error) { return fail(`Could not resolve message records: ${error.message}.`); }
-			if (item === undefined) {
-				const forgotten = loadContext(brainDir).forgottenEntries ?? [];
-				if (forgotten.includes(args.ref.id)) return textResult("Message updated.", { status: "soft_forgotten", replay: true });
-				// Crash recovery: the forget marker may exist in the transcript even though this store lost the update.
-				let markerExists = false;
-				try {
-					markerExists = await api.commit(async (tx) => {
-						const conversations = await scanAll((cursor) => tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, cursor));
-						for (const conversation of conversations) {
-							const entries = await scanAll((cursor) => tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor));
-							if (entries.some((entry) => entry.kind === "carto.book.soft-forget" && String(entry.data?.target) === String(args.ref.id))) return true;
-						}
-						return false;
-					}, callContext);
-				} catch { markerExists = false; }
-				if (markerExists) {
-					updateContext(brainDir, (store) => {
-						store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(args.ref.id)])];
-						const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => !(placement?.target?.kind === "message" && placement.target.id === String(args.ref.id))) : shelf);
-						store.shelf = strip(store.shelf);
-						for (const task of Object.values(store.tasks ?? {})) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
-						if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
-					});
-					return textResult("Message updated.", { status: "soft_forgotten", replay: true });
-				}
-				return fail("Message is unavailable or already removed from ordinary recall.");
-			}
-			const expected = args.expectedVersion ?? args.ref.version ?? item.version;
-			if (expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
-			const owner = item.provenance.conversationId;
-			const entryId = item.provenance.entryId;
-			const timestamp = item.value.message.timestamp;
-			const text = typeof item.value.message.content === "string" ? item.value.message.content : (item.value.message.content ?? []).flatMap((part) => part?.type === "text" ? [part.text] : []).join("");
+	return unsupported("file", action);
+}
+
+/** Durable transcript records use their own live lookup and retained-version rules. */
+async function runDurableBookOperation({ brainDir }, args, api, callContext) {
+	const { target, action } = args;
+	if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
+		let current;
+		try { current = nativeReference(brainDir, "schema", args.ref.id); }
+		catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
+		if (args.ref.namespace !== current.namespace) return fail("Schema reference belongs to another brain-store namespace.");
+		const retained = readReferenceVersion(brainDir, args.ref);
+		if (retained !== undefined) return textResult(JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
+	}
+	if (action === "list") {
+		let records;
+		try { records = await durableSummaries(target, brainDir, api, callContext); }
+		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+		if (records.length === 0) return textResult(`${target} is empty in this conversation.`, { target, count: 0 });
+		let namespace;
+		try { namespace = ensureCatalog(brainDir).namespace; }
+		catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
+		const items = records.map((record) => ({ ref: listRef(namespace, target, record.id, record.version), summary: summaryLine(record), provenance: record.provenance }));
+		let paged;
+		try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
+		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
+	}
+	if (action === "edit" && target === "message") {
+		if (!validateReference(args.ref) || args.ref.kind !== target) return fail("message edit needs a stable message ref.");
+		const currentNamespace = nativeReference(brainDir, target, args.ref.id);
+		if (args.ref.namespace !== currentNamespace.namespace) return fail("Message reference belongs to another brain-store namespace.");
+		let item;
+		try { item = await durableRecordFor("message", args.ref.id, brainDir, api, callContext); }
+		catch (error) { return fail(`Could not resolve message records: ${error.message}.`); }
+		if (item === undefined) {
+			const forgotten = loadContext(brainDir).forgottenEntries ?? [];
+			if (forgotten.includes(args.ref.id)) return textResult("Message updated.", { status: "soft_forgotten", replay: true });
+			// Crash recovery: the forget marker may exist in the transcript even though this store lost the update.
+			let markerExists = false;
 			try {
-				await api.commit(async (tx) => {
-					let cursor;
-					do {
-						const page = await tx.scanEntries({ conversationId: owner, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor);
-					if (page.items.some((entry) => entry.kind === "carto.book.soft-forget" && entry.data?.operationId === String(api.taskId))) return;
-					cursor = page.next;
-				} while (cursor !== undefined);
-					const original = await tx.entry(entryId);
-					if (original === undefined || original.conversationId !== owner || !original.model?.some((message) => ["user", "assistant"].includes(message.role))) throw new Error("The selected message is no longer visible in its conversation.");
-					await tx.appendEntry(owner, { kind: "carto.book.soft-forget", edits: [{ target: entryId, action: "omit" }], data: { operationId: String(api.taskId), target: String(entryId) } });
+				markerExists = await api.commit(async (tx) => {
+					const conversations = await scanAll((cursor) => tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, cursor));
+					for (const conversation of conversations) {
+						const entries = await scanAll((cursor) => tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor));
+						if (entries.some((entry) => entry.kind === "carto.book.soft-forget" && String(entry.data?.target) === String(args.ref.id))) return true;
+					}
+					return false;
 				}, callContext);
-				recordSoftForgetPending(brainDir, { operationId: String(api.taskId), entryId: String(entryId), timestamp, text });
-				const removedShelf = [];
+			} catch { markerExists = false; }
+			if (markerExists) {
 				updateContext(brainDir, (store) => {
-					store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(entryId)])];
-					store.chat = store.chat.filter((line) => !(line.at === timestamp && line.text === text));
-					const strip = (shelf) => shelf.filter((placement) => {
-						if (placement.target?.kind === "message" && placement.target.id === String(entryId)) { removedShelf.push(placement); return false; }
-						return true;
-					});
+					store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(args.ref.id)])];
+					const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => !(placement?.target?.kind === "message" && placement.target.id === String(args.ref.id))) : shelf);
 					store.shelf = strip(store.shelf);
-					for (const task of Object.values(store.tasks)) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
+					for (const task of Object.values(store.tasks ?? {})) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
 					if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
 				});
-				if (removedShelf.length) cleanupShelfSnapshots(brainDir, removedShelf);
-				return textResult("Message updated.", { status: "soft_forgotten" });
-			} catch (error) { return fail(`Message edit refused: ${error.message}.`); }
+				return textResult("Message updated.", { status: "soft_forgotten", replay: true });
+			}
+			return fail("Message is unavailable or already removed from ordinary recall.");
 		}
-		if (action !== "read") return unsupported(target, action);
-		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
-		let currentNamespace;
-		try { currentNamespace = nativeReference(brainDir, target, args.ref.id); }
+		const expected = args.expectedVersion ?? args.ref.version ?? item.version;
+		if (expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
+		const owner = item.provenance.conversationId;
+		const entryId = item.provenance.entryId;
+		const timestamp = item.value.message.timestamp;
+		const text = typeof item.value.message.content === "string" ? item.value.message.content : (item.value.message.content ?? []).flatMap((part) => part?.type === "text" ? [part.text] : []).join("");
+		try {
+			await api.commit(async (tx) => {
+				let cursor;
+				do {
+					const page = await tx.scanEntries({ conversationId: owner, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor);
+				if (page.items.some((entry) => entry.kind === "carto.book.soft-forget" && entry.data?.operationId === String(api.taskId))) return;
+				cursor = page.next;
+			} while (cursor !== undefined);
+				const original = await tx.entry(entryId);
+				if (original === undefined || original.conversationId !== owner || !original.model?.some((message) => ["user", "assistant"].includes(message.role))) throw new Error("The selected message is no longer visible in its conversation.");
+				await tx.appendEntry(owner, { kind: "carto.book.soft-forget", edits: [{ target: entryId, action: "omit" }], data: { operationId: String(api.taskId), target: String(entryId) } });
+			}, callContext);
+			recordSoftForgetPending(brainDir, { operationId: String(api.taskId), entryId: String(entryId), timestamp, text });
+			const removedShelf = [];
+			updateContext(brainDir, (store) => {
+				store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(entryId)])];
+				store.chat = store.chat.filter((line) => !(line.at === timestamp && line.text === text));
+				const strip = (shelf) => shelf.filter((placement) => {
+					if (placement.target?.kind === "message" && placement.target.id === String(entryId)) { removedShelf.push(placement); return false; }
+					return true;
+				});
+				store.shelf = strip(store.shelf);
+				for (const task of Object.values(store.tasks)) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
+				if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
+			});
+			if (removedShelf.length) cleanupShelfSnapshots(brainDir, removedShelf);
+			return textResult("Message updated.", { status: "soft_forgotten" });
+		} catch (error) { return fail(`Message edit refused: ${error.message}.`); }
+	}
+	if (action !== "read") return unsupported(target, action);
+	if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
+	let currentNamespace;
+	try { currentNamespace = nativeReference(brainDir, target, args.ref.id); }
+	catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
+	if (args.ref.namespace !== currentNamespace.namespace) return fail(`${target} reference belongs to another brain-store namespace.`);
+	let found;
+	try { found = await durableRecordFor(target, args.ref.id, brainDir, api, callContext); }
+	catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+	if (found === undefined) {
+		if (target === "message" && loadContext(brainDir).forgottenEntries?.includes(args.ref.id)) return fail("Message is no longer available through ordinary recall.");
+		const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
+		if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or inaccessible.`);
+		return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
+	}
+	if (args.ref.version !== undefined && args.ref.version !== found.version) {
+		const historical = readReferenceVersion(brainDir, args.ref);
+		if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; the requested immutable version is unavailable.`);
+		return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
+	}
+	const ref = nativeReference(brainDir, target, found.id, found.version);
+	return textResult(JSON.stringify(found.value, null, 2), { ref, status: "live" });
+}
+
+/** The assessment is one whole replace, with its existing clipping and top-copy update. */
+function runAssessmentBookOperation({ brainDir }, args) {
+	const { target, action } = args;
+	if (action !== "write") return unsupported(target, action);
+	let text = typeof args.text === "string" ? args.text.trim() : "";
+	if (text === "") return withGuide(target, action, fail("assessment write needs `text`: the whole assessment; it replaces the current one."));
+	if (text.length > ASSESSMENT_MAX) {
+		const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
+		warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
+		text = clipped;
+	}
+	saveAssessment(brainDir, text);
+	noteAssessed(brainDir, text);
+	return textResult(`Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`, { target, action, shown: [`assessment written, ${text.length} characters`] });
+}
+
+/** Shared-brain targets retain their target-specific reads, mutations, and authority checks. */
+function runBrainBookOperation({ root, brainDir, config, engine, gate, main }, args, api) {
+	const { target, action } = args;
+	if (action === "list") {
+		let records;
+		try { records = listBrainRecords(target, brainDir); }
+		catch (error) { return fail(error.message); }
+		if (records.length === 0) return textResult(`${target} is empty.`, { target, count: 0 });
+		let namespace;
+		try { namespace = ensureCatalog(brainDir).namespace; }
+		catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
+		const items = records.map((record) => {
+			const id = record.id;
+			return { ref: listRef(namespace, target, id, contentVersion(record)), summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
+		});
+		let paged;
+		try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
+		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
+	}
+	if (action === "read") {
+		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
+		let current;
+		try { current = nativeReference(brainDir, target, args.ref.id); }
 		catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
-		if (args.ref.namespace !== currentNamespace.namespace) return fail(`${target} reference belongs to another brain-store namespace.`);
+		if (args.ref.namespace !== current.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
 		let found;
-		try { found = await durableRecordFor(target, args.ref.id, brainDir, api, callContext); }
-		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+		try { found = brainRecord(target, brainDir, args.ref.id); }
+		catch (error) { return fail(error.message); }
 		if (found === undefined) {
-			if (target === "message" && loadContext(brainDir).forgottenEntries?.includes(args.ref.id)) return fail("Message is no longer available through ordinary recall.");
 			const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
-			if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or inaccessible.`);
+			if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
 			return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
 		}
 		if (args.ref.version !== undefined && args.ref.version !== found.version) {
 			const historical = readReferenceVersion(brainDir, args.ref);
-			if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; the requested immutable version is unavailable.`);
+			if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; historical content is unavailable.`);
 			return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 		}
-		const ref = nativeReference(brainDir, target, found.id, found.version);
-		return textResult(JSON.stringify(found.value, null, 2), { ref, status: "live" });
+		const ref = nativeReference(brainDir, target, found.record.id ?? args.ref.id, found.version);
+		return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
 	}
-	if (target === "assessment") {
-		if (action !== "write") return unsupported(target, action);
-		let text = typeof args.text === "string" ? args.text.trim() : "";
-		if (text === "") return withGuide(target, action, fail("assessment write needs `text`: the whole assessment; it replaces the current one."));
-		if (text.length > ASSESSMENT_MAX) {
-			const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
-			warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
-			text = clipped;
-		}
-		saveAssessment(brainDir, text);
-		noteAssessed(brainDir, text);
-		return textResult(`Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`, { target, action, shown: [`assessment written, ${text.length} characters`] });
+	if (target === "context" && (action === "fold" || action === "recall" || action === "note" || action === "collapse")) {
+		const contextOp = {
+			action,
+			...(args.id !== undefined ? { id: args.id } : {}),
+			...(args.text !== undefined ? { text: args.text } : {}),
+		};
+		return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [contextOp] }, api));
 	}
-	if (BRAIN_TARGETS.has(target)) {
-		if (action === "list") {
-			let records;
-			try { records = listBrainRecords(target, brainDir); }
-			catch (error) { return fail(error.message); }
-			if (records.length === 0) return textResult(`${target} is empty.`, { target, count: 0 });
-			let namespace;
-			try { namespace = ensureCatalog(brainDir).namespace; }
-			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
-			const items = records.map((record) => {
-				const id = record.id;
-				return { ref: listRef(namespace, target, id, contentVersion(record)), summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
-			});
-			let paged;
-			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
-			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
-		}
-		if (action === "read") {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
-			let current;
-			try { current = nativeReference(brainDir, target, args.ref.id); }
-			catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
-			if (args.ref.namespace !== current.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
-			let found;
-			try { found = brainRecord(target, brainDir, args.ref.id); }
-			catch (error) { return fail(error.message); }
-			if (found === undefined) {
-				const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
-				if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
-				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
-			}
-			if (args.ref.version !== undefined && args.ref.version !== found.version) {
-				const historical = readReferenceVersion(brainDir, args.ref);
-				if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; historical content is unavailable.`);
-				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
-			}
-			const ref = nativeReference(brainDir, target, found.record.id ?? args.ref.id, found.version);
-			return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
-		}
-		if (target === "context" && (action === "fold" || action === "recall" || action === "note" || action === "collapse")) {
-			const contextOp = {
-				action,
-				...(args.id !== undefined ? { id: args.id } : {}),
-				...(args.text !== undefined ? { text: args.text } : {}),
-			};
-			return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [contextOp] }, api));
-		}
-		if (target === "atlas" && (action === "look" || action === "tree")) {
-			const { atlas, error } = loadAtlas(brainDir);
-			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
-				const atlasOp = action === "look"
-				? { action, ...(args.name !== undefined || args.path !== undefined || args.id !== undefined ? { name: args.name ?? args.path ?? args.id } : {}) }
-				: { action, ...(args.anchor !== undefined ? { anchor: args.anchor } : {}), ...(args.depth !== undefined ? { depth: args.depth } : {}) };
-			try {
-				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
-				if (result.changed) saveAtlas(brainDir, atlas);
-				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
-			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
-		}
-		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
-		if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
-		const atlasOwnTarget = target === "atlas" && (
-			(action === "confirm" && args.ref === undefined)
-			|| (action === "focus" && args.ref === undefined)
-			|| action === "unfocus"
-		);
-		const needsRef = action !== "add" && !(target === "plan" && (action === "clear" || action === "addMove")) && !atlasOwnTarget;
-		let current;
-		if (needsRef) {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
-			try {
-				const namespace = nativeReference(brainDir, target, args.ref.id);
-				if (args.ref.namespace !== namespace.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
-			} catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
-			try { current = brainRecord(target, brainDir, args.ref.id); }
-			catch (error) { return fail(error.message); }
-			if (current === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
-			const expected = args.expectedVersion ?? args.ref.version ?? current.version;
-			if (expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
-		}
-		if (target === "atlas") {
-			const { atlas, error } = loadAtlas(brainDir);
-			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
-			if (atlas.lastCall === api.taskId) return textResult("This atlas operation was already applied before a restart.", { replay: true });
-			const atlasOp = {
-				action,
-				...(needsRef ? { name: current.record.id } : args.name !== undefined ? { name: args.name } : {}),
-				...(args.path !== undefined ? { path: args.path } : {}),
-				...(args.reason !== undefined ? { reason: args.reason } : {}),
-				...(args.gist !== undefined ? { gist: args.gist } : {}),
-				...(args.detail !== undefined ? { detail: args.detail } : {}),
-				...(args.files !== undefined ? { files: args.files } : {}),
-				...(args.links !== undefined ? { links: args.links } : {}),
-				...(args.to !== undefined ? { to: args.to } : {}),
-				...(args.names !== undefined ? { names: args.names } : {}),
-			};
-			try {
-				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
-				if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
-				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
-			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
-		}
-		if (target === "ledger") {
-			const ledgerOp = {
-				action,
-				...(needsRef ? { id: current.record.id } : {}),
-				...(args.kind !== undefined ? { kind: args.kind } : {}),
-				...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
-				...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
-				...(args.salient !== undefined ? { salient: args.salient } : {}),
-				...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
-			};
-			return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [ledgerOp] }, api));
-		}
-		if (target === "plan") {
-			const planOp = {
-				action,
-				...(needsRef ? { id: current.record.id } : {}),
-				...(args.parent !== undefined ? { parent: args.parent } : {}),
-				...(args.mode !== undefined ? { mode: args.mode } : {}),
-				...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
-				...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
-				...(args.targets !== undefined ? { targets: args.targets } : {}),
-				...(args.proof !== undefined ? { proof: args.proof } : {}),
-				...(args.review !== undefined ? { review: args.review } : {}),
-				...(args.turns !== undefined ? { turns: args.turns } : {}),
-				...(args.capabilities !== undefined ? { capabilities: args.capabilities } : {}),
-				...(args.budget !== undefined ? { budget: args.budget } : {}),
-				...(args.before !== undefined ? { before: args.before } : {}),
-				...(args.network !== undefined ? { network: args.network } : {}),
-				...(args.standing !== undefined ? { standing: args.standing } : {}),
-				...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
-			};
-			return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [planOp] }, api));
-		}
-		if (target === "context") {
-			if (action === "archive" || action === "restore") {
-				try { return textResult(applyContextRowAction(brainDir, current.record.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, undefined, api.taskId), { target, action, ref: args.ref }); }
-				catch (error) { return withGuide(target, action, fail(`Context row ${action} refused: ${error.message}.`)); }
-			}
+	if (target === "atlas" && (action === "look" || action === "tree")) {
+		const { atlas, error } = loadAtlas(brainDir);
+		if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
+			const atlasOp = action === "look"
+			? { action, ...(args.name !== undefined || args.path !== undefined || args.id !== undefined ? { name: args.name ?? args.path ?? args.id } : {}) }
+			: { action, ...(args.anchor !== undefined ? { anchor: args.anchor } : {}), ...(args.depth !== undefined ? { depth: args.depth } : {}) };
+		try {
+			const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
+			if (result.changed) saveAtlas(brainDir, atlas);
+			return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
+		} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
+	}
+	if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
+	if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
+	const atlasOwnTarget = target === "atlas" && (
+		(action === "confirm" && args.ref === undefined)
+		|| (action === "focus" && args.ref === undefined)
+		|| action === "unfocus"
+	);
+	const needsRef = action !== "add" && !(target === "plan" && (action === "clear" || action === "addMove")) && !atlasOwnTarget;
+	let current;
+	if (needsRef) {
+		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
+		try {
+			const namespace = nativeReference(brainDir, target, args.ref.id);
+			if (args.ref.namespace !== namespace.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
+		} catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
+		try { current = brainRecord(target, brainDir, args.ref.id); }
+		catch (error) { return fail(error.message); }
+		if (current === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
+		const expected = args.expectedVersion ?? args.ref.version ?? current.version;
+		if (expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
+	}
+	if (target === "atlas") {
+		const { atlas, error } = loadAtlas(brainDir);
+		if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
+		if (atlas.lastCall === api.taskId) return textResult("This atlas operation was already applied before a restart.", { replay: true });
+		const atlasOp = {
+			action,
+			...(needsRef ? { name: current.record.id } : args.name !== undefined ? { name: args.name } : {}),
+			...(args.path !== undefined ? { path: args.path } : {}),
+			...(args.reason !== undefined ? { reason: args.reason } : {}),
+			...(args.gist !== undefined ? { gist: args.gist } : {}),
+			...(args.detail !== undefined ? { detail: args.detail } : {}),
+			...(args.files !== undefined ? { files: args.files } : {}),
+			...(args.links !== undefined ? { links: args.links } : {}),
+			...(args.to !== undefined ? { to: args.to } : {}),
+			...(args.names !== undefined ? { names: args.names } : {}),
+		};
+		try {
+			const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
+			if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
+			return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
+		} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
+	}
+	if (target === "ledger") {
+		const ledgerOp = {
+			action,
+			...(needsRef ? { id: current.record.id } : {}),
+			...(args.kind !== undefined ? { kind: args.kind } : {}),
+			...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+			...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
+			...(args.salient !== undefined ? { salient: args.salient } : {}),
+			...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
+		};
+		return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [ledgerOp] }, api));
+	}
+	if (target === "plan") {
+		const planOp = {
+			action,
+			...(needsRef ? { id: current.record.id } : {}),
+			...(args.parent !== undefined ? { parent: args.parent } : {}),
+			...(args.mode !== undefined ? { mode: args.mode } : {}),
+			...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+			...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
+			...(args.targets !== undefined ? { targets: args.targets } : {}),
+			...(args.proof !== undefined ? { proof: args.proof } : {}),
+			...(args.review !== undefined ? { review: args.review } : {}),
+			...(args.turns !== undefined ? { turns: args.turns } : {}),
+			...(args.capabilities !== undefined ? { capabilities: args.capabilities } : {}),
+			...(args.budget !== undefined ? { budget: args.budget } : {}),
+			...(args.before !== undefined ? { before: args.before } : {}),
+			...(args.network !== undefined ? { network: args.network } : {}),
+			...(args.standing !== undefined ? { standing: args.standing } : {}),
+			...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
+		};
+		return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [planOp] }, api));
+	}
+	if (target === "context") {
+		if (action === "archive" || action === "restore") {
+			try { return textResult(applyContextRowAction(brainDir, current.record.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, undefined, api.taskId), { target, action, ref: args.ref }); }
+			catch (error) { return withGuide(target, action, fail(`Context row ${action} refused: ${error.message}.`)); }
 		}
 	}
-	if (target === "report" && action === "list") {
+	return unsupported(target, action);
+}
+
+/** Reports are a separate file-backed family, even though they use the same reference envelope. */
+function runReportBookOperation({ root, brainDir, config, engine }, args, api) {
+	const { target, action } = args;
+	if (action === "list") {
 		let reportNamespace;
 		try { reportNamespace = ensureCatalog(brainDir).namespace; } catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
 		const reports = composedRows(loadContext(brainDir)).map((row) => {
@@ -651,7 +661,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		try { paged = listPage(reports, args, "report"); } catch (error) { return fail(`Could not list reports: ${error.message}.`); }
 		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 	}
-	if (target === "report" && ["read", "recall", "archive", "restore", "remove"].includes(action)) {
+	if (["read", "recall", "archive", "restore", "remove"].includes(action)) {
 		const ref = args.ref;
 		if (!validateReference(ref) || ref.kind !== "report") return fail("Invalid report reference; expected at least an `id`.");
 		let current;
@@ -674,10 +684,25 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			return textResult(applyContextRowAction(brainDir, ref.id, rowAction, undefined, api.taskId), { status: action === "remove" ? "deleted" : "live", ref: { ...current, version } });
 		} catch (error) { return fail(`Report ${action} refused: ${error.message}.`); }
 	}
-	// Unadvertised transcript-replay fallback: new calls go through the top-level `shelf` tool.
-	if (target === "shelf") {
-		return runShelf({ root, brainDir, config }, action, args, api, callContext);
+	return unsupported(target, action);
+}
+
+async function runUniversal({ root, brainDir, config, engine, gate }, given, api, callContext) {
+	const main = api.conversationId === ROOT_CONVERSATION_ID;
+	if (typeof given?.id === "string" && given.id.trim() !== "" && typeof given?.ref?.id === "string" && given.id.trim() !== given.ref.id.trim()) {
+		return fail("`id` and `ref.id` do not match; pass `id` alone unless pinning `ref.version`.");
 	}
+	// Tool callers may reach here without prepareArguments: normalizing again is harmless.
+	const args = normalizeArgs(brainDir, given);
+	const target = args.target;
+	const action = args.action;
+	if (target === "file") return runFileBookOperation({ root, brainDir, gate, main }, args, api, callContext);
+	if (DURABLE_TARGETS.has(target)) return runDurableBookOperation({ brainDir }, args, api, callContext);
+	if (target === "assessment") return runAssessmentBookOperation({ brainDir }, args);
+	if (BRAIN_TARGETS.has(target)) return runBrainBookOperation({ root, brainDir, config, engine, gate, main }, args, api);
+	if (target === "report") return runReportBookOperation({ root, brainDir, config, engine }, args, api);
+	// Unadvertised transcript-replay fallback: new calls go through the top-level `shelf` tool.
+	if (target === "shelf") return runShelf({ root, brainDir, config }, action, args, api, callContext);
 	return unsupported(target, action);
 }
 
