@@ -22,6 +22,7 @@ import { describeCall, describeResult } from "../terminal.mjs";
 import { isFront } from "../context.mjs";
 import { splitTop } from "../top.mjs";
 import { parseStory, STORY_ID } from "../story.mjs";
+import { renderConference } from "../conference.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
@@ -97,13 +98,13 @@ function previewTail(text, cols, rows) {
 }
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readStory?: (id: string) => string | undefined, readConference?: (id: string) => object | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readStory: reads the durable consultation transcript under a thread (st1, st2, …), so a consult row can show the
- *   whole exchange without keeping that text in the session. Without it, a consult row opens to the call and its
- *   outcome only.
+ *   readStory: reads a legacy durable consultation transcript under a thread (st1, st2, …).
+ *   readConference: reads the consult-local co<N> audit record. It is only fetched when the Work row opens; no
+ *   private conference notebook is copied into the parent session or ordinary conversation projection.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef, readStory } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readStory, readConference } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -168,6 +169,19 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		}
 		row.story = { thread, rounds, question, context, unparsable, missing: thread !== undefined && raw === undefined };
 		return row.story;
+	};
+	/** The new conference notebook is a separate durable record, never a parent-chat payload. */
+	const conferenceOf = (row) => {
+		// A Work row can stay open while its private child progresses. Refresh that audit record while the outer call
+		// runs, then freeze the completed view just like every other settled tool result.
+		if (row.conference !== undefined && row.state !== "running") return row.conference;
+		const id = typeof row.details?.conference === "string" && /^co\d+$/.test(row.details.conference) ? row.details.conference : undefined;
+		let record;
+		if (id !== undefined && typeof readConference === "function") {
+			try { record = readConference(id); } catch { /* An unreadable audit is rendered explicitly below. */ }
+		}
+		row.conference = { id, record, missing: id !== undefined && record === undefined };
+		return row.conference;
 	};
 
 	const api = {
@@ -328,26 +342,40 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			return true;
 		},
 		/** What the running tools at this depth are saying, as far as the harness keeps it: a bounded tail of each. */
-		liveTools(depth, slots) {
-			void depth;
-			const next = new Map();
-			for (const slot of slots ?? []) {
-				if (slot?.callId === undefined || slot?.status !== "running") continue;
-				if (typeof slot.output !== "string" || slot.output === "") continue;
-				next.set(slot.callId, { text: slot.output, clipped: (slot.droppedBytes ?? 0) > 0 });
-			}
-			let same = next.size === toolTails.size;
-			if (same) for (const [id, entry] of next) {
-				const previous = toolTails.get(id);
-				if (previous === undefined || previous.text !== entry.text || previous.clipped !== entry.clipped) {
-					same = false;
-					break;
+			liveTools(depth, slots) {
+				void depth;
+				const next = new Map();
+				let detailsChanged = false;
+				for (const slot of slots ?? []) {
+					if (slot?.callId === undefined || slot?.status !== "running") continue;
+					// api.details() arrives before a long tool settles. A consult publishes only co<N> metadata there;
+					// that lets an explicitly opened Work row read its private audit notebook as it progresses without
+					// injecting that notebook into the parent conversation or waiting for the final receipt.
+					const row = rows.get(slot.callId);
+					if (row?.name === "consult" && slot.details !== undefined) {
+						const sign = JSON.stringify(slot.details);
+						if (row.liveDetailsSign !== sign) {
+							row.liveDetailsSign = sign;
+							row.details = slot.details;
+							delete row.conference;
+							detailsChanged = true;
+						}
+					}
+					if (typeof slot.output !== "string" || slot.output === "") continue;
+					next.set(slot.callId, { text: slot.output, clipped: (slot.droppedBytes ?? 0) > 0 });
 				}
-			}
-			toolTails.clear();
-			for (const [id, entry] of next) toolTails.set(id, entry);
-			if (!same) touch();
-		},
+				let same = next.size === toolTails.size;
+				if (same) for (const [id, entry] of next) {
+					const previous = toolTails.get(id);
+					if (previous === undefined || previous.text !== entry.text || previous.clipped !== entry.clipped) {
+						same = false;
+						break;
+					}
+				}
+				toolTails.clear();
+				for (const [id, entry] of next) toolTails.set(id, entry);
+				if (!same || detailsChanged) touch();
+			},
 		/** Whether the end of what is being written is the same thing over and over (src/screen/text.mjs). */
 		stuck() {
 			for (const { message } of live.values()) {
@@ -528,9 +556,16 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						const body = (text, style = "muted") => {
 							for (const piece of wrap(text, inner - width(indent))) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : style]], { ...ref, kind: "detail" });
 						};
-						const story = storyOf(row);
-						const clippedContext = (text) => (text.length > CONTEXT_MAX ? `${text.slice(0, CONTEXT_MAX)}\n… (${text.length - CONTEXT_MAX} more characters of context)` : text);
-						if (story.thread !== undefined) add([[indent, "faint"], [`the consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
+							const conference = conferenceOf(row);
+							if (conference.id !== undefined) {
+								section(`consult conference ${conference.id} · private audit notebook`);
+								if (conference.record === undefined) body(`(The conference record ${conference.id} cannot be read; the outer receipt remains: ${plain(row.receipt ?? "no receipt")})`, row.state === "failed" ? "err" : "faint");
+								else body(renderConference(conference.record));
+								return;
+							}
+							const story = storyOf(row);
+							const clippedContext = (text) => (text.length > CONTEXT_MAX ? `${text.slice(0, CONTEXT_MAX)}\n… (${text.length - CONTEXT_MAX} more characters of context)` : text);
+							if (story.thread !== undefined) add([[indent, "faint"], [`the consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
 						if (story.rounds !== undefined) {
 							for (const [index, round] of story.rounds.entries()) {
 								section(`round ${index + 1} · ${shortWhen(round.at)}`);
@@ -752,9 +787,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note" || row?.kind === "reasoning") return row.text;
-				if (row?.name === "consult") {
-					const story = storyOf(row);
-					const parts = [row.label];
+					if (row?.name === "consult") {
+						const conference = conferenceOf(row);
+						if (conference.id !== undefined) return `${row.label}\n\n${conference.record === undefined ? `(The conference record ${conference.id} cannot be read; outer receipt: ${plain(row.receipt ?? "none")})` : renderConference(conference.record)}`;
+						const story = storyOf(row);
+						const parts = [row.label];
 					if (story.thread !== undefined) parts.push(`The consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`);
 					if (story.rounds !== undefined) {
 						for (const [index, round] of story.rounds.entries()) {

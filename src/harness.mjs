@@ -29,6 +29,8 @@ import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
 import { shellTool } from "./tools/shell.mjs";
 import { consultTool } from "./tools/consult.mjs";
+import { createConferenceExtension } from "./conference-extension.mjs";
+import { endConference, findConferenceByCaller } from "./conference.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { caseTool } from "./tools/case.mjs";
 import { admitWitnessSourceTool, appendCaseReceipt, noteCaseMessage } from "./case.mjs";
@@ -132,6 +134,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			supportsReasoningEffort: false,
 			// This OpenAI-compatible endpoint must accept strict function JSON Schemas; selected calls fail closed otherwise.
 			supportsStrictMode: true,
+			// Custom grammar tools are a distinct capability. The conference probes the selected adapter before capture.
+			...(config.consultGrammar === "openai" ? { supportsOpenAIGrammarTools: true } : {}),
 			supportsUsageInStreaming: true,
 			maxTokensField: "max_tokens",
 		},
@@ -353,6 +357,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			control: { ...POLICY.control.terminate },
 		};
 	};
+	// Installed once but selected only by independent consultation children. Its registration objects are passed to
+	// Durable agent configuration below; names alone are stored only after Durable validates the selection.
+	const conferenceExtension = createConferenceExtension({ brainDir });
 	// One flat list of tools for the main agent and every task: a fork shares the main conversation's
 	// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
 	// Tool descriptions are built into the tool definitions.
@@ -368,7 +375,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		...lookTools(root).map(caseSourceTool),
 		...changeTools({ root, brainDir, gate }),
 		shellTool({ root, config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-		consultTool({ root, brainDir, config }),
+		consultTool({ root, brainDir, config, conferenceExtension }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
@@ -437,8 +444,24 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					return undefined;
 				},
 					afterTool: async (call, result, api) => {
-					if (call.parent !== undefined) return undefined;
-					const looped = loopCheck(call, result, api);
+						if (call.parent !== undefined) return undefined;
+						// The harness can end a running tool without returning through its execute() catch. Preserve the
+						// conference lifecycle in that case rather than leaving an apparently-live private child after /stop.
+						if (call.name === "consult") {
+							const diagnostic = (result.diagnostics ?? []).find((entry) => ["aborted", "interrupted", "restart_limit", "abandoned"].includes(entry.code));
+							if (diagnostic !== undefined) {
+								const conference = findConferenceByCaller(brainDir, { taskId: api.taskId, callId: call.id });
+								if (conference !== undefined) {
+									const cancelled = diagnostic.code === "aborted" || diagnostic.code === "abandoned";
+									try {
+										endConference(brainDir, conference.id, cancelled ? "cancelled" : "interrupted", cancelled ? "The caller stopped the outer consult tool before a final consult_return." : "The outer consult tool was interrupted before a final consult_return.", api.now());
+									} catch {
+										// The record may already have returned or recorded a more specific terminal failure.
+									}
+								}
+							}
+						}
+						const looped = loopCheck(call, result, api);
 					const out = looped ?? result;
 					// Keep this synchronous with loopCheck: sibling calls in one reply share one mapping epoch. A case
 					// phase may observe project files, but never changes the shared atlas as a side effect of observing them.
@@ -596,6 +619,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	});
 	const registry = createRegistry();
 	registry.install(core);
+	// Conference children select this isolated profile explicitly. Installing it does not add its prompt or tools
+	// to the root (which stays on Cartographer and retains the legacy Case surface until C5).
+	registry.install(conferenceExtension);
 	// The copy of the assessment and the graph that stands at the top of the context (src/top.mjs).
 	if (loadTop(brainDir) === undefined) pin(brainDir, { reason: "the first start" });
 
@@ -606,7 +632,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// later tool round (or even the next user turn) when the current response ends without more tools.
 	const harness = sessionHarness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
 	const main = sessionMain = await harness.root(context, {
-		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
+		// Explicit selection prevents an installed consult-only extension from leaking its isolated tools into root requests.
+		agent: { model: { provider: PROVIDER, modelId: config.model }, extensions: [core], maxTurns: config.mainTurns },
 	});
 	// The settings say which model this session is on. A conversation keeps the model it began with, so a change
 	// in the settings would otherwise never take hold (the stored one won, or, if the server had dropped it, the
@@ -616,6 +643,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	if (held === undefined || (held.provider === PROVIDER && held.modelId !== config.model)) {
 		await main.configure({ model: { provider: PROVIDER, modelId: config.model } }, context);
 	}
+	// Existing Durable roots predate the extension selection field. Pin them on every open so a stored root cannot
+	// accidentally retain the conference profile; only independent conference children receive it.
+	await main.configure({ extensions: [core] }, context);
 	return {
 		harness,
 		main,

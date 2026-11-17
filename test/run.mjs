@@ -39,6 +39,7 @@ import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
 import { beginCasePhase, createCase, finishCasePhase } from "../src/case.mjs";
 import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
+import { loadConference } from "../src/conference.mjs";
 
 /** The first line of every block the harness writes; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -884,6 +885,30 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 		assert.equal(ledger.items.some((entry) => entry.text === "phase side channel"), false, "the blocked phase attempt did not promote its note");
 		assert.equal(Object.values(loadContext(join(root, ".brain")).tasks).some((task) => task.caseId === "c1"), false, "each temporary case-phase context is cleaned from the ordinary task store after its artifact is recorded");
 		assert.equal(evidence.synthesis, undefined, "phase execution ends with retained evidence and no automatic vote or synthesis");
+	} finally {
+		await server.close();
+	}
+});
+
+test("consult C1-C4: a CLI conference uses the caller model, returns an isolated bounded audit, and leaves legacy storage untouched", async () => {
+	const root = makeProject("consult-conference-cli", { git: false });
+	configure(root, { initiate: false, consultGrammar: "openai" });
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	try {
+		const result = await carto(root, server, ["-p", `consult: ${JSON.stringify({ question: "What should we verify?", context: "CLI CAPTURED CONTEXT", myPersona: "Be a skeptical systems reviewer.", files: ["src/math.js"] })}`]);
+		assert.equal(result.code, 0, `conference CLI call exits cleanly:\n${result.all}`);
+		has(result.stdout, "Consult conference co1 returned", "the parent receives only the compact terminal conference receipt");
+		const loaded = loadConference(join(root, ".brain"), "co1").conference;
+		assert.equal(loaded.status, "returned");
+		assert.equal(loaded.model.modelId, "stand-in", "the conference records the model resolved for its caller");
+		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM atlas");
+		assert.ok(loaded.childConversationId, "the independent child identity is durable");
+		assert.ok(loaded.requestPlans.length >= 2, "participant and finite selector provider plans are auditable");
+		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the new conference does not enter the retained external storyteller store");
+		const custom = server.requests.find((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom"));
+		assert.ok(custom, "the configured adapter receives a provider-enforced required custom grammar request");
+		const participantRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Active participant packet"));
+		assert.equal(participantRequests.some((request) => request.messages.map(rawText).join("\n").includes("CLI CAPTURED CONTEXT")), true, "the immutable conference seed reaches its independent child");
 	} finally {
 		await server.close();
 	}

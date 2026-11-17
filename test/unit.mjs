@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { contextWindowLimits, POLICY } from "../src/config.mjs";
+import { contextWindowLimits, loadConfig, POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
@@ -16,7 +16,10 @@ import { createRefDescriber } from "../src/refs.mjs";
 import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate, editRow } from "../src/ops.mjs";
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
+import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
+import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { startStandIn } from "./stand-in.mjs";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
 import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, bindTalkSource, dressMain, KEPT_AS, recordSoftForgetPending, removeTalkSource, reviseTalkSource } from "../src/context.mjs";
@@ -32,10 +35,12 @@ import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
+import { createConferenceExtension } from "../src/conference-extension.mjs";
+import { CONSULT_ROSTER, ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, enumGrammar, forceSelectorPayload, grammarCapability, loadConference, participantTail, probeGrammarCapability, readConferenceSource, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, renderConference, restrictParticipantPayload, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
 import { createEngine } from "../src/engine.mjs";
-import { runFromBrief } from "../src/harness.mjs";
+import { openSession, runFromBrief } from "../src/harness.mjs";
 import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -44,7 +49,8 @@ import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { admitWitnessSourceTool, appendCaseReceipt, beginCasePhase, CaseError, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, noteCaseMessage, readyCase, recordWitnessDocket, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, renderWitnessDocket, stopCase, synthesizeCase } from "../src/case.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
-import { sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
+import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
+import { createChat } from "../src/screen/chat.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -91,21 +97,44 @@ test("prompt: the sleep checklist names the person whose message may be waiting"
 	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
 });
 
-test("prompt: consult is a bounded long-form consultation, not only a refutable storyteller", () => {
+test("prompt: consult describes an isolated same-model conference while Case remains a separate pre-cutover product", () => {
 	const prompt = systemPrompt({ root: "/project" });
-	assert.match(TOOLS.consult, /separate long-form consultation/i);
-	assert.match(TOOLS.consult, /alternative designs or plans, critique, derivation, explanation, or synthesis/i);
-	assert.match(TOOLS.consult, /not an authoritative record or verdict/i);
-	assert.match(TOOLS.consult, /no tools, project access, or independent project memory/i);
-	assert.match(TOOLS.consult, /Cartographer-managed `thread`/i);
-	assert.ok(TOOLS.consult.includes(`${USER_NAME}'s choices of taste`));
-	assert.doesNotMatch(TOOLS.consult, /storyteller|refutable hard question/i);
-	assert.match(prompt, /opens a separate, long-form consultation/i);
-	assert.doesNotMatch(prompt, /storyteller/i, "the system prompt no longer narrows consult to a storyteller role");
-	assert.match(TOOLS.case, /supplied-context, long-form consultation/i, "case guidance distinguishes its evidence phases from consultation");
-	assert.match(TOOLS.shelf, /consultation threads/i);
-	const fallback = consultTool({ root: "/project", brainDir: "/project/.brain", config: {} });
+	assert.match(TOOLS.consult, /isolated same-model consultation conference/i);
+	assert.match(TOOLS.consult, /`myPersona`/);
+	assert.match(TOOLS.consult, /grammar-constrained selector/i);
+	assert.match(TOOLS.consult, /no project, shell, network, shared-brain, plan, approval, or user-decision authority/i);
+	assert.match(TOOLS.consult, /There is no `thread` follow-up/i);
+	assert.match(prompt, /isolated same-model conference/i);
+	assert.match(TOOLS.case, /supplied-context, long-form consultation/i, "the legacy Case surface remains intact until the separate C5 cutover");
+	assert.match(TOOLS.shelf, /consultation threads/i, "the live story shelf stays intact until C5 migrates it atomically");
+	const fallback = consultTool({ root: "/project", brainDir: "/project/.brain" });
 	assert.equal(fallback.description, TOOLS.consult, "the standalone tool declaration cannot drift from the harness prompt");
+});
+
+test("consult C1-C4 stays additive: an existing storyteller call remains outside the same-model conference path", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const config = { server: "http://legacy.example/v1", consultModel: "LegacyModel", consultMaxTokens: 64, consultTemperature: 0, consultTimeoutSeconds: 1, contextWindow: 100_000 };
+	const tool = consultTool({
+		root,
+		brainDir,
+		config,
+		fetchImpl: async (_url, init) => {
+			calls.push(JSON.parse(init.body));
+			return new Response(JSON.stringify({ choices: [{ message: { content: "Retained legacy answer." }, finish_reason: "stop" }], usage: { completion_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
+		},
+	});
+	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "legacy-consult", now: () => 1, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
+	const legacy = await tool.execute({ question: "Keep the earlier contract alive." }, api, undefined);
+	assert.equal(legacy.isError, undefined, legacy.output[0].text);
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].model, "LegacyModel", "only the explicitly legacy shape reads consultModel");
+	assert.match(legacy.details.thread, /^st\d+$/);
+	assert.equal(existsSync(join(brainDir, "consults")), false, "a legacy call does not allocate a co<N> record");
+	const mixed = await tool.execute({ question: "Do not cross paths.", myPersona: "Conference only.", thread: legacy.details.thread }, api, undefined);
+	assert.equal(mixed.isError, true);
+	assert.match(mixed.output[0].text, /cannot be mixed with an isolated conference/i);
+	assert.equal(calls.length, 1, "a conference-shaped request never falls back to the external endpoint");
 });
 
 test("prompt: case describes the main-owned bounded witness and report boundary", () => {
@@ -2290,392 +2319,396 @@ test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped clean
 	assert.equal(withoutAdditions(legacy), "file body");
 });
 
-// ─── The consult tool ────────────────────────────────────────────────────────
+// ─── Same-model consultation conference ─────────────────────────────────────
 
-const consultConfig = { server: "http://127.0.0.1:8888/v1", consultModel: "MythosNano", consultMaxTokens: 40960, consultTemperature: 0.6, consultTimeoutSeconds: 1800, contextWindow: 100000 };
-const consultApi = (conversationId) => ({ conversationId, taskId: "c1", now: () => 1726000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
-/** An SSE body the way the endpoint streams one: deltas, a final finish_reason with usage, a [DONE]. */
-const sseAnswer = (content = "The answer is 42.", finishReason = "stop", completionTokens = 1234) => {
-	const frames = [];
-	for (const piece of String(content).split(/(?<=\n)/)) {
-		if (piece === "") continue;
-		frames.push(`data: ${JSON.stringify({ choices: [{ delta: { content: piece }, finish_reason: null }] })}\n\n`);
-	}
-	frames.push(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 256, completion_tokens: completionTokens, total_tokens: 256 + completionTokens } })}\n\n`);
-	frames.push("data: [DONE]\n\n");
-	return new Response(frames.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+const grammarFixture = async (t) => {
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
+	const id = `grammar-fixture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+	const model = {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "local",
+		baseUrl: server.url,
+		input: ["text"],
+		reasoning: false,
+		contextWindow: 100_000,
+		maxTokens: 1_000,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		compat: { supportsOpenAIGrammarTools: true, supportsStrictMode: true, supportsUsageInStreaming: true, maxTokensField: "max_tokens" },
+	};
+	const provider = createProvider({
+		id: "local",
+		name: "conference grammar fixture",
+		baseUrl: server.url,
+		auth: { apiKey: { name: "fixture", resolve: async () => ({ auth: { apiKey: "fixture" } }) } },
+		models: [model],
+		api: openAICompletionsApi(),
+	});
+	const models = createModels();
+	models.setProvider(provider);
+	return { server, models, model };
 };
-const okAnswer = sseAnswer;
 
-test("consult: one plain chat completion, the answer in a file, shelved", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		calls.push({ url, init });
-		return okAnswer("The answer is 42.\n");
-	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const chunks = [];
-	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
-	const result = await tool.execute({ question: "What is the answer?", context: "It was asked before." }, api, undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.equal(chunks.join(""), "The answer is 42.\n", "the words are reported as they stream, token for token");
-	// The request: same endpoint, plain chat completion, no tools, no grammar, the question last.
-	assert.equal(calls.length, 1);
-	assert.equal(calls[0].url, "http://127.0.0.1:8888/v1/chat/completions");
-	assert.equal(calls[0].init.method, "POST");
-	const sent = JSON.parse(calls[0].init.body);
-	assert.equal(sent.model, "MythosNano");
-	assert.equal(sent.max_tokens, 40960);
-	assert.equal(sent.temperature, 0.6);
-	assert.equal(sent.stream, true, "the consultation streams token by token");
-	assert.equal(sent.stream_options?.include_usage, true, "and asks the server for usage at the end");
-	assert.equal("tools" in sent, false, "no tool definitions are sent");
-	assert.equal(sent.messages.length, 1);
-	assert.equal(sent.messages[0].role, "user");
-	assert.ok(sent.messages[0].content.endsWith("What is the answer?"), "the question is last");
-	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
-	// The answer lands in the brain under a thread; the question stands in the transcript for whoever reads it later.
-	const thread = result.details.thread;
-	assert.match(thread, /^st\d+$/, "a fresh story mints the short thread marker, like every other id");
-	assert.equal(result.details.rounds, 1);
-	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
-	assert.ok(file.includes("What is the answer?"));
-	assert.ok(file.includes("The answer is 42."));
-	assert.ok(file.includes("finish: stop"));
-	assert.equal(result.output[0].text.includes(".brain"), false, "the receipt never names a path");
-	assert.equal(result.output[0].text.includes("storyteller/"), false, "the receipt never names the file");
-	// Shelved for the main agent as a consultation reference; the receipt names the placement, not the answer.
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1);
-	assert.equal(store.shelf[0].ref.type, "story");
-	assert.equal(store.shelf[0].ref.id, thread);
-	assert.match(result.output[0].text, new RegExp(`shelved as placement ${store.shelf[0].id}`, "i"));
-	assert.match(result.output[0].text, new RegExp(`thread: "${thread}"`), "the receipt says how to ask on");
-	assert.doesNotMatch(result.output[0].text, /The answer is 42/, "the answer is not dumped into the context");
-	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance");
+test("conference C1: the configured adapter probes a required custom grammar tool and pi-ai parses its choice", async (t) => {
+	const { server, models, model } = await grammarFixture(t);
+	assert.deepEqual(await probeGrammarCapability(models, model), { ok: true });
+	const request = server.requests.at(-1);
+	assert.equal(request.tool_choice, "required");
+	assert.equal(request.tools.length, 1);
+	assert.equal(request.tools[0].type, "custom");
+	assert.equal(request.tools[0].custom.name, "consult_grammar_probe");
+	assert.equal(request.tools[0].custom.format.type, "grammar");
+	assert.match(request.tools[0].custom.format.grammar.definition, /"cartographer"/);
+	assert.deepEqual(grammarCapability({ api: "openai-completions", compat: { supportsOpenAIGrammarTools: true } }), { ok: true });
+	assert.equal(grammarCapability({ api: "openai-completions", compat: {} }).ok, false, "declaring only strict JSON schemas cannot enable selector routing");
 });
 
-test("consult: a focus shelves the answer into its own shelf, not the main one", async (t) => {
+test("conference C1-C4: an independent same-model child preserves the handoff prefix, reaches a bounded return, and lets the root rest", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => okAnswer("Task-scoped answer.");
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "Settle this kernel." }, consultApi(7777), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 0, "the main shelf is untouched");
-	assert.equal(taskState(store, "7777").shelf.length, 1, "the focus shelf holds it");
-	assert.equal(taskState(store, "7777").shelf[0].ref.id, result.details.thread);
-});
-
-test("consult: the context is clipped to the cap, in prepareArguments and at send time", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const big = "c".repeat(65000);
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => okAnswer("clipped ok") });
-	const prepared = tool.prepareArguments({ question: "q?", context: big });
-	assert.equal(prepared.context.length, 64000, "prepareArguments clips to the cap before validation sees it");
-	const calls = [];
-	const spy = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("clipped ok"); } });
-	const result = await spy.execute({ question: "q?", context: big }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const sent = calls[0].messages[0].content;
-	assert.ok(sent.includes("c".repeat(64000)) && !sent.includes("c".repeat(64001)), "only the head is sent");
-	assert.match(result.output[0].text, /clipped to the first/);
-});
-
-test("consult: an HTTP error names the model and the setting that fixes it", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => new Response("unknown model: MythosNano", { status: 404 });
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /HTTP 404/);
-	assert.match(result.output[0].text, /consultModel/, "it says which setting names the model");
-});
-
-test("consult: a cut-off answer says the ending is incomplete", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => okAnswer("Partial reasoning…", "length", 40960);
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.match(result.output[0].text, /ran out of room/);
-	assert.match(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8"), /finish: length/);
-});
-
-test("consult: an empty consultModel switches the tool off and asks nothing", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: { ...consultConfig, consultModel: "" }, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /switched off/);
-	assert.equal(called, 0, "the endpoint is never hit");
-});
-
-test("consult: the stream is read the way llama.cpp frames it — pings, CRLF, and frames split mid-frame across chunks", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const encoder = new TextEncoder();
-	const frames = [
-		": ping\r\n\r\n",
-		`data: {"choices":[{"delta":{"role":"assistant","content":"It "},"finish_reason":null}]}\r\n\r\n`,
-		`data: {"choices":[{"delta":{"content":"is 42."},"finish_reason":null}]}\r\n\r\n`,
-		": ping\r\n\r\n",
-		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":12}}\r\n\r\n`,
-		"data: [DONE]\r\n\r\n",
-	];
-	// Bytes, not frames: every TCP chunk boundary is fair game.
-	const bytes = encoder.encode(frames.join(""));
-	const stream = new ReadableStream({
-		async start(controller) {
-			for (let at = 0; at < bytes.length; at += 7) controller.enqueue(bytes.slice(at, at + 7));
-			controller.close();
-		},
+	writeFileSync(join(root, "source.txt"), "first captured line\nsecond captured line\n");
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false, consultGrammar: "openai" }));
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	let session;
+	t.after(async () => {
+		await session?.harness.close(session.context);
+		await server.close();
 	});
-	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
-	const chunks = [];
-	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, api, undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.equal(chunks.join(""), "It is 42.", "the pieces are reassembled across chunk boundaries");
-	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("It is 42."));
-});
-
-test("consult: a consultation transcript that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const encoder = new TextEncoder();
-	const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: "It is not. Roll twice." }, finish_reason: null }] })}\n\n`;
-	let sent = false;
-	const stream = new ReadableStream({
-		pull(controller) {
-			if (!sent) {
-				controller.enqueue(encoder.encode(frames));
-				sent = true;
-				return;
-			}
-			controller.error(new Error("connection reset"));
-		},
+	const config = loadConfig({
+		brainDir,
+		flags: { url: server.url, model: "stand-in" },
+		env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" },
 	});
-	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true, "a broken story is an error");
-	assert.match(result.output[0].text, /broke off mid-answer/);
-	const file = readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8");
-	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the consultation transcript");
-	assert.match(file, /broke off mid-answer/, "and says it broke off");
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1, "the partial is shelved all the same");
-});
-
-test("consult: a server that refuses stream_options is asked again without it", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		const sent = JSON.parse(init.body);
-		calls.push(sent);
-		if (sent.stream_options !== undefined) return new Response("unknown field: stream_options", { status: 400 });
-		return okAnswer("Plain answer.");
+	session = await openSession({ root, brainDir, config, runner: createRunner() });
+	const input = {
+		question: "Which bounded fixture path should we choose?",
+		context: "COMMON CONTEXT SENTINEL",
+		files: [{ path: "source.txt", range: "1-1" }],
+		myPersona: "OPENING PERSONA SENTINEL",
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.equal(calls.length, 2, "the refusal is answered with one retry, no more");
-	assert.equal(calls[1].stream_options, undefined, "without stream_options the second time");
-});
+	const submitted = await session.main.submit({ type: "input", content: `PARENT-EXCLUSION-SENTINEL || consult: ${JSON.stringify(input)}` }, session.context);
+	const settled = await submitted.wait(session.context);
+	assert.equal(settled.status, "done", "the root ends after its post-consult sleep rather than repeatedly accepting the completed receipt");
+	assert.equal(server.requests.length, 6, "root call, grammar probe, participant, selector, participant, then one root receipt turn");
+	const [rootBefore, probe, opening, selector, selected, rootAfter] = server.requests;
+	const tools = (request) => (request.tools ?? []).map((tool) => tool.type === "custom" ? `custom:${tool.custom?.name}` : `function:${tool.function?.name}`);
+	const messageText = (message) => typeof message.content === "string" ? message.content : (message.content ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
+	const joined = (request) => request.messages.map(messageText).join("\n");
 
-test("consult: a server that answers with one plain JSON body still records the consultation transcript", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: "42." }, finish_reason: "stop" }], usage: { completion_tokens: 7 } }), { status: 200, headers: { "content-type": "application/json" } });
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("42."));
-});
-
-test("consult: a timeout is reported as a timeout and writes nothing", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { throw new DOMException("The operation timed out.", "TimeoutError"); } });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /did not answer within 1800 seconds/);
-	assert.equal(existsSync(join(brainDir, "storyteller")), false, "no consultation transcript is written");
-});
-
-test("consult: a follow-up carries the full consultation transcript — the original question and answer — and appends its round", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		calls.push(JSON.parse(init.body));
-		return okAnswer(calls.length === 1 ? "Roll twice, not once, or the die never lands on six." : "Once lands on six only half the time.");
-	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "Is the roller sound?", context: "It rolls one die." }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(first.isError, undefined, first.output[0].text);
-	const thread = first.details.thread;
-	assert.equal(first.details.rounds, 1);
-	const second = await tool.execute({ question: "Why twice?", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(second.isError, undefined, second.output[0].text);
-	assert.equal(second.details.thread, thread, "the follow-up keeps the same thread");
-	assert.equal(second.details.rounds, 2);
-	// The consultation model sees round one whole: the context, the question, the answer — then this question.
-	const sent = calls[1];
-	assert.equal(sent.messages.length, 3);
-	assert.equal(sent.messages[0].role, "user");
-	assert.ok(sent.messages[0].content.startsWith("It rolls one die."), "round one's context stands first");
-	assert.ok(sent.messages[0].content.endsWith("Is the roller sound?"), "and its question last within the round");
-	assert.equal(sent.messages[1].role, "assistant");
-	assert.equal(sent.messages[1].content, "Roll twice, not once, or the die never lands on six.");
-	assert.equal(sent.messages[2].role, "user");
-	assert.equal(sent.messages[2].content, "Why twice?");
-	// One story on disk, both rounds, in order.
-	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
-	assert.match(file, /## Round 1 — /);
-	assert.match(file, /## Round 2 — /);
-	assert.ok(file.indexOf("## Round 1") < file.indexOf("## Round 2"));
-	assert.ok(file.includes("Roll twice") && file.includes("Once lands on six"));
-	// One placement on the shelf, re-shelved with the whole exchange; no path and no model name in it.
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1, "the consultation transcript is one placement, re-shelved, not minted twice");
-	assert.equal(store.shelf[0].ref.type, "story");
-	assert.equal(store.shelf[0].ref.id, thread);
-	assert.ok(store.shelf[0].snapshot.includes("Is the roller sound?"));
-	assert.ok(store.shelf[0].snapshot.includes("Roll twice"));
-	assert.ok(store.shelf[0].snapshot.includes("Why twice?"));
-	assert.ok(store.shelf[0].snapshot.includes("Once lands on six"));
-	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance or the path");
-	// The round-two receipt says where in the consultation transcript it stands, and never carries the answer.
-	assert.match(second.output[0].text, /^Round 2\./);
-	assert.ok(second.output[0].text.includes(`thread: "${thread}"`));
-	assert.doesNotMatch(second.output[0].text, /Once lands on six/);
-});
-
-test("consult: a fresh second consultation round re-uses the placement id", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let n = 0;
-	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const second = await tool.execute({ question: "q2", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const placement = loadContext(brainDir).shelf[0].id;
-	assert.equal(first.details.placement, second.details.placement, "the placement is re-used, not re-minted");
-	assert.equal(loadContext(brainDir).shelf[0].id, placement);
-	assert.ok(loadContext(brainDir).shelf[0].snapshot.includes("Answer 1.") && loadContext(brainDir).shelf[0].snapshot.includes("Answer 2."));
-});
-
-test("consult: a thread that is not a consultation thread is refused before anything is asked", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	for (const bad of ["../etc/passwd", "st-20261115", "st-20261115-143022-XYZ!", "story:st-20261115-143022-k7q2", `/abs/path/st-20261115-143022-k7q2`]) {
-		const result = await tool.execute({ question: "q?", thread: bad }, consultApi(ROOT_CONVERSATION_ID), undefined);
-		assert.equal(result.isError, true, bad);
-		assert.match(result.output[0].text, /not a valid consultation thread/);
+	assert.equal(probe.model, "stand-in");
+	assert.deepEqual(tools(probe), ["custom:consult_grammar_probe"]);
+	assert.equal(probe.tool_choice, "required");
+	assert.deepEqual(tools(opening), ["function:consult_source", "function:consult_return"]);
+	assert.equal(opening.tool_choice, undefined);
+	assert.deepEqual(tools(selector), ["custom:select_persona"]);
+	assert.equal(selector.tool_choice, "required");
+	assert.match(selector.tools[0].custom.format.grammar.definition, /"atlas"/);
+	assert.doesNotMatch(selector.tools[0].custom.format.grammar.definition, /"cartographer"/, "the prior speaker is physically absent from the finite grammar");
+	assert.deepEqual(tools(selected), ["function:consult_source", "function:consult_return"]);
+	assert.equal(selected.tool_choice, undefined);
+	for (const request of [opening, selector, selected]) {
+		assert.equal(request.model, "stand-in", "every child request uses the caller's resolved model");
+		assert.doesNotMatch(joined(request), /PARENT-EXCLUSION-SENTINEL/, "the independent child has no parent transcript");
 	}
-	assert.equal(called, 0, "a bad thread never reaches the endpoint");
+	assert.match(joined(opening), /OPENING PERSONA SENTINEL/, "Cartographer alone receives the request-local opening persona");
+	assert.match(joined(opening), /COMMON CONTEXT SENTINEL/, "the captured caller context is part of the immutable common packet");
+	assert.doesNotMatch(joined(selector), /OPENING PERSONA SENTINEL/, "the selector tail has no active persona packet");
+	assert.doesNotMatch(joined(selected), /OPENING PERSONA SENTINEL/, "the selected participant does not inherit the prior persona tail");
+	assert.match(joined(selected), /You are Atlas \(atlas\)/);
+	assert.match(joined(selected), /private entry-time atlas snapshot.*empty snapshot/is, "even an empty Atlas book remains a real role packet");
+
+	// The shared Durable head is not rebuilt: each later request begins byte-for-byte with the prior request's
+	// stable messages, while only the request-local tail is replaced and new shared history appends in between.
+	assert.deepEqual(selector.messages.slice(0, 2), opening.messages.slice(0, 2), "the selector keeps the initial stable situation and entry packet prefix");
+	assert.deepEqual(selected.messages.slice(0, 4), selector.messages.slice(0, 4), "the selected participant retains the selector's entire stable prefix rather than resetting or forking");
+	assert.match(messageText(selector.messages[2]), /OPENING CONFERENCE CONTRIBUTION/);
+	assert.match(messageText(selector.messages[3]), /attributed to participant cartographer/);
+	assert.match(messageText(selected.messages[5]), /Conference selector chose atlas/);
+	assert.match(messageText(rootAfter.messages.at(-1)), /Consult conference co1 returned answered from atlas/);
+
+	const { conference } = loadConference(brainDir, "co1");
+	assert.equal(conference.status, "returned");
+	assert.notEqual(conference.childConversationId, session.main.id, "the conference owns a new Durable conversation, not a parent fork");
+	assert.deepEqual(conference.model, { provider: "local", modelId: "stand-in" });
+	assert.deepEqual(conference.turns.map((turn) => turn.participant), ["cartographer"]);
+	assert.deepEqual(conference.selectorEvents.map((event) => [event.after, event.participant]), [["cartographer", "atlas"]]);
+	assert.equal(conference.final.participant, "atlas", "any active selected participant can return the conference");
+	assert.equal(conference.requestPlans.length, 3);
+	assert.ok(conference.requestPlans.length <= POLICY.limits.conference.requestPlans, "the audit cap is above this complete bounded handoff and did not discard its evidence");
+	assert.ok(POLICY.limits.conference.requestPlans >= Math.max(8, POLICY.limits.conference.turns * 4 + 4), "the request-plan audit cap covers every Durable request permitted by the conference child turn ceiling");
 });
 
-test("consult: fresh consultations mint short thread markers from the folder, and legacy markers stay valid", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let n = 0;
-	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	// Two new stories in a fresh brain: st1, then st2.
-	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const second = await tool.execute({ question: "q2" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(first.details.thread, "st1");
-	assert.equal(second.details.thread, "st2");
-	// A follow-up to the legacy story minted before the short markers: the marker stays as it was.
-	const legacy = "st-20261115-143022-k7q2";
-	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
-	writeFileSync(join(brainDir, "storyteller", `${legacy}.md`), "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: MythosNano\nStarted: 2026-11-15T14:30:22.000Z\n\n## Round 1 — 2026-11-15T14:30:22.000Z\n\nQuestion:\n```text\nlegacy question?\n```\n\nAnswer:\n```text\nlegacy answer.\n```\n");
-	const third = await tool.execute({ question: "and then?", thread: legacy }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(third.isError, undefined, third.output[0].text);
-	assert.equal(third.details.thread, legacy, "a legacy thread keeps its marker");
-	// The next fresh story after legacy files still mints the short form from the short ids in the folder — st3.
-	const fourth = await tool.execute({ question: "q4" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(fourth.details.thread, "st3");
+test("conference C1/C2: raw provider payloads make selector authority and participant authority disjoint", () => {
+	const participant = restrictParticipantPayload({
+		model: "fixture",
+		tool_choice: "required",
+		tools: [
+			{ type: "function", function: { name: "consult_source", parameters: {} } },
+			{ type: "function", function: { name: "consult_return", parameters: {} } },
+			{ type: "custom", custom: { name: "select_persona", format: { type: "grammar" } } },
+		],
+	});
+	assert.deepEqual(participant.tools.map((tool) => tool.function.name), ["consult_source", "consult_return"]);
+	assert.equal(participant.tool_choice, undefined, "a participant never inherits the selector's required tool choice");
+	assert.throws(() => restrictParticipantPayload({ tools: [{ type: "function", function: { name: "consult_source" } }] }), ConferenceError);
+	const selector = forceSelectorPayload({ model: "fixture", messages: [{ role: "user", content: "common history" }], tools: participant.tools }, ["atlas", "ledger"]);
+	assert.equal(selector.tool_choice, "required");
+	assert.deepEqual(selector.tools.map((tool) => tool.custom.name), ["select_persona"]);
+	assert.equal(selector.tools[0].custom.format.grammar.definition, enumGrammar(["atlas", "ledger"]));
 });
 
-test("consult: a well-formed thread with no consultation transcript behind it is refused before anything is asked", async (t) => {
+test("conference C2/C3: entry snapshots stay immutable, persona tails are private, and routing excludes the previous speaker", (t) => {
 	const { root, brainDir } = fresh(t);
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	const result = await tool.execute({ question: "q?", thread: "st-20261115-000000-zzzz" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /No consultation transcript stands under thread st-20261115-000000-zzzz/);
-	assert.equal(called, 0);
+	writeFileSync(join(root, "source.txt"), "one\ntwo\nthree\n");
+	const conference = createConferenceCapture({
+		root,
+		brainDir,
+		question: "Which bounded migration is safer?",
+		context: "Caller fact A.",
+		files: [{ path: "source.txt", range: "2-3" }],
+		myPersona: "Care about a reversible migration boundary.",
+		model: { provider: "local", modelId: "fixture" },
+		caller: { conversationId: "main", taskId: "task-1", callId: "call-1" },
+		at: 1,
+	});
+	assert.equal(conference.id, "co1");
+	assert.equal(readConferenceSource(brainDir, conference, "s1").text, "two\nthree");
+	writeFileSync(join(root, "source.txt"), "mutated live project bytes\n");
+	assert.equal(readConferenceSource(brainDir, loadConference(brainDir, "co1").conference, "s1").text, "two\nthree", "the conference reads its frozen source, not the changed project path");
+	assert.throws(() => readConferenceSource(brainDir, conference, "b-atlas"), /only inspect c0 or one captured s<N> source/);
+	assert.throws(() => createConferenceCapture({ root, brainDir, question: "q", myPersona: "p", files: ["../escape.txt"], model: {}, caller: {} }), /Supplied file refused/);
+	assert.throws(() => createConferenceCapture({ root, brainDir, question: "q", myPersona: "p", files: [{ path: "source.txt", range: "1-99999" }], model: {}, caller: {} }), /at most/);
+
+	const running = attachChildConference(brainDir, conference.id, "conference-child", 2);
+	const opening = participantTail(withConferenceBrain(running, brainDir));
+	assert.match(opening, /Care about a reversible migration boundary/);
+	assert.doesNotMatch(opening, /Atlas entry snapshot/);
+	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
+	assert.throws(() => recordSelectorChoice(brainDir, conference.id, "cartographer", { at: 4 }), /not eligible/);
+	recordSelectorChoice(brainDir, conference.id, "atlas", { at: 4 });
+	const atlas = loadConference(brainDir, conference.id).conference;
+	const atlasTail = participantTail(withConferenceBrain(atlas, brainDir));
+	assert.match(atlasTail, /You are Atlas \(atlas\)/);
+	assert.match(atlasTail, /empty snapshot/);
+	assert.doesNotMatch(atlasTail, /Care about a reversible migration boundary/, "the next participant never inherits Cartographer's request-local persona");
+	const neutral = selectorTail({ ...running, turns: [{ participant: "cartographer" }], active: { kind: "selector", previousSpeaker: "cartographer" } });
+	assert.match(neutral, /atlas, ledger, plan, assessment, context/);
+	assert.doesNotMatch(neutral, /Care about a reversible migration boundary/);
+	assert.doesNotMatch(neutral, /Atlas entry snapshot/);
+	assert.equal(loadConference(brainDir, conference.id).conference.turns[0].participant, "cartographer");
+	assert.equal(loadConference(brainDir, conference.id).conference.selectorEvents[0].participant, "atlas");
 });
 
-test("consult: a consultation transcript that does not parse is refused, never guessed at", async (t) => {
+test("conference C4: request-plan audit retention stays bounded with monotonic provenance indexes", (t) => {
 	const { root, brainDir } = fresh(t);
-	const id = "st-20261115-000000-a1b2";
-	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
-	writeFileSync(join(brainDir, "storyteller", `${id}.md`), "The storyteller — one long problem, kept whole\n\n## Round 1 — nope\n\nQuestion:\naaa\nAnswer:\nbbb\n");
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	const result = await tool.execute({ question: "follow up?", thread: id }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /consultation transcript under thread .* cannot be read/);
-	assert.equal(called, 0, "a broken story never reaches the endpoint");
+	const conference = createConferenceCapture({ root, brainDir, question: "Bound the audit.", myPersona: "Keep the handoff evidence finite.", model: {}, caller: {}, at: 1 });
+	const total = POLICY.limits.conference.requestPlans + 3;
+	for (let index = 0; index < total; index++) {
+		recordRequestPlan(brainDir, conference.id, index % 2 === 0 ? "participant" : "selector", [{ role: "user", content: `stable ${index}` }], `tail ${index}`, index + 2);
+	}
+	const bounded = loadConference(brainDir, conference.id).conference;
+	assert.equal(bounded.requestPlans.length, POLICY.limits.conference.requestPlans);
+	assert.equal(bounded.requestPlanCount, total);
+	assert.equal(bounded.requestPlans[0].index, total - POLICY.limits.conference.requestPlans + 1);
+	assert.equal(bounded.requestPlans.at(-1).index, total);
+	assert.match(renderConference(bounded), new RegExp(`${total} total`));
 });
 
-test("consult: a follow-up whose transcript grows is sent the whole conversation — round one is not re-sent by the agent", async (t) => {
+test("conference C4: tool activity keeps its speaker, malformed returns and limits preserve an auditable incomplete state, and a valid return carries provenance", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		calls.push(JSON.parse(init.body));
-		return okAnswer(`Answer ${calls.length}.`);
+	writeFileSync(join(root, "packet.txt"), "captured evidence\n");
+	const captured = createConferenceCapture({
+		root,
+		brainDir,
+		question: "How should the bounded conference end?",
+		context: "captured context",
+		files: ["packet.txt"],
+		myPersona: "Opening perspective.",
+		model: { provider: "local", modelId: "fixture" },
+		caller: { conversationId: "parent", taskId: "outer-tool", callId: "call-consult" },
+		at: 1,
+	});
+	attachChildConference(brainDir, captured.id, "conference-child", 2);
+	const extension = createConferenceExtension({ brainDir });
+	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
+	const source = extension.tools.find((tool) => tool.name === "consult_source");
+	const returned = extension.tools.find((tool) => tool.name === "consult_return");
+	const selector = extension.tools.find((tool) => tool.name === "select_persona");
+	const api = { conversationId: "conference-child", now: () => 10 };
+
+	await generation.afterResponse({ stopReason: "toolUse", content: [
+		{ type: "text", text: "I will inspect the packet before I hand off." },
+		{ type: "toolCall", id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } },
+	] }, api);
+	assert.deepEqual(loadConference(brainDir, captured.id).conference.active, { kind: "participant", participant: "cartographer", opening: true }, "text plus a tool call does not trigger a selector handoff");
+	const read = await source.execute({ action: "read", id: "s1" }, api);
+	assert.equal(read.isError, undefined);
+	assert.match(read.output[0].text, /captured evidence/);
+	assert.equal(loadConference(brainDir, captured.id).conference.toolReceipts.length, 1);
+
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "My completed contribution." }] }, api);
+	let running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.active.kind, "selector");
+	assert.equal(running.turns.length, 1, "only the no-tool response closes the participant turn");
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /neutral selector choice/);
+	const picked = await selector.execute({ choice: "atlas" }, api);
+	assert.equal(picked.isError, undefined);
+	assert.equal(loadConference(brainDir, captured.id).conference.active.participant, "atlas");
+
+	const malformed = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
+	assert.equal(malformed.isError, true);
+	running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.status, "running");
+	assert.equal(running.active.participant, "atlas", "a malformed return leaves its same participant active to correct it");
+	assert.throws(() => validateConsultReturn({ outcome: "answered", synthesis: "x", alternatives: [{ option: "", tradeoff: "missing option" }] }), /alternatives/);
+
+	const final = await returned.execute({
+		outcome: "answered",
+		synthesis: "Use the captured evidence and keep the conclusion advisory.",
+		evidence: [{ source: "b-atlas", claim: "The entry snapshot had no mapped nodes." }],
+		uncertainties: ["No live project verification happened."],
+	}, api);
+	assert.equal(final.isError, undefined);
+	assert.equal(final.control.terminate, true);
+	const returnedRecord = loadConference(brainDir, captured.id).conference;
+	assert.equal(returnedRecord.status, "returned");
+	assert.deepEqual(returnedRecord.final.provenance.participantPacket, { kind: "book-snapshot", id: "b-atlas", digest: returnedRecord.bookSources.atlas.digest });
+	assert.deepEqual(returnedRecord.final.provenance.selectorHistory.map((event) => [event.after, event.participant]), [["cartographer", "atlas"]]);
+	assert.match(renderConference(returnedRecord), /grammar enforced yes/);
+	assert.match(conferenceStatusLine(returnedRecord), /returned/);
+
+	const limited = createConferenceCapture({ root, brainDir, question: "What if output ends?", myPersona: "Bound the output.", model: {}, caller: {}, at: 20 });
+	attachChildConference(brainDir, limited.id, "limited-child", 21);
+	await generation.afterResponse({ stopReason: "length", content: [{ type: "text", text: "partial" }] }, { conversationId: "limited-child", now: () => 22 });
+	const limitedRecord = loadConference(brainDir, limited.id).conference;
+	assert.equal(limitedRecord.status, "interrupted");
+	assert.equal(limitedRecord.final, undefined, "an output limit never fabricates a synthesis");
+	assert.match(renderConference(limitedRecord), /No synthesis was fabricated/);
+
+	const chat = createChat({ readConference: (id) => id === captured.id ? returnedRecord : undefined });
+	chat.entry(0, { id: "entry-1", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-call", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
+		{ role: "toolResult", toolCallId: "consult-call", toolName: "consult", isError: false, details: { conference: captured.id }, content: [{ type: "text", text: "Only the compact parent receipt." }] },
+	] });
+	const group = chat.items.find((item) => item.type === "group");
+	assert.match(chat.textOf(group.key, 0), /Consult conference co1/, "opening a Work consult row reads the audit record on demand instead of copying its private notebook into parent chat");
+
+	let liveAudit = { ...returnedRecord, status: "running", active: { kind: "participant", participant: "cartographer" } };
+	const liveChat = createChat({ readConference: () => liveAudit });
+	liveChat.entry(0, { id: "entry-live", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-live", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
+	] });
+	liveChat.liveTools(0, [{ callId: "consult-live", status: "running", details: { conference: captured.id } }]);
+	const liveGroup = liveChat.items.find((item) => item.type === "group");
+	assert.match(liveChat.textOf(liveGroup.key, 0), /Current participant: cartographer/, "api.details exposes only co<N> metadata while the outer tool remains pending");
+	liveAudit = { ...liveAudit, active: { kind: "participant", participant: "atlas" } };
+	assert.match(liveChat.textOf(liveGroup.key, 0), /Current participant: atlas/, "an open Work audit refreshes its durable record while the conference progresses");
+});
+
+test("conference C4: recovery resumes the captured child and captured model rather than allocating or adopting a later model", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const captured = createConferenceCapture({
+		root,
+		brainDir,
+		question: "Can recovery preserve the model boundary?",
+		myPersona: "Keep recovery deterministic.",
+		model: { provider: "frozen-provider", modelId: "frozen-model" },
+		caller: { conversationId: "caller", taskId: "recover-task", callId: "recover-call" },
+		at: 1,
+	});
+	const selected = [];
+	const submissions = [];
+	const frozenModel = { provider: "frozen-provider", id: "frozen-model", api: "openai-completions", compat: { supportsOpenAIGrammarTools: true } };
+	const models = {
+		getModel(provider, modelId) {
+			selected.push([provider, modelId]);
+			return provider === "frozen-provider" && modelId === "frozen-model" ? frozenModel : undefined;
+		},
+		async completeSimple(_model, _request, options) {
+			options.onPayload({ messages: [], tools: [] });
+			return { content: [{ type: "toolCall", name: "consult_grammar_probe", arguments: { choice: "cartographer" } }] };
+		},
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "Round one question." }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const second = await tool.execute({ question: "Round two question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const third = await tool.execute({ question: "Round three question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(third.details.rounds, 3);
-	const sent = calls[2];
-	assert.deepEqual(sent.messages.map((m) => m.role), ["user", "assistant", "user", "assistant", "user"]);
-	assert.equal(sent.messages[0].content, "Round one question.");
-	assert.equal(sent.messages[1].content, "Answer 1.");
-	assert.equal(sent.messages[2].content, "Round two question.");
-	assert.equal(sent.messages[3].content, "Answer 2.");
-	assert.equal(sent.messages[4].content, "Round three question.");
-	assert.equal(second.details.rounds, 2);
-});
-
-test("consult: a consultation transcript survives a question that carries its own fenced blocks and labels", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const tricky = "It failed with:\n\nQuestion:\n```text\nAnswer:\n```\n\n## Round 99 — fake\n\nWhat does it print?";
-	const fetchImpl = async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("The exit code is 1.\n```\nb ```\nDone."); };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: tricky }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(first.isError, undefined, first.output[0].text);
-	const second = await tool.execute({ question: "And the sign?", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(second.isError, undefined, second.output[0].text);
-	const sent = calls[1];
-	assert.equal(sent.messages.length, 3);
-	assert.equal(sent.messages[0].content, tricky, "the tricky round-one payload round-trips byte for byte");
-	assert.equal(sent.messages[1].content, "The exit code is 1.\n```\nb ```\nDone.");
-});
-
-test("consult: a server refusing an over-long consultation says its transcript outgrew model capacity", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let call = 0;
-	const fetchImpl = async () => {
-		call += 1;
-		if (call === 1) return okAnswer("Roll twice.");
-		return new Response("request (99999 tokens) exceeds the available context size (65536 tokens)", { status: 400 });
+	const tool = consultTool({ root, brainDir, config: {}, conferenceExtension: { name: "consult-conference", tools: [{}, {}, {}] } });
+	const api = {
+		conversationId: "caller",
+		taskId: "recover-task",
+		callId: "recover-call",
+		now: () => 3,
+		models,
+		agent: async () => { throw new Error("a resumed conference must not read a later caller model"); },
+		commit: async (work) => work({
+			createConversation: async () => { throw new Error("a resumed conference must not create another child"); },
+			scanConversations: async () => ({ items: [{ id: "unrelated-child", parent: { at: 1 } }, { id: "existing-private-child", parent: { at: 1 } }] }),
+			scanEntries: async ({ conversationId }) => ({ items: [{ conversationId, kind: "carto.conference-seed", data: { conference: conversationId === "existing-private-child" ? captured.id : "co999", version: captured.version } }] }),
+		}),
+		details: async () => {},
+		conversation: async (id) => {
+			assert.equal(id, "existing-private-child");
+			return {
+				submit: async (input) => {
+					submissions.push(input);
+					completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Recovered from the existing isolated child.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] }, 4);
+					return { wait: async () => ({ status: "done" }) };
+				},
+				abort: async () => {},
+			};
+		},
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "Is the roller sound?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const thread = first.details.thread;
-	const second = await tool.execute({ question: "Go on.", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(second.isError, true);
-	assert.match(second.output[0].text, /consultation transcript has outgrown what the model can hold/);
-	assert.match(second.output[0].text, /let it rest, or begin a new consultation with the crux/);
-	assert.doesNotMatch(second.output[0].text, /consultModel/, "an overflow is not a model-name problem");
-	// Round one overflow names the ask, not a transcript:
-	const solo = await consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => new Response("prompt is too long: 99999 tokens", { status: 400 }) }).execute({ question: "x".repeat(50000) }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(solo.isError, true);
-	assert.match(solo.output[0].text, /outgrew what the consultation model can hold/);
+	const result = await tool.execute({ question: captured.question, myPersona: captured.myPersona.text }, api, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.deepEqual(selected, [["frozen-provider", "frozen-model"]]);
+	assert.deepEqual(submissions, [{ type: "continue", requestId: "consult:recover-task" }]);
+	const resumed = loadConference(brainDir, captured.id).conference;
+	assert.equal(resumed.childConversationId, "existing-private-child");
+	assert.equal(resumed.status, "returned");
+	assert.match(result.output[0].text, /Recovered from the existing isolated child/);
+});
+
+test("conference C4: stopping the outer tool records cancellation rather than a made-up answer", async (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false, consultGrammar: "openai" }));
+	const server = await startStandIn({
+		tokenDelayMs: 0,
+		holdWhen: (request) => (request.tools ?? []).some((tool) => tool.function?.name === "consult_source")
+			&& request.messages.some((message) => typeof message.content === "string" && message.content.includes("Active participant packet")),
+	});
+	let session;
+	t.after(async () => {
+		await session?.harness.close(session.context);
+		await server.close();
+	});
+	const config = loadConfig({ brainDir, flags: { url: server.url, model: "stand-in" }, env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" } });
+	session = await openSession({ root, brainDir, config, runner: createRunner() });
+	const submitted = await session.main.submit({ type: "input", content: `consult: ${JSON.stringify({ question: "Stop this child.", myPersona: "Observe cancellation." })}` }, session.context);
+	const deadline = Date.now() + 2_000;
+	while (server.heldCount() === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(server.heldCount(), 1, "the test stopped an active participant request, not a completed consultation");
+	await session.main.abort(session.context);
+	const settled = await submitted.wait(session.context);
+	assert.equal(settled.status, "unanswered");
+	const cancelled = loadConference(brainDir, "co1").conference;
+	assert.equal(cancelled.status, "cancelled");
+	assert.equal(cancelled.final, undefined);
+	assert.match(cancelled.ended.reason, /caller stopped/i);
+});
+
+
+test("conference C4: final objects require an honest structured return and thread revival fails before model work", async (t) => {
+	assert.throws(() => validateConsultReturn({ outcome: "needs_input", synthesis: "Need a choice." }), /blocking_question/);
+	assert.deepEqual(validateConsultReturn({ outcome: "answered", synthesis: "Use the frozen packet.", evidence: [{ source: "s1", claim: "The captured file says so." }], uncertainties: ["No live verification yet."] }), {
+		outcome: "answered",
+		synthesis: "Use the frozen packet.",
+		evidence: [{ source: "s1", claim: "The captured file says so." }],
+		assumptions: [],
+		uncertainties: ["No live verification yet."],
+		alternatives: [],
+		next_checks: [],
+	});
+	const { root, brainDir } = fresh(t);
+	const tool = consultTool({ root, brainDir });
+	const result = await tool.execute({ question: "q", myPersona: "p", thread: "st1" }, {}, undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /cannot be mixed with an isolated conference/i);
 });

@@ -26,6 +26,7 @@ import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowS
 import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
 import { caseStatusLine, listCases, loadCase, renderCase, stopCase } from "./case.mjs";
+import { conferenceStatusLine, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -139,7 +140,9 @@ export function describeCall(call, describeRef) {
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
 
 		case "consult":
-			return `consultation  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
+			return args.myPersona !== undefined || args.files !== undefined
+				? `consult conference  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`
+				: `consultation  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
 		case "wake":
 			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
@@ -181,7 +184,11 @@ export function describeResult(message) {
 	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
 	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
 	if (message.toolName === "shelf") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.context);
-	// The consultation: how long it took and how much it wrote. Where its transcript stands is said in the opened row.
+	// A same-model conference has a compact parent receipt; its detailed notebook stays private under /consult co<N>.
+	if (message.toolName === "consult" && !message.isError && typeof message.details?.conference === "string") {
+		return oneLine(text, POLICY.limits.terminal.resultSummary.refusal);
+	}
+	// The retained legacy consultation: how long it took and how much it wrote. Its transcript is shown in the opened row.
 	if (message.toolName === "consult" && !message.isError) {
 		const tokens = typeof message.details?.tokens === "number" && Number.isFinite(message.details.tokens) ? `${Math.round(message.details.tokens).toLocaleString("en-US")} tokens` : "";
 		const seconds = typeof message.details?.seconds === "number" && Number.isFinite(message.details.seconds)
@@ -1186,6 +1193,7 @@ export async function runTerminal(session, options) {
 						"  /thinking  show or hide what the agent thinks and notes for itself (/thinking on, /thinking off; Ctrl-T does the same)",
 						"  /report   the last task's report in full; /report t12 shows a kept one",
 						"  /case     active and recent bounded evidence cases; /case c1 shows its durable phase, witness docket/budget, report and participant provenance; /case stop c1 stops it and interrupts an active phase",
+						"  /consult  consultation conference audits; /consult co1 shows its immutable packet, participant/selector trail, receipts, and final or incomplete outcome",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
 						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
@@ -1240,6 +1248,21 @@ export async function runTerminal(session, options) {
 					const kept = loadReport(options.brainDir, argument);
 					line(kept ?? `  There is no report ${argument}. /context lists the kept ones.`);
 				} else line(lastReport === undefined ? "  No task has reported in this run of carto." : lastReport);
+				return true;
+			}
+			case "consult": {
+				if (argument !== undefined) {
+					const loaded = loadConference(options.brainDir, argument);
+					line(loaded.conference === undefined ? `! ${loaded.error}` : renderConference(loaded.conference));
+					return true;
+				}
+				const conferences = listConferences(options.brainDir);
+				if (conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook.");
+				else {
+					line(`  ${bold("Consult conferences")}`);
+					for (const entry of conferences) line(entry.error === undefined ? `    ${conferenceStatusLine(entry.conference)}` : `    ${entry.id} · unreadable: ${entry.error}`);
+					line(dim("  /consult co1 shows immutable sources, roster snapshots, participant turns, selector grammar events, tool receipts, and the returned or incomplete outcome. /stop cancels an active outer call."));
+				}
 				return true;
 			}
 			case "case": {

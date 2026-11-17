@@ -30,6 +30,7 @@ import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
 import { readStory } from "../story.mjs";
+import { loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
@@ -282,9 +283,11 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// For a consult row in Work: the consultation transcript is read from the brain under its thread, never from the session.
+	// Consult rows open their private durable material only on demand: legacy threads remain readable until C5,
+	// while co<N> conferences read their compact audit notebook rather than leaking it into parent chat history.
 	const readStoryRaw = (thread) => readStory(brainDir, thread);
-	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw });
+	const readConferenceRaw = (id) => loadConference(brainDir, id).conference;
+	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw, readConference: readConferenceRaw });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {

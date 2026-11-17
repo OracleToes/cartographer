@@ -186,6 +186,10 @@ function mainCalls(text) {
 			const [, id, report] = /^case\s+synthesize:\s*(\S+)\s+(\{[\s\S]*\})$/.exec(part);
 			calls.push({ name: "case", args: { action: "synthesize", id, ...JSON.parse(report) } });
 		}
+		else if (part.startsWith("consult:")) {
+			const requested = part.slice(8).trim();
+			calls.push({ name: "consult", args: JSON.parse(requested) });
+		}
 		else if (part.startsWith("case:")) {
 			const requested = part.slice(5).trim();
 			if (requested.startsWith("{")) calls.push({ name: "case", args: { action: "start", ...JSON.parse(requested) } });
@@ -208,6 +212,14 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 		const text = textOf(message);
 		const later = messages.slice(i + 1);
 		const raw = rawOf(message);
+		// The isolated conference fixture first gives Cartographer one ordinary contribution, then lets the real
+		// custom-grammar selector choose another participant, which returns the structured advisory result.
+		if (message.role === "user" && text.startsWith("Active participant packet")) {
+			const participant = /You are [^(]+\(([^)]+)\)/.exec(text)?.[1];
+			const alreadySpoke = messages.some((entry) => entry.role === "user" && textOf(entry).startsWith("Conference host event:"));
+			if (participant === "cartographer" && !alreadySpoke) return { text: "OPENING CONFERENCE CONTRIBUTION" };
+			return { calls: [{ name: "consult_return", args: { outcome: "answered", synthesis: `CONFERENCE RETURN FROM ${participant ?? "participant"}`, evidence: [{ source: "c0", claim: "fixture source was captured" }], uncertainties: ["fixture-only result"] } }] };
+		}
 		// A task that said yes to the question before its steps collapse: it notes what its results began with.
 		if (message.role === "user" && raw.includes("Your steps will be collapsed after this reply")) {
 			const found = messages.slice(0, i).filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
@@ -329,8 +341,12 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 			const thinkAfter = text.startsWith("<cartographer>")
 				? /ON (EVERY )?WAKE: .*\|\| then think\b/m.test(messages.slice(0, i).filter((entry) => entry.role === "user").map(textOf).join("\n"))
 				: /\|\| then think\b/.test(text);
-			if (results.length > 0 && thinkAfter) return { text: "Noted for myself." };
-			if (results.length > 0) return chat(`Report received: ${results.map(textOf).join(" ++ ")}`);
+				if (results.length > 0 && thinkAfter) return { text: "Noted for myself." };
+				// A same-model consult already has its own terminal child lifecycle. Once its bounded final/error
+				// receipt reaches the caller, the fixture rests instead of treating it like a task report and calling
+				// chat repeatedly. This makes the full child-to-parent smoke path settle at the root as production does.
+				if (results.some((entry) => /^Consult conference co\d+ (?:returned|ended)\b/.test(textOf(entry)))) return { calls: [{ name: "sleep", args: {} }] };
+				if (results.length > 0) return chat(`Report received: ${results.map(textOf).join(" ++ ")}`);
 			// The note that follows a reply without a call. `think then chat: WORDS` in the message before it: say them now.
 			if (text.startsWith(NOTED)) {
 				const before = messages.slice(0, i).filter((entry) => entry.role === "user" && !textOf(entry).startsWith(NOTED)).map(textOf).at(-1) ?? "";
@@ -455,6 +471,12 @@ export async function startStandIn(options = {}) {
 		}
 		requests.push(body);
 		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof, caseSteps: options.caseSteps });
+		// The conference selector uses OpenAI's custom grammar-tool wire shape, not a function schema. The fixture
+		// enforces that small contract: it emits only the first enum literal from the supplied grammar as custom input.
+		const customTool = Array.isArray(body.tools) && body.tools.length === 1 && body.tools[0]?.type === "custom" ? body.tools[0].custom : undefined;
+		const grammarChoice = typeof customTool?.format?.grammar?.definition === "string"
+			? /"([^"\\]+)"/.exec(customTool.format.grammar.definition)?.[1]
+			: undefined;
 		const promptTokens = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 
 		response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
@@ -482,7 +504,14 @@ export async function startStandIn(options = {}) {
 			send({ reasoning_content: piece });
 			generated += 1;
 		}
-		if (decision.calls !== undefined) {
+		if (customTool !== undefined && grammarChoice !== undefined) {
+			send({ tool_calls: [{ index: 0, id: `call_${counter}_custom`, type: "custom", custom: { name: customTool.name, input: "" } }] });
+			for (const piece of grammarChoice.match(/.{1,12}/gs) ?? []) {
+				await pause();
+				send({ tool_calls: [{ index: 0, custom: { input: piece } }] });
+				generated += 1;
+			}
+		} else if (decision.calls !== undefined) {
 			for (const piece of decision.say?.match(/\S+\s*/g) ?? []) {
 				await pause();
 				send({ content: piece });
@@ -506,7 +535,7 @@ export async function startStandIn(options = {}) {
 				generated += 1;
 			}
 		}
-		send({}, decision.cut ? "length" : decision.calls !== undefined ? "tool_calls" : "stop");
+		send({}, decision.cut ? "length" : customTool !== undefined || decision.calls !== undefined ? "tool_calls" : "stop");
 		const usage = { prompt_tokens: promptTokens, completion_tokens: generated, total_tokens: promptTokens + generated };
 		response.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: 0, model: body.model, choices: [], usage })}\n\n`);
 		response.end("data: [DONE]\n\n");
