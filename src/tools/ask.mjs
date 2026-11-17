@@ -39,7 +39,7 @@ export function askTool({ brainDir, asks }) {
 			const task = api.conversationId !== ROOT_CONVERSATION_ID;
 			let outcome = await api.memo("answer", callContext);
 			if (outcome === undefined) {
-				if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), questionText(text, choices));
+				if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), questionText(text, choices), { source: { kind: "tool-call", conversationId: String(api.conversationId), callId: String(api.callId) } });
 				outcome = await asks.put({ text, choices, task }, callContext.abortSignal);
 				if (outcome.kind === "stopped") return fail(`${USER_HEAD} stopped this before answering.`, { ask: { text, choices, outcome } });
 				await api.memo("answer", outcome, callContext);

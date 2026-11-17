@@ -1,4 +1,4 @@
-// The Chat tab has two projections of the same local event feed.
+// Talk and Work are two projections of the same local event feed.
 //
 // Talk holds only the user's submitted speech and an agent `chat` call while it is sending or after its result says
 // it was delivered. Work holds private reasoning, ordinary agent notes, calls/results, failures, harness notices,
@@ -71,6 +71,8 @@ const noteOf = (message) => [thinkingOf(message), textOf(message)].filter((part)
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
 /** A Talk item is direct two-party speech. Failed delivery is private work, not a statement that reached the user. */
 const inTalk = (item) => item?.type === "user" || (item?.type === "agent" && item.delivery !== "failed");
+/** The visible identity cue is deliberately an admitted Durable entry, never the visible saying or a local row number. */
+const sourceLabel = (source) => source?.kind === "durable-message" ? ` · Durable ${source.entryId}/${source.position}` : " · source pending";
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?/, "").trim();
 /** The argument of a call that is worth watching while it is written: the longest text in it. */
 function bodyOf(call) {
@@ -172,10 +174,22 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			thinking = on;
 			touch();
 		},
-		/** What the user typed. */
-		user(text) {
-			say({ type: "user", text });
+		/** What the user typed. It becomes source-bound when its admitted Durable entry arrives; that handoff is FIFO,
+		 * not a comparison of visible words. */
+		user(text, { source, pending = source === undefined } = {}) {
+			say({ type: "user", text, ...(source === undefined ? {} : { source }), ...(pending ? { pending: true } : {}) });
 		},
+		/** Bind an already-visible submitted row to its admitted source without matching on its text. */
+		bindNextUser(source) {
+			const item = items.find((entry) => entry.type === "user" && entry.pending === true);
+			if (item === undefined) return false;
+			item.source = source;
+			delete item.pending;
+			item.rev = (item.rev ?? 0) + 1;
+			touch();
+			return true;
+		},
+
 		/** Text from Cartographer itself: what a command printed, a notice. Consecutive pieces are one block. `{ keep: true }`: survives a collapse of the conversation. */
 		print(text, options = {}) {
 			const cleaned = String(text).replace(/\r\x1b\[2?K/g, "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
@@ -215,7 +229,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		 * terminal says about it, used for the outcome of a task and for a collapse.
 		 */
 		entry(depth, entry, printed = "") {
-			for (const message of entry.model ?? []) {
+			const entrySource = (position, callId) => {
+				const carried = entry.source?.kind === "durable-message" ? entry.source : undefined;
+				const base = carried ?? (entry?.id === undefined || entry?.conversationId === undefined ? undefined : { kind: "durable-message", conversationId: String(entry.conversationId), entryId: String(entry.id), position });
+				return base === undefined || callId === undefined ? base : { ...base, callId };
+			};
+			for (const [position, message] of (entry.model ?? []).entries()) {
 				if (message.role === "assistant") {
 					live.delete(depth);
 					const reasoning = thinkingOf(message).trim();
@@ -233,7 +252,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					for (const call of calls) {
 						if (call.name === "chat") {
 							const text = typeof call.arguments?.text === "string" ? call.arguments.text.trim() : "";
-							const speech = text === "" ? undefined : say({ type: "agent", text, task: depth > 0, depth, callId: call.id, delivery: "sending" });
+							const speech = text === "" ? undefined : say({ type: "agent", text, task: depth > 0, depth, callId: call.id, delivery: "sending", source: entrySource(position, call.id) });
 							rows.set(call.id, { quiet: true, name: "chat", speech });
 							continue;
 						}
@@ -248,6 +267,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					if (row?.speech !== undefined) {
 						row.speech.delivery = message.isError ? "failed" : "delivered";
 						row.speech.result = message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.consoleErrorChars) : undefined;
+						row.speech.rev = (row.speech.rev ?? 0) + 1;
 						touch();
 						continue;
 					}
@@ -274,6 +294,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					api.collapse();
 					const said = printed.trim() !== "" ? printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "") : "◆ the context was collapsed; /context shows it\n";
 					say({ type: "console", text: said, sealed: true });
+				} else if (message.role === "user" && depth === 0) {
+					const text = textOf(message).trim();
+					if (text !== "") {
+						// A live submit already made its row. Bind the next lifecycle-pending row; replay has none and adds one.
+						if (!api.bindNextUser(entrySource(position))) say({ type: "user", text, source: entrySource(position) });
+					}
 				}
 			}
 		},
@@ -397,11 +423,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		const said = String(text ?? "").replace(/\s+$/, "");
 		if (said === "" || said === item.text) return false;
 		item.text = said;
+		item.rev = (item.rev ?? 0) + 1;
 		delete item.md;
 		touch();
 		return true;
 	},
-	/** A message taken out of the tab (deleted in the Context window): gone where it stood. */
+	/** A source removed from future kept talk is gone from this local Talk projection too. */
 	forget(key) {
 		const at = items.findIndex((entry) => entry.key === key);
 		if (at < 0) return false;
@@ -558,11 +585,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			const make = (item) => {
 				if (item.type === "user") {
 					for (const [index, piece] of wrap(item.text, inner - 2).entries()) add([[index === 0 ? "› " : "  ", "user bold"], [piece, "bold"]], { item: item.key, kind: "user", bg: "bgUser" });
-					if (projection === "talk") add([["  You → agent · submitted", "faint"]], { item: item.key, kind: "user", bg: "bgUser" });
+					if (projection === "talk") add([[`  You → agent · submitted${sourceLabel(item.source)}`, "faint"]], { item: item.key, kind: "user", bg: "bgUser" });
 				} else if (item.type === "agent") {
 					const state = item.delivery === "failed" ? "failed" : item.delivery === "delivered" ? "delivered" : "sending";
 					const ref = { item: item.key, kind: "agent", ...(state === "failed" ? { bg: "bgTool" } : {}) };
-					if (projection !== "all") add([[`Agent speech${item.task ? " · focus" : ""} · ${state}${item.callId === undefined ? "" : ` · chat call ${item.callId}`}`, state === "failed" ? "err" : state === "sending" ? "warn" : "faint"]], ref);
+					if (projection !== "all") add([[`Agent speech${item.task ? " · focus" : ""} · ${state}${item.callId === undefined ? "" : ` · chat call ${item.callId}`}${sourceLabel(item.source)}`, state === "failed" ? "err" : state === "sending" ? "warn" : "faint"]], ref);
 					said(item.text, ref, item);
 					if (state === "failed" && item.result !== undefined) add([[`  Failed delivery · ${item.result}`, "err"]], ref);
 				} else if (item.type === "block") {
@@ -618,7 +645,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			const base = `${cols}|${thinking}|${styleRev}|${projection}`;
 			const linesOf = (item) => {
 				const still = item.type !== "group" || (item.closed && !item.rows.some((row) => row.kind === "call" && row.state === "running"));
-				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : item.type === "block" ? `${base}|${item.text.length}|${item.open ?? ""}` : `${base}|${item.text.length}`;
+				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : item.type === "block" ? `${base}|${item.text.length}|${item.open ?? ""}` : `${base}|${item.rev ?? 0}|${item.text}|${item.delivery ?? ""}|${item.result ?? ""}|${item.source?.id ?? ""}|${item.source?.callId ?? ""}|${item.pending === true}`;
 				if (sign !== undefined && item.made?.sign === sign) return item.made.lines;
 				sink = [];
 				make(item);

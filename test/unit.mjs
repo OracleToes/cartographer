@@ -18,7 +18,7 @@ import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
-import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, dressMain, KEPT_AS } from "../src/context.mjs";
+import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, bindTalkSource, dressMain, KEPT_AS, recordSoftForgetPending, removeTalkSource, reviseTalkSource } from "../src/context.mjs";
 import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
@@ -32,6 +32,7 @@ import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
+import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
 import { createEngine } from "../src/engine.mjs";
 import { runFromBrief } from "../src/harness.mjs";
 import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
@@ -885,8 +886,69 @@ test("request plan: it is a pure current calculation with ordered source facts",
 	assert.equal(JSON.stringify(messages), before, "planning never mutates the active conversation");
 	assert.match(plan.messages.at(-1).content.at(-1).text, /<read-tail>/, "the current read batch is planned at the tail");
 	assert.deepEqual(plan.parts.map((part) => part.kind), ["active-message", "active-message", "active-message", "generated-state", "transient-read-tail"], "the plan captures source order before provider formatting");
-	assert.equal(plan.parts[0].source, `active:${ROOT_CONVERSATION_ID}:0`, "a source has an identity rather than a text-match key");
+	assert.equal(plan.parts[0].source, `unmapped:${ROOT_CONVERSATION_ID}:0`, "an unavailable Durable id is explicitly unmapped, never a text-match key");
 	assert.match(plan.parts.find((part) => part.kind === "generated-state").fragment, /^<state>/, "generated state has its exact planned fragment");
+});
+
+test("active context projection: it preserves Durable entry identities through edits, multi-message contributions, ordering, and synthetic results", (t) => {
+	const user = { role: "user", timestamp: 100, content: [{ type: "text", text: "replacement words" }] };
+	const assistant = { role: "assistant", timestamp: 101, content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }] };
+	const result = { role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "one result" }] };
+	const synthetic = { role: "toolResult", toolCallId: "missing", toolName: "read", content: [{ type: "text", text: "Durable synthesized this result" }] };
+	const view = {
+		entries: [
+			{ id: "u1", conversationId: "main", model: [{ role: "user", timestamp: 100, content: [{ type: "text", text: "old words" }] }] },
+			{ id: "a1", conversationId: "main", model: [assistant] },
+			{ id: "r1", conversationId: "main", model: [result] },
+			{ id: "omitted", conversationId: "main", model: [{ role: "user", timestamp: 99, content: [{ type: "text", text: "gone" }] }] },
+		],
+		contributions: [[user], [assistant], [result], []],
+		// Flattening may put the result beside its call and add a missing result. It is not an editable-row map.
+		messages: [user, assistant, result, synthetic],
+	};
+	const projection = activeContextProjection(view);
+	assert.deepEqual(projection.map((event) => [event.entryId, event.contributions.length]), [["u1", 1], ["a1", 1], ["r1", 1], ["omitted", 0]], "the projection follows active contributions, not raw entry models");
+	const copies = view.messages.map((message) => JSON.parse(JSON.stringify(message)));
+	const sources = bridgeRequestSources(copies, view);
+	assert.deepEqual(sources.map((source) => source?.entryId), ["u1", "a1", "r1", undefined], "reordered active messages retain their entry ids while a synthesized result stays unmapped");
+	assert.deepEqual(sources.slice(0, 3).map((source) => source?.position), [0, 0, 0], "each source also names its contribution position");
+	const { brainDir, root } = fresh(t);
+	const plan = planRequest(copies, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: "main", used: 1, fired: [], wakeLines: [], windowRows: [], sources });
+	const active = plan.parts.filter((part) => part.kind === "active-message");
+	assert.deepEqual(active.map((part) => part.source), ["durable:main:u1:0", "durable:main:a1:0", "durable:main:r1:0", "unmapped:main:3"], "frozen request provenance keeps contribution ids and marks a synthesized result as unmapped");
+	assert.equal(active[0].sourceRef.entryId, "u1", "the plan retains the structured source beside its printable provenance");
+	const firstSameStamp = { role: "user", timestamp: 200, content: [{ type: "text", text: "one" }] };
+	const secondSameStamp = { role: "user", timestamp: 200, content: [{ type: "text", text: "two" }] };
+	const ambiguous = { entries: [{ id: "u2", conversationId: "main" }, { id: "u3", conversationId: "main" }], contributions: [[firstSameStamp], [secondSameStamp]], messages: [firstSameStamp, secondSameStamp] };
+	assert.deepEqual(bridgeRequestSources(ambiguous.messages.map((message) => JSON.parse(JSON.stringify(message))), ambiguous), [undefined, undefined], "a copied ambiguous timestamp pair stays unmapped rather than borrowing array position or text");
+});
+
+test("talk source mutations: equal visible words cannot select one another", (t) => {
+	const { brainDir } = fresh(t);
+	const one = { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 };
+	const two = { kind: "durable-message", conversationId: "main", entryId: "u2", position: 0 };
+	noteChat(brainDir, "user", 100, "same words", { source: one });
+	noteChat(brainDir, "user", 101, "same words", { source: two });
+	assert.equal(reviseTalkSource(brainDir, one, "first reworded"), true, "the selected Durable source changes");
+	assert.deepEqual(loadContext(brainDir).chat.map((entry) => entry.text), ["first reworded", "same words"], "an equal later saying stays untouched");
+	assert.equal(removeTalkSource(brainDir, two), true, "the selected second source leaves future kept talk");
+	assert.deepEqual(loadContext(brainDir).chat.map((entry) => entry.text), ["first reworded"], "removal is source-specific too");
+	const provisional = { kind: "chat-call", conversationId: "main", callId: "c1" };
+	noteChat(brainDir, "you", 102, "agent words", { source: provisional });
+	assert.equal(bindTalkSource(brainDir, provisional, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }), true, "a tool call is promoted to its admitted entry id");
+	assert.equal(reviseTalkSource(brainDir, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }, "agent reworded"), true, "the stable admitted source drives later mutation");
+	const beforeToolWrites = { kind: "chat-call", conversationId: "main", callId: "c2" };
+	assert.equal(bindTalkSource(brainDir, beforeToolWrites, { kind: "durable-message", conversationId: "main", entryId: "a2", position: 0, callId: "c2" }), true, "an admitted entry may arrive before its tool writes talk");
+	noteChat(brainDir, "you", 103, "later tool words", { source: beforeToolWrites });
+	assert.deepEqual(loadContext(brainDir).chat.map((entry) => entry.text), ["first reworded", "agent reworded", "later tool words"]);
+	assert.equal(loadContext(brainDir).chat.at(-1).source.entryId, "a2", "the pending call binding promotes the stored saying without comparing its words");
+	const forgotten = { kind: "durable-message", conversationId: "main", entryId: "u-forget", position: 0 };
+	noteChat(brainDir, "user", 104, "equal soft-forget words", { source: forgotten });
+	noteChat(brainDir, "user", 105, "equal soft-forget words");
+	recordSoftForgetPending(brainDir, { entryId: "u-forget" });
+	const equalAfterForget = loadContext(brainDir).chat.filter((entry) => entry.text === "equal soft-forget words");
+	assert.equal(equalAfterForget.length, 1, "soft-forget removes only its admitted entry from kept talk");
+	assert.equal(equalAfterForget[0].source, undefined, "an equal legacy saying is not removed by its text");
 });
 
 test("dressRequest: a task carries the context lines and the requests, as the live agent does", (t) => {

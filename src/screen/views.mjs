@@ -813,7 +813,7 @@ export function handsView({ root, brainDir }) {
 
 /**
  * Where a tool of the context is defined: cartographer's own source, by its `name: "…"` line. `e` on a tool
- * part of the Context tab opens it there.
+ * part of the Model tab opens it there.
  * @returns {{ file: string, line: number } | undefined}
  */
 export function toolSource(name) {

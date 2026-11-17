@@ -22,6 +22,7 @@ import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs"
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted, noteKey } from "./wake.mjs";
 import { planRequest, prepareRequest } from "./request.mjs";
+import { bridgeRequestSources } from "./request-sources.mjs";
 import { beginReadBatch, readBatchCheck } from "./read-batch.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { changeTools } from "./tools/change.mjs";
@@ -289,6 +290,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
+	// The generation hooks are declared before Harness.open() creates these handles. They are assigned before any run
+	// can start, and let the hooks read the exact active Durable ContextView for provenance.
+	let sessionHarness;
+	let sessionMain;
 	const core = defineExtension({
 		name: "cartographer",
 		// The preamble never changes within a project; a change here makes the server read the whole prompt again.
@@ -392,12 +397,21 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (turns.get(api.conversationId)?.start !== turn.start) failures.delete(api.conversationId);
 					turns.set(api.conversationId, turn);
 					engine.seen(api.conversationId, messages);
+					// Durable gives its active entries beside their contributions. Re-read that view here so the planner and
+					// the talk store can keep entry ids through request dressing; a row with no unambiguous bridge stays unnamed.
+					let sources;
+					try {
+						const conversation = main ? sessionMain : await sessionHarness.conversation(api.conversationId, context);
+						if (conversation !== undefined) sources = bridgeRequestSources(messages, await conversation.context(context));
+					} catch {
+						// A request still runs when inspection cannot be read; its plan says that source is unmapped.
+					}
 					// What the user said is noted for the talk a collapse keeps. A task whose context is nearly full has
 					// its own steps collapsed here, after the one question (src/engine.mjs).
 					let note;
-					if (main) noteUserMessages(brainDir, messages);
+					if (main) noteUserMessages(brainDir, messages, sources);
 					else note = await engine.beforeTaskRequest(api.conversationId, messages);
-					const planned = prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) });
+					const planned = prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId), sources });
 					engine.planned(api.conversationId, planned);
 					return { messages: planned.messages };
 				},
@@ -473,8 +487,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// A burst of user messages sent while a provider request or focus is busy belongs in the very next context
 	// boundary. The Durable default takes only one steer per boundary, needlessly leaving the rest queued for a
 	// later tool round (or even the next user turn) when the current response ends without more tools.
-	const harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
-	const main = await harness.root(context, {
+	const harness = sessionHarness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
+	const main = sessionMain = await harness.root(context, {
 		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
 	});
 	// The settings say which model this session is on. A conversation keeps the model it began with, so a change

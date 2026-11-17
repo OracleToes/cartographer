@@ -173,7 +173,7 @@ const markAppliedOperation = (store, operationId) => {
 	if (operationId === undefined) return;
 	store.appliedOperations = [...new Set([...(store.appliedOperations ?? []), String(operationId)])].slice(-POLICY.limits.context.operationReplay);
 };
-const empty = () => ({ version: 1, next: 1, rows: [], chat: [], seenUser: 0, shelf: [], dropped: [], forgottenEntries: [], appliedOperations: [], tasks: {} });
+const empty = () => ({ version: 1, next: 1, rows: [], chat: [], nextTalk: 1, talkBindings: {}, seenUser: 0, shelf: [], dropped: [], forgottenEntries: [], appliedOperations: [], tasks: {} });
 const clone = (value) => JSON.parse(JSON.stringify(value));
 export const composedRows = (store) => store.rows.filter((row) => row.species === ROW_SPECIES.composed);
 const activeRows = (rows) => rows.filter((row) => row.archived !== true).map(clone);
@@ -261,6 +261,22 @@ export function loadContext(brainDir) {
 		}
 		delete store.records;
 		for (const key of ["chat", "shelf", "dropped"]) if (!Array.isArray(store[key])) store[key] = base[key];
+		let nextTalk = 1;
+		for (const [index, entry] of store.chat.entries()) {
+			if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+				store.chat[index] = { id: `talk:${nextTalk++}`, who: "user", at: 0, text: String(entry ?? "") };
+				continue;
+			}
+			const found = /^talk:(\d+)$/.exec(typeof entry.id === "string" ? entry.id : "");
+			if (found !== null) nextTalk = Math.max(nextTalk, Number(found[1]) + 1);
+			else entry.id = `talk:${nextTalk++}`;
+			// A source is optional for records written before source identities existed. New mutations refuse those rows
+			// rather than guessing from equal words.
+			if (entry.source === null || typeof entry.source !== "object" || Array.isArray(entry.source)) delete entry.source;
+		}
+		if (!Number.isInteger(store.nextTalk) || store.nextTalk < nextTalk) store.nextTalk = nextTalk;
+		if (store.talkBindings === null || typeof store.talkBindings !== "object" || Array.isArray(store.talkBindings)) store.talkBindings = {};
+		for (const [key, source] of Object.entries(store.talkBindings)) if (talkSourceKey(source) === undefined || !/^(?:chat-call|tool-call):/.test(key)) delete store.talkBindings[key];
 		const typeShelfItem = (item, index, scope) => ({
 			...item,
 			type: item?.ref !== undefined ? "reference" : "file",
@@ -491,24 +507,108 @@ function recordText(records) {
 
 // ─── The talk ────────────────────────────────────────────────────────────────
 
-/** Note something the user or the agent said, for the chat window. `at` tells two sayings apart. */
-export function noteChat(brainDir, who, at, text, { seen = true } = {}) {
+/** A stable source of one kept saying. Older records may have no source; callers must not infer one from its words. */
+export function talkSourceKey(source) {
+	if (source === null || typeof source !== "object" || Array.isArray(source)) return undefined;
+	if (source.kind === "durable-message" && typeof source.conversationId === "string" && typeof source.entryId === "string" && Number.isInteger(source.position)) return `durable-message:${source.conversationId}:${source.entryId}:${source.position}:${typeof source.callId === "string" ? source.callId : ""}`;
+	if ((source.kind === "chat-call" || source.kind === "tool-call") && typeof source.conversationId === "string" && typeof source.callId === "string") return `${source.kind}:${source.conversationId}:${source.callId}`;
+	return undefined;
+}
+
+const talkSourceOf = (source) => {
+	const key = talkSourceKey(source);
+	return key === undefined ? undefined : { ...source };
+};
+
+/** Note something the user or the agent said, for a later collapse. */
+export function noteChat(brainDir, who, at, text, { seen = true, source } = {}) {
 	const said = String(text ?? "").trim();
-	if (said === "") return;
+	if (said === "") return undefined;
+	let stableSource = talkSourceOf(source);
+	let noted;
 	updateContext(brainDir, (store) => {
-		if (store.chat.some((entry) => entry.who === who && entry.at === at && entry.text === said)) return;
-		store.chat.push({ who, at, text: said });
+		const provisionalKey = talkSourceKey(stableSource);
+		const bound = provisionalKey === undefined ? undefined : talkSourceOf(store.talkBindings?.[provisionalKey]);
+		if (bound !== undefined) {
+			stableSource = bound;
+			delete store.talkBindings[provisionalKey];
+		}
+		const sourceKey = talkSourceKey(stableSource);
+		const prior = sourceKey === undefined
+			? store.chat.find((entry) => entry.who === who && entry.at === at && entry.text === said)
+			: store.chat.find((entry) => talkSourceKey(entry.source) === sourceKey);
+		if (prior !== undefined) {
+			noted = prior;
+			return;
+		}
+		const id = `talk:${store.nextTalk++}`;
+		noted = { id, who, at, text: said, ...(stableSource === undefined ? {} : { source: stableSource }) };
+		store.chat.push(noted);
 		// `seen: false`: words of the user that are not a message of the conversation (an answer to `ask`, a line
 		// typed to a running task), so the messages that are still count as new.
 		if (who === "user" && seen) store.seenUser = Math.max(store.seenUser, at);
 	});
+	return noted;
 }
 
-/** Note the user's messages of a request that were not noted yet. */
-export function noteUserMessages(brainDir, messages) {
+/** Note the user's messages of a request that were not noted yet, with their Durable entry sources when available. */
+export function noteUserMessages(brainDir, messages, sources = []) {
 	const seen = loadContext(brainDir).seenUser;
-	const fresh = messages.filter((message) => message.role === "user" && Number.isFinite(message.timestamp) && message.timestamp > seen && !isNoteText(textOf(message)) && !isFront(message));
-	for (const message of fresh) noteChat(brainDir, "user", message.timestamp, textOf(message));
+	for (const [index, message] of messages.entries()) {
+		if (message.role !== "user" || !Number.isFinite(message.timestamp) || message.timestamp <= seen || isNoteText(textOf(message)) || isFront(message)) continue;
+		noteChat(brainDir, "user", message.timestamp, textOf(message), { source: sources[index] });
+	}
+}
+
+/** Reword exactly one source in the mutable talk that a future collapse may keep. */
+export function reviseTalkSource(brainDir, source, text) {
+	const key = talkSourceKey(source);
+	const next = String(text ?? "").trim();
+	if (key === undefined || next === "") return false;
+	let changed = false;
+	updateContext(brainDir, (store) => {
+		const entry = store.chat.find((line) => talkSourceKey(line.source) === key);
+		if (entry === undefined || entry.text === next) return;
+		entry.text = next;
+		changed = true;
+	});
+	return changed;
+}
+
+/** Replace one provisional tool-call source with its admitted Durable entry source. */
+export function bindTalkSource(brainDir, from, source) {
+	const fromKey = talkSourceKey(from);
+	const next = talkSourceOf(source);
+	if (fromKey === undefined || next === undefined) return false;
+	let changed = false;
+	updateContext(brainDir, (store) => {
+		const entry = store.chat.find((line) => talkSourceKey(line.source) === fromKey);
+		if (entry === undefined) {
+			// Durable records an assistant entry before its tool runs on some paths. Keep this exact call-to-entry
+			// binding until the tool writes its talk record; no visible wording is used to join them.
+			store.talkBindings[fromKey] = next;
+			changed = true;
+			return;
+		}
+		entry.source = next;
+		delete store.talkBindings[fromKey];
+		changed = true;
+	});
+	return changed;
+}
+
+/** Remove exactly one source from the mutable talk that a future collapse may keep. */
+export function removeTalkSource(brainDir, source) {
+	const key = talkSourceKey(source);
+	if (key === undefined) return false;
+	let changed = false;
+	updateContext(brainDir, (store) => {
+		const at = store.chat.findIndex((line) => talkSourceKey(line.source) === key);
+		if (at < 0) return;
+		store.chat.splice(at, 1);
+		changed = true;
+	});
+	return changed;
 }
 
 const isNoteText = (text) => text.startsWith(`${NOTE_OPEN}\n${HEAD}`);
@@ -572,8 +672,10 @@ const readSoftForgetPending = (brainDir) => {
 const applySoftForgetPending = (store, pending) => {
 	const ids = new Set(pending.map((entry) => entry.entryId));
 	store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), ...ids])];
-	const byAtText = new Set(pending.map((entry) => `${entry.timestamp}:${entry.text}`));
-	store.chat = (store.chat ?? []).filter((line) => !byAtText.has(`${line.at}:${line.text}`));
+	// A soft-forget acts on one Durable entry. Do not take an equal saying out of kept talk: legacy rows with no
+	// source remain visible until someone deliberately changes that source.
+	store.chat = (store.chat ?? []).filter((line) => !ids.has(String(line.source?.entryId ?? "")));
+	for (const [key, source] of Object.entries(store.talkBindings ?? {})) if (ids.has(String(source?.entryId ?? ""))) delete store.talkBindings[key];
 	const removed = [];
 	const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => {
 		if (placement?.target?.kind === "message" && ids.has(String(placement.target.id))) { removed.push(placement); return false; }
@@ -1542,40 +1644,6 @@ export function unshelveForUser(brainDir, path) {
 	});
 	cleanupShelfSnapshots(brainDir, gone);
 	return `Taken off the shelf: ${gone.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}. A copy that stands in the context stays until the next collapse.`;
-}
-
-/** A message, as it shows, was edited in the editor: the line the talk keeps is rewritten to match. A note of the agent stands nowhere in the talk, so there is nothing to rewrite for one. */
-export function reviseNote(brainDir, from, to) {
-	const said = String(from ?? "").trim();
-	const next = String(to ?? "").trim();
-	if (said === "" || next === "" || said === next) return false;
-	let changed = false;
-	updateContext(brainDir, (store) => {
-		const at = store.chat.findLastIndex((entry) => entry.text === said);
-		if (at >= 0) {
-			store.chat[at] = { ...store.chat[at], text: next };
-			changed = true;
-		}
-	});
-	return changed;
-}
-
-/**
- * The user takes a message out of the talk the collapse keeps: it is gone from view, and the next collapse keeps
- * nothing of it. What was sent stays stored, and the agent reads it until then. @returns whether it was there
- */
-export function forgetChat(brainDir, text) {
-	const said = String(text ?? "").trim();
-	if (said === "") return false;
-	let changed = false;
-	updateContext(brainDir, (store) => {
-		const at = store.chat.findLastIndex((entry) => entry.text === said);
-		if (at >= 0) {
-			store.chat.splice(at, 1);
-			changed = true;
-		}
-	});
-	return changed;
 }
 
 /**

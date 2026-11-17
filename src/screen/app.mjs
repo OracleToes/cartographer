@@ -2,10 +2,10 @@
 //
 //   1 Talk     what reached the user or is being sent (src/screen/chat.mjs)
 //   2 Work     the private shared-brain activity, not user-directed speech
-//   3 Carto    the agent's brain: Atlas, Ledger, Plan, Tree, Assessment, one at a time
+//   3 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
 //   4 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   5 Shells   the shell windows, live
-//   6 Model    sent provider payloads, current accounting, and the live shared brain
+//   6 Model    sent provider payloads, next-request preview, and current accounting
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -29,7 +29,7 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
+import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
 import { readStory } from "../story.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
@@ -49,8 +49,6 @@ import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
-
-const USER_SPEAKER = `${USER_NAME}: `;
 
 export const TABS = [
 	{ id: "chat", name: "Talk" },
@@ -162,8 +160,8 @@ export const KEYS_HELP = [
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk, a submitted message or delivered agent speech; private work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain)",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk it rewords a stable source for a future kept talk; private work cannot be edited; sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Talk, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -278,7 +276,7 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// For a consult row in the Chat tab: the story is read from the brain under its thread, never from the session.
+	// For a consult row in Work: the story is read from the brain under its thread, never from the session.
 	const readStoryRaw = (thread) => readStory(brainDir, thread);
 	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw });
 	const askColors = () => {
@@ -301,9 +299,9 @@ export async function runScreen(session, options, runTerminal) {
 		tab: "chat",
 		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
 		shell: undefined, // the shell window whose output the Output view shows
-		deleteArm: undefined, // a report marked for deleting in Hands, waiting for the second d
+		deleteArm: undefined, // a report or Talk source marked for its second d
 		mode: "type",
-		selected: undefined, // a stop of the Chat tab
+		selected: undefined, // a stop of the Talk or Work projection
 		pending: "", // the first key of a command of two (z, then R)
 		prompt: "› ",
 		busySince: undefined,
@@ -492,7 +490,7 @@ export async function runScreen(session, options, runTerminal) {
 
 	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
 	const LEGEND = {
-		chat: "j k move · Enter open · e edit · d forget · y copy",
+		chat: "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
 		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
 		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
 		"carto.plan": "t done · n new · v archive · d delete · e edit",
@@ -722,88 +720,43 @@ export async function runScreen(session, options, runTerminal) {
 		writeFileSync(file, `${text}\n`);
 		return file;
 	};
-	/** e in Talk keeps the existing future-talk edit path; Work is private and read-only until its sources have durable ids. */
+	/** e in Talk changes only a row that names the source it changes. Work is private and read-only. */
 	const editChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
 		if (state.tab === "work") return flash("private work cannot be edited");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
-		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : `only submitted speech can be edited: tool work and undelivered speech stay private`);
+		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
+		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
 		const file = scratch("message.md", item.text);
 		if (!runEditor(file)) return;
 		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
 		if (now === item.text || now === "") return flash("the message stands as it was");
-		const was = item.text;
+		if (!reviseTalkSource(brainDir, item.source, now)) return flash("this source is no longer in the kept talk, so it is left unchanged");
 		inPlace(() => chat.revise(item.key, now));
-		// Talk only presents submitted user speech and delivered chat speech; this preserves the existing future-talk path
-		// until Stage 4 replaces its text match with a Durable message identity.
-		if (item.type !== "note") reviseNote(brainDir, was, now);
-		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the delivered agent speech is edited · the talk the context keeps says the same");
+		flash(item.type === "user" ? "your future kept speech is edited · a later collapse may copy these words; active context and sent requests stay unchanged" : "the delivered agent speech is edited for future kept talk · a later collapse may copy it; sent requests stay as sent");
 	};
-	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
-	/** What the user has said anew in the editor, by the text it was sent with. The tab shows the new words where the old stood; the sizes stay those of what was sent. */
-	const messageEdits = new Map();
-	/** What the user has deleted in the Context window, by the text it was sent with: the parts stand out of the list. */
-	const messageDeleted = new Set();
-	/** A message edited here is also edited in the Chat tab, when it stands there by the same words. */
-	const syncChat = (base, now, type) => {
-		const item = chat.items.findLast((entry) => (type === undefined || entry.type === type) && entry.text === base);
-		if (item !== undefined) chat.revise(item.key, now);
-	};
-	/** The Context tab's messages: surgery on what shows and on the talk the collapse keeps; the stored conversation is never rewritten. */
-	const editMessage = (item) => {
-		const full = item.copy ?? item.body;
-		if (typeof full !== "string" || full === "") return flash("nothing to edit here");
-		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to edit.
-		let base = full;
-		let prefix = "";
-		let suffix = "";
-		if (item.editKind === "chat-you") {
-			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) {
-				prefix = USER_SPEAKER;
-				base = base.slice(USER_SPEAKER.length);
-			}
-			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
-			if (found !== null) {
-				suffix = found[0];
-				base = base.slice(0, found.index);
-			}
+	/** Remove one selected source from a future collapse; it does not omit its Durable entry or rewrite a sent request. */
+	const removeChat = () => {
+		const line = chatBody.lines()[selectedRow()];
+		if (line === undefined) return flash("nothing is selected: j and k select");
+		if (state.tab === "work") return flash("private work cannot be removed from future kept talk");
+		const item = chat.items.find((entry) => entry.key === line.item);
+		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
+		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
+		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
+		const arm = `talk:${item.key}`;
+		if (state.deleteArm?.id !== arm || Date.now() - state.deleteArm.at >= POLICY.timing.screen.deleteConfirmMs) {
+			state.deleteArm = { id: arm, at: Date.now() };
+			return flash("Press d again: remove this source from future kept talk; sent requests and the active conversation stay unchanged");
 		}
-		// What the agent said to you, where the part is its words: the saying is edited, not the rendering of the call.
-		if (typeof item.chat === "string") base = item.chat;
-		const file = scratch("message.md", base);
-		if (!runEditor(file)) return;
-		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
-		if (now === base || now === "") return flash("the message stands as it was");
-		const shown = typeof item.chat === "string" ? full.split(base).join(now) : prefix + now + suffix;
-		messageEdits.set(full, shown);
-		reviseNote(brainDir, base, now);
-		syncChat(base, now, item.editKind === "chat-you" ? "user" : item.editKind === "chat-agent" ? "agent" : undefined);
-		refresh(viewId(), true);
-		flash(item.editKind === "chat-you" ? "your message is edited · what follows reads the edited words" : "edited where it shows, and in the talk the collapse keeps · what was sent stays as it was");
+		state.deleteArm = undefined;
+		if (!removeTalkSource(brainDir, item.source)) return flash("this source is no longer in the kept talk, so it is left unchanged");
+		inPlace(() => chat.forget(item.key));
+		flash("removed from future kept talk · the Durable transcript, active conversation, and sent requests stay unchanged");
 	};
-	/** d on a message of the Context window, yours or the agent's: it leaves the talk the collapse keeps, and the views. What was sent stays stored, and the agent reads it until the next collapse. */
-	const deleteChat = (item) => {
-		const full = item.copy ?? item.body;
-		if (typeof full !== "string" || full === "") return flash("nothing to delete here");
-		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to delete.
-		let base = full;
-		if (item.editKind === "chat-you") {
-			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) base = base.slice(USER_SPEAKER.length);
-			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
-			if (found !== null) base = base.slice(0, found.index);
-		}
-		if (typeof item.chat === "string") base = item.chat;
-		if (!forgetChat(brainDir, base)) return flash("the talk the collapse keeps does not hold it: a collapse may have dropped it already");
-		messageDeleted.add(full);
-		messageDeleted.add(base);
-		// Where the same words stand in the Chat tab, they go too.
-		const twin = chat.items.findLast((entry) => entry.text === base || entry.text === full);
-		if (twin !== undefined) inPlace(() => chat.forget(twin.key));
-		refresh(viewId(), true);
-		flash("deleted from the talk the collapse keeps, and from view · what was sent stays stored, and the agent reads it until the next collapse");
-	};
+	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
 	/** n in a book view: an editor opens on a template; on save the entry goes in through the same operations the agent uses. */
 	const newEntry = (book) => {
 		const template = addTemplate(book);
@@ -848,7 +801,7 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			case "chat-you":
 			case "chat-agent":
-				return editMessage(item);
+				return flash("this is a frozen sent-request row. Open Talk to change a current kept source; sent requests stay as sent.");
 			case "reply":
 				return flash("the reply is being written; e on it works once it is done");
 			case "result":
@@ -862,7 +815,7 @@ export async function runScreen(session, options, runTerminal) {
 			default: {
 				// A kept row that is a ledger entry opens the small box on its fields, as in the Ledger view.
 				if (typeof item.key === "string" && item.key.startsWith("entry:")) return void openFieldBox(viewId(), item.key);
-				// Hands: a shelved file is its file; a report is its file in .brain/reports.
+				// Current shared brain: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
 					if (!existsSync(item.path)) return flash("the shelved file is not there");
 					if (!runEditor(item.path)) return;
@@ -1243,16 +1196,15 @@ export async function runScreen(session, options, runTerminal) {
 			return second === undefined ? undefined : command(second);
 		}
 		if (key === "z") return void (state.pending = "z");
-		// The rows of the views, in every tab but Chat: the same keys do everywhere what they do in Hands — f
-		// folds a report, v archives a row out of what the agent reads, d deletes it for good, t settles it, x unshelves a file.
-		// They stand on whatever the view shows: a report or a shelved file in Hands, a node of the graph, a
-		// ledger entry, a plan envelope or move in Carto, a request in Requests, a message of the user or the agent in the
-		// Context window. The operations themselves are in src/ops.mjs, the same code the commands run.
+		// The rows of the views outside Talk and Work use the current record's own operations: f folds a report,
+		// v archives a row out of what the agent reads, d deletes it for good, t settles it, and x unshelves a file.
+		// They stand on a report or shelved file in Current shared brain, a graph node, a ledger entry, a plan envelope
+		// or move, or a request. Model rows are frozen or prospective and have no mutable-record action.
 		if (!inChat) {
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
-			const deletable = rowKey !== undefined && (/^(?:report|entry|item|envelope|move|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
+			const deletable = rowKey !== undefined && /^(?:report|entry|item|envelope|move|node|request):/.test(rowKey);
 			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
 				const said = foldRow(brainDir, bookId);
 				flash(said.replace(/\n+/g, " "));
@@ -1283,13 +1235,12 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "d" && deletable) {
 				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
 					state.deleteArm = undefined;
-					if (item.editKind === "chat-you" || item.editKind === "chat-agent") deleteChat(item);
-					else flash(dropRow(brainDir, bookId));
+					flash(dropRow(brainDir, bookId));
 					refresh(viewId(), true);
 					return;
 				}
 				state.deleteArm = { id: rowKey, at: Date.now() };
-				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : item.editKind === "chat-you" || item.editKind === "chat-agent" ? "Press d again: the message goes for good" : `Press d again: ${bookId} goes for good`);
+				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : `Press d again: ${bookId} goes for good`);
 				return;
 			}
 			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
@@ -1343,6 +1294,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "ctrl+e") return void scroll.scrollBy(1);
 		if (key === "ctrl+y") return void scroll.scrollBy(-1);
 		if (inChat) {
+			if (key === "d") return void removeChat();
 			if (key === "j" || key === "down") return void moveSelection(1);
 			if (key === "k" || key === "up") return void moveSelection(-1);
 			if (key === "g" || key === "home") return void (stops().length > 0 && showStop(stops()[0]));

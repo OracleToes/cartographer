@@ -1,6 +1,12 @@
-# Talk, work, and the model window — proposal
+# Talk, work, and the model window
 
-**Status:** proposal, 2026-11-16. Nothing in this document changes the screen or request path. `docs/design.md` remains the source of intent; the current source and README describe the implementation being proposed against. No live-server claim is made here.
+**Status:** approved and implemented through Stage 4, 2026-11-16. `docs/design.md` remains the source of intent. The historical “What happens now” passages below describe the baseline that this architecture replaced; current source and README describe the shipped behavior. No live-server claim is made here.
+
+## Implementation note
+
+Stage 4 carries an active Durable projection from `Conversation.context()`'s aligned `entries` and `contributions`. A contribution source names its admitted `EntryRecord.id`, conversation, and contribution position before request dressing. Flattened request messages are then bridged only by immutable Durable facts (timestamps and tool-call ids); a synthesized or ambiguous row remains unmapped. Replay, watches, request planning, and the mutable Talk source use that projection. A provisional `chat` call is promoted to the admitted assistant-entry source before it becomes an edit handle. Text equality, message-array position, `api.callId`, `SubmissionDraft.requestId`, and catalog memo records are not mutation targets.
+
+**Reword future kept talk** and **Remove from future kept talk** act only on that exact source in `store.chat`. They do not rewrite the Durable transcript, the active conversation, or a sent payload. **Soft-forget active message** remains the separate `book target=message action=edit` omission action. Legacy Talk rows without a source stay visible but are deliberately not mutable.
 
 ## The problem
 

@@ -102,19 +102,21 @@ export function withoutAdditions(text) {
  * consumes wakes, marks windows shown, advances an attempt, or retains a snapshot. The live send and the prospective
  * inspector both consume this one plan.
  * @param {readonly any[]} messages  the active Durable messages
- * @param {{ brainDir: string, root: string, runner?: any, config?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, fired?: any[], wakeLines?: any, windowRows?: any[] }} input
+ * @param {{ brainDir: string, root: string, runner?: any, config?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, fired?: any[], wakeLines?: any, windowRows?: any[], sources?: any[] }} input
  * @returns {{ messages: any[], parts: any[], main: boolean, conversationId?: string, task?: object }}
  */
-export function planRequest(messages, { brainDir, root, runner, config, gate, main, conversationId, note, used, fired = [], wakeLines, windowRows }) {
-	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike. These source
-	// identities are positional only when Durable did not expose an entry id; the plan says that rather than matching
-	// equal text later.
+export function planRequest(messages, { brainDir, root, runner, config, gate, main, conversationId, note, used, fired = [], wakeLines, windowRows, sources }) {
+	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike. When Durable
+	// did not expose an unambiguous entry source, the plan says `unmapped` rather than inventing a positional or
+	// text-derived identity.
+	const fallbackSource = (index, kind = "active-message") => ({ id: `unmapped:${conversationId ?? "unknown"}:${index}`, kind, conversationId: String(conversationId ?? "unknown") });
+	const sourceAt = (index) => sources?.[index]?.id !== undefined ? { ...sources[index] } : fallbackSource(index);
+	const originalSources = new WeakMap();
+	for (const [index, message] of messages.entries()) if (message !== null && typeof message === "object") originalSources.set(message, sourceAt(index));
 	let kept = withoutQuietWakes(messages);
-	const sourceIds = kept.map((message, index) => {
-		const known = message?.entryId ?? message?.entry?.id;
-		return known === undefined ? `active:${conversationId ?? "unknown"}:${index}` : `durable:${conversationId ?? "unknown"}:${known}`;
-	});
+	let keptSources = kept.map((message, index) => originalSources.get(message) ?? fallbackSource(index));
 	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
+	// dressMain is one-for-one: a changed request-only rendering keeps its Durable source identity.
 	kept = dressMain(kept, brainDir);
 	// File-read results are ephemeral: the newest successful reply's read batch is at the very end; earlier batches are one line.
 	// Dressing that tail is request-only and never asks the context engine to collapse.
@@ -124,11 +126,14 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 	if (!main) {
 		focus = conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId];
 		const beforeTask = kept;
-		const sourcesBeforeTask = new WeakMap(beforeTask.map((message, index) => [message, sourceIds[index]]));
+		const sourcesBeforeTask = new WeakMap(beforeTask.map((message, index) => [message, keptSources[index]]));
+		const resultSources = new Map(beforeTask.filter((message) => message.role === "toolResult").map((message, index) => [message.toolCallId, sourcesBeforeTask.get(message) ?? fallbackSource(index)]));
 		kept = dressTask(kept, focus);
 		// A task collapse can introduce one generated block and replace large results. Preserve an original object
 		// identity where it survives; name the other output as transformed rather than guessing from equal words.
-		sourceIds.splice(0, sourceIds.length, ...kept.map((message, index) => sourcesBeforeTask.get(message) ?? `transformed-active:${conversationId ?? "unknown"}:${index}`));
+		keptSources = kept.map((message, index) => sourcesBeforeTask.get(message)
+			?? (message.role === "toolResult" ? resultSources.get(message.toolCallId) : undefined)
+			?? { id: `transformed-active:${conversationId ?? "unknown"}:${index}`, kind: "transformed-active", conversationId: String(conversationId ?? "unknown") });
 	}
 	// Only chat the person sent gets the speaker label. The task's one-request note is appended afterward.
 	let requestMessages = withSpeaker(withNotes(kept));
@@ -136,7 +141,7 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 		const taskNote = { role: "user", content: [{ type: "text", text: note }] };
 		kept = [...kept, taskNote];
 		requestMessages = [...requestMessages, taskNote];
-		sourceIds.push(`task-note:${conversationId ?? "unknown"}`);
+		keptSources.push({ id: `task-note:${conversationId ?? "unknown"}`, kind: "task-note", conversationId: String(conversationId ?? "unknown") });
 	}
 	const top = loadTop(brainDir);
 	let dressed = withTop(withTimes(requestMessages), top?.text);
@@ -148,7 +153,8 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 		parts.push({ id: `part:${conversationId ?? "unknown"}:top`, kind: "brain-copy", source: "brain:top", lifecycle: "planned", message: firstMessage, fragment: top.text, ...(top.at === undefined ? {} : { sourceAt: top.at }) });
 	}
 	for (const [index, message] of dressed.entries()) {
-		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: "active-message", source: sourceIds[index] ?? `planned:${conversationId ?? "unknown"}:${index}`, lifecycle: "planned", message: index, role: message.role, fragment: message });
+		const source = keptSources[index] ?? { id: `planned:${conversationId ?? "unknown"}:${index}`, kind: "planned", conversationId: String(conversationId ?? "unknown") };
+		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: "active-message", source: source.id, sourceRef: source, lifecycle: "planned", message: index, role: message.role, fragment: message });
 	}
 	let state;
 	if (main) {
@@ -185,9 +191,9 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
  * The live request planner. Effects that make a real attempt different from a preview stay here, outside
  * `planRequest`: wakes are checked and consumed once, and current window output is marked shown after it was copied.
  * @param {readonly any[]} messages  the request's messages, as stored
- * @param {{ brainDir: string, root: string, runner?: any, config?: any, windows?: any, wakes?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, replay?: boolean }} input
+ * @param {{ brainDir: string, root: string, runner?: any, config?: any, windows?: any, wakes?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, replay?: boolean, sources?: any[] }} input
  */
-export function prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, replay }) {
+export function prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, replay, sources }) {
 	let fired = [];
 	if (main && !replay) {
 		try {
@@ -210,6 +216,7 @@ export function prepareRequest(messages, { brainDir, root, runner, config, windo
 		fired,
 		wakeLines: main ? wakes?.lines() : undefined,
 		windowRows: windows?.list(config?.windowTail),
+		sources,
 	});
 	// What the windows did up to now is in that block, so it is no longer news the main agent must be woken for.
 	if (main && !replay) windows?.noteShown();

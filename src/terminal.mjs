@@ -23,7 +23,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
+import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
@@ -41,7 +41,8 @@ import { REPEAT_NOTE } from "./wake.mjs";
 import { createStreamFreeze } from "./stream.mjs";
 import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
 import { USER_NAME } from "./user.mjs";
-import { dressRequest, withoutAdditions } from "./request.mjs";
+import { planRequest, withoutAdditions } from "./request.mjs";
+import { bridgeRequestSources } from "./request-sources.mjs";
 
 /**
  * How often the agent is woken in quick succession before its wakes are spaced out. One more becomes free with
@@ -357,7 +358,18 @@ export async function runTerminal(session, options) {
 	const afterCall = new Map();
 	const afterResult = [];
 	const afterReply = [];
+	const promoteChatSources = (message, source) => {
+		if (message?.role !== "assistant" || source?.kind !== "durable-message") return;
+		for (const part of message.content ?? []) if (part?.type === "toolCall" && part.name === "chat") {
+			bindTalkSource(options.brainDir, { kind: "chat-call", conversationId: String(source.conversationId), callId: String(part.id) }, { ...source, callId: String(part.id) });
+		}
+	};
 	const showOne = (depth, entry) => {
+		// `chat` records its tool call before Durable commits the assistant entry on some paths. Promote that
+		// provisional call correlation to the admitted entry id before the screen exposes an edit handle.
+		if (entry?.id !== undefined && entry?.conversationId !== undefined) for (const [position, message] of (entry.model ?? []).entries()) {
+			promoteChatSources(message, { kind: "durable-message", conversationId: String(entry.conversationId), entryId: String(entry.id), position });
+		}
 		if (ui === undefined) showMessages(depth, entry);
 		else {
 			capture = [];
@@ -639,7 +651,8 @@ export async function runTerminal(session, options) {
 	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in
 	 * between, the blocks the message carries after it. The screen only; the plain terminal has its own behavior.
 	 */
-	const renderDressed = (depth, message) => {
+	const renderDressed = (depth, message, source) => {
+		promoteChatSources(message, source);
 		const original = textOf(message);
 		const { text: afterTail, tail } = splitReadTail(original);
 		const { text: afterState, state, windows } = splitState(afterTail);
@@ -664,7 +677,7 @@ export async function runTerminal(session, options) {
 				} else if (isNote({ role: "user", content: [{ type: "text", text: cleaned }] })) {
 					ui.print(`◆ a note Cartographer left itself: ${oneLine(cleaned.replace(/\n/g, " "), POLICY.limits.terminal.messageSummaryChars)}\n`);
 				} else {
-					ui.user(cleaned);
+					ui.entry(depth, { model: [{ ...message, content: [{ type: "text", text: cleaned }] }], source }, "");
 				}
 			} else {
 				const cleaned = message.role === "toolResult" ? withoutAdditions(body).trim() : undefined;
@@ -696,25 +709,57 @@ export async function runTerminal(session, options) {
 		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
 		const briefIds = new Set();
 		for (const entry of own) for (const message of entry.model ?? []) if (message.role === "toolResult" && message.toolName === "task") briefIds.add(message.toolCallId);
-		const raw = [];
-		// The system prompt rides in its own entry and is rebuilt fresh for every request; it is not part of the
-		// conversation the tab shows, and a system message at the end would keep the state and windows blocks off
-		// the end of the request.
-		for (const entry of own) for (const message of entry.model ?? []) {
-			if (message.role === "system") continue;
-			raw.push(message);
+		let view;
+		try {
+			view = await conversation.context(context);
+		} catch {
+			view = undefined;
+		}
+		let raw;
+		let sources;
+		if (view !== undefined) {
+			// A task inherits its fork's active context. The screen starts at its brief, so retain only the active
+			// contributions of its own stretch. This is still the Durable contribution projection, not entry.model.
+			const allowed = new Set(own.map((entry) => String(entry.id)));
+			const allSources = bridgeRequestSources(view.messages ?? [], view);
+			const ownCalls = new Set();
+			for (const [index, entry] of (view.entries ?? []).entries()) {
+				if (!allowed.has(String(entry.id))) continue;
+				for (const message of view.contributions?.[index] ?? []) if (message.role === "assistant") for (const part of message.content ?? []) if (part?.type === "toolCall") ownCalls.add(part.id);
+			}
+			raw = [];
+			sources = [];
+			for (const [index, message] of (view.messages ?? []).entries()) {
+				const source = allSources[index];
+				const ownMessage = source !== undefined && allowed.has(source.entryId);
+				const ownSyntheticResult = source === undefined && message.role === "toolResult" && ownCalls.has(message.toolCallId);
+				// The main view owns every active non-system row. An ambiguous bridge may still be shown, but reaches
+				// Talk without an edit handle; it never borrows another row's identity.
+				const ownUnmappedMain = depth === 0 && source === undefined && message.role !== "system";
+				if (!ownMessage && !ownSyntheticResult && !ownUnmappedMain) continue;
+				raw.push(message);
+				sources.push(source);
+			}
+		} else {
+			// An unreadable ContextView must not blank the screen. This compatibility fallback has no mutable source
+			// handles: raw entry models are only shown, never used to target an edit or removal.
+			raw = [];
+			for (const entry of own) for (const message of entry.model ?? []) if (message.role !== "system") raw.push(message);
 		}
 		if (raw.length === 0) return;
 		let dressed;
+		let dressedSources;
 		try {
-			dressed = dressRequest(raw, { brainDir: options.brainDir, root: options.root, runner: options.runner, config, windows, wakes, gate, main: depth === 0, conversationId: depth === 0 ? undefined : id, replay: true });
+			const plan = planRequest(raw, { brainDir: options.brainDir, root: options.root, runner: options.runner, config, gate, main: depth === 0, conversationId: depth === 0 ? undefined : id, used: engine.usedBy(id), sources, fired: [], wakeLines: depth === 0 ? wakes?.lines() : undefined, windowRows: windows?.list(config.windowTail) });
+			dressed = plan.messages;
+			dressedSources = new Map(plan.parts.filter((part) => part.kind === "active-message").map((part) => [part.message, part.sourceRef]));
 		} catch (error) {
 			ui.print(`! the stored conversation could not be shown as the agent sees it (${error?.message ?? error}); it is stored safely\n`);
 			dressed = raw;
 		}
-		for (const message of dressed) {
+		for (const [index, message] of dressed.entries()) {
 			if (message.role === "toolResult" && briefIds.has(message.toolCallId)) continue;
-			renderDressed(depth, message);
+			renderDressed(depth, message, dressedSources?.get(index));
 		}
 	};
 

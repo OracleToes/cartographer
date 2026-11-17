@@ -1568,7 +1568,7 @@ test("screen: keys are named for the commands mode, and several lines that arriv
 	assert.equal(watch.lineEnd("\r"), undefined, "a later read forgets the earlier one");
 });
 
-test("screen: the Chat tab folds the agent's work into one line, opens it to a line per call, and shows what is being written", async () => {
+test("screen: Work folds the agent's private trace into one line, opens it to a line per call, and shows what is being written", async () => {
 	const { createChat, homeOf } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
@@ -1700,7 +1700,29 @@ test("screen: Talk separates delivered speech from private Work", async () => {
 	has(text("work"), "read roll.py", "Ctrl-T leaves tool work visible");
 });
 
-test("screen: long live reasoning names its compact tail, opens in Chat, and resets when it finishes", async () => {
+test("screen: Talk binds an admitted Durable source by lifecycle, not matching words", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const chat = createChat();
+	chat.user("same visible words");
+	chat.entry(0, {
+		id: "u1",
+		conversationId: "main",
+		model: [{ role: "user", timestamp: 10, content: [{ type: "text", text: "same visible words" }] }],
+	});
+	const user = chat.items.find((item) => item.type === "user");
+	assert.equal(chat.items.filter((item) => item.type === "user").length, 1, "the admitted user entry binds the pending submitted row instead of adding an equal-text duplicate");
+	assert.deepEqual(user.source, { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, "the Talk row now names its admitted Durable entry");
+	assert.match(chat.lines(120, "talk").map((line) => line.spans.map(([part]) => part).join("")).join("\n"), /Durable u1\/0/, "Talk renders the stable source instead of using its visible words as an identity");
+	chat.entry(0, {
+		id: "a1",
+		conversationId: "main",
+		model: [{ role: "assistant", timestamp: 11, content: [{ type: "toolCall", id: "c1", name: "chat", arguments: { text: "same visible words" } }] }],
+	});
+	const speech = chat.items.find((item) => item.type === "agent");
+	assert.deepEqual(speech.source, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }, "a delivered-speech candidate carries the assistant entry id and its call boundary");
+});
+
+test("screen: long live reasoning names its compact tail, opens in Work, and resets when it finishes", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	const chat = createChat();
 	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -1870,7 +1892,7 @@ test("screen: a consult call folds to one line, and opens to the whole story —
 	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
 });
 
-test("screen: while the storyteller writes, the Chat tab shows the tail of its draft, and wipes it when the answer lands", async () => {
+test("screen: while the storyteller writes, Work shows the tail of its draft, and wipes it when the answer lands", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const thread = "st-20261116-053946-a1b2";
@@ -2128,7 +2150,7 @@ test("screen: the Next preview is explicit that its request plan was not sent", 
 		at: Date.parse("2026-11-16T14:05:00.000Z"),
 		plan: {
 			parts: [
-				{ id: "part:1:message:0", kind: "active-message", source: "active:1:0", lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
+				{ id: "part:1:message:0", kind: "active-message", source: "durable:main:u1:0", sourceRef: { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
 				{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
 			],
 		},
@@ -2138,7 +2160,7 @@ test("screen: the Next preview is explicit that its request plan was not sent", 
 	assert.match(header, /wakes were not checked or consumed/, "the preview names its non-effect");
 	assert.match(header, /Provider JSON does not exist for a preview/, "it does not present an unsent plan as a provider payload");
 	assert.equal(view.items[0].body, "Please inspect the parser.");
-	assert.match(view.items[0].head.map(([part]) => part).join(""), /active:1:0 · preview only/, "each row names its planned source and lifecycle");
+	assert.match(view.items[0].head.map(([part]) => part).join(""), /durable:main:u1:0 · preview only/, "each row names its planned source and lifecycle");
 	assert.equal(view.items[0].editKind, undefined, "a preview has no historical or mutable edit route");
 	const accounting = accountingView("about 4k tokens");
 	assert.match(accounting.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /neither a sent provider payload nor a promise of the next request/, "current accounting has its own temporal boundary");
