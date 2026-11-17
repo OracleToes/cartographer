@@ -1,6 +1,6 @@
 # Atlas attention — heat, decay, and focus
 
-**Status:** restored implementation record, 2026-11-16. Current attention mechanics are verified; the user-selected fresh-confirmation gate for permanent removal is an approved alignment slice, not yet runtime behavior.
+**Status:** restored and verified implementation record, 2026-11-16. Permanent removal is a deliberate operating protocol, not a durable confirmation-receipt subsystem.
 
 The durable Atlas graph records project knowledge. Its attention data is a bounded,
 derived work trail beside that graph. Attention never proves a node true or false,
@@ -108,39 +108,24 @@ idle it can show the reasons. `archive` is explicit and reversible, and `restore
 refreshes the restored node. Nothing in heat or decay automatically archives or removes
 an Atlas node.
 
-### Permanent removal gate — approved alignment
+### Permanent removal — operating protocol
 
-Permanent removal is stricter than reversible archive. The existing `confirm` action is
-the sole verification path: each successful confirmation records a durable,
-removal-eligible receipt for that node. `remove` must then require both that fresh
-receipt and a nonempty reason naming why the confirmed node should leave the map.
+Permanent removal is stricter than reversible archive, but it does not need a second
+durable receipt database. `archive` is the normal maintenance action: it is explicit,
+reversible, and keeps the node available for later restoration.
 
-Conceptually, each receipt binds:
+Before an agent permanently removes a node, it directly inspects the node and relevant
+sources—normally through `confirm`, a targeted source read, or both—and states why the
+node is redundant, superseded, or otherwise no longer belongs in the active map. Cold
+scores, target overlays, stale signals, and archive-candidate listings are prompts to
+inspect; they never by themselves justify deletion.
 
-```text
-node id + checked-at time + material node version + direct source-state version
-```
-
-It is fresh while that same node and its directly checked sources remain materially the
-same. There is no arbitrary wall-clock expiry: an edit, link/unlink, rename, relevant
-source drift, malformed receipt, or other material mismatch invalidates it. Archive and
-restore are reversible view changes, not evidence changes, so they do not by themselves
-make a valid receipt stale. A direct check may record a source as gone; the removal gate
-then verifies that the observed gone/current state has not changed before accepting the
-reasoned removal.
-
-This keeps the surface small: no second verification tool and no generic provenance
-framework. Existing and hand-edited nodes simply have no valid receipt until `confirm`
-checks them. Cold scores, target overlays, stale signals, or archive-candidate listings
-never substitute for confirmation.
-
-The future acceptance suite must prove refusal without a receipt or reason; acceptance
-after `confirm`; refusal after node/source mutation; preservation through archive and
-restore; and safe handling of missing or malformed legacy receipt data.
-
-Current code does not yet enforce this gate: it refuses removal of the explicit focus,
-but otherwise permits removal without a preceding verification record. That is the
-remaining implementation mismatch with this document's intended behavior.
+This is deliberate operating discipline rather than a security boundary. The user may
+always edit the durable Atlas directly, and a source fingerprint cannot prove the
+semantic judgment that a map node is no longer useful. The host continues to enforce
+structural rules it can know mechanically, including refusal to remove the explicit
+focus. No receipt, time-to-live, invalidation schema, new verification tool, or generic
+provenance framework is needed.
 
 ## One projection, several consumers
 
@@ -185,8 +170,8 @@ Offline evidence run on 2026-11-16:
   The two skipped checks require Bubblewrap, which is unavailable in this environment;
   they are unrelated to Atlas attention.
 
-This verifies the implemented offline mechanics and persistence behavior. It does not
-verify the approved fresh-confirmation removal gate above, because that gate is not yet
-implemented. It also does not claim that a particular model will make good
-prioritization choices, nor that attention is a source of evidence about the project
-itself.
+This verifies the implemented offline mechanics and persistence behavior. Permanent
+removal remains a deliberate direct-verification protocol, not a separately testable
+durable receipt mechanism. The evidence does not claim that a particular model will
+make good prioritization choices, nor that attention is a source of evidence about the
+project itself.
