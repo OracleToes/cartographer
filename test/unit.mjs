@@ -1640,7 +1640,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	assert.match(TOOLS.shelf, /action/);
 });
 
-test("prepend: the user's own markdown is read before the prompt — core first, brain second; nothing when absent", (t) => {
+test("prepend: the user's own markdown is read before the prompt as source of truth; nothing when absent", (t) => {
 	const { root, brainDir } = fresh(t);
 	const core = join(root, "PREPEND.md");
 	// Nothing anywhere: nothing to prepend.
@@ -1648,26 +1648,23 @@ test("prepend: the user's own markdown is read before the prompt — core first,
 	// The core alone.
 	writeFileSync(core, "Be brief.\n");
 	const coreOnly = loadPrepend(brainDir, core);
-	assert.match(coreOnly, /PREPEND\.md \(the installation/);
-	assert.ok(coreOnly.includes(`written by ${USER_NAME}`));
-	assert.match(coreOnly, /Be brief\./);
-	assert.equal(coreOnly.includes("this project's brain"), false, "only what exists is read");
-	// Both: the core is read before the brain (the closer one said last, so it wins).
+	assert.equal(coreOnly, "Source of Truth:\nBe brief.");
+	assert.equal(coreOnly.includes("Always sign off"), false, "only what exists is read");
+	// Both: the core is read before the brain, so the closer instruction comes last.
 	writeFileSync(join(brainDir, "PREPEND.md"), "Always sign off as Molly.\n");
 	const both = loadPrepend(brainDir, core);
-	assert.ok(both.indexOf("Be brief.") < both.indexOf("Always sign off as Molly."), "core before brain");
-	assert.match(both, /this project's brain/);
+	assert.equal(both, "Source of Truth:\nBe brief.\n\nSource of Truth:\nAlways sign off as Molly.");
 	// A whitespace-only brain file is nothing, not even a header.
 	writeFileSync(join(brainDir, "PREPEND.md"), "  \n\n");
 	const after = loadPrepend(brainDir, core);
 	assert.equal(after.includes("Molly"), false);
-	assert.match(after, /Be brief\./);
+	assert.equal(after, "Source of Truth:\nBe brief.");
 	// An unreadable core (a folder) is skipped, not fatal.
 	assert.equal(loadPrepend(brainDir, root), undefined, "a folder where the file would be: nothing added");
 	// Line endings and a byte order mark do not stand in the way.
 	writeFileSync(core, "\uFEFFBe terse.\r\n");
 	const crlf = loadPrepend(brainDir, core);
-	assert.match(crlf, /Be terse\./);
+	assert.equal(crlf, "Source of Truth:\nBe terse.");
 	assert.equal(crlf.includes("\r"), false);
 });
 
