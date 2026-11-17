@@ -2019,11 +2019,14 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 		],
 	};
 	const reply = { role: "assistant", content: [{ type: "thinking", thinking: "Say it." }, { type: "toolCall", id: "c2", name: "chat", arguments: { text: "It is in src/config.js." } }] };
-	const sent = { task: false, payload, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, used: 6100, collapsedSince: false };
+	const payloadJson = JSON.stringify(payload);
+	const sent = { task: false, requestId: "main:7", payload, payloadJson, payloadHash: "a1b2c3d4e5f60708", model: { provider: "local", api: "openai-completions", id: "qwen" }, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, usage: { input: 6000, cacheRead: 100, output: 500 }, used: 6100, collapsedSince: false };
 	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
-	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them");
-	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each is one line: its colour, its size, what it is, how it begins");
+	assert.deepEqual(titles, ["Provider payload JSON", "System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the frozen payload stays in provider order, then the explicit not-sent response boundary");
+	assert.deepEqual(view.items.slice(1, 3).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
+	assert.equal(view.items[0].body, payloadJson, "the raw frozen provider body is available without reconstructing it");
+	assert.equal(view.items.every((item) => item.editKind === undefined), true, "sent payload and since-send response rows have no edit route");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
 	has(byKey("Tools · 1").body, '── read ──\nRead one file.\nparameters: {\n  "type": "object"', "the tools as they are sent");
@@ -2034,27 +2037,29 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	assert.match(byKey("State block").body, /^<state>\n[\s\S]*\n<\/state>$/, "the state block is cut off the result it was added to");
 	assert.match(byKey("Windows block").body, /^<windows>\n[\s\S]*\n<\/windows>$/, "and the windows block");
 	hasNot(byKey("Result of task").body, "<state>", "which is then only the result");
-	assert.equal(byKey("The reply").body, "(thinking, not kept in the context)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the request: the reply");
-	assert.equal(byKey("Result of chat").body, "Shown to the user.", "and what its call returned");
+	assert.equal(byKey("Response received").body, "(private reasoning)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the sent request: the response, marked as not sent");
+	assert.equal(byKey("Result after chat").body, "Shown to the user.", "and what its call returned afterward");
 
-	// The top: whose window, the bar, the legend.
+	// The top describes only the sent provider payload; reported usage remains separate from its estimated input bar.
 	const top = view.header.map((line) => line.map(([part]) => part).join(""));
-	assert.match(top[0], /^What the main agent sees {2}· {2}about [\d.]+k of 20k tokens \(\d+%\) — estimated {2}· {2}the server counted 6\.1k \(measured\)$/);
-	assert.match(top[1], /^request 7 of this run, sent \d\d:\d\d \(/);
-	assert.equal(top[2].length, 40, "the bar is as wide as the screen");
-	assert.match(top[2], /^■+□+$/, "used cells, then free ones");
-	// A quarter of the window is the big result: about ten of forty cells are its colour.
-	const resultCells = view.header[2].filter(([, style]) => style === "catResult").reduce((sum, [cells]) => sum + cells.length, 0);
+	assert.match(top[0], /^Sent provider request {2}· {2}main agent · main:7 {2}· {2}local · openai-completions · qwen$/);
+	assert.match(top[1], /^sent \d\d:\d\d \(.*\) · frozen for this run · payload a1b2c3d4e5f60708$/);
+	assert.match(top[2], /^about [\d.]+k of 20k input tokens \(\d+%\) — estimated · provider reported input 6\.0k · cache read 100 · output 500$/);
+	assert.equal(top[3].length, 40, "the bar is as wide as the screen");
+	assert.match(top[3], /^■+□+$/, "used cells, then free ones");
+	// A quarter of the window is the big sent result: about ten of forty cells are its colour.
+	const resultCells = view.header[3].filter(([, style]) => style === "catResult").reduce((sum, [cells]) => sum + cells.length, 0);
 	assert.ok(resultCells >= 9 && resultCells <= 11, `a part takes as much of the bar as of the window: ${resultCells} of 40 cells for about 5k of 20k tokens`);
 	has(top.join("\n"), "■ Tool results ", "what each colour is");
 	has(top.join("\n"), "□ Free ", "and how much is free");
 	assert.deepEqual(contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
 
 	const task = contextView({ ...sent, task: true, reply: undefined, results: new Map() }, { windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] } });
-	has(task.header[0][0][0], "What the running task sees", "while a task runs, the window is the task's");
+	has(task.header[0][0][0], "Sent provider request", "while a task runs, the frozen request stays labelled as sent");
+	has(task.header[0].map(([part]) => part).join(""), "focus", "and names the focus rather than calling it main");
 	const writing = task.items.at(-1);
-	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("The reply, as it is being written"), writing.body], [true, "Half a tho"], "and the reply shows as far as it is written");
-	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "The context was collapsed after this request was sent", "a collapse since then is said");
+	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("Response, as it is being written"), writing.body], [true, "Half a tho"], "and unfinished response material is explicitly not sent");
+	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
 });
 
@@ -2081,69 +2086,31 @@ test("screen: a windows block followed by an ephemeral read batch tail is still 
 	const bare = { ...sent, payload: { messages: [{ role: "system", content: "You are Cartographer." }, { role: "tool", tool_call_id: "c1", content: "== a.js" }] } };
 	const bareView = contextView(bare, { windowSize: 20_000, cols: 40 });
 	assert.ok(bareView.items.some((item) => item.key === "state:missing"), "the absence of the state block is said out loud");
-	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this request", "and the marker tells the user what one should always carry");
+	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this sent request", "and the marker tells the user what this payload did not carry");
 });
 
-test("screen: the Context tab unfolds the collapse block into one row per kept object, with the same verbs", async () => {
+test("screen: a sent collapse block stays frozen when the current brain changes", async () => {
 	const { contextView } = await import("../src/screen/views.mjs");
-	const { writeFront, noteChat, shelfItem, updateContext } = await import("../src/context.mjs");
-	const root = mkdtempSync(join(tmpdir(), "carto-kept-"));
+	const { writeFront, noteChat, updateContext } = await import("../src/context.mjs");
+	const root = mkdtempSync(join(tmpdir(), "carto-snapshot-"));
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	const at = (h, m) => new Date(2026, 10, 15, h, m).getTime();
 	try {
-		writeFileSync(join(root, "shelf.txt"), "the shelf keeps this\n");
-		noteChat(brainDir, "user", at(13, 10), "please add the wrist throw");
-		noteChat(brainDir, "you", at(13, 12), "on it");
-		applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep quotes in English." }), null);
-		mkdirSync(join(brainDir, "reports"), { recursive: true });
-		writeFileSync(join(brainDir, "reports", "s3.md"), "# Report s3\n\nIt throws now.\n");
-		updateContext(brainDir, (store) => {
-			store.rows.push({ id: "s3", species: "composed", at: at(13, 5), mode: "look", brief: "Add the wrist throw", outcome: "It throws.", changed: 2, ref: { type: "report", id: "s3" } });
-		});
-		const shelved = shelfItem(root, "shelf.txt", undefined, brainDir, []);
-		updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
-		// The salient mark, through the same op the agent edits with.
-		const ledger = loadLedger(brainDir).ledger;
-		applyOp(ledger, { action: "edit", id: "n1", salient: true }, new Date().toISOString());
-		saveLedger(brainDir, ledger);
-		const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, { now: at(14, 32), reason: "a test collapse", calls: [
-			{ at: at(13, 20), text: "read shelf.txt", outcome: "12 lines" },
-			{ at: at(13, 25), text: "edit src/dice.mjs", outcome: "34 lines changed" },
-		] });
+		noteChat(brainDir, "user", at(13, 10), "words at collapse");
+		const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, { now: at(14, 32), reason: "a test collapse" });
 		const payload = { messages: [{ role: "user", content: `${front.text}\n\nWhere are we?` }] };
-		const sent = { task: false, payload, reply: undefined, results: new Map(), at: Date.now(), count: 3, used: 4000, collapsedSince: false };
-		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir, edits: new Map(), deleted: new Set() });
-		const keys = view.items.map((item) => item.key);
-		const keptAt = keys.indexOf("kept");
-		assert.ok(keptAt >= 0, "the kept block stands as one folder");
-		assert.equal(view.items[keptAt].folder, true);
-		assert.equal(view.items[keptAt].editKind, "store", "e on the folder still opens the raw store");
-		assert.ok(keys.join(" ").includes("kept:meta"), "the preamble is the first row inside");
-		assert.deepEqual(keys.slice(keptAt + 1, keptAt + 5), ["kept:meta", "report:s3", "entry:n1", "shelf:sh1"], "the shelf row keys by the id, not the label");
-		// The talk rows are the chat objects: e and d work on them as elsewhere.
-		const talk = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("talk:"));
-		assert.equal(talk.length, 2, "both sayings stand inside the block");
-		assert.deepEqual([talk[0].editKind, talk[1].editKind], ["chat-you", "chat-agent"]);
-		assert.equal(talk[0].chat, "please add the wrist throw", "the row carries the words, for the edit machinery");
-		assert.equal(talk[0].head[1][0], USER_NAME, "the kept-talk row uses the configured speaker");
-		// The calls rows are the block's history: visible, copyable, not editable.
-		const calls = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("call:"));
-		assert.equal(calls.length, 2);
-		assert.ok(calls.every((item) => item.editKind === undefined), "history is not editable");
-		// The parent says what it holds.
-		assert.match(view.items[keptAt].head.map(([part]) => part).join(""), /1 task.*1 note.*1 shelf item.*2 talk.*2 calls/);
-		// A saying the user has deleted stands out of the block's rows as well.
-		const gone = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir, edits: new Map(), deleted: new Set(["please add the wrist throw"]) });
-		const left = gone.items.filter((item) => typeof item.key === "string" && item.key.startsWith("talk:"));
-		assert.deepEqual(left.map((item) => item.chat), ["on it"], "the deleted saying is out of the rows, the rest stands");
-		assert.deepEqual(left.map((item) => item.key), ["talk:1:" + at(13, 12)], "deleting the middle saying does not renumber the rest");
-		// A store that cannot be read still renders the kept folder instead of blanking the tab.
-		const noStore = join(root, "no-store");
-		mkdirSync(noStore, { recursive: true });
-		const bare = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir: join(noStore, ".brain"), edits: new Map(), deleted: new Set() });
-		assert.ok(bare.items.some((item) => item.key === "kept"), "the folder renders even with no store at all");
-		assert.match(bare.items.find((item) => item.key === "kept").head.map(([part]) => part).join(""), /not readable|empty|calls/, "and it carries a summary instead of throwing");
+		const sent = { task: false, requestId: "main:3", payload, reply: undefined, results: new Map(), at: Date.now(), count: 3, collapsedSince: false };
+		// These are later current-brain changes. A historical sent request must not gain either one.
+		noteChat(brainDir, "user", at(15, 0), "words added after send");
+		updateContext(brainDir, (store) => { store.front.text = "replaced current front"; });
+		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept" });
+		const kept = view.items.find((item) => item.head?.[2]?.[0]?.includes("What the last collapse kept"));
+		assert.ok(kept, "the sent collapse block remains one frozen payload part");
+		assert.match(kept.body, /words at collapse/, "it shows the bytes that were sent");
+		assert.doesNotMatch(kept.body, /words added after send|replaced current front/, "it never rebuilds from mutable current brain state");
+		assert.equal(kept.editKind, undefined, "a frozen collapse block has no edit route");
+		assert.equal(view.items.some((item) => String(item.key).startsWith("talk:")), false, "no current talk rows are injected under the sent snapshot");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

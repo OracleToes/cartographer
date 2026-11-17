@@ -4,7 +4,7 @@
 //   2 Carto    the agent's brain: Atlas, Ledger, Plan, Tree, Assessment, one at a time
 //   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   4 Shells   the shell windows, live
-//   5 Context  what the agent sees: the request it was last sent, part by part, each of which opens
+//   5 Model    sent provider payloads, current accounting, and the live shared brain
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -56,7 +56,7 @@ export const TABS = [
 	{ id: "carto", name: "Carto" },
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
-	{ id: "context", name: "Context" },
+	{ id: "context", name: "Model" },
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
 const VIEWS = {
@@ -77,10 +77,10 @@ const VIEWS = {
 		{ id: "out", name: "Output" },
 	],
 	context: [
-		{ id: "window", name: "Window" },
-		{ id: "main", name: "Main agent" },
-		{ id: "parts", name: "Parts" },
-		{ id: "hands", name: "Hands" },
+		{ id: "window", name: "Latest sent" },
+		{ id: "main", name: "Main sent" },
+		{ id: "parts", name: "Current accounting" },
+		{ id: "hands", name: "Current brain" },
 	],
 };
 /** Every view of every tab but Chat, by the name it is kept under. */
@@ -152,15 +152,15 @@ export const KEYS_HELP = [
 	"",
 	"Commands",
 	"  1 to 5           go to a tab",
-	"  [ and ]          the previous and the next view inside Carto, Diff and Context (H and L do the same)",
+	"  [ and ]          the previous and the next view inside Carto, Diff and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
 	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter opens a long live reasoning stream or takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Context), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
-	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Current brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current brain)",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -500,9 +500,9 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.git": "Enter open · y copy · e edit",
 		"shells.list": "Enter output · y copy",
 		"shells.out": "Enter back",
-		"context.window": "Enter open · d delete · e edit · y copy",
-		"context.main": "Enter open · d delete · e edit · y copy",
-		"context.parts": "Enter open · + all · e edit",
+		"context.window": "Enter open · y copy",
+		"context.main": "Enter open · y copy",
+		"context.parts": "Enter open · + all · y copy",
 		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
 	};
 	const legend = () => {
@@ -534,7 +534,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted, root, brainDir });
+			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
 		}
 		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
 		if (id === "context.hands") return handsView({ root, brainDir });
