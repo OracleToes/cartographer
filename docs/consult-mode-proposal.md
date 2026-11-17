@@ -29,6 +29,14 @@ working area is the durable conference transcript, participant-labelled turn rec
 selector events, tool receipts, and immutable snapshots. It is private from the parent
 prompt and has no project authority; it is not secret from audit/UI.
 
+This is a consolidation, not an additional deliberation subsystem. It replaces both
+the separate external-model consultation lane and the separate `case` product. The
+conference takes only the small source-snapshot property it needs; it does not absorb
+Case's capsule/artifact phases, blind-cross protocol, witness workflow, or scratch
+ambition. The completed Case C1–C3 implementation is evidence about existing data and
+migration work, not a reason to preserve that machinery. C4 and E1 are dropped rather
+than carried forward as unfinished obligations.
+
 ## Findings about current `consult`
 
 The reported current behavior is implemented behavior, not a model failure:
@@ -75,8 +83,8 @@ selected prior result as supplied material rather than reviving a half-finished 
 conversation.
 
 The call can originate in the main conversation or ordinary focus and returns only to
-that caller. It remains unavailable to case phases/witnesses. A conference participant
-cannot invoke `consult`, so conferences never nest.
+that caller. A conference participant cannot invoke `consult`, so conferences never
+nest. There is no separate Case phase/witness caller after the consolidation.
 
 ## Conference model
 
@@ -148,6 +156,44 @@ becoming a persona or contributing prose analysis.
 The stable Situation Prompt and common conference history remain at the front of the
 provider context. A speaker swap changes only a small suffix, preserving prefix-cache
 value rather than reloading the whole conference for each persona.
+
+### Prefill invariant
+
+Keeping the common prefix warm is a correctness and performance requirement, not a
+hopeful optimization. Define `P(H)` as the provider prefill for append-only shared
+conference history `H`:
+
+```text
+P(H) = Situation Prompt + stable tool contract + entry packet/source manifests + H
+```
+
+An ordinary handoff must use the same live conference and progress only as follows,
+where `C` is the completed participant contribution and `S` is the recorded selector
+choice:
+
+```text
+active participant:      P(H)       + active-persona tail
+neutral selector:        P(H + C)   + constrained-selector tail
+selected participant:    P(H + C+S) + selected-persona tail
+```
+
+Thus the stable Situation Prompt, tool contract, captured common sources, and every
+already-recorded shared entry keep their byte-for-byte content and order at the front
+of each later request. The only replacement is the final transient tail: remove the
+outgoing persona packet, add the selector packet, then replace that selector packet
+with the selected persona packet. `C` and `S` are append-only conference entries, not
+new request heads.
+
+Persona removal or selection must never empty, reset, fork, compact, replace the
+Durable head, or rebuild the shared conference as a new prompt. A selector runs against
+the same active provider context, emits one ID, and leaves that common prefill intact.
+A full reread/reconstruction is an invariant failure, not normal routing.
+
+The implementation must capture request plans/payloads in tests across
+participant → selector → participant handoffs and assert the stable-prefix identity,
+append-only shared history, tail-only replacement, one continuing Durable head, and
+absence of reset/compaction. UI/provider accounting should make a broken
+prefix-cache invariant visible rather than quietly treating a full reread as normal.
 
 ### Turn and handoff protocol
 
@@ -227,22 +273,23 @@ enum response schema or forced typed call, but that is not this v1 contract.
 
 ### General decision direction
 
-This selector is the first use of a reusable host-owned `decideOne` primitive:
+The selector demonstrates a small host-owned finite-choice pattern:
 
 ```text
 bounded state + explicit finite candidates + enforced enum grammar → one validated ID
 ```
 
-The intended direction is to replace **model-mediated semantic/routing choices** across
-Cartographer with this style, rather than asking for free-form decisions. That includes
-choices such as which perspective should inspect a conference next. It does not replace
-deterministic or authority decisions: approval, schema validation, path confinement,
-resource limits, permission checks, checkpoint validation, and sandbox policy remain
-host-enforced rules, never model choices.
+It is a pattern, not a new project-wide decision framework. Keep it consult-local until
+a second concrete routing need justifies extracting a shared helper. Any later use must
+supply its own state packet, candidate registry, grammar support, failure policy, and
+tests.
 
-Each later adoption needs its own state packet, candidate registry, grammar support,
-failure policy, and tests. “Use constrained decisions everywhere” is not permission to
-turn security or correctness invariants into inference.
+This style is appropriate for model-mediated semantic/routing choices, such as which
+conference perspective should speak next. It never replaces deterministic or authority
+decisions: approval, schema validation, path confinement, resource limits, permission
+checks, checkpoint validation, and sandbox policy remain host-enforced rules, never
+model choices. “Use constrained decisions where applicable” is not permission to turn
+security or correctness invariants into inference.
 
 ## Same model and isolated Durable architecture
 
@@ -260,9 +307,9 @@ This intentionally uses neither `config.model` nor `config.consultModel`:
 - later model changes do not rewrite an active conference; and
 - it removes the automatic Mythos-nano switch.
 
-An empty legacy `consultModel` must not disable same-model conference mode. The legacy
-model/token/temperature/timeout settings remain only for an explicit external-consult
-compatibility adapter while that adapter exists.
+Legacy `consultModel`, token, temperature, and timeout settings have no role in
+conference mode. The cutover treats their presence as a clear migration problem rather
+than silently ignoring them or retaining an external-consult compatibility adapter.
 
 ### Independent conversation, not a fork
 
@@ -316,9 +363,9 @@ The conference profile exposes only:
 | `consult_return` | Any active participant may call it to validate and persist the final structured synthesis, then terminate the conference. |
 
 There is no ordinary `read`, `search`, `list`, `book`, `shelf`, `write`, `edit`, `rm`,
-`shell`, `task`, `case`, `chat`, `ask`, `wake`, `sleep`, ordinary focus `return`, or
-nested `consult`. There is no direct network tool. Persona/book prompts never grant an
-ability to update their real counterparts.
+`shell`, `task`, `chat`, `ask`, `wake`, `sleep`, ordinary focus `return`, or nested
+`consult`. There is no direct network tool. Persona/book prompts never grant an ability
+to update their real counterparts.
 
 A dedicated conference extension selects exactly these tools through both the enabled
 `tools` and model-visible `modelTools` lists, and defends that list in its own tool
@@ -341,6 +388,11 @@ Each snapshot receives an ID, kind, source label, range/version metadata where
 relevant, size, and SHA-256 digest. The host stores private immutable copies under the
 conference record. A later project or brain change does not alter what a participant
 or selector sees in that conference.
+
+This is a compact conference-owned capture contract, not adoption of Case C1's
+capsule, ledger, receipt, artifact, or phase schema. Existing C1 records inform the
+retirement migration only. Do not extract a generic snapshot framework until another
+surviving product need demonstrates one.
 
 `consult_source` can reread/search caller-attached file snapshots. It cannot broaden a
 range, access a sibling path, read a live book, or observe new project bytes. A persona
@@ -413,17 +465,17 @@ implicitly, but the user can inspect it deliberately in the conference audit vie
 cannot mutate project files, shared books, or the durable main brain.
 
 Level 2 must not reuse the project, `.brain`, a generic temporary directory, or
-persistent shell windows. Level 3 must meet at least the stricter C4-style contract in
-`docs/plan.md`: a fresh private root outside project/brain, fixed read-only projection
-with `.git`/`.brain` absent, disposable home/cache/tmp, network disabled by default,
-enforced resource limits, retained receipts/digests, cleanup evidence, and no automatic
-project promotion. Normal sandbox arguments and session windows are not consultation
-scratch.
+persistent shell windows. Any later Level 3 proposal must independently establish a
+fresh private root outside project/brain, a fixed read-only projection with `.git` and
+`.brain` absent, disposable home/cache/tmp, network disabled by default, enforced
+resource limits, retained receipts/digests, cleanup evidence, and no automatic project
+promotion. Normal sandbox arguments and session windows are not consultation scratch.
 
 ### UI
 
-The current UI only understands legacy storyteller threads. New conference rows should
-show:
+The current UI only understands legacy storyteller threads. The conference view replaces
+that special rendering at cutover; once archival shelf migration succeeds, no live
+storyteller or Case view remains. New conference rows should show:
 
 - `co<N>`, captured model, lifecycle state, elapsed/budget facts, and grammar-adapter
   availability;
@@ -445,18 +497,38 @@ lifecycle, subject to policy caps. A future purge/export policy must leave visib
 provenance (for example, “sources purged”) rather than a dangling apparently
 reproducible result.
 
-## Compatibility and migration
+## Consolidation and migration
 
-1. Existing `st<N>` storyteller transcripts remain readable and shelfable exactly as
-   they are; they are never described as conferences.
-2. The old direct Mythos-nano behavior moves to an explicit temporary
-   `consult_external`/legacy adapter, retaining its `thread` API and legacy settings.
-   It is never an implicit fallback from conference mode.
-3. Target `consult` uses `question`, optional `context`, optional `files`, and required
-   `myPersona`; a legacy `thread` gets a clear migration error.
-4. Prompt wording, README, config documentation, shelf resolver, UI, and tests change
-   together only when implementation ships.
-5. The external adapter is removed only through a stated migration/release decision.
+This is a replacement, not a compatibility layer that leaves two meanings of
+`consult` in the product. The end state has no `consult_external`, no external-model
+fallback, and no separate `case` tool or runtime.
+
+1. **Inventory before cutover.** The migrator inventories legacy storyteller threads,
+   shelf placements that resolve through them, Case records, and any active Case
+   Durable child. An active or resumable Case blocks cutover until the user explicitly
+   stops and archives it; no unfinished isolated context is silently orphaned.
+2. **Archive without perpetuating a reader.** Migration preserves exact legacy bytes
+   and digests under a clearly labelled `.brain/legacy/` archive and produces a static,
+   human-readable export for each thread/case. That archive is never projected into a
+   conference request and is not a new live product database. A later purge is explicit
+   user action; migration does not discard records automatically.
+3. **Remove special shelf/story routing.** A shelf placement for a legacy storyteller
+   transcript is converted to an ordinary immutable text snapshot during migration.
+   The live shelf resolver, UI, and context builder then need no storyteller parser or
+   special transcript path.
+4. **Make breaking inputs explicit.** Target `consult` accepts `question`, optional
+   `context`, optional `files`, and required `myPersona`; a supplied `thread` fails
+   with a direct migration error. Legacy `consultModel`, token, temperature, and timeout
+   settings—including their environment override—are reported as removed settings,
+   never silently ignored or used to start a second model.
+5. **Delete the retired verticals after verified migration.** Remove external-consult
+   HTTP behavior, `story` persistence/rendering, Case creation/resume/phase/witness
+   behavior, Case-specific harness and return branches, associated policy/config
+   limits, prompts, UI commands, documentation, and tests. Do not retain a permanent
+   legacy adapter or Case reader merely because historical data exists.
+6. **Change public wording only with behavior.** README, prompt, config help, screen
+   help, shelf resolver, and tests change atomically with the cutover. Until then they
+   continue to describe the shipped behavior honestly.
 
 ## Implementation slices and acceptance evidence
 
@@ -464,39 +536,49 @@ reproducible result.
    - Add `co<N>` records, atomic writes, caller/file snapshots, book snapshots, empty
      book representations, digests, and read-only snapshot resolution.
    - Prove live file/book mutation after entry cannot alter an active conference;
-     reject path escapes, range expansion, and uncaptured source IDs.
+     reject path escapes, range expansion, and uncaptured source IDs. Keep the capture
+     schema consult-local rather than importing Case capsule/artifact machinery.
 
-2. **Persona registry and transient request construction**
+2. **Persona registry, Durable child, and transient request construction**
    - Define the initial roster and versioned book mappings; add `myPersona` input;
      create the independent Durable child and request-local persona injection.
    - Prove the opening Cartographer turn uses `myPersona`, an empty book persona still
      has its role, a nonempty persona sees only its own frozen book source, and a prior
      persona prompt is absent after a handoff while its spoken turn remains.
 
-3. **Grammar-constrained selector**
-   - Add a tested provider adapter for finite enum grammars and a host-owned
-     `decideOne`/`selectNextPersona` path.
+3. **Grammar-constrained selector and stable prefill**
+   - Add a tested provider adapter for finite enum grammar and the consult-local
+     selector path.
    - Prove output can only be an eligible exact ID, the previous speaker is excluded,
      selector events are durable, no active persona leaks into selector input, and an
      unsupported server fails explicitly rather than routing with unconstrained prose.
+   - Capture participant → selector → participant plans and prove the common prefill is
+     preserved, shared history is append-only, and only the transient tail changes.
 
-4. **Turn/return lifecycle**
+4. **Turn/return lifecycle and consultation UI**
    - Keep a speaker active through tool calls; hand off only after a no-tool response;
-     let any speaker make `consult_return`; add cancellation/restart/limit recovery.
-   - Prove tool-plus-text and text-plus-tool responses retain the same speaker,
-     a plain response triggers exactly one selector decision, malformed return keeps
-     that speaker active, and failure/limit never invents a result.
+     let any speaker make `consult_return`; add cancellation/restart/limit recovery and
+     an auditable conference view.
+   - Prove tool-plus-text and text-plus-tool responses retain the same speaker, a plain
+     response triggers exactly one selector decision, malformed return keeps that
+     speaker active, and failure/limit never invents a result.
 
-5. **UI, reuse boundary, and migration**
-   - Render conference records and adopt `decideOne` deliberately at other
-     model-mediated routing sites without weakening deterministic authority gates.
-   - Preserve legacy storyteller rendering/continuation through the explicit adapter;
-     document every later decision-site migration with its own candidate/failure tests.
+5. **One cutover, then deletion**
+   - Implement the inventory/archive and shelf migration; make active Case records a
+     visible cutover block; reject legacy call/config inputs clearly.
+   - Once the conference passes its end-to-end acceptance suite, remove the external
+     consultation and Case verticals rather than leaving adapters, dead configuration,
+     duplicate UI, or unreachable code.
+   - Prove fresh installs expose one `consult` contract and no `case`; migrated legacy
+     bytes/digests and shelf text remain available without a live Case/story parser;
+     no conference provider request reaches archived data or a second configured model.
 
 ## Non-goals
 
 The conference is not a panel of independent agents, a vote, a source of corroboration,
-a project worker, a user-facing persona, or a route around approval and change policy.
-Book personas do not update their books. A grammar-constrained selector is not a
-Jev-calibrated decision model and must not be described as one. The proposal does not
-claim sandbox or persistent terminal execution as scratch.
+a project worker, a user-facing persona, a replacement for authority checks, or a route
+around approval and change policy. It does not preserve Case's blind-evidence,
+artifact/witness, or scratch subsystem under new names. Book personas do not update
+their books. A grammar-constrained selector is not a Jev-calibrated decision model and
+must not be described as one. The proposal does not claim sandbox or persistent terminal
+execution as scratch.

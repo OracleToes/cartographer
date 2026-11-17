@@ -1,252 +1,179 @@
-# Cartographer delivery plan
-
-**Status:** current verified plan and proposed slices, 2026-11-16.
-
-`docs/design.md` is the recorded source of intent. It is not a live delivery plan or a changelog. `README.md` describes the shipped harness. This document is the one place for verified implementation status, the remaining work, and the order in which new work may be taken. Git history retains the superseded working proposals and completed slices.
-
-“Verified” below means inspected source, offline tests, and commit history—not a claim about a live model session or a provider's hidden prompt.
-
----
-
-## 1. Audit: what exists now
-
-The former working documents describe several different pieces of work. Their status is not the same.
-
-| Material folded here | Verified state | Evidence in the current tree | Plan disposition |
-| --- | --- | --- | --- |
-| Talk, Work, Model, request snapshots, and truthful mutations | Shipped through the former four implementation stages | `planRequest()` separates pure planning from send effects; `engine.sending()` freezes provider payloads; the Model views separate Sent, Since, Raw payload, Preview, and current accounting; Talk uses Durable identities rather than equal text. | Baseline, not an active feature slice. |
-| State-led dispatch, focus capsules, and normal writable-command staging | Shipped | Main-only `Dispatch` is in `src/state.mjs`; focus projection and captured shelf evidence are in `src/request.mjs`, `src/context.mjs`, and `src/tools/task.mjs`; direct file operations have atomic changed-surface accounting in `src/tools/change.mjs`; `src/stage.mjs` materializes a disposable command candidate and promotes it only through the live move gate. | Baseline. Direct mode remains intentionally detection-only. |
-| Bounded evidence cases | v1 is shipped; C1 capsule/artifact v2, C2 blind/cross transition, and C3 main-owned witness/report flow are shipped; C4 remains | `src/case.mjs`, `src/tools/case.mjs`, and `src/harness.mjs` preserve v1 and C1-v2 lifecycle compatibility; new flow cases persist frozen provenance, schema-validated artifacts, phase-local receipts, a sealed blind pass, a controlled same-context constructor packet, one durable witness docket, bounded witness-call admission, and one main case-level report. | Continue sequentially with C4 only after a proven stricter confinement primitive; do not represent C3 as scratch execution. |
-| Long-form external consultation | Shipped as a separate, supplied-context advisory lane | `consult` wording, durable thread handling, screen rendering, and tests are current. | Keep it distinct; evaluate an explicit escalation policy only in E1. |
-| Atlas heat and focus | Shipped | `src/atlas.mjs`, `src/state.mjs`, and coverage for direct-hot, warm, care, mapping gaps, and reversible archive candidates. | Baseline. The stale public “not here yet” claim is removed with this consolidation. |
-
-The audit is backed by the following implementation commits, in addition to the current source and tests:
-
-- `9609a76` — frozen provider-request snapshots;
-- `5621fdf` — pure request planning before provider formatting;
-- `ab56bd8` and `2e09ea9` — Talk/Work separation and stable Durable-source mutation;
-- `85897d1`, `f7bbb74`, and `6757d80` — Dispatch, focus capsules, captured shelf evidence, and symmetric direct changed-surface accounting;
-- `94d4d8e` and `04293ec` — evidence-case v1 and its lifecycle hardening; and
-- `1642852` — long-form `consult` clarification without conflating it with same-model case work.
-
-The current offline suite passes **111 unit tests and 69 ported integration tests**; two bubblewrap confinement checks are skipped on this machine because `bwrap` is unavailable. The current `npm test` run reported all green in 7.8 seconds within its ten-second watchdog; a skip is not treated as a passing sandbox observation.
-
-### 1.1 What is deliberately not claimed as complete
-
-The remaining safety/evidence gap matters more than another prompt rewrite:
-
-1. **C4 and E1 remain design contracts, not runtime behavior.** C1–C3 now enforce versioned provenance capsules and structured artifacts, a sealed blind pass and controlled cross-examination, one main-owned witness docket, bounded source-only witness admission, and a durable main report. Cases still have no disposable scratch space and no benchmark-backed `consult` escalation rule.
-
-Sandboxed normal change commands now use a per-focus disposable source stage. Its candidate diff is validated against the current approved move, source digest, targets, operation/surface limits, and checkpoint path before promotion; direct mode remains explicitly user-selected detection-only execution. This stage is not case scratch and supplies no case authority.
-
-Plugins, durable transcript/catalog pruning, and the measurement decision for live 27B sessions remain parked. They are not silently promoted into this plan.
-
----
-
-## 2. Invariants every slice keeps
-
-The design intent and shipped harness establish these boundaries. A slice that needs to weaken one stops for an explicit decision rather than smuggling it in.
-
-1. **One agent, not a simulated team.** A focus or case lens is the same Cartographer under a different information boundary. It is not an expert, voter, independent corroborator, or authority source.
-2. **The main context owns project judgment.** It selects work, changes the plan, accepts move reports, chooses whether case evidence settles a claim, and decides whether model distance is worth requesting. Isolated contexts return bounded artifacts and observations.
-3. **Authority stays where it is.** A declared move, exact revision, approval mode, target list, capabilities, checkpoints, proof, acceptance, and undo remain the only route to a project change. A handoff, case artifact, scratch patch, or consultation never applies a change.
-4. **The brain is durable; the provider request is a finite cache.** Sent payloads are frozen historical records; previews are explicitly unsent; current brain records are never rendered as historical request content.
-5. **Provenance beats prose.** Sources, snapshots, artifacts, command receipts, user input, and closure gaps carry stable identities/digests and a lifecycle. A summary remains a claim until its source is checked.
-6. **No ambient side channel.** A case phase cannot use the shared shelf, brain, shell windows, nested work, or `consult` to smuggle information across its intended boundary.
-7. **Do not misdescribe confinement.** Direct-file scope and sandboxed normal command promotion are preventative; user-selected direct command mode remains detection-only. Case scratch is unavailable until C4 ships; it must refuse rather than silently degrade to host execution.
-8. **Offline mechanics first.** Every slice proves its own data flow and authority boundaries in the bounded test suite. A live run is a deliberately labelled observation, never a general model-quality pass.
-
----
-
-## 3. Delivery shape
-
-A slice is one reviewable, reversible unit with one authority surface. It includes its schema/renderer, tests, public wording where behavior changes, and an explicit closure condition. It does not bundle “while here” redesigns.
-
-The work has two independent tracks until their controlled-execution requirements meet:
-
-```text
-Safety track:  S1 contract ─▶ S2 normal writable-command staging
-
-Case track:    C1 v2 capsule/artifacts ─▶ C2 blind-to-cross flow ─▶ C3 witness/report/UI ─▶ C4 isolated scratch
-
-Evidence track:                                                  E1 benchmark and consult policy
-```
-
-C1–C3 need no scratch runner and can proceed without S2. C4 may reuse only a **proven** low-level isolation primitive from S2; it may not inherit S2's broader normal-change authority or persistent home. If no such primitive can satisfy C4's stricter contract, C4 uses a separate runner.
-
-### Common exit gate
-
-Before a slice is called done:
-
-- its exact behavior is covered by unit/integration tests under the existing ten-second budget;
-- `npm test` and `git diff --check` pass;
-- v1 durable files and existing public behavior remain readable unless a versioned migration says otherwise;
-- prompt, README, and screen wording make only claims the code can enforce; and
-- any live experiment is recorded as one observed session/model/project, separately from offline acceptance.
-
-### D0 — Consolidate the working record
-
-**Status:** completed by this documentation change; no runtime behavior changes.
-
-Retain `docs/design.md` as intent, create this single current plan, and retire the now-conflicting information-architecture, dispatch, and case-v2 working proposals. Correct public documentation where the audit found a shipped feature still described as absent. Git history preserves the detailed predecessor documents and the commits that implemented their shipped portions.
-
-**Exit evidence:** no link points at a retired plan; `docs/design.md` points here for current delivery status without treating its historic decisions as a tracker; README no longer lists shipped graph heat/focus as absent; the repository has one current planning document.
-
----
-
-## 4. Safety track — make writable command scope honest
-
-### S1 — Specify the normal writable-command staging contract
-
-**Status:** accepted 2026-11-16; this is the contract S2 implements. No runtime behavior changed in S1.
-
-The goal is to turn the existing “compare the final checkpoint diff” detection into a pre-application gate for sandboxed command moves. This is not case scratch and must not be disguised as one.
-
-1. **One stage per change focus.** On a sandbox-capable change focus, Cartographer makes one random, case-unrelated stage root under an OS-private runtime parent, never inside the project or `.brain`. It contains a bounded materialized project copy (`work`), a fresh home/cache, and a fresh temporary directory. The source copy excludes `.git` and `.brain`; neither becomes a writable alternate path.
-2. **The command's only writable project-shaped path is `work`.** The command starts in that path. The live project remains reachable, if at all, only through bubblewrap's read-only system view; stage home and temporary paths are private to that move. Network remains exactly the approved move capability. Existing output/time limits remain in force; S2 adds fixed file-count and storage limits before a stage can be used.
-3. **The stage is a candidate, not a mutation.** Cartographer snapshots the source manifest before the first command. At task end it first closes every stage-owned window, then computes a bounded candidate manifest/diff from `work`. A candidate carries source/stage digests, commands, output/exit receipts, and cleanup result. It is not a project change merely because a command exited zero.
-4. **Promotion is the existing authority path.** The harness validates every candidate path against the live current move, original source digest, target list, changed-surface allowance, file-operation ceiling, text/binary policy, and checkpoint precondition before it touches the live tree. It validates the whole candidate before writing; an apply failure rolls back the already-applied paths or reports a rollback failure as fatal. A successful promotion is what the task's normal after-checkpoint records.
-5. **Refusal is safe and durable.** An oversized, stale, out-of-target, malformed, or resource-exceeded stage is discarded without applying a partial diff and becomes a precise closure gap/command record. Normal completion, stop, timeout, restart recovery, and failed promotion remove only the stage root Cartographer created.
-6. **Direct mode remains honest.** User-selected `--no-bwrap` / direct command moves retain their current detection-only behavior and explicit warning. They never receive a false “staged” claim. Main-context read-only commands continue to require bubblewrap.
-
-**Exit evidence:** negative tests are designed before the runner: no live-project write, no brain/git bypass, no undeclared network, no diff application outside the ordinary move gate, and no leftover stage directory after normal, stopped, timed-out, or refused work.
-
-### S2 — Implement sandboxed command staging and promotion
-
-**Status:** completed 2026-11-16.
-
-`src/stage.mjs` creates an OS-private, random disposable work root for each sandboxed change focus. `src/tools/shell.mjs` routes its commands only to that stage; `src/windows.mjs` mounts it below the sandbox's fresh `/tmp` tmpfs, gives it a fresh home, hides the live brain/git paths, and makes any dependency overlay read-only. Keeping the mount target below that writable tmpfs avoids creating a top-level path beneath the read-only system-root bind. `src/tools/task.mjs` closes all stage-owned windows, records the bounded candidate manifest and receipts, rechecks the live approved move and source manifest, validates targets/operation/surface/file rules, then promotes the complete candidate or records a closure gap before checkpointing. The task report retains the staging receipt; direct mode remains clearly detection-only. Dead-process stages are cleaned on the next session start.
-
-The implementation does not broaden the command API or create a project-local scratch folder. It does not treat an exit status as a project mutation.
-
-**Verified exit evidence:** portable unit fixtures prove no live-tree mutation before promotion, blocked `.brain`/`.git` candidate paths, target and stale-source refusal, source/diff bounds, atomic rollback, and cleanup. A bubblewrap integration fixture checks the actual staged mount and is explicitly skipped on this machine because `bwrap` is unavailable; it is not claimed as a local confinement observation. `npm test` passed with 107 unit tests and 67 ported integration tests; two bubblewrap checks skipped; total 9.0 seconds under the ten-second budget.
-
----
-
-## 5. Case track — bounded deliberation v2
-
-The existing `case` tool is the compatibility anchor. Do not create `deliberate`, `panel`, or a competing case database. v1 files remain historical records; a v2 reader/renderer must never fabricate fields that a v1 case did not have.
-
-### C1 — Versioned capsule and structured artifacts
-
-**Status:** completed 2026-11-16. No scratch or cross-examination is included.
-
-`src/case.mjs` now writes version-2 records while continuing to load and render version-1 records without migration. A v2 frozen capsule carries the question and claim, resolution criteria, constraints, non-goals, bounded role-tagged sources (`primary`, `derived`, or `claim`), each source's capture status, origin, locator, SHA-256, capture time, and freshness, plus its initial evidence ledger. Source metadata, source text, and the complete frozen capsule have policy-owned storage bounds. The append-only case ledger can then retain observations, claims, source gaps, and immutable phase-local read/search/list receipts without changing the frozen capsule bytes.
-
-A v2 phase must return a schema-validated artifact rather than promote its free-form `report`. It has candidate, observations, assumptions, citations, falsifiers, proposed witness, closure gaps, and uncertainty; its deterministic readable rendering and structured data share a digest. Direct observations must cite a frozen non-claim source or a receipt from that exact phase. A retained receipt includes bounded tool input/output, their SHA-256 digests, and its own digest; a receipt cited by an artifact is rendered to the main context. Frozen claim sources and prior phase artifacts can only be cited as claims under review. Capsule/source, ledger, receipt, artifact, and field-count/text bounds are policy-owned. C2 replaces the new-v2 phase sequence while retaining pre-C2 v2 records unchanged.
-
-**Verified exit evidence:** unit tests cover malformed criteria, oversized source content/metadata and artifacts, acyclic derived provenance, missing required artifact fields, uncited direct observations, source-role confusion in both ledger and artifact, the blind citation boundary, receipt append versus capsule immutability, receipt input/output integrity, resume-visible frozen inputs/artifacts, report-only return refusal, and byte-stable/read-write-compatible v1 rendering. An integration fixture proves a real case `read` appends an immutable receipt outside the frozen capsule, leaves the shared atlas unchanged, returns the receipt id to the same phase, and accepts a subsequent direct observation that cites it. `npm test` passed with 109 unit tests and 68 integration tests; two unavailable-`bwrap` checks skipped.
-
-### C2 — Blind pass, controlled cross-examination, and durable transition
-
-**Status:** completed 2026-11-16. It stops at the main-owned witness boundary; C3 supplies the docket and witness/synthesis transition.
-
-New v2 cases carry an explicit durable flow:
-
-```text
-construct
-  → falsify-blind
-  → falsify-cross-exam
-  → awaiting-witness-specification
-  → main-owned docket: isolated witness | source-only direct observation | documented closure gap
-  → ready-for-synthesis
-```
-
-`src/case.mjs` preserves v1 and pre-C2 v2 records with their historical phase layout. New flow records split the former middle pass into `falsify-blind` and `falsify-cross-exam`. The blind request receives the same frozen capsule but no constructor prose, citations, digest, or summary. Completing the blind pass atomically seals its artifact and prepares a bounded, digested constructor packet. `src/tools/case.mjs` appends that packet to the **same** Durable falsifier context, records its Durable entry receipt, resets the per-pass budget, and only then starts cross-examination.
-
-The cross artifact adds `cross_examination`: one classification for every material constructor claim (the candidate and explicitly inferential observations), each as `confirmed-flaw`, `failed-challenge`, or `unresolved` with citations. Confirmed/failed classifications require frozen-source or same-phase-receipt evidence; unresolved classifications retain the constructor as a claim under review and require an exact closure gap. The constructor gets no default rhetorical rebuttal loop. A case remains one agent under controlled visibility, not a debate or vote. Case phases remain blocked from shell windows, shared-brain/shelf writes, nested work, `chat`, `ask`, and `consult`.
-
-At C2 completion the durable state is `awaiting-witness-specification`; C2 itself could not start `witness`, mark a case ready, or synthesize from phase count. C3 subsequently adds only the main-owned docket transition. `/case` exposes the subphase, blind seal, and constructor-packet delivery. Stop/timeout behavior still blocks later phases; resume finds a sealed artifact/packet rather than replaying a completed blind pass.
-
-**Verified exit evidence:** unit tests cover packet-gated cross start, blind seal/digest, same-context delivery receipt, required per-claim classifications, unresolved/claimed citation rules, stop races, and refusal to synthesize before the later witness boundary. Integration fixtures prove the blind request excludes constructor prose and digest byte-for-byte; one cross request carries the recorded constructor packet after the persisted blind seal, reuses the blind context, retains a cross-local receipt, and pauses awaiting witness specification. Restart, stop, and timeout fixtures remain green. `npm test` passed with 109 unit tests and 68 ported integration tests; two bubblewrap confinement checks skipped because `bwrap` is unavailable; total 8.9 seconds under the ten-second budget.
-
-### C3 — Main-owned witness, synthesis, report, and visible state
-
-**Status:** completed 2026-11-16; still no scratch execution. C3 records one canonical main-owned witness docket after C2's cross boundary, invokes only a bounded source-capable witness specified by that docket, and persists the only final case-level report.
-
-After cross-examination, the main context receives a bounded witness docket. It records exactly one witness specification, source-only direct observation, or closure gap. A specification names target claims, method, exact allowed inputs, expected discriminator, budget, and what result would still be unresolved.
-
-An isolated witness sees only the capsule, sealed structured artifacts, cited receipts, and specification. It may perform only a specified exact `read`, `search`, or `list` check; the harness admits and charges it before project bytes are read. It cannot read the parent conversation, use a generic shell, mutate the project, or synthesize the outcome. A narrowly scoped main-context direct observation uses the same durable witness schema over named frozen sources or retained receipts; it gains no new authority from the case.
-
-Main-context synthesis is the only point with these outcomes:
-
-- `supported` or `refuted`, each naming the witness that settles every material claim;
-- `unresolved`, with residual uncertainty, a closure gap, or a budget limit; or
-- `needs_user_input`, with an exact blocking question and a linked successor-capsule boundary.
-
-Produce one durable case-level report, not durable persona chatter. `/case` and the screen expose capsule source roles/freshness, current subphase, the blind boundary, budget use, participant routing, witness state, closure gaps, retained artifacts, and final witness ids. C3 has no scratch or candidate patch; `/case` says that no case path has live-project change authority. Any later candidate patch remains visibly outside the live project.
-
-**Verified exit evidence:** unit coverage refuses a supported/refuted report without a settling witness, rejects an omitted witness assessment, an unlisted/exhausted source call, an undeclared receipt append, or an artifact citation outside the docket, requires `needs_user_input` to carry its exact question and successor boundary, proves closure-gap and source-only main-observation paths, and preserves v1 inspection plus `/case stop`. An end-to-end stand-in integration shelves a frozen source, records the main docket, verifies an intervening parent-conversation sentinel is absent from witness requests, refuses an undeclared witness read before bytes are read, charges the one admitted exact read, accepts the witness assessment, records `supported`, and verifies that `/case` renders the durable report and witness id. Prompt, README, screen help, state, and terminal wording now expose only this source-bounded witness/report behavior; no scratch authority is claimed.
-
-### C4 — Isolated case scratch witness
-
-**Status:** depends on C3 and a proven confinement design; highest-risk implementation slice.
-
-A scratch witness is a disposable experiment surface, not a shell window and not a candidate project change. It is available only through a main-owned witness specification and one dedicated experiment operation.
-
-Its non-negotiable contract is:
-
-- fresh private work root outside the project and `.brain`;
-- read-only source projection at a fixed path, with `.git` and `.brain` blocked/absent even below that projection;
-- per-case disposable home/cache and `/tmp`, network off by default, case-owned processes, and enforced time/CPU/memory/process/output/file/storage limits;
-- command/script, input source/capsule/artifact digests, output, exit/resource status, declared artifact manifest, and cleanup result retained as provenance;
-- default destruction at completion/stop/timeout/recovery; only the harness can promote a bounded immutable artifact under the case record; and
-- no automatic project application. A retained candidate patch is only evidence for a later ordinary move.
-
-Direct mode or an unavailable strong sandbox refuses scratch rather than using the host. The generic `sandboxArgs()` path and persistent session windows do not satisfy this contract as they stand.
-
-**Exit evidence:** automated confinement checks prove no project write, no `.git`/`.brain` visibility, no network, no access from another case/window, enforced resource limits, receipt/artifact digest integrity, cleanup reporting, and promotion-only candidate patches.
-
----
-
-## 6. Evidence track — measure before changing escalation policy
-
-### E1 — Offline benchmark and `consult` selection rule
-
-**Status:** depends on C3 for a meaningful case comparison; C4 is optional for the first source-only fixture set.
-
-Build a fixed offline fixture corpus with known source answers, runtime failures, and boundary cases. For the exact same bounded source packet, compare:
-
-1. ordinary main-context investigation;
-2. bounded same-model case work;
-3. supplied-context external `consult`; and
-4. a hybrid that escalates only after a real unresolved case.
-
-Measure source-citation/digest fidelity, useful counterexamples, witness attempts and discrimination, false confidence against known ground truth, correct unresolved/user-input outcomes, wall-clock time, model swaps, request/prefill tokens, completion tokens, and scratch resource use where applicable.
-
-The result informs call selection, not a claim that separated same-model contexts became independent. Until then, the current boundary holds:
-
-- use a case for project-grounded uncertainty that Cartographer can inspect;
-- use `consult` deliberately for a compact self-contained hard kernel, formal argument, unresolved clean case packet, or outside critique where different model behavior is worth its cost; and
-- treat external output as an advisory claim packet to verify, never a tie-breaking vote or project authority.
-
-Only benchmark evidence may justify a broader prompt or README recommendation about when to invoke `consult`.
-
-**Exit evidence:** reproducible fixtures, exact packets, recorded metric definitions, and a report that labels any live session as observation rather than general acceptance.
-
----
-
-## 7. Parked decisions and explicit non-work
-
-These items remain visible so that they are not accidentally reintroduced as “obvious cleanup.” They are not approved implementation slices.
-
-| Item | Why it is parked | Required decision before work |
+# Cartographer consolidation plan
+
+**Status:** approved direction and migration design only — no runtime behavior changes in this document.
+**Date:** 2026-11-16
+
+Cartographer should have one coherent bounded-deliberation feature: the same-model
+`consult` conference described in `docs/consult-mode-proposal.md`. This plan replaces
+the former Case/E1 delivery track. Git history and archived records retain evidence of
+previous work; they do not make old concepts permanent product commitments.
+
+## 1. Product decision
+
+The end state is deliberately small:
+
+- `consult` is one isolated same-model conference with a caller-supplied `myPersona`,
+  contextual book personas, immutable entry-time sources, restricted snapshot tools,
+  a grammar-constrained neutral selector, and `consult_return`.
+- The separate external-model/`thread` consultation lane is retired. There is no
+  Mythos-nano configuration, external-model fallback, or second meaning of `consult`.
+- The separate `case` product is retired. Its C1–C3 implementation is not promoted
+  into a general framework; C4 isolated scratch and E1 benchmark/escalation policy are
+  dropped.
+- The conference keeps only the source-capture properties it needs. It does not acquire
+  Case capsules, blind/cross phases, witness dockets, artifacts, votes, or scratch
+  execution under new names.
+- Existing user records are preserved through an explicit archive migration, not by
+  keeping a permanent compatibility runtime.
+
+This is a consolidation, not an invitation to add a generic persona, snapshot,
+decision, sandbox, or archival framework before a concrete surviving need exists.
+
+## 2. Boundaries that remain
+
+| Boundary | Required end-state behavior |
+| --- | --- |
+| Authority | A conference is advisory and cannot change project files, books, plans, approvals, checkpoints, or user-value decisions. |
+| Isolation | The conference is a new Durable child, not a fork of the parent. It sees only captured conference material and its restricted tools. |
+| Sources | Supplied context, selected files, and persona-specific book views are immutable, bounded, digested entry-time snapshots. They are consult-local records, not Case capsules. |
+| Routing | The host, not a participant, selects the next eligible participant with an actually enforced finite enum grammar. The last speaker is excluded. |
+| Provider context | Situation Prompt, stable tool contract, captured common sources, and append-only shared transcript remain the stable prefill. Routing swaps only the transient persona/selector tail. |
+| Termination | Any participant may use `consult_return`. Limits, cancellation, invalid grammar support, malformed returns, and provider failure remain explicit incomplete/failure outcomes. |
+| Scratch | V1 has only the auditable structured conference notebook. It has no arbitrary files, shell, executable scratch, or project promotion path. |
+| Data loss | Migration never silently deletes legacy stories or cases, and archived bytes never enter a new conference request. |
+
+## 3. Retirement boundary
+
+The following are implementation inventory, not work to preserve.
+
+| Retired surface | Current examples | Cutover result |
 | --- | --- | --- |
-| Transcript/catalog/index retention and pruning | It changes the durability/recoverability contract. | User decision on retention, deletion, export, and recovery semantics. |
-| Plugins | It broadens the harness's authority surface. | Separate plugin trust and lifecycle design. |
-| Live-model measurement gate | Offline mechanics can pass without making model-quality claims. | Decide whether a live 27B run is observational only or may be acceptance evidence. |
-| Exact case/scratch budgets and scratch confirmation | They need fixture cost and user-control calibration. | Establish through C1/C3 fixtures and the S1/C4 contracts. |
-| Persistent request audit beyond this run | Current Model inspection is deliberately in-memory; wire tracing is opt-in. | Retention/privacy decision, not a screen convenience change. |
+| External consultation | `src/tools/consult.mjs` direct HTTP completion, `consultModel` settings, `thread` follow-ups | Replaced by the same-model conference under the single `consult` name. |
+| Story persistence | `src/story.mjs`, storyteller shelf resolution, transcript-specific context/UI rendering | Migrated to static archive/shelf text, then removed from live runtime. |
+| Evidence Case | `src/case.mjs`, `src/tools/case.mjs`, Case phase/task state, witness routing, `/case` UI | Retired as a complete vertical slice, not retained as a dormant tool. |
+| Case policy and plumbing | Case limits/config, harness admission/receipt branches, Case-aware `return`, prompt wording, tests | Removed once migration confirms no live Case lifecycle remains. |
+| Case roadmap | C1–C3 preservation, C4 scratch witness, E1 benchmark/escalation rule | Superseded. C1–C3 are historical implementation; C4 and E1 are intentionally dropped. |
 
----
+The normal change/staging safety boundary remains unrelated retained infrastructure. It
+must not be recast as consultation or legacy Case scratch.
 
-## 8. Documentation ownership after consolidation
+## 4. Data and configuration migration contract
 
-- `docs/design.md` remains the recorded intent. Do not use it to track implementation completion; change it only when the user changes intent.
-- `docs/plan.md` is this verified delivery plan. New active work, its evidence, status, dependencies, and staged slices go here.
-- `README.md` describes behavior already shipped. It must not promise an unimplemented slice.
-- Source, tests, and git history are the proof of implementation. The prior working proposals are intentionally retired rather than maintained as competing status records.
+Migration exists to preserve user data while allowing the runtime to become smaller.
+It is a one-shot cutover path, not a perpetual second product surface.
 
-## Next slice
+### 4.1 Inventory and gate
 
-S1–S2 and C1–C3 are complete. C4 may begin only with a proven low-level confinement primitive that meets its stricter isolated-scratch contract; preserve v1 and pre-C2 v2 inspection plus C1 capsule/artifact, C2 blind-packet, and C3 main-owned witness/report immutability. Do not reuse normal change authority, the generic sandbox arguments, or persistent command windows as case scratch.
+Before removing any live code, the cutover must inventory:
+
+- `.brain/storyteller/` records and every shelf placement that depends on one;
+- `.brain/cases/` records and their schema/version/terminal state; and
+- active or resumable Case Durable children and task-state references.
+
+A running, resumable, or otherwise nonterminal Case blocks the cutover. The user must
+explicitly stop and archive it; migration must not orphan an isolated child, pretend it
+finished, or silently discard its evidence.
+
+### 4.2 Opaque legacy archive
+
+For each successfully inventoried legacy record, migration must preserve the original
+bytes and SHA-256 digest under a clearly labelled `.brain/legacy/` namespace and write
+a static, human-readable export plus a compact manifest. The manifest records original
+path/ID, schema/version where available, size, digest, export path, and migration time.
+
+The archive is deliberately opaque to ordinary Cartographer operation:
+
+- no new provider request reads it;
+- no `consult`, tool, UI, or shelf resolver relies on a live Case/story parser;
+- a later purge is explicit user action, never automatic cleanup; and
+- a malformed legacy record stops its own migration and reports the path rather than
+  being guessed at or deleted.
+
+A legacy storyteller shelf placement becomes an ordinary immutable text snapshot during
+migration. If its transcript cannot be parsed/rendered faithfully, the migration stops
+before changing that placement. Old Durable transcript rows may remain historical data
+in the session store, but no new lifecycle treats them as active Case or consultation
+work.
+
+### 4.3 Breaking inputs are explicit
+
+Target `consult` accepts `question`, optional `context`, optional `files`, and required
+`myPersona`. A legacy `thread` is a clear migration error, never a hidden external
+fallback.
+
+`consultModel`, `consultMaxTokens`, `consultTemperature`, `consultTimeoutSeconds`, and
+`CARTO_CONSULT_MODEL` are removed. If they appear in a supported-upgrade configuration,
+the migrator/config reader must name them and explain their removal rather than ignore
+them or silently launch a second model.
+
+## 5. Implementation slices after approval
+
+No slice below is authorized by this document alone. The order prevents a temporary
+product with two competing consultation systems.
+
+### K1 — Consult-local record, entry capture, and isolated child
+
+Create the `co<N>` conference record, immutable context/file/book snapshots, bounded
+source manifest, empty-book representations, and independent same-model Durable child.
+Use a small consult-local capture schema; do not import or generalize Case C1 objects.
+
+**Acceptance:** mutations after entry cannot alter conference input; path/range escape
+and uncaptured source access fail; the child cannot see the parent transcript or live
+project/brain material; `myPersona` opens Cartographer and an empty book stays a valid
+persona source.
+
+### K2 — Persona turns, constrained selector, and preserved prefill
+
+Add transient persona packets and the host-owned selector. The provider adapter must
+enforce the exact eligible-ID grammar, not rely on a completion prefix or voluntary
+tool call.
+
+**Acceptance:** the prior speaker is excluded; selector output is exactly one valid ID;
+unsupported grammar capability fails explicitly; outgoing persona instructions disappear
+while spoken turns remain; participant → selector → participant requests retain the
+same stable prefill and append-only shared transcript, swapping only the final tail.
+
+### K3 — Return lifecycle and conference UI
+
+Add restricted `consult_source` and `consult_return`, restart/cancellation/limit
+recovery, final result projection to the caller, and an auditable conference view.
+
+**Acceptance:** tool calls keep a participant active; a no-tool response triggers one
+selector event; any participant can return; malformed return stays with its speaker;
+limits never fabricate a synthesis; UI shows source/selector/turn provenance without
+leaking private stream content into the parent chat.
+
+### K4 — One cutover and deletion
+
+Run the inventory/archive/shelf migration, block unsafe active Cases, reject legacy
+configuration and call inputs clearly, then remove the obsolete verticals only after
+K1–K3 pass their end-to-end acceptance suite.
+
+**Deletion inventory:** external consult HTTP behavior and settings; `story` storage and
+live story renderers; `case` creation/resume/phase/witness/synthesis paths; Case-specific
+harness, return, state, terminal, screen, prompt, README, configuration, and tests.
+Update public documentation atomically so it describes exactly one `consult` and no
+`case` command.
+
+**Acceptance:** a fresh install exposes one consultation contract and no Case tool;
+there is no Mythos/external-model request path; migrated records retain verified
+archive bytes/digests and readable shelf text without a live legacy parser; archived
+data is absent from conference provider payloads; no Case child/task route remains
+reachable; full tests and migration fixtures pass.
+
+## 6. Explicit non-work
+
+- No C4 executable/Case scratch runner.
+- No E1 benchmark for choosing among products that will no longer coexist.
+- No external-consult adapter, permanent story reader, or permanent Case reader.
+- No generic snapshot or finite-choice framework before a second concrete surviving use
+  demonstrates the need.
+- No automatic legacy data purge.
+- No claim that normal task staging or shell windows are conference scratch.
+- No runtime implementation, deletion, or migration occurs until the user approves the
+  implementation phase.
+
+## Next action
+
+Review this migration design against the conference proposal. Once approved, begin K1;
+do not start deletion work early or preserve retired surfaces “just in case.”
