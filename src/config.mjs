@@ -178,7 +178,7 @@ export const POLICY = freezeTree({
 			oscChars: 100_000, copyTimeoutMs: 3000, windowsListed: 200, shellViewLines: 400,
 			contextWarnPercent: 80, wheelScrollLines: 3,
 			viewSummaryChars: 70, contextSummaryChars: 160, consoleErrorChars: 300, taskErrorChars: 200, jsonLongValueChars: 80,
-			activeCallChars: 50, notePreviewLines: 2, typedDraftChars: 40, rowWrapChars: 100,
+			activeCallChars: 50, notePreviewLines: 5, typedDraftChars: 40, rowWrapChars: 100,
 		},
 	},
 	timing: {

@@ -34,7 +34,7 @@ export function loadPrepend(brainDir, core = join(CORE_DIR, "PREPEND.md")) {
 		}
 		const body = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/\s+$/, "");
 		if (body.trim() === "") continue;
-		parts.push(`PREPEND.md (${label}, ${path}), written by ${USER_NAME}, read before the rest of this prompt.\n\n${body}`);
+		parts.push(`Source of Truth:\n${body}`);
 	}
 	return parts.length === 0 ? undefined : parts.join("\n\n");
 }
