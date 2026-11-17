@@ -109,6 +109,10 @@ test("case: a frozen capsule keeps phase artifacts and participant routes withou
 	const halted = stopCase(brainDir, stopped.id, { at: 202, why: "user stopped it" });
 	assert.equal(halted.status, "stopped");
 	assert.equal(halted.phases.find((phase) => phase.id === "falsify").status, "stopped", "a stop prevents later phases from starting");
+	const lateReturn = finishCasePhase(brainDir, stopped.id, "construct", { returned: true, done: true, report: "a return raced with the stop" }, { at: 203 });
+	assert.equal(lateReturn.status, "stopped", "a late ordinary return cannot revive the stopped active phase");
+	assert.equal(lateReturn.artifact.done, undefined, "a stopped case never presents the raced report as a completed artifact");
+	assert.equal(loadCase(brainDir, stopped.id).case.status, "stopped", "the case-level stop remains durable after the race");
 });
 
 test("context window: a reported capacity reserves configured reply room without raising the setting cap", () => {

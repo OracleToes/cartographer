@@ -8,6 +8,7 @@
 //   task: BRIEF          call `task` with BRIEF; when the report is back, answer "Report received: <report>"
 //   task(m2): BRIEF      run declared move m2; the stored move contract supplies the brief
 //   case: QUESTION       start one bounded evidence case; case phases return named fixed artifacts
+//   case resume: c1     continue a durable running evidence case by id
 //   look: DIRECTIVE      call a look or change tool itself (the harness should refuse it)
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
@@ -87,7 +88,16 @@ function lookCall(directive) {
 	const shell = /^shell(?:\[([^\]]*)\])?:\s*(.*)$/s.exec(directive.trim());
 	if (shell) {
 		const options = Object.fromEntries((shell[1] ?? "").split(",").filter(Boolean).map((pair) => pair.split("=")));
-		return { name: "shell", args: { command: shell[2].replaceAll("\\n", "\n"), ...(options.window ? { window: options.window } : {}), ...(options.wait ? { wait: Number(options.wait) } : {}) } };
+		const action = typeof options.action === "string" && options.action !== "" ? options.action : undefined;
+		return {
+			name: "shell",
+			args: {
+				...(action === undefined || action === "run" ? { command: shell[2].replaceAll("\\n", "\n") } : {}),
+				...(action === undefined ? {} : { action }),
+				...(options.window ? { window: options.window } : {}),
+				...(options.wait ? { wait: Number(options.wait) } : {}),
+			},
+		};
 	}
 	// window: NAME ACTION, window: repl send some text, window[seconds=5]: server wait ready, window[lines=3]: main read
 	const window = /^window(?:\[([^\]]*)\])?:\s*(\S+)\s+(\S+)\s?(.*)$/s.exec(directive.trim());
@@ -165,6 +175,7 @@ function mainCalls(text) {
 			const brief = task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n");
 			calls.push({ name: "task", args: task[1] ? { move: task[1] } : { brief, done_when: "The requested observation is stated in the report." } });
 		}
+		else if (/^case\s+resume:\s*\S+\s*$/.test(part)) calls.push({ name: "case", args: { action: "resume", id: part.replace(/^case\s+resume:\s*/, "").trim() } });
 		else if (part.startsWith("case:")) calls.push({ name: "case", args: { action: "start", question: part.slice(5).trim() } });
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
 		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));

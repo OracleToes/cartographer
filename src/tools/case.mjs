@@ -20,7 +20,7 @@ function phaseBrief(caseFile, phase, participant = []) {
 		TASK_HEADER,
 		"",
 		"Case phase",
-		`I am the same Cartographer agent in the ${phase.name} phase of case ${caseFile.id}, not a separate agent, a vote, or independent corroboration. This is a bounded read-only evidence context: project file writes, writable shell commands, shared-brain edits, and shelf changes are refused. The plan stays with the main context, and this phase cannot start a task, case, wake, or sleep, call chat, ask, or consult, or hand a shelf item onward. The user participates through the durable case queue. I inspect sources, distinguish observation from inference, and end with one \`return\` artifact. Agreement between phase artifacts does not prove a claim.`,
+		`I am the same Cartographer agent in the ${phase.name} phase of case ${caseFile.id}, not a separate agent, a vote, or independent corroboration. This is a bounded read-only evidence context: project file writes, shell-window access, shared-brain edits, and shelf changes are refused. The plan stays with the main context, and this phase cannot start a task, case, wake, or sleep, call chat, ask, or consult, or hand a shelf item onward. The user participates through the durable case queue. I inspect sources, distinguish observation from inference, and end with one \`return\` artifact. Agreement between phase artifacts does not prove a claim.`,
 		CASE_LOOK_NOTE,
 		"",
 		`Objective: ${phase.objective}`,

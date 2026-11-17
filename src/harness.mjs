@@ -376,6 +376,11 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (run.caseId !== undefined && ["book", "shelf"].includes(call.name)) {
 						return { block: "A bounded evidence phase keeps its work in its case artifact: it does not edit the shared brain or shelf. Read project sources directly and return the observation to the main context." };
 					}
+					// Even a shell-window read would expose another context's ambient output, while wait, stop, and close
+					// would control it. Case evidence is deliberately limited to project read/search/list results.
+					if (run.caseId !== undefined && call.name === "shell") {
+						return { block: "A bounded evidence phase does not use shell windows. Its evidence tools are read, search, and list; return the resulting observation as its case artifact." };
+					}
 					if (run.caseId !== undefined && call.name === "return" && String(call.arguments?.shelf ?? "").trim() !== "") {
 						return { block: "A bounded evidence phase cannot hand a shelf item onward. Put the source, observation, and uncertainty in this case artifact; the main context decides what to keep." };
 					}

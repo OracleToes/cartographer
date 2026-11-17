@@ -10,7 +10,7 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { droppable, dressTask, KEPT_AS, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
+import { droppable, dressTask, KEPT_AS, loadContext, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { FOCUS_START, TASK_HEADER } from "../src/prompt.mjs";
@@ -37,6 +37,7 @@ import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
+import { beginCasePhase, createCase, finishCasePhase } from "../src/case.mjs";
 
 /** The first line of every block the harness writes; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -804,10 +805,16 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 	const root = makeProject("evidence-case", { git: false });
 	configure(root, { initiate: false });
 	const server = await startStandIn({
-		caseSteps: { construct: ['book: {"target":"ledger","action":"add","kind":"note","text":"phase side channel"}'] },
+		tokenDelayMs: 0,
+		caseSteps: {
+			construct: [
+				'book: {"target":"ledger","action":"add","kind":"note","text":"phase side channel"}',
+				"shell[action=read,window=main]:",
+			],
+		},
 	});
 	try {
-		const result = await carto(root, server, ["-p", "case: Does src/main.js call the exported add function?"]);
+		const result = await carto(root, server, ["-p", "case: Does src/main.js call the exported add function? || then think"]);
 		ok(result, "bounded evidence case");
 		const file = join(root, ".brain", "cases", "c1.json");
 		assert.equal(existsSync(file), true, "the case has its own durable evidence file");
@@ -816,23 +823,114 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 		assert.deepEqual(evidence.phases.map((phase) => [phase.id, phase.status]), [["construct", "complete"], ["falsify", "complete"], ["witness", "complete"]]);
 		assert.match(evidence.capsule.digest, /^[a-f0-9]{64}$/, "the capsule is frozen and digested");
 		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
-		assert.equal(phases.length, 4, "the blocked constructor call gets one bounded retry, then each phase returns once");
+		assert.equal(phases.length, 5, "the constructor gets bounded retries for its refused shared-brain and shell-window side channels, then each phase returns once");
 		const phaseText = (name) => phases.filter((request) => request.messages.map(rawText).join("\n").includes(`in the ${name} phase`));
 		const construct = phaseText("construction");
 		const falsify = phaseText("blind falsification");
 		const witness = phaseText("concrete witness");
-		assert.equal(construct.length, 2, "construction is the only phase that made the deliberately refused side-channel call");
+		assert.equal(construct.length, 3, "construction is the only phase that made the deliberately refused side-channel calls");
 		assert.equal(falsify.length, 1);
 		assert.equal(witness.length, 1);
 		const constructorResult = construct.at(-1).messages.filter((message) => message.role === "tool").map(rawText).join("\n");
 		assert.match(constructorResult, /does not edit the shared brain or shelf/, "a phase cannot mutate shared brain state as an evidence side channel");
+		assert.match(constructorResult, /does not use shell windows/, "a phase cannot read or control an ambient shell window as an evidence side channel");
 		assert.doesNotMatch(falsify[0].messages.map(rawText).join("\n"), /CASE construct ARTIFACT/, "blind falsification does not receive construction prose");
 		const witnessText = witness[0].messages.map(rawText).join("\n");
 		assert.match(witnessText, /CASE construct ARTIFACT/, "the concrete check can inspect earlier artifacts deliberately");
 		assert.match(witnessText, /CASE falsify ARTIFACT/);
 		const { ledger } = loadLedger(join(root, ".brain"));
 		assert.equal(ledger.items.some((entry) => entry.text === "phase side channel"), false, "the blocked phase attempt did not promote its note");
-		assert.match(result.stdout, /ready for my synthesis/, "the main context receives the artifacts and, rather than a vote, must synthesize them itself");
+		assert.equal(Object.values(loadContext(join(root, ".brain")).tasks).some((task) => task.caseId === "c1"), false, "each temporary case-phase context is cleaned from the ordinary task store after its artifact is recorded");
+		assert.equal(evidence.synthesis, undefined, "phase execution ends with evidence retained for the main context, not an automatic vote or synthesis");
+	} finally {
+		await server.close();
+	}
+});
+
+test("case: /case stop interrupts a held phase and leaves a stopped durable trail", async () => {
+	const root = makeProject("evidence-case-stop", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({
+		tokenDelayMs: 0,
+		holdWhen: (body) => body.messages.some((message) => rawText(message).includes("\nCase phase\n")),
+	});
+	try {
+		const result = await cartoOnTerminal(root, server, [], [
+			["Set one up in", ""],
+			["Type a message", "case: Does src/main.js call the exported add function?"],
+			[1, "Check the exceptional input before stopping."],
+			["recorded for evidence case c1", "/case stop c1"],
+			["the active phase was interrupted", "/case c1"],
+			["Status: stopped.", "/quit"],
+		]);
+		if (result === undefined) return "python3 is needed for a terminal";
+		ok(result, "stopping a held evidence case");
+		has(result.screen, "case  c1 stopped", "the terminal confirms the durable case stop");
+		has(result.screen, "the active phase was interrupted", "the terminal says that the held phase was interrupted");
+		has(result.screen, "Status: stopped.", "/case inspects the stopped durable record");
+		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
+		assert.equal(evidence.status, "stopped");
+		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped"], "the stop prevents later phases from starting");
+		assert.match(evidence.phases[0].artifact.failure, /interrupted/i, "the active phase records the interrupted outcome rather than a successful return");
+		assert.deepEqual(evidence.messages, [{
+			id: "u1",
+			at: evidence.messages[0].at,
+			text: "Check the exceptional input before stopping.",
+			route: "queued",
+			unreadBy: "construct",
+			afterCase: true,
+		}], "an active-phase participant line that could not reach a result is retained with exact interrupted-phase provenance");
+		assert.equal(server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n"))).length, 1, "only the active construction phase was started before the terminal stop");
+	} finally {
+		await server.close();
+	}
+});
+
+test("case: the fixed phase runtime stops a held phase before later phases can start", async () => {
+	const root = makeProject("evidence-case-timeout", { git: false });
+	configure(root, { initiate: false });
+	// The production bound is two minutes. This child-process-only preload preserves every other timer but makes
+	// that exact phase timer fire after one second, so the test can exercise a live held-request abort without waiting two minutes.
+	const preload = join(root, "case-timeout-preload.mjs");
+	writeFileSync(preload, `const original = globalThis.setTimeout;\nglobalThis.setTimeout = (callback, delay, ...args) => original(callback, delay === 120000 ? 1000 : delay, ...args);\n`);
+	const server = await startStandIn({
+		tokenDelayMs: 0,
+		holdWhen: (body) => body.messages.some((message) => rawText(message).includes("\nCase phase\n")),
+	});
+	try {
+		const result = await carto(root, server, ["-p", "case: Does src/main.js call the exported add function? || then think"], { env: { NODE_OPTIONS: `--import=${preload}` } });
+		ok(result, "timing out a held evidence phase");
+		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
+		assert.equal(evidence.status, "stopped");
+		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped"], "the timeout stops the active phase and bars later phases");
+		assert.match(evidence.stopReason, /construction exceeded its 120 second runtime limit/);
+		assert.match(evidence.phases[0].artifact.failure, /exceeded its 120 second runtime limit/i, "the timed-out phase receives a durable timeout artifact rather than a return");
+		assert.equal(server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n"))).length, 1, "the runtime limiter aborts before any second phase starts");
+	} finally {
+		await server.close();
+	}
+});
+
+test("case: a fresh session resumes durable unfinished phases without rerunning a recorded artifact", async () => {
+	const root = makeProject("evidence-case-resume", { git: false });
+	configure(root, { initiate: false });
+	const brainDir = join(root, ".brain");
+	const prior = createCase(brainDir, { question: "Does src/main.js call the exported add function?", context: "Resume only the phases that were not completed before the restart.", at: 100 });
+	beginCasePhase(brainDir, prior.id, "construct", { conversationId: "prior-session-construct", at: 101 });
+	finishCasePhase(brainDir, prior.id, "construct", { returned: true, done: true, report: "construction artifact survives the restart" }, { at: 102 });
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	try {
+		const result = await carto(root, server, ["-p", "case resume: c1 || then think"]);
+		ok(result, "resuming a durable evidence case");
+		const evidence = JSON.parse(readFileSync(join(brainDir, "cases", "c1.json"), "utf8"));
+		assert.equal(evidence.status, "ready");
+		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["complete", "complete", "complete"]);
+		assert.equal(evidence.phases[0].artifact.text, "construction artifact survives the restart", "resume keeps the already durable construction artifact byte-for-byte");
+		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
+		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase")).length, 0, "a completed phase is not replayed after restart");
+		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the blind falsification phase")).length, 1);
+		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the concrete witness phase")).length, 1);
+		assert.equal(Object.values(loadContext(brainDir).tasks).some((task) => task.caseId === "c1"), false, "resumed phase contexts are cleaned when their artifacts return");
 	} finally {
 		await server.close();
 	}

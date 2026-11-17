@@ -235,7 +235,10 @@ export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now()
 		const phase = phaseOf(caseFile, phaseId);
 		if (phase.status !== "active") throw new CaseError(`Case ${id}'s ${phase.name} phase is not active.`);
 		const report = clip(result?.report ?? result?.failure ?? "", POLICY.limits.case.artifactChars);
-		const ended = result?.stopped === true ? "stopped" : result?.returned === true ? "complete" : "ended";
+		// A terminal stop wins a race with an ordinary phase return. The late words may remain inspectable, but they
+		// cannot turn a stopped case back into a completed phase or make its report look like a completed artifact.
+		const stopped = result?.stopped === true || caseFile.status === "stopped";
+		const ended = stopped ? "stopped" : result?.returned === true ? "complete" : "ended";
 		phase.status = ended;
 		phase.endedAt = at;
 		phase.artifact = {
@@ -243,7 +246,7 @@ export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now()
 			chars: report.chars,
 			digest: digest(String(result?.report ?? result?.failure ?? "")),
 			...(report.clipped ? { clipped: true } : {}),
-			...(result?.done === true ? { done: true } : result?.returned === true ? { done: false } : {}),
+			...(stopped ? {} : result?.done === true ? { done: true } : result?.returned === true ? { done: false } : {}),
 			...(typeof result?.summary === "string" && result.summary.trim() !== "" ? { summary: compact(result.summary) } : {}),
 			...(typeof result?.failure === "string" && result.failure.trim() !== "" ? { failure: compact(result.failure) } : {}),
 		};
