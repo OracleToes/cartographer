@@ -1384,7 +1384,7 @@ test("context: file-read results are ephemeral — successful reply batches repl
 	];
 	const { messages, tail } = dressReads(convo);
 	// Earlier successful batches leave one line; brain reads and failed file reads stay inline and never evict the current batch.
-	assert.match(rawText(messages[2]), /no longer in view — read a\.js/);
+	assert.match(rawText(messages[2]), /no longer in active view — read a\.js/);
 	assert.equal(rawText(messages[4]), "{ \"entries\": [] }", "ledger read stays inline");
 	assert.match(rawText(messages[6]), /stands in the current read batch at the end of the request[^\n]*read f9 lines 1-40/);
 	assert.match(rawText(messages[8]), /No file at missing\.js/, "failed read stays inline");
