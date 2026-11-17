@@ -436,7 +436,7 @@ export async function runScreen(session, options, runTerminal) {
 		brain = next;
 		return brain;
 	};
-	/** The two rows of the strip, as spans. */
+	/** The activity, shared-state, and key-reminder rows of the strip, as spans. */
 	const status = () => {
 		const busy = core.busy();
 		if (busy && state.busySince === undefined) {
@@ -1438,16 +1438,19 @@ export async function runScreen(session, options, runTerminal) {
 			const question = session.asks?.pending();
 			const typed = prompt.getText();
 			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
-			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to type";
-			return [[" COMMANDS ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
+			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to write";
+			return [[" COMMAND MODE ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
 		prompt() {
 			const question = session.asks?.pending();
-			if (question !== undefined) return { text: "? ", style: "warn bold" };
-			// What is switched off is in the strip; here stands only where the words go.
-			return { text: session.activeTask?.() !== undefined && core.busy() ? "→ task › " : "› ", style: "user bold" };
+			if (question !== undefined) return { text: "Answer › ", style: "warn bold" };
+			// Keep the terminal core's safety marks at the place someone acts, but give the words a stable human role
+			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
+			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
+			const role = session.activeTask?.() !== undefined && core.busy() ? "Task" : "You";
+			return { text: `${marks === "" ? "" : `${marks} `}${role} › `, style: marks === "" ? (role === "Task" ? "tool bold" : "user bold") : "warn bold" };
 		},
-		placeholder: () => (session.asks?.pending() !== undefined ? "your answer" : core.busy() ? "type to speak to the agent while it works · Esc for commands" : "type a message, or /help · Esc for commands"),
+		placeholder: () => (session.asks?.pending() !== undefined ? "Write the answer" : core.busy() ? "Message the agent while it works · Esc for commands" : "Message Cartographer, or /help · Esc for commands"),
 	};
 	const chatBody = new ChatBody(ui);
 	const scrollbar = { scrollbar: "auto", scrollbarTrackStyle: (text) => `${sgr("faint")}${text}\x1b[39m`, scrollbarThumbStyle: (text) => `${sgr("muted")}${text}\x1b[39m` };

@@ -44,21 +44,24 @@ Enter or `y` sets up the brain and starts a session. Anything else leaves the fo
 On a terminal `carto` takes the whole screen. `carto --plain` gives the line-by-line terminal described further down instead, and so does `"screen": false` in the settings; with `-p` or piped input it is always the plain one.
 
 ```
- 1 Talk  2 Work  3 Carto  4 Diff  5 Shells  6 Model                 Esc: commands · F1: keys
+ Cartographer   1 Talk  2 Work  3 Carto  4 Diff  5 Shells  6 Model
 
 ▎› add a seed option to the roller
 
 The roller takes --seed now. Two tests cover it; both pass.
 
-▸ 14 calls · t3 · 1m 12s
+│▸ 14 calls · t3 · 1m 12s
 ◂ report t3  1,204 characters  (/report shows it)
 
 ⠹ task m3 · edit src/roll.py · 38s · 31 tok/s
 ctx ▮▮▮▯▯▯▯▯ 41k/100k · 1 goal · plan 2/5 · approved · 1 window, 1 busy · 2 wakes
-→ task ›  type to speak to the agent while it works · Esc for commands
+Esc: commands · Ctrl-O: $EDITOR · ? all keys
+Task ›  Message the agent while it works · Esc for commands
 ```
 
 (An illustration of the layout, not a recorded run.)
+
+The screen is deliberately static: the filled top tab is the primary location, the quieter second row names its current subview, and selected rows remain the strongest content surface. Message and work blocks use a one-cell role rail plus a faint fill rather than a bright card per line. The activity strip steps down from immediate work to shared state to its key reminder, and the input names who is speaking (**You**, **Task**, or **Answer**) rather than relying on a bare prompt glyph. On narrower terminals labels compact as whole words and margins shrink before content does. These are hierarchy and alignment cues, not animations; labels and glyphs still carry the meaning when colour is unavailable.
 
 | Tab | What it shows |
 |---|---|
@@ -67,7 +70,7 @@ ctx ▮▮▮▯▯▯▯▯ 41k/100k · 1 goal · plan 2/5 · approved · 1 win
 | **3 Carto** | The live shared brain: Atlas, Ledger, Plan, Requests, Tree, and **Current shared brain**. Shelf and report material lives here, not in Model. |
 | **4 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
 | **5 Shells** | The shell windows, live. Open a window for its newest lines or its terminal-emulator output. |
-| **6 Model** | **Latest sent**, **Main sent**, **Next preview**, and **Current accounting**. It separates frozen provider requests from an unsent calculation and live accounting. |
+| **6 Model** | **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. It separates frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
 
 Tabs 3 to 6 are lists of items that fold. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it. Carto is read again while it shows; Diff, Shells, and Model refresh more often.
 
@@ -103,7 +106,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | Ctrl-L | Draw the screen again. |
 | F1 | Show the keys. |
 
-**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off.
+**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A quieter third row keeps the relevant key reminder beside the input.
 
 #### Talk, Work, and Model
 

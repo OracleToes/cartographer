@@ -12,8 +12,17 @@ import { CURSOR_MARKER, Editor, renderFakeCursor, truncateToWidth, visibleWidth 
 import { POLICY } from "../config.mjs";
 import { cut, paint, paintStyled, sgr, width as cells, wrap } from "./text.mjs";
 
-/** Empty cells at the left and right edge of the screen; none on a screen too narrow to spare them. */
-export const marginOf = (width) => (width >= 30 ? 2 : 0);
+/**
+ * Empty cells at the left and right edge of the screen. Wide terminals get a calmer reading column; narrow ones
+ * give those cells back to the content instead of making every row feel needlessly cramped.
+ */
+export const marginOf = (width) => {
+	if (width < 36) return 0;
+	if (width < 72) return 1;
+	if (width < 120) return 2;
+	if (width < 160) return 4;
+	return 6;
+};
 /** From how many rows on the screen has an empty row under the tabs, above the strip and under what is typed. */
 export const AIRY_ROWS = POLICY.limits.screen.airyRows;
 
@@ -93,9 +102,16 @@ export function contentRow(line, width, chosen = false) {
 	const inner = width - 2 * marginOf(width);
 	if (line === undefined) return " ".repeat(width);
 	if (line.styled !== undefined) return `${edge(width)}${paintStyled(line.styled, line.cells, inner, chosen ? "bgSel" : "")}${edge(width)}`;
-	// A block's text stands a cell in from its edge; what you said has that edge drawn, in your colour.
-	const lead = line.pad ? [[line.bg === "bgUser" ? "▎" : " ", "user"]] : [];
-	return `${edge(width)}${paint([...lead, ...line.spans], inner, chosen ? "bgSel" : (line.bg ?? ""))}${edge(width)}`;
+	// A block gets one quiet, consistent rail. It groups a multi-line message without making every line compete for
+	// attention: your words have a blue edge, tool work a teal one, and private notes a violet one.
+	const rail = line.pad
+		? ({
+				bgUser: ["▎", "user"],
+				bgTool: ["│", "tool"],
+				bgNote: ["┊", "note"],
+			}[line.bg] ?? [" ", ""])
+		: undefined;
+	return `${edge(width)}${paint([...(rail === undefined ? [] : [rail]), ...line.spans], inner, chosen ? "bgSel" : (line.bg ?? ""))}${edge(width)}`;
 }
 /** A line that pi-tui will take: never wider than it was asked for, whatever went into it. */
 const safe = (line, width) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line);
@@ -123,14 +139,29 @@ export class TabBar {
 		return guarded(width, () => {
 			const { ui } = this;
 			const inner = width - 2 * marginOf(width);
+			const full = ui.tabs.map((tab, index) => ` ${index + 1} ${tab.name} `);
+			const compact = ui.tabs.map((_tab, index) => ` ${index + 1} `);
+			const brand = " Cartographer ";
+			const total = (labels) => labels.reduce((sum, label) => sum + widthOf(label), 0);
+			// The product name is useful orientation when there is room. On smaller terminals, preserve the tab names;
+			// if those do not fit either, the numbered tabs stay whole rather than being cut halfway through a name.
+			const showBrand = widthOf(brand) + 1 + total(full) <= inner;
+			const labels = total(full) + (showBrand ? widthOf(brand) + 1 : 0) <= inner ? full : compact;
 			const spans = [];
 			this.spans = [];
 			let x = 0;
+			if (showBrand) {
+				spans.push([brand, "carto bold"]);
+				x += widthOf(brand);
+				spans.push([" ", ""]);
+				x++;
+			}
 			for (const [index, tab] of ui.tabs.entries()) {
-				const label = ` ${index + 1} ${tab.name} `;
-				this.spans.push({ id: tab.id, from: marginOf(width) + x, to: marginOf(width) + x + label.length });
+				const label = labels[index];
+				const cells = widthOf(label);
+				this.spans.push({ id: tab.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
 				spans.push([label, tab.id === ui.state.tab ? "bgTab" : "muted"]);
-				x += label.length;
+				x += cells;
 			}
 			return [barRow(spans, width, "bgBar")];
 		});
@@ -154,20 +185,68 @@ export class ViewBar {
 		return guarded(width, () => {
 			const { ui } = this;
 			const views = ui.views();
-			const spans = [[" ", ""]];
-			this.spans = [];
-			let x = 1;
-			for (const view of views) {
-				const label = ` ${view.name} `;
-				this.spans.push({ id: view.id, from: marginOf(width) + x, to: marginOf(width) + x + label.length });
-				spans.push([label, view.id === ui.view() ? "user bold under" : "muted"]);
-				x += label.length;
-			}
+			const inner = width - 2 * marginOf(width);
+			if (views.length === 0) return [barRow([], width, "bgPanel")];
+			const active = views.find((view) => view.id === ui.view()) ?? views[0];
+			const prefix = " views ";
+			const roomySeparator = " · ";
+			const compactSeparator = "·";
+			const roomySwitchHint = "  [ ] switch";
+			const compactSwitchHint = " [ ]";
+			const labelOf = (view) => ` ${view.name} `;
+			// Names remain descriptive in the roomy layout. A compact vocabulary keeps every sibling visible at the
+			// common 80-column width, instead of turning the secondary navigation into a clipped sentence.
+			const compactName = (view) =>
+				({
+					"Current shared brain": "Brain",
+					"Last step": "Last",
+					"This session": "Session",
+					"git HEAD": "HEAD",
+					"Latest sent": "Latest",
+					"Main sent": "Main",
+					"Raw payload": "Raw",
+					"Next preview": "Preview",
+					"Current accounting": "Accounting",
+				}[view.name] ?? view.name);
+			const compactLabelOf = (view) => ` ${compactName(view)} `;
+			const navWidth = (makeLabel, separator) => views.reduce((sum, view, index) => sum + widthOf(makeLabel(view)) + (index === 0 ? 0 : widthOf(separator)), 0);
 			const file = ui.fileHint();
-			spans.push(["   [ ] change view", "faint"]);
-			x += widthOf("   [ ] change view");
-			// The file goes in only whole; a hint cut in half says where e goes nowhere.
-			if (file !== undefined && x + widthOf(` · ${file}`) <= width - 2 * marginOf(width)) spans.push([` · ${file}`, "faint"]);
+			const fileHint = file === undefined ? "" : ` · ${file}`;
+			const allFit = widthOf(prefix) + navWidth(labelOf, roomySeparator) + widthOf(roomySwitchHint) <= inner;
+			const compactFit = widthOf(prefix) + navWidth(compactLabelOf, compactSeparator) + widthOf(compactSwitchHint) <= inner;
+			const spans = [[prefix, "faint"]];
+			this.spans = [];
+			let x = widthOf(prefix);
+			if (allFit || compactFit) {
+				const compact = !allFit;
+				const makeLabel = compact ? compactLabelOf : labelOf;
+				const separator = compact ? compactSeparator : roomySeparator;
+				const switchHint = compact ? compactSwitchHint : roomySwitchHint;
+				for (const [index, view] of views.entries()) {
+					if (index > 0) {
+						spans.push([separator, "faint"]);
+						x += widthOf(separator);
+					}
+					const label = makeLabel(view);
+					const cells = widthOf(label);
+					this.spans.push({ id: view.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
+					spans.push([label, view.id === active.id ? "user bold under" : "muted"]);
+					x += cells;
+				}
+				spans.push([switchHint, "faint"]);
+				x += widthOf(switchHint);
+				// The file goes in only whole; a hint cut in half says where e goes nowhere.
+				if (fileHint !== "" && x + widthOf(fileHint) <= inner) spans.push([fileHint, "faint"]);
+			} else {
+				// At a narrow width, one clear current view beats a ragged, half-visible row of alternatives. The
+				// persistent [ ] cue keeps the complete view switcher discoverable without pretending hidden labels fit.
+				const room = Math.max(1, inner - x - widthOf(compactSwitchHint) - 2);
+				const label = ` ${cut(compactName(active), room)} `;
+				const cells = widthOf(label);
+				this.spans.push({ id: active.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
+				spans.push([label, "user bold under"]);
+				spans.push([compactSwitchHint, "faint"]);
+			}
 			return [barRow(spans, width, "bgPanel")];
 		});
 	}
@@ -274,14 +353,19 @@ export class ListBody {
 	}
 }
 
-/** The strip: what the agent is doing, and how things stand. `ui.status()` gives its two rows as spans. */
+/** The strip: what the agent is doing, shared state, and the current key reminder. `ui.status()` gives its rows as spans. */
 export class Strip {
 	constructor(ui) {
 		this.ui = ui;
 	}
 	invalidate() {}
 	render(width) {
-		return guarded(width, () => this.ui.status().map((spans) => barRow(spans, width, "bgBar")));
+		return guarded(width, () => {
+			// The strip reads from now to later: immediate activity, quieter shared state, then the key reminder next
+			// to the input. Giving those rows descending chrome makes the information order visible without extra rules.
+			const grounds = ["bgBar", "bgPanel", "bgInput"];
+			return this.ui.status(width).map((spans, index) => barRow(spans, width, grounds[index] ?? "bgPanel"));
+		});
 	}
 }
 

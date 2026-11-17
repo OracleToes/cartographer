@@ -1690,7 +1690,8 @@ test("screen: Work folds the agent's private trace into one line, opens it to a 
 	// What is being written now is shown as it grows: notes, a message, the arguments of a call.
 	chat.user("Write it");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: "The file needs a seed." }, call("c9", "task", { brief: "Add a seed\nto the roller" })] });
-	has(text(), "┊ The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
+	has(text(), "The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
+	assert.equal(chat.lines(80).find((line) => line.kind === "live" && line.bg === "bgNote")?.bg, "bgNote", "live private material uses the same quiet block as a completed note");
 	assert.equal(chat.doing().what, "writing task Add a seed to the roller");
 	// `book file edit` streams `oldText` and then `newText`; both show as they are written, and `newText` wins at equal length.
 	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)" })] });
@@ -1815,7 +1816,7 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 	chat.setAll(false);
 	has(text(), "▸ thinking · 8 earlier lines · Enter opens all", "fold all returns it to the compact tail");
 	assert.equal(chat.toggleLive(live.liveDepth, true), true, "the selected live stream opens");
-	has(text(), "▾ thinking · 10 lines · Enter folds\n┊ thought 1", "opening shows the beginning as well as the tail");
+	has(text(), "▾ thinking · 10 lines · Enter folds\nthought 1", "opening shows the beginning as well as the tail");
 	assert.equal(chat.textOf("live:0"), thought, "copying the live stream takes its whole reasoning");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought 11` }] });
 	has(text(), "▾ thinking · 11 lines · Enter folds", "an opened stream stays open as it grows");
@@ -1824,10 +1825,11 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 	has(text(), "thinking… (Ctrl-T shows it)", "Ctrl-T hides the live reasoning");
 	hasNot(text(), "thought 11", "the hidden stream does not leave its open text behind");
 	chat.setThinking(true);
-	has(text(), "▾ thinking · 11 lines · Enter folds\n┊ thought 1", "showing thinking again keeps the deliberate open state");
+	has(text(), "▾ thinking · 11 lines · Enter folds\nthought 1", "showing thinking again keeps the deliberate open state");
 	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought 11` }] }] });
 	hasNot(text(), "Enter folds", "the completed reply has no live expansion control");
-	has(text(), "┊ thought 1", "the completed reasoning stands as its saved message");
+	has(text(), "thought 1", "the completed reasoning stands as its saved message");
+	assert.equal(chat.lines(40).find((line) => line.kind === "reasoning")?.bg, "bgNote", "completed private reasoning keeps its own quiet block instead of blending into tool work");
 	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
 	const next = Array.from({ length: 5 }, (_entry, index) => `next ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 10, content: [{ type: "thinking", thinking: next }] });
@@ -2017,7 +2019,7 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(hues.every((hue) => hue.c > 0.07), `and each is a colour, not a grey: ${what}`);
 		assert.ok(Math.abs(hues[0].h - HUES.user) < 12 && Math.abs(hues[1].h - HUES.tool) < 12, `the hues are the ones named: ${what}`);
 		// Where it is: every block is near the background, in its own direction, and all of them tell apart.
-		const blocks = ["bgUser", "bgTool", "bgPanel", "bgInput", "bgBar", "bgSel"];
+		const blocks = ["bgUser", "bgTool", "bgNote", "bgPanel", "bgInput", "bgBar", "bgSel"];
 		for (const name of blocks) assert.ok(far(rgb[name], rgb.bg) < 70, `${name} stays near the background: ${what}`);
 		assert.equal(new Set(blocks.map((name) => rgb[name].join())).size, blocks.length, `each block has a background of its own: ${what}`);
 		assert.ok(far(rgb.bgSel, rgb.bg) > far(rgb.bgUser, rgb.bg) && far(rgb.bgUser, rgb.bg) > far(rgb.bgTool, rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
@@ -2077,7 +2079,7 @@ test("screen: lines are painted on their block's background, and text says by it
 		"- | ",
 		"bgUser | › {user bold}Look at it{bold}",
 		"- | ",
-		"- | ┊ {faint}A thought.{note italic}",
+		"bgNote | A thought.{note italic}",
 		"- | ",
 		"bgTool | ▸ {tool}1 call · t1 · 0s{muted}{err}",
 		"- | ◂ {carto}report t1  5 characters{muted}",
@@ -2105,6 +2107,74 @@ test("screen: lines are painted on their block's background, and text says by it
 	const call = opened.find((line) => line.kind === "call");
 	chat.toggleRow(call.item, call.row);
 	assert.ok(chat.lines(60).some((line) => line.kind === "detail"), "and a call that is opened inside it shows what it returned");
+});
+
+test("screen: static chrome keeps hierarchy, affordances, and whole labels across terminal widths", async () => {
+	const { TabBar, ViewBar, contentRow, marginOf } = await import("../src/screen/parts.mjs");
+	const { clean } = await import("../src/screen/text.mjs");
+	const tabs = [
+		{ id: "chat", name: "Talk" },
+		{ id: "work", name: "Work" },
+		{ id: "carto", name: "Carto" },
+		{ id: "diff", name: "Diff" },
+		{ id: "shells", name: "Shells" },
+		{ id: "context", name: "Model" },
+	];
+	const views = [
+		{ id: "window", name: "Latest sent" },
+		{ id: "main", name: "Main sent" },
+		{ id: "raw", name: "Raw payload" },
+		{ id: "preview", name: "Next preview" },
+		{ id: "parts", name: "Current accounting" },
+	];
+	const picked = [];
+	const ui = {
+		tabs,
+		state: { tab: "context" },
+		views: () => views,
+		view: () => "raw",
+		fileHint: () => "src/screen/app.mjs",
+		setTab: (id) => picked.push(`tab:${id}`),
+		setView: (id) => picked.push(`view:${id}`),
+	};
+	const text = (line) => clean(line).replace(/ +$/, "");
+	assert.deepEqual([20, 35, 36, 71, 72, 119, 120, 159, 160].map(marginOf), [0, 0, 1, 1, 2, 2, 4, 4, 6], "the reading margin grows only when the terminal has room for it");
+
+	const wideTabs = new TabBar(ui);
+	const wide = text(wideTabs.render(80)[0]);
+	has(wide, "Cartographer", "a roomy tab bar establishes the product before its areas");
+	has(wide, "1 Talk", "the full tab labels scan with their number keys");
+	has(wide, "6 Model", "the last tab remains visible too");
+	wideTabs.handleMouse({ type: "click", button: "left", x: wideTabs.spans[2].from, y: 0 });
+	assert.equal(picked.pop(), "tab:carto", "the re-spaced tab still receives its own click");
+	const narrow = text(new TabBar(ui).render(35)[0]);
+	assert.equal(narrow, " 1  2  3  4  5  6", "when names cannot fit, the compact tabs remain complete instead of clipping one another");
+
+	const compactViews = new ViewBar(ui);
+	const compact = text(compactViews.render(80)[0]);
+	has(compact, "Latest", "the common-width subview bar keeps the first sibling visible");
+	has(compact, "Accounting", "and it keeps the last sibling visible");
+	has(compact, "[ ]", "the keyboard affordance stays beside the subviews");
+	hasNot(compact, "Latest sent", "compact labels are deliberate, not clipped full labels");
+	compactViews.handleMouse({ type: "click", button: "left", x: compactViews.spans[3].from, y: 0 });
+	assert.equal(picked.pop(), "view:preview", "every compact subview keeps its click target");
+	const cartoViews = [
+		{ id: "atlas", name: "Atlas" },
+		{ id: "ledger", name: "Ledger" },
+		{ id: "plan", name: "Plan" },
+		{ id: "requests", name: "Requests" },
+		{ id: "tree", name: "Tree" },
+		{ id: "hands", name: "Current shared brain" },
+	];
+	const cartoCompact = text(new ViewBar({ ...ui, views: () => cartoViews, view: () => "atlas" }).render(80)[0]);
+	has(cartoCompact, "Atlas", "the six Carto subviews keep their first item visible at the common width");
+	has(cartoCompact, "Brain", "and compact the long Current shared brain name without hiding that view");
+	const roomy = text(new ViewBar(ui).render(120)[0]);
+	has(roomy, "Latest sent", "a wide terminal restores the descriptive subview names");
+	has(roomy, "Current accounting", "without changing the underlying information architecture");
+
+	has(text(contentRow({ spans: [["your message", ""]], bg: "bgUser", pad: 1 }, 40)), "▎your message", "your multi-line block has a stable blue rail");
+	has(text(contentRow({ spans: [["tool work", ""]], bg: "bgTool", pad: 1 }, 40)), "│tool work", "tool work has its own quieter rail");
 });
 
 test("screen: a list of items that fold: the selection, opening one and all, folders, what is in view, and what e and y act on", async () => {

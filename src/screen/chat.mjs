@@ -11,7 +11,7 @@
 //   what the agent says    plain text on the screen's own background, as Markdown: the most readable thing there is
 //   what the agent does    a block in the tools' hue; a mark at full strength for each call, the rest muted
 //   what Cartographer says muted, with its mark picked out; a warning in the colour of attention
-//   notes and thinking     faint and italic, behind a gutter
+//   notes and thinking     faint and italic, on a quiet violet block with a fine rail
 // Blocks of different kinds stand a blank row apart, and what a task leaves behind stands right under its run.
 //
 // This file is the model: items in, lines out. A line is { spans, bg?, styled?, … }: `bg` names the block it
@@ -604,9 +604,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					}
 				} else if (item.type === "note" || item.type === "reasoning") {
 					if (!thinking) return;
+					// Private material is its own quiet block, rather than borrowing the tools' cyan. Its rail and faint
+					// violet surface make it easy to keep separate from both speech and work without elevating its weight.
+					const ref = { item: item.key, kind: item.type, bg: "bgNote" };
 					const label = item.type === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : "Agent note · provider response · replay: active-context dependent";
-					if (projection === "work") add([[`┊ Main · ${label}`, "faint"]], { item: item.key, kind: item.type });
-					for (const piece of wrap(item.text, cols - 2)) add([["┊ ", "faint"], [piece, "note italic"]], { item: item.key, kind: item.type });
+					if (projection === "work") add([[`Main · ${label}`, "faint"]], ref);
+					for (const piece of wrap(item.text, cols - 2)) add([[piece, "note italic"]], ref);
 				} else if (item.type === "console") {
 					if (projection === "work") add([["Harness · notice", "faint"]], { item: item.key, kind: "console" });
 					const question = /^\? /.test(item.text);
@@ -683,7 +686,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					}
 				}
 				if (projection === "talk") continue;
-				const block = depth > 0 ? { bg: "bgTool" } : {};
+				// A main reply's private material should look like its completed counterpart from the first token. A focus
+				// stays inside the teal work block that owns it.
+				const block = { bg: depth > 0 ? "bgTool" : "bgNote" };
 				const privateResponse = (kind, text) => {
 					if (text.trim() === "" || !thinking) return;
 					const room = inner - width(indent) - 2;
@@ -694,12 +699,13 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					const expandable = current.open || omitted > 0;
 					const ref = expandable ? { item: `live:${depth}`, kind: "live", liveDepth: depth, ...block } : { kind: "live", ...block };
 					const label = kind === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : kind === "note" ? "Agent note · provider response · replay: active-context dependent" : kind;
+					const noteLead = depth > 0 ? `${indent}┊ ` : "";
 					if (depth === 0 && before !== kind) blank();
 					if (expandable) {
 						const lines = current.open ? `${full.length} ${full.length === 1 ? "line" : "lines"} · Enter folds` : `${omitted} earlier ${omitted === 1 ? "line" : "lines"} · Enter opens all`;
 						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${projection === "work" ? `${depth > 0 ? "Focus" : "Main"} · ` : ""}${label} · ${lines}`, "faint"]], ref);
-					} else if (projection === "work") add([[`${indent}┊ `, "faint"], [`${depth > 0 ? "Focus" : "Main"} · ${label}`, "faint"]], ref);
-					for (const piece of pieces) add([[`${indent}┊ `, "faint"], [piece, "note italic"]], ref);
+					} else if (projection === "work") add([[noteLead, "faint"], [`${depth > 0 ? "Focus" : "Main"} · ${label}`, "faint"]], ref);
+					for (const piece of pieces) add([[noteLead, "faint"], [piece, "note italic"]], ref);
 					before = kind;
 				};
 				if (projection === "all") privateResponse(thinkingOf(message).trim() === "" ? "note" : "thinking", noteOf(message));
@@ -709,7 +715,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				}
 				if (!thinking && projection === "all" && noteOf(message).trim() !== "" && calls.length === 0) {
 					if (depth === 0 && before !== "note") blank();
-					add([[`${indent}┊ `, "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
+					add([[depth > 0 ? `${indent}┊ ` : "", "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
 					before = "note";
 				}
 				for (const call of calls.filter((entry) => entry.name !== "chat")) {
