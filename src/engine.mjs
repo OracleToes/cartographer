@@ -16,6 +16,7 @@
 // conversation: they need what the conversation's requests must never have, a fixed
 // reply shape and a different end.
 import { POLICY } from "./config.mjs";
+import { createHash } from "node:crypto";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { describeCall, describeResult } from "./terminal.mjs";
 import { createRefDescriber } from "./refs.mjs";
@@ -34,6 +35,28 @@ const ASK_SECONDS = POLICY.timing.context.handoffQuestionSeconds;
 const NOTE_TAG = new RegExp(`(?:${POLICY.markup.note.open}|${POLICY.markup.note.close})\\n?`, "g");
 
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
+
+/** A JSON-shaped value copied away from a live provider or Durable object. */
+const copyJson = (value) => {
+	try { return structuredClone(value); } catch {
+		try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+	}
+};
+/** The provider body as it stood at the last hook before dispatch. JSON is both the durable comparison form and the
+ * closest local account of what the HTTP client serializes; a provider may still apply its own transport details. */
+const snapshotPayload = (payload) => {
+	try {
+		const json = JSON.stringify(payload);
+		return { payload: JSON.parse(json), json, hash: createHash("sha256").update(json).digest("hex").slice(0, 16) };
+	} catch {
+		return { payload: copyJson(payload), json: undefined, hash: undefined };
+	}
+};
+const modelRef = (model) => ({
+	...(typeof model?.provider === "string" ? { provider: model.provider } : {}),
+	...(typeof model?.api === "string" ? { api: model.api } : {}),
+	...(typeof model?.id === "string" ? { id: model.id } : {}),
+});
 
 /** A stored reply in the shape the server is sent. */
 function replyForServer(message, results) {
@@ -216,20 +239,29 @@ export function createEngine({ root, brainDir, config }) {
 			of(conversationId).messages = messages;
 		},
 		messagesOf: (conversationId) => of(conversationId).messages,
-		/** The body of a request as it is sent. */
-		sending(conversationId, payload) {
+		/** The provider body at the last hook before dispatch. It is copied now: a screen view may never acquire later
+		 * provider, response, or brain changes and still call itself a sent request. */
+		sending(conversationId, payload, model) {
 			const state = of(conversationId);
+			const frozen = snapshotPayload(payload);
 			newest = conversationId;
 			state.sentAt = Date.now();
 			state.sent = (state.sent ?? 0) + 1;
-			state.payload = payload;
+			state.requestId = `${conversationId}:${state.sent}`;
+			state.payload = frozen.payload;
+			state.payloadJson = frozen.json;
+			state.payloadHash = frozen.hash;
+			state.model = modelRef(model);
 			state.reply = undefined;
+			state.usage = undefined;
 			state.results = new Map();
 		},
-		/** The reply to it. */
+		/** The reply to it. Usage is preserved as the provider reported it; `used` remains the existing collapse
+		 * accounting total (input + cache read + output), not a claim that the sent input has that size. */
 		replied(conversationId, message) {
 			const state = of(conversationId);
-			state.reply = message;
+			state.reply = copyJson(message);
+			state.usage = copyJson(message.usage);
 			state.results = new Map();
 			const used = (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.output ?? 0);
 			if (used > 0) state.used = used;
@@ -243,10 +275,11 @@ export function createEngine({ root, brainDir, config }) {
 		},
 		usedBy: (conversationId) => of(conversationId).used,
 		/**
-		 * What an agent was last sent, exactly as the server got it, and what has come since: for the screen's
-		 * Context tab. `which` is "main" for the main agent, anything else for whoever asked last (a task while
-		 * one runs). undefined before the first request of this run of carto.
-		 * @returns {undefined | { task: boolean, payload: any, reply?: any, results: Map<string, string>, at: number, count: number, used?: number, collapsedSince: boolean }}
+		 * The latest frozen provider request for a conversation, plus response material that arrived after it. The
+		 * response is deliberately separate from `payload`: it belongs to a possible later request, never to the one
+		 * already sent. `which` is "main" for the main agent, anything else for the newest conversation. Undefined
+		 * before the first request of this run of carto.
+		 * @returns {undefined | { task: boolean, conversationId: string, requestId: string, payload: any, payloadJson?: string, payloadHash?: string, model: object, reply?: any, results: Map<string, string>, at: number, count: number, usage?: object, used?: number, collapsedSince: boolean }}
 		 */
 		window(which) {
 			const id = which === "main" || newest === undefined ? ROOT_CONVERSATION_ID : newest;
@@ -254,7 +287,22 @@ export function createEngine({ root, brainDir, config }) {
 			if (state.payload === undefined) return undefined;
 			const at = id === ROOT_CONVERSATION_ID ? loadContext(brainDir).front?.at : undefined;
 			const front = typeof at === "number" ? at : Date.parse(at ?? "");
-			return { task: id !== ROOT_CONVERSATION_ID, payload: state.payload, reply: state.reply, results: state.results ?? new Map(), at: state.sentAt, count: state.sent, used: state.used, collapsedSince: Number.isFinite(front) && front > state.sentAt };
+			return {
+				task: id !== ROOT_CONVERSATION_ID,
+				conversationId: id,
+				requestId: state.requestId ?? `${id}:${state.sent ?? 0}`,
+				payload: copyJson(state.payload),
+				...(state.payloadJson === undefined ? {} : { payloadJson: state.payloadJson }),
+				...(state.payloadHash === undefined ? {} : { payloadHash: state.payloadHash }),
+				model: copyJson(state.model ?? {}),
+				...(state.reply === undefined ? {} : { reply: copyJson(state.reply) }),
+				results: new Map(state.results ?? []),
+				at: state.sentAt,
+				count: state.sent,
+				...(state.usage === undefined ? {} : { usage: copyJson(state.usage) }),
+				...(state.used === undefined ? {} : { used: state.used }),
+				collapsedSince: Number.isFinite(front) && front > state.sentAt,
+			};
 		},
 		/** What the last collapse did, for the screen; read once. */
 		takeCollapsed() {

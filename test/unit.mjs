@@ -1424,6 +1424,31 @@ test("engine: task read turnover drops only redundant task steps, never schedule
 	assert.equal(task.dropped.s1, "An earlier read of the same lines stood here; the newer one is further down.");
 });
 
+test("engine: a sent provider request is an immutable snapshot with separate provider usage", (t) => {
+	const { root, brainDir } = fresh(t);
+	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
+	const focus = "focus-snapshot";
+	const payload = { model: "qwen", stream: true, messages: [{ role: "user", content: "first words" }], tools: [{ type: "function", function: { name: "read" } }] };
+	engine.sending(focus, payload, { provider: "local", api: "openai-completions", id: "qwen" });
+	payload.messages[0].content = "changed after dispatch";
+	payload.tools[0].function.name = "changed";
+	engine.replied(focus, { role: "assistant", content: [{ type: "text", text: "reply" }], usage: { input: 10, cacheRead: 7, output: 3 } });
+
+	const first = engine.window("newest");
+	assert.equal(first.requestId, `${focus}:1`);
+	assert.equal(first.payload.messages[0].content, "first words", "the body was copied before outside code could mutate it");
+	assert.equal(first.payload.tools[0].function.name, "read");
+	assert.equal(first.payloadHash?.length, 16, "the frozen JSON has a short comparison hash");
+	assert.deepEqual(first.model, { provider: "local", api: "openai-completions", id: "qwen" });
+	assert.deepEqual(first.usage, { input: 10, cacheRead: 7, output: 3 }, "provider fields stay separate from the old collapse accounting total");
+	assert.equal(first.used, 20, "the existing total keeps its old collapse meaning");
+	first.payload.messages[0].content = "a screen cannot mutate the snapshot";
+	first.reply.content[0].text = "a screen cannot mutate the reply";
+	const again = engine.window("newest");
+	assert.equal(again.payload.messages[0].content, "first words", "window callers get copies too");
+	assert.equal(again.reply.content[0].text, "reply");
+});
+
 test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped cleanly", () => {
 	const legacy = "file body\n\n<shelf-ask>\nShould I shelf index.html? Yes or no.\n</shelf-ask>\n";
 	assert.equal(withoutShelfAsk(legacy), "file body");

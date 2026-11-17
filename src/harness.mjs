@@ -401,8 +401,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				},
 				// The request as it is sent: the question before a collapse is put behind exactly this.
 				beforeProviderRequest: ({ payload, model }, api) => {
-					// The declaration is static and flat; there is nothing to re-route here. `sending` keeps the collapse accounting honest.
-					engine.sending(api.conversationId, payload);
+					// The declaration is static and flat; there is nothing to re-route here. `sending` freezes this provider
+					// body for the Model view before pi-ai dispatches it; the collapse accounting uses the same snapshot.
+					engine.sending(api.conversationId, payload, model);
 					return { payload, model };
 				},
 				afterResponse: async (message, api) => {
