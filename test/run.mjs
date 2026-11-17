@@ -800,6 +800,44 @@ test("task: a change focus executes the cached declared move contract through an
 	}
 });
 
+test("case: bounded same-model phases keep blind evidence flow, artifacts, and shared-brain authority separate", async () => {
+	const root = makeProject("evidence-case", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({
+		caseSteps: { construct: ['book: {"target":"ledger","action":"add","kind":"note","text":"phase side channel"}'] },
+	});
+	try {
+		const result = await carto(root, server, ["-p", "case: Does src/main.js call the exported add function?"]);
+		ok(result, "bounded evidence case");
+		const file = join(root, ".brain", "cases", "c1.json");
+		assert.equal(existsSync(file), true, "the case has its own durable evidence file");
+		const evidence = JSON.parse(readFileSync(file, "utf8"));
+		assert.equal(evidence.status, "ready", "the phase runner stops before the main context's synthesis");
+		assert.deepEqual(evidence.phases.map((phase) => [phase.id, phase.status]), [["construct", "complete"], ["falsify", "complete"], ["witness", "complete"]]);
+		assert.match(evidence.capsule.digest, /^[a-f0-9]{64}$/, "the capsule is frozen and digested");
+		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
+		assert.equal(phases.length, 4, "the blocked constructor call gets one bounded retry, then each phase returns once");
+		const phaseText = (name) => phases.filter((request) => request.messages.map(rawText).join("\n").includes(`in the ${name} phase`));
+		const construct = phaseText("construction");
+		const falsify = phaseText("blind falsification");
+		const witness = phaseText("concrete witness");
+		assert.equal(construct.length, 2, "construction is the only phase that made the deliberately refused side-channel call");
+		assert.equal(falsify.length, 1);
+		assert.equal(witness.length, 1);
+		const constructorResult = construct.at(-1).messages.filter((message) => message.role === "tool").map(rawText).join("\n");
+		assert.match(constructorResult, /does not edit the shared brain or shelf/, "a phase cannot mutate shared brain state as an evidence side channel");
+		assert.doesNotMatch(falsify[0].messages.map(rawText).join("\n"), /CASE construct ARTIFACT/, "blind falsification does not receive construction prose");
+		const witnessText = witness[0].messages.map(rawText).join("\n");
+		assert.match(witnessText, /CASE construct ARTIFACT/, "the concrete check can inspect earlier artifacts deliberately");
+		assert.match(witnessText, /CASE falsify ARTIFACT/);
+		const { ledger } = loadLedger(join(root, ".brain"));
+		assert.equal(ledger.items.some((entry) => entry.text === "phase side channel"), false, "the blocked phase attempt did not promote its note");
+		assert.match(result.stdout, /ready for my synthesis/, "the main context receives the artifacts and, rather than a vote, must synthesize them itself");
+	} finally {
+		await server.close();
+	}
+});
+
 test("task: browser evidence outside m2's JavaScript boundary becomes a durable closure gap without undeclared edits", async () => {
 	const root = makeProject("browser-closure-gap", { git: false });
 	configure(root, { initiate: false });
@@ -2118,8 +2156,7 @@ test("screen: static chrome keeps hierarchy, affordances, and whole labels acros
 	const { TabBar, ViewBar, contentRow, marginOf } = await import("../src/screen/parts.mjs");
 	const { clean } = await import("../src/screen/text.mjs");
 	const tabs = [
-		{ id: "chat", name: "Talk" },
-		{ id: "work", name: "Work" },
+		{ id: "chat", name: "Chat" },
 		{ id: "carto", name: "Carto" },
 		{ id: "diff", name: "Diff" },
 		{ id: "shells", name: "Shells" },
@@ -2148,12 +2185,12 @@ test("screen: static chrome keeps hierarchy, affordances, and whole labels acros
 	const wideTabs = new TabBar(ui);
 	const wide = text(wideTabs.render(80)[0]);
 	has(wide, "Cartographer", "a roomy tab bar establishes the product before its areas");
-	has(wide, "1 Talk", "the full tab labels scan with their number keys");
-	has(wide, "6 Model", "the last tab remains visible too");
-	wideTabs.handleMouse({ type: "click", button: "left", x: wideTabs.spans[2].from, y: 0 });
+	has(wide, "1 Chat", "the full tab labels scan with their number keys");
+	has(wide, "5 Model", "the last tab remains visible too");
+	wideTabs.handleMouse({ type: "click", button: "left", x: wideTabs.spans[1].from, y: 0 });
 	assert.equal(picked.pop(), "tab:carto", "the re-spaced tab still receives its own click");
 	const narrow = text(new TabBar(ui).render(35)[0]);
-	assert.equal(narrow, " 1  2  3  4  5  6", "when names cannot fit, the compact tabs remain complete instead of clipping one another");
+	assert.equal(narrow, " 1  2  3  4  5", "when names cannot fit, the compact tabs remain complete instead of clipping one another");
 
 	const compactViews = new ViewBar(ui);
 	const compact = text(compactViews.render(80)[0]);
@@ -2327,7 +2364,8 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 		import("../src/screen/app.mjs"),
 		import("../src/screen/views.mjs"),
 	]);
-	assert.deepEqual(TABS.map((tab) => tab.name), ["Talk", "Work", "Carto", "Diff", "Shells", "Model"], "the top-level tabs name speech, private work, live brain, and provider inspection separately");
+	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model"], "the top-level tabs group speech and private activity under Chat before the project and provider views");
+	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }], "Chat keeps user-directed exchange and private case or focus activity as adjacent subtabs");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
 	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");

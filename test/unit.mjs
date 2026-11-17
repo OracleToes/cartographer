@@ -41,6 +41,7 @@ import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
+import { beginCasePhase, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, noteCaseMessage, readyCase, renderCaseForSynthesis, stopCase, synthesizeCase } from "../src/case.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -63,7 +64,51 @@ test("harness: a cached inspect brief restores its look contract", () => {
 		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
 	});
 	assert.deepEqual(runFromBrief({ mode: "change", network: false, move: "m3", revision: 4 }), { mode: "change", move: "m3", revision: 4 }, "only an explicit true carries network");
+	assert.deepEqual(runFromBrief({ mode: "look", turns: 3, caseId: "c1", phase: "falsify" }), { mode: "look", turns: 3, caseId: "c1", phase: "falsify" }, "a durable case-phase brief restores its separate evidence identity");
 	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
+});
+
+test("case: a frozen capsule keeps phase artifacts and participant routes without turning them into votes", (t) => {
+	const { brainDir } = fresh(t);
+	const created = createCase(brainDir, {
+		question: "Does the fixture support the stated invariant?",
+		context: "Only the selected snapshot and source reads count as evidence.",
+		evidence: [{ placement: "sh1", label: "fixture", source: { path: "src/math.js" }, digest: "a".repeat(64), item: { snapshot: "export const witness = true;" } }],
+		at: 100,
+	});
+	assert.equal(created.id, "c1");
+	assert.match(created.capsule.digest, /^[a-f0-9]{64}$/, "the frozen capsule records a digest");
+	assert.equal(noteCaseMessage(brainDir, "c1", "Check the exceptional input too.", { at: 110 }).entry.route, "queued", "input before a phase is queued durably");
+	const construct = beginCasePhase(brainDir, "c1", "construct", { conversationId: "phase-construct", at: 120 });
+	assert.deepEqual(construct.messages.map((message) => message.id), ["u1"], "the queued line joins the construction capsule");
+	markCaseMessagesDelivered(brainDir, "c1", ["u1"], "construct", { at: 121, via: "initial capsule" });
+	assert.equal(noteCaseMessage(brainDir, "c1", "Do not assume the happy path.", { at: 122, phase: "construct" }).entry.route, "active", "input during a phase names that active phase");
+	finishCasePhase(brainDir, "c1", "construct", { returned: true, done: true, report: "construction observation" }, { at: 130 });
+	let afterConstruct = loadCase(brainDir, "c1").case;
+	assert.equal(afterConstruct.phases.find((phase) => phase.id === "construct").artifact.text, "construction observation");
+	assert.equal(afterConstruct.messages.find((message) => message.id === "u2").route, "queued", "unread active input is retained for the next phase rather than dropped");
+	assert.equal(afterConstruct.messages.find((message) => message.id === "u2").unreadBy, "construct");
+	assert.equal(noteCaseMessage(brainDir, "c1", "Try the boundary value.", { at: 131 }).entry.route, "queued");
+	const falsify = beginCasePhase(brainDir, "c1", "falsify", { conversationId: "phase-falsify", at: 140 });
+	assert.deepEqual(falsify.messages.map((message) => message.id), ["u2", "u3"], "the next phase receives both previously unread and between-phase input");
+	markCaseMessagesDelivered(brainDir, "c1", ["u2", "u3"], "falsify", { at: 141, via: "initial capsule" });
+	finishCasePhase(brainDir, "c1", "falsify", { returned: true, done: false, report: "no counterexample in the bounded check" }, { at: 150 });
+	beginCasePhase(brainDir, "c1", "witness", { conversationId: "phase-witness", at: 160 });
+	finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, report: "concrete witness observed" }, { at: 170 });
+	const ready = readyCase(brainDir, "c1", { at: 180 });
+	const handoff = renderCaseForSynthesis(ready);
+	assert.match(handoff, /same model.*not independent agents, votes, or corroboration/i);
+	assert.match(handoff, /\[u1 .*offered to construct by initial capsule\]/, "the main handoff retains initial participant provenance");
+	assert.match(handoff, /\[u2 .*offered to falsify by initial capsule\]/, "the main handoff retains rerouted participant provenance");
+	const synthesized = synthesizeCase(brainDir, "c1", { outcome: "unresolved", report: "The construction and witness are bounded observations; the falsifier did not settle the invariant.", residual: "Exceptional input remains untested.", at: 190 });
+	assert.equal(synthesized.status, "synthesized");
+	assert.equal(synthesized.synthesis.outcome, "unresolved", "only the main synthesis labels the conclusion");
+
+	const stopped = createCase(brainDir, { question: "Can this second case be stopped?", at: 200 });
+	beginCasePhase(brainDir, stopped.id, "construct", { conversationId: "phase-stop", at: 201 });
+	const halted = stopCase(brainDir, stopped.id, { at: 202, why: "user stopped it" });
+	assert.equal(halted.status, "stopped");
+	assert.equal(halted.phases.find((phase) => phase.id === "falsify").status, "stopped", "a stop prevents later phases from starting");
 });
 
 test("context window: a reported capacity reserves configured reply room without raising the setting cap", () => {

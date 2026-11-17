@@ -7,6 +7,7 @@
 //   say: TEXT            answer TEXT
 //   task: BRIEF          call `task` with BRIEF; when the report is back, answer "Report received: <report>"
 //   task(m2): BRIEF      run declared move m2; the stored move contract supplies the brief
+//   case: QUESTION       start one bounded evidence case; case phases return named fixed artifacts
 //   look: DIRECTIVE      call a look or change tool itself (the harness should refuse it)
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
@@ -164,6 +165,7 @@ function mainCalls(text) {
 			const brief = task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n");
 			calls.push({ name: "task", args: task[1] ? { move: task[1] } : { brief, done_when: "The requested observation is stated in the report." } });
 		}
+		else if (part.startsWith("case:")) calls.push({ name: "case", args: { action: "start", question: part.slice(5).trim() } });
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
 		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));
 		else if (part === "sleep") calls.push({ name: "sleep", args: {} });
@@ -175,7 +177,7 @@ function mainCalls(text) {
 const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
-export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof } = {}) {
+export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof, caseSteps: forcedCaseSteps } = {}) {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		const text = textOf(message);
@@ -190,6 +192,18 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith(TASK_HEADER))) continue;
 		// The block that stands for a task's collapsed steps is not a message to obey.
 		if (message.role === "user" && /steps up to here \(\d+ repl/.test(raw)) continue;
+		if (message.role === "tool" && text.startsWith(TASK_HEADER) && text.includes("\nCase phase\n")) {
+			const phaseName = /\bin the (construction|blind falsification|concrete witness) phase\b/.exec(text)?.[1] ?? "case";
+			const phase = { construction: "construct", "blind falsification": "falsify", "concrete witness": "witness" }[phaseName] ?? "case";
+			const scripted = Array.isArray(forcedCaseSteps?.[phase]) ? forcedCaseSteps[phase].map((step) => String(step).trim()).filter((step) => step !== "") : [];
+			const turns = later.filter((entry) => entry.role === "assistant").length;
+			if (turns < scripted.length) {
+				const calls = scripted[turns].split(" +++ ").map(lookCall).filter((call) => call !== undefined);
+				if (calls.length > 0) return { calls };
+			}
+			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
+			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: true } }] };
+		}
 		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
 			const contractAt = text.indexOf("Move contract:\n");
 			const briefAt = text.indexOf("Brief:\n");
@@ -325,6 +339,7 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   closureGap: when set, a focused task's automatic return reports this exact durable closure gap.
  *   focusSteps: a fixed sequence of focused-task directives, used instead of what a capsule's brief says.
+ *   caseSteps: `{ construct, falsify, witness }` directives for named evidence phases; each phase otherwise returns its fixed artifact.
  *   returnProof: the proof text for that focused task's automatic return.
  */
 export async function startStandIn(options = {}) {
@@ -375,7 +390,7 @@ export async function startStandIn(options = {}) {
 			return;
 		}
 		requests.push(body);
-		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof });
+		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof, caseSteps: options.caseSteps });
 		const promptTokens = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 
 		response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
