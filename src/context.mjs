@@ -338,7 +338,7 @@ function outcomeOf(report) {
  */
 export function addRecord(brainDir, task) {
 	mkdirSync(reportsDir(brainDir), { recursive: true });
-	const head = [`Report ${task.id} · ${stamp(task.at)} · ${task.mode} task${task.item ? ` for ${task.item}` : ""}${task.failed ? " · it did not end well" : task.undone ? " · returned not done" : ""}`, "", "Brief:", task.brief, "", "Report:"].join("\n");
+	const head = [`Report ${task.id} · ${stamp(task.at)} · ${task.mode} task${task.move ? ` for ${task.move} r${task.revision}` : task.item ? ` for ${task.item}` : ""}${task.failed ? " · it did not end well" : task.undone ? " · returned not done" : ""}`, "", "Brief:", task.brief, "", "Report:"].join("\n");
 	writeFileSync(join(reportsDir(brainDir), `${task.id}.md`), `${head}\n${task.report}\n`);
 	updateContext(brainDir, (store) => {
 		const record = {
@@ -348,6 +348,7 @@ export function addRecord(brainDir, task) {
 			at: task.at,
 			mode: task.mode,
 			...(task.item ? { item: task.item } : {}),
+			...(task.move ? { move: task.move, revision: task.revision } : {}),
 			brief: oneLine(task.brief, POLICY.limits.context.briefChars),
 			// What the task itself asked to be remembered by (`summary` of `return`), or the start of its report.
 			outcome: String(task.summary ?? "").trim() !== "" ? oneLine(task.summary, POLICY.limits.context.summaryChars) : outcomeOf(task.report),

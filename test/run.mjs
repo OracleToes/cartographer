@@ -530,14 +530,14 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		hasNot(result.text, "TOKEN-123", "the user's environment is not passed on");
 		has(`${result.text}\n`, `HOME=${home}\n`, "HOME is the home path");
 
-		// The network belongs to the window: it is what the plan item said when the window was opened.
+		// The network belongs to the window: it is what the move capability said when the window was opened.
 		const reach = `exec 3<>/dev/tcp/127.0.0.1/${port} && echo reached`;
 		result = await sh(reach);
 		assert.notEqual(result.exit, 0, "without network, a server on this machine cannot be reached");
 		hasNot(result.text, "reached", "without network");
 		result = await sh(reach, { window: "net", network: true });
 		assert.deepEqual([result.exit, result.text, result.network], [0, "reached", true], "a window opened for an item marked network can");
-		await assert.rejects(sh("echo x", { window: "net" }), /Window net was opened by a task whose plan item is marked network, and this task's item is not\. Run this in a window of another name\./, "a task without the mark cannot borrow that window");
+		await assert.rejects(sh("echo x", { window: "net" }), /Window net was opened by a move whose capability allows network, and this move does not\. Run this in a window of another name\./, "a move without the capability cannot borrow that window");
 		await assert.rejects(sh("echo x", { network: true }), /Window main was opened without network access, and it keeps it that way\. This task may use the network: run this in a window of another name\./, "and a window without network does not get it later");
 
 		result = await sh(`kill -0 ${process.pid}; ps -e -o pid= | wc -l`);
@@ -707,31 +707,67 @@ test("windows: what the windows block says about them", () => {
 	assert.equal(withoutAdditions(timed[0].content), note, "the mark comes off again like the other");
 });
 
-test("plan: the network mark belongs to change items, and giving it withdraws the authorization", () => {
-	const plan = { version: 1, next: 1, items: [] };
+test("plan: network belongs to a change envelope, but each move must declare its own network capability", () => {
+	const plan = { version: 2, next: 1, nextMove: 1, items: [], moves: [] };
 	const now = "2026-01-01T00:00:00.000Z";
-	assert.throws(() => applyPlanOp(plan, { action: "add", mode: "look", text: "Look", network: true }, now), /`network` goes with a change item: only a change task runs commands\./, "a look item cannot have it");
-	assert.equal(applyPlanOp(plan, { action: "add", mode: "change", text: "Install", network: true }, now).shown, "+ p1 [change, network] Install", "a change item shows it");
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Build" }, now);
-	applyPlanOp(plan, { action: "add", mode: "look", text: "Read" }, now);
-	authorize(plan, now);
-	assert.equal(applyPlanOp(plan, { action: "edit", id: "p1", network: false }, now).withdrawn, false, "taking the network away asks for less");
-	assert.ok(plan.authorized !== undefined && plan.items[0].network === undefined, "the authorization stands and the mark is gone");
-	assert.equal(applyPlanOp(plan, { action: "edit", id: "p2", network: true }, now).withdrawn, true, "giving it asks for more");
-	assert.equal(plan.authorized, undefined, "the authorization is withdrawn");
-	assert.throws(() => applyPlanOp(plan, { action: "edit", id: "p3", network: true }, now), /`network` goes with a change item/, "a look item cannot be given it");
-	applyPlanOp(plan, { action: "edit", id: "p2", mode: "look" }, now);
-	assert.equal(plan.items[1].network, undefined, "an item turned into a look item loses it");
-	has(renderPlan(plan), "p1 [change] Install", "the plan as text");
+	assert.throws(() => applyPlanOp(plan, { action: "add", mode: "look", text: "Look", network: true }, now), /`network` goes with a change envelope/, "a look envelope cannot have it");
+	assert.equal(applyPlanOp(plan, { action: "add", mode: "change", text: "Install", done_when: "The dependency is installed.", network: true }, now).shown, "+ p1 [change, network] Install (done when: The dependency is installed.)", "a change envelope shows its network grant");
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run the install", done_when: "The command exits.", targets: ["package.json"], proof: "Install output.", capabilities: { network: true } }, now);
+	assert.equal(plan.moves[0].capabilities.network, true, "the child explicitly takes the envelope's grant");
+	assert.throws(() => applyPlanOp(plan, { action: "edit", id: "p1", mode: "look" }, now), /`network` goes with a change envelope/, "the grant must be removed before turning an envelope into look");
+	assert.equal(applyPlanOp(plan, { action: "edit", id: "p1", network: false }, now).withdrawn, true, "changing an incomplete envelope invalidates its move revision");
+	assert.equal(plan.moves[0].capabilities.network, false, "taking the envelope grant removes the child's network lane");
+	assert.throws(() => applyPlanOp(plan, { action: "editMove", id: "m1", capabilities: { network: true } }, now), /does not grant network/, "a move cannot grant its own network access");
+	applyPlanOp(plan, { action: "edit", id: "p1", network: true }, now);
+	assert.equal(plan.moves[0].capabilities.network, false, "restoring an envelope grant does not expand an existing move by implication");
+	applyPlanOp(plan, { action: "editMove", id: "m1", capabilities: { network: true } }, now);
+	has(renderPlan(plan), "p1 [change, network] Install", "the plan renders the envelope and its child move");
 
-	// By hand: the mark counts on a change item only, and only as true.
+	// By hand: network counts on a change envelope only, and only as true.
 	const root = makeProject("plan-network", { git: false });
 	const { brainDir } = setUpBrain(root);
-	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ items: [{ id: "p1", mode: "look", text: "a", network: true }, { id: "p2", mode: "change", text: "b", network: "yes" }, { id: "p3", mode: "change", text: "c", network: true }] }));
+	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ version: 2, next: 4, nextMove: 1, items: [
+		{ id: "p1", mode: "look", text: "a", network: true },
+		{ id: "p2", mode: "change", text: "b", doneWhen: "b is known", network: "yes" },
+		{ id: "p3", mode: "change", text: "c", doneWhen: "c is known", network: true },
+	], moves: [] }));
 	assert.deepEqual(loadPlan(brainDir).plan.items.map((item) => item.network), [undefined, undefined, true], "a plan file edited by hand");
 });
 
 // ─── Looking: only inside the project ───────────────────────────────────────
+
+test("task: a change focus executes the cached declared move contract and returns stated proof for review", async () => {
+	const root = makeProject("move-contract", { git: false });
+	configure(root, { initiate: false });
+	const { brainDir } = setUpBrain(root);
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "change", text: "Check the entry point.", doneWhen: "The focused read is reviewed.", status: "open", revision: 1 }],
+		moves: [{
+			id: "m1", parent: "p1", action: "read: src/main.js", text: "read: src/main.js", doneWhen: "The entry point is reported.",
+			targets: ["src/main.js"], proof: "The read output names the entry point.",
+			capabilities: { files: false, commands: false, network: false }, budget: { replies: 2, fileOps: 0, commandStarts: 0 }, turns: 2,
+			revision: 1, parentRevision: 1, status: "open", approvedRevision: 1, approvedAt: "2026-11-15T00:00:00.000Z",
+		}],
+	});
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, ["-p", "task(m1): ignore this free-form text || then think"]);
+		ok(result, "cached move contract");
+		const move = readPlan(root).moves.find((entry) => entry.id === "m1");
+		assert.equal(move.status, "reported", "the focus reports the one stored move instead of completing its envelope");
+		assert.equal(move.reported.claimed, true);
+		assert.equal(move.reported.proof, "Stand-in observed the task results above.", "proof is stored separately from the report claim");
+		assert.deepEqual(move.reported.changes, [], "checkpoint evidence is kept even for a read-only execution step");
+		const contractRequest = server.requests.map((request) => request.messages.map(rawText).join("\n")).find((text) => text.includes("Move contract:\nread: src/main.js"));
+		assert.ok(contractRequest, "the child received the stored move action, not a broad new brief");
+		assert.match(contractRequest, /Required proof: The read output names the entry point\./);
+	} finally {
+		await server.close();
+	}
+});
 
 test("look: read gives the exact bytes, ranges, and says how to continue", () => {
 	const root = makeProject("read-unit", { git: false });
@@ -876,7 +912,7 @@ test("terminal: one line per call to the atlas and the assessment", () => {
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");
 });
 
-// ─── Wakes, sleep, approval switched off, standing items ────────────────────
+// ─── Wakes, sleep, approval switched off, declared moves ────────────────────
 
 /** Shell windows as src/wakes.mjs asks about them, for the tests that need no real shell. */
 const fakeWindows = () => {
@@ -1158,7 +1194,7 @@ test("yolo: the prompt shows it for as long as it is on", async () => {
 		const result = await cartoOnTerminal(root, server, [], [["Set one up in", ""], ["Type a message", "/yolo on"], ["[yolo, waits] › ", "say: hi || sleep"], ["context ", "/yolo off"], ["approval: on", "/quit"]]);
 		if (result === undefined) return "python3 is needed for a terminal";
 		has(result.screen, "[yolo, waits] › say: hi", "the prompt after /yolo on");
-		has(result.screen, "● approval: on · change items wait for /approve again", "and after /yolo off");
+		has(result.screen, "● approval: on · declared change moves wait for /approve again", "and after /yolo off");
 		has(result.screen, "[waits] › /quit", "the prompt is back to waiting for you");
 	} finally {
 		await server.close();
@@ -1406,7 +1442,8 @@ test("harness: one reply's admitted reads share a tail batch, the ninth is refus
 	const server = await startStandIn();
 	try {
 		const firstReply = Array.from({ length: 9 }, (_, index) => `read: batch-${index + 1}.txt`).join(" +++ ");
-		const result = await carto(root, server, ["-p", `task: ${firstReply}\nread: src/main.js || then think`]);
+		// `|||` is the stand-in's durable task-step separator: real inspect briefs are one line.
+		const result = await carto(root, server, ["-p", `task: ${firstReply} ||| read: src/main.js || then think`]);
 		ok(result, "read-batch task");
 		const tailOf = (request) => {
 			const text = request.messages.map(rawText).join("\n");
@@ -2073,8 +2110,14 @@ test("brain: an outcome of a settled entry is editable; the lists refuse what ma
 	saveLedger(brainDir, { version: 1, next: 3, items: [{ id: "g2", kind: "goal", text: "Open goal", doneWhen: "It is done", status: "open" }] });
 	const ledgerOpen = loadLedger(brainDir).ledger;
 	assert.throws(() => applyOp(ledgerOpen, { action: "edit", id: "g2", outcome: "not closed" }, now), LedgerError, "an outcome on an open goal is refused");
-	// The plan: the same again.
-	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: "Map the thing", status: "done", outcome: "mapped" }] });
+	// The plan: the same again, with a completed child move rather than a broad done item.
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "look", text: "Map the thing", doneWhen: "The map is recorded.", status: "done", revision: 1, outcome: "mapped", closed: now }],
+		moves: [{ id: "m1", parent: "p1", action: "Read the entry point", text: "Read the entry point", doneWhen: "The entry point is reported.", capabilities: { files: false, commands: false, network: false }, budget: { replies: 4, fileOps: 0, commandStarts: 0 }, turns: 4, revision: 1, parentRevision: 1, status: "done", outcome: "accepted after report t1", closed: now, reported: { id: "t1", claimed: true, proof: "The entry point was read." } }],
+	});
 	const { plan } = loadPlan(brainDir);
 	const planEdited = applyPlanOp(plan, { action: "edit", id: "p1", outcome: "mapped, with a diagram" }, now);
 	assert.equal(planEdited.line.includes("changed"), true);
@@ -2122,6 +2165,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		assert.ok(view.items.some((item) => item.plain !== true && exposed(item).includes(flatNeedle)), `${name}: the text is nowhere to be found`);
 	};
 	const LONG = "word ".repeat(70).trim(); // about 350 characters, longer than any head row at a usual width
+	const PLAN_LONG = "word ".repeat(55).trim(); // below the plan's 300-character contract limit, still longer than a head row
 	saveLedger(brainDir, { version: 1, next: 3, items: [
 		{ id: "q1", kind: "question", text: LONG, status: "open", added: 1 },
 		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },
@@ -2129,14 +2173,20 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	expectReachable("ledger question", ledgerView({ brainDir }), LONG);
 	expectReachable("ledger goal done-when", ledgerView({ brainDir }), LONG);
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
-	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: LONG, status: "open", added: 1 }] });
-	expectReachable("plan item", planView({ brainDir, yolo: false }), LONG);
+	savePlan(brainDir, { version: 2, next: 2, nextMove: 1, items: [{ id: "p1", mode: "look", text: PLAN_LONG, status: "open", revision: 1 }], moves: [] });
+	expectReachable("plan envelope", planView({ brainDir, yolo: false }), PLAN_LONG);
 	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
 	expectReachable("atlas gist", atlasView({ root, brainDir }), LONG.slice(0, 200));
 	expectReachable("atlas detail", atlasView({ root, brainDir }), LONG);
-	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p2", mode: "change", text: LONG, status: "open", added: 1 }] });
-	expectReachable("approval request", requestsView({ brainDir, yolo: false }), LONG);
-	savePlan(brainDir, { version: 1, next: 2, items: [] });
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "change", text: "Apply the narrow update.", doneWhen: "The update is checked.", status: "open", revision: 1 }],
+		moves: [{ id: "m1", parent: "p1", action: PLAN_LONG, text: PLAN_LONG, doneWhen: "The narrow update is checked.", capabilities: { files: true, commands: true, network: false }, budget: { replies: 6, fileOps: 4, commandStarts: 2 }, turns: 6, revision: 1, parentRevision: 1, status: "open", targets: ["src/main.js"], proof: "The focused check passes." }],
+	});
+	expectReachable("approval request", requestsView({ brainDir, yolo: false }), PLAN_LONG);
+	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
 	const session = { windows: { list: () => [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] } };
 	expectReachable("shell command", shellsView({ session }), LONG);
 });

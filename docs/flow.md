@@ -27,7 +27,7 @@ flowchart TB
         YIELD -- "rests (sleep / limit / same note / wake-quiet)" --> REST
 
         GATE_ENTRY --> WHICH
-        AFTER["Tool result returns - afterTool for executed calls: loop check, shelf ask, accounting (a refusal is a result too)"] --> BUILD_REQ
+        AFTER["Tool result returns - afterTool for executed calls: loop check, read-batch accounting, accounting (a refusal is a result too)"] --> BUILD_REQ
     end
 
     %% ==========================================
@@ -62,9 +62,9 @@ flowchart TB
         TF -- "yes" --> TREF["REFUSED (ends with return)"]
         TF -- "no" --> TR{"Call type?"}
         TR -- "read-only" --> TINLINE["Runs inline"]
-        TR -- "write / command" --> AUTH{"Authorized plan item?"}
-        AUTH -- "yes (/approve or /yolo)" --> GO["Run in sandbox + checkpoints"]
-        AUTH -- "no / look-only" --> TREF2["REFUSED"]
+        TR -- "write / command start" --> AUTH{"Live declared move revision?"}
+        AUTH -- "yes (approved or yolo; exact targets/capabilities/budget)" --> GO["Run + checkpoints + report evidence"]
+        AUTH -- "no / inspect-only" --> TREF2["REFUSED"]
     end
 
     %% ==========================================
@@ -72,12 +72,12 @@ flowchart TB
     %% ==========================================
     subgraph CHANGE ["4. Change Lifecycle (hypothesis to undo)"]
         direction TB
-        HYP["Agent forms hypothesis / change"] --> PLAN["Add plan item"]
-        PLAN --> REQ_VIEW["Wait in the Requests view (async)"]
-        REQ_VIEW -- "/deny" --> DENY["Item discarded"]
-        REQ_VIEW -- "/approve, or unambiguous words like 'approved p2' (network items need naming)" --> OK["Authorized - the agent carries it via a task focus"]
-        OK --> CP["Pre/post checkpoints + sandbox (/undo reverts)"]
-        CP --> REP["Journal report t<id> and verify"]
+        HYP["Agent forms hypothesis / change"] --> PLAN["Add intent envelope p<N> + narrow move m<N>"]
+        PLAN --> REQ_VIEW["Wait on exact move revision in Requests"]
+        REQ_VIEW -- "/deny m<N>" --> DENY["Move revision superseded"]
+        REQ_VIEW -- "/approve m<N> or /approve p<N> snapshot" --> OK["Approved move - agent carries it via a task focus"]
+        OK --> CP["Pre/post checkpoints + sandbox (/undo reopens move revision)"]
+        CP --> REP["Durable report + evidence"] --> ACCEPT["Orchestrator reviews and accepts move"]
     end
 
     %% ==========================================
@@ -116,7 +116,7 @@ flowchart TB
 ## Reading notes
 
 - **The loop that matters:** `BUILD_REQ → SERVER → REPLY` and either straight back to `BUILD_REQ` via `onYield`, or out through the gate into `AFTER` and back to `BUILD_REQ`. `REST` is only ever reached when a stretch ends (`sleep`, a limit, a same-note run, a wake-quiet turn); a turn does not end at a plain reply.
-- **The gate never refuses on network.** The main agent's inline commands run in the read-only window (no network, read-only mounts — decision O5); a command that must write or reach the network is a change item for a task, not a gate refusal. File create/edit/remove is refused twice: `beforeTool` (change tools) and `book` (file mutations outside a change task carrying the authorized `planItem`).
+- **The gate never refuses on network.** The main agent's inline commands run in the read-only window (no network, read-only mounts — decision O5); a command that must write or reach the network needs a declared change move, not broad plan clearance. File create/edit/remove is refused twice: `beforeTool` (change tools) and `book` (file mutations outside a focus carrying the live move revision).
 - **`/yolo` is a session switch**, not an answer in the Requests view; nothing ever waits for approval while it is on. The mechanical gates stay regardless.
 - **The state block is not identical for the two conversations**: wakes ride the main agent's copy only; a focus gets its own fullness count, shelf line and the requests that wait for it. The newest successful reply's read batch stands together at the very end of the request, after every block; replacing it is a transient-tail eviction, never a collapse.
 - **Collapse honesty:** the handoff question is opt-in (`handoffQuestion`); with it off, nothing asks the model anything — the front block is assembled by the harness. `afterMainCall` decides it after a round of tool results, and since 2026-11-16 the plain-reply path ends the stretch at the same line; the rest path collapses it mechanically (`docs/design.md` §7).

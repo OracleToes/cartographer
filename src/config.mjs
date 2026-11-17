@@ -49,9 +49,10 @@ export const DEFAULTS = freezeTree({
 	consultTemperature: 0.6,
 	// How long a `consult` call may wait before it gives up; at the ceiling above, generation alone can take that long.
 	consultTimeoutSeconds: 1800,
-	// Tool rounds one run may take before it stops and says so. Carrying out a plan takes about two per item.
+	// Tool rounds one run may take before it stops and says so. A focus is a small execution move;
+	// the configured ceiling can never exceed the fixed move ceiling below.
 	mainTurns: 40,
-	taskTurns: 30,
+	taskTurns: 6,
 	// Seconds a `shell` call waits for its command before it returns and leaves the command running in its window.
 	shellWait: 30,
 	// Lines of output the agent is shown for each busy shell window, at the end of every request.
@@ -79,7 +80,7 @@ export const DEFAULTS = freezeTree({
 	// around, keeps the map and works what is approved, or sleeps when there is nothing to do. /initiate switches
 	// it while carto runs, and that switch is never remembered.
 	initiate: true,
-	// Whether change items run without asking for approval. --yolo overrides for one run; /yolo switches it
+	// Whether declared change moves run without asking for approval. --yolo overrides for one run; /yolo switches it
 	// while carto runs, and that switch is never remembered.
 	yolo: false,
 	// Whether the tasks' commands run in the bubblewrap sandbox. --no-bwrap overrides for one run; /bwrap
@@ -115,7 +116,7 @@ export const DEFAULTS = freezeTree({
 export const POLICY = freezeTree({
 	limits: {
 		ledger: { textChars: 400, openEntries: 40, closedEntriesKept: 50 },
-		plan: { itemChars: 300, items: 30 },
+		plan: { itemChars: 300, items: 30, moves: 120, targets: 4, proofChars: 300, moveTurns: { look: 4, change: 6, max: 8 }, moveBudget: { fileOps: 4, commandStarts: 2 } },
 		atlas: { nameChars: 80, gistChars: 400, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
 		assessment: { textChars: 3000 },
 		context: { callsTokens: 1000, recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, operationReplay: 256, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
@@ -126,7 +127,7 @@ export const POLICY = freezeTree({
 		look: { readDefaultLines: 1024, readMaxLines: 2048, readMaxFiles: 8, lineChars: 2000, readTokenCeiling: 8192, fileBytes: 2_000_000, binaryProbeChars: 8000, searchDefault: 60, searchMax: 200, searchHitChars: 240, listLines: 400, walkFiles: 20_000, maxBufferBytes: 64 * 1024 * 1024 },
 		taskDisplay: { listedNodes: 20, staleNodes: 12 },
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
-		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300 },
+		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8 },
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
@@ -216,6 +217,7 @@ export const POLICY = freezeTree({
 		ledgerKinds: Object.values(LEDGER_KIND),
 		planMode: PLAN_MODE,
 		planModes: Object.values(PLAN_MODE),
+		moveStatus: { open: "open", running: "running", reported: "reported", done: "done", blocked: "blocked", superseded: "superseded" },
 		wakeKinds: WAKE_KIND,
 		windowStates: { starting: "starting", idle: "idle", busy: "busy", closed: "closed", gone: "gone" },
 		windowWaitReasons: WINDOW_WAIT_REASON,
@@ -236,6 +238,7 @@ export const POLICY = freezeTree({
 		report: "t",
 		ledger: { goal: "g", question: "q", note: "n" },
 		plan: "p",
+		move: "m",
 		wake: "w",
 		taskStep: "s",
 		atlas: "c",
@@ -245,6 +248,7 @@ export const POLICY = freezeTree({
 		reportId: "^t\\d+$",
 		ledgerId: "^[gqn]\\d+$",
 		planId: "^p\\d+$",
+		moveId: "^m\\d+$",
 		atlasId: "^c\\d+$",
 		questionId: "^q\\d+$",
 		wakeIdOrAll: "^(all|w[0-9]+)$",
@@ -339,6 +343,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	for (const key of ["contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "treeDepth", "windowTail", "wakeMin", "wakesMax"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
 	}
+	if (config.taskTurns > POLICY.limits.plan.moveTurns.max) throw new ConfigError(`config: taskTurns must be ${POLICY.limits.plan.moveTurns.max} or fewer: one focus is one small execution move`);
 	if (typeof config.consultModel !== "string") throw new ConfigError("config: consultModel must be a string — the name llama-swap serves the consult model under; empty switches the consult tool off");
 	if (config.consultModel.length > POLICY.limits.consult.modelChars) throw new ConfigError(`config: consultModel must be ${POLICY.limits.consult.modelChars} characters or fewer`);
 	if (/[\r\n]/.test(config.consultModel)) throw new ConfigError("config: consultModel must be one name on one line");

@@ -1,6 +1,6 @@
 // The `task` tool: one agent entering a bounded focus context.
 //
-//   1. The orchestrating context starts a focus with a brief and, for project changes, an authorized plan item.
+//   1. The orchestrating context starts a focus with a brief or one declared move; a project change carries one approved move revision.
 //   2. Durable forks the stored conversation. Request dressing adds fresh shared state and a one-line purpose.
 //   3. The focus uses the same agent tools, shared books and atlas; only plan changes stay orchestrator-owned.
 //   4. Its working conversation is temporary. `return` hands back the remaining report and shelf items; shared-memory
@@ -15,7 +15,7 @@ import { fileMarks, loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../at
 import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep } from "../checkpoints.mjs";
 import { addRecord, KEPT_AS, loadContext, reserveId, taskState, updateContext } from "../context.mjs";
 import { endTaskContext } from "../context.mjs";
-import { applyPlanOp, loadPlan, mayRun, savePlan } from "../plan.mjs";
+import { blockMove, loadPlan, reportMove, savePlan, startMove } from "../plan.mjs";
 import { CHANGE_NOTE, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";
 import { treeSection } from "../tree.mjs";
@@ -65,22 +65,59 @@ function treeNow(root, brainDir, config) {
  * What kind of task a call asks for, or why it cannot run.
  * @returns {{ run?: { mode: "look" | "change", item?: string, text?: string, network?: boolean }, refusal?: string }}
  */
-function kindOf(brainDir, item, gate) {
-	if (item === undefined || item === null || String(item).trim() === "") return { run: { mode: POLICY.enums.planMode.look } };
-	const { plan, error } = loadPlan(brainDir);
-	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; they have to repair the file. A task without \`item\` reads only.` };
-	const found = plan.items.find((entry) => entry.id === String(item).trim());
-	if (found === undefined) {
-		const ids = plan.items.map((entry) => entry.id).join(", ");
-		return { refusal: `There is no plan item ${JSON.stringify(item)}. ${ids === "" ? "The plan is empty: write it with `book` (target=plan) first, or leave `item` out for a task that reads only." : `The plan has ${ids}.`}` };
+function kindOf(brainDir, args, gate, now) {
+	const moveId = typeof args.move === "string" ? args.move.trim() : "";
+	if (moveId === "") {
+		if (typeof args.brief !== "string" || args.brief.trim() === "") return { refusal: "A focus without `move` is an inspect focus: give `brief` as one narrow question and `done_when` as the report it must return." };
+		if (typeof args.done_when !== "string" || args.done_when.trim() === "") return { refusal: "An inspect focus needs `done_when`: name the observation its report must contain." };
+		if (args.context !== undefined) return { refusal: "`context` belongs to a declared move. Put the inspect focus's facts in its brief." };
+		return {
+			run: {
+				mode: POLICY.enums.planMode.look,
+				text: args.brief.replace(/\s+/g, " ").trim(),
+				doneWhen: args.done_when.replace(/\s+/g, " ").trim(),
+				turns: POLICY.limits.plan.moveTurns.look,
+			},
+		};
 	}
-	if (found.status === POLICY.enums.entryStatus.done) return { refusal: `${found.id} is marked done. For further work, add a new item to the plan.` };
-	// Approval is per item: a change item runs once the user has approved it (requests), once the
-	// whole plan was authorized with /approve, or while approval is switched off. Adding another
-	// item never cancels what was already agreed.
-	if (found.mode === POLICY.enums.planMode.change && !mayRun(plan, found, gate?.yolo === true)) return { refusal: REFUSALS.notAuthorized(found.id) };
-	// Whether the task's commands reach the network is settled here, with the item as the user authorized it.
-	return { run: { mode: found.mode, item: found.id, text: found.text, ...(found.mode === POLICY.enums.planMode.change && found.network === true ? { network: true } : {}) } };
+	if (args.brief !== undefined || args.done_when !== undefined) return { refusal: "A declared move supplies its own action and done-when line. Pass `move` and, only for facts from the orchestrator, optional `context`." };
+	const { plan, error } = loadPlan(brainDir);
+	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; they have to repair the file.` };
+	try {
+		const { envelope, move } = startMove(plan, moveId, now, { yolo: gate?.yolo === true });
+		savePlan(brainDir, plan);
+		return {
+			run: {
+				mode: envelope.mode,
+				item: envelope.id,
+				move: move.id,
+				revision: move.revision,
+				action: move.action ?? move.text,
+				text: move.action ?? move.text,
+				doneWhen: move.doneWhen,
+				proof: move.proof,
+				targets: move.targets,
+				capabilities: move.capabilities,
+				budget: move.budget ?? { replies: move.turns, fileOps: POLICY.limits.plan.moveBudget.fileOps, commandStarts: POLICY.limits.plan.moveBudget.commandStarts },
+				turns: move.budget?.replies ?? move.turns,
+				...(move.capabilities?.network === true ? { network: true } : {}),
+			},
+		};
+	} catch (error) {
+		return { refusal: error.message };
+	}
+}
+
+/** The exact instruction that becomes the focus's durable report brief. */
+function assignedBrief(run, context) {
+	const lines = [run.text];
+	if (Array.isArray(run.targets) && run.targets.length > 0) lines.push(`Targets: ${run.targets.join(", ")}.`);
+	if (run.doneWhen) lines.push(`Done when: ${run.doneWhen}.`);
+	if (run.proof) lines.push(`Required proof: ${run.proof}. Put the observed evidence in return's proof field.`);
+	if (run.budget) lines.push(`Hard budget: ${run.budget.replies} replies, ${run.budget.fileOps} direct file operations, ${run.budget.commandStarts} command starts.`);
+	if (run.capabilities) lines.push(`Capabilities: files ${run.capabilities.files ? "allowed" : "not allowed"}; commands ${run.capabilities.commands ? "allowed" : "not allowed"}; network ${run.capabilities.network ? "allowed" : "not allowed"}.`);
+	if (typeof context === "string" && context.trim() !== "") lines.push(`Orchestrator context: ${context.replace(/\s+/g, " ").trim()}`);
+	return lines.join("\n");
 }
 
 /**
@@ -90,12 +127,14 @@ function kindOf(brainDir, item, gate) {
 export function taskTool({ root, brainDir, config, runner = { mode: "none" }, windows, gate, loops, ends, active = { id: undefined, said: [], heard: [] } }) {
 	return defineTool({
 		name: "task",
-		description:
-			"Enter one focused context for bounded work. It is the same agent over the shared ledger and atlas, but its working conversation is temporary and may be forgotten when it returns. Without `item` the focus only inspects the project with `read`, `shelf`, `search` and `list`. With an authorized change `item`, it can also use `book` target=file action=create/edit/remove and run commands. Its purpose appears in the state block; keep lasting findings before returning a report.",
-		parameters: obj({
-			brief: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "What the task must do, and what its report must contain" }),
-			item: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.planId, description: "The plan item this task carries out (p2). Leave out for a task that reads only." })),
-		}),
+			description:
+				"Enter one small focused execution context. A change focus carries exactly one approved plan move (`move`, such as m2); its action, targets, evidence and reply limit come from that stored move, not from a free-form brief. Without `move`, this is a read-only inspect focus and needs one narrow `brief` plus `done_when`. The focus shares the ledger and atlas, but its working conversation is temporary; keep lasting findings before returning a report.",
+			parameters: obj({
+				move: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.moveId, description: "One declared plan move to execute (m2). Its current approved revision supplies all change authority." })),
+				brief: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Only for an inspect focus without move: one narrow question to answer." })),
+				done_when: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Only for an inspect focus without move: the observation its report must contain." })),
+				context: opt(str({ description: "Optional bounded facts from the orchestrator for a declared move; it does not add work or authority." })),
+			}),
 		// One model, one context: when a turn asks for several tasks they run in order, not at once.
 		executionMode: "sequential",
 		// Safe to run again after a crash: a rerun finds the fork and the submission it already made.
@@ -113,16 +152,31 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			// The report is kept under an id, and one line of it goes into the record a collapse keeps
 			// (src/context.mjs). The id is taken once, also when this call runs again after a restart.
 			const id = (await api.memo("record", callContext)) ?? (await api.memo("record", reserveId(brainDir), callContext));
-			addRecord(brainDir, { id, at: api.now(), mode: result.details.mode ?? POLICY.enums.planMode.look, item: result.details.item, brief: args.brief, report: text, summary: result.details.summary, failed: result.isError === true, undone: result.details.done === false, changed: result.details.changes?.length });
+			const details = result.details ?? {};
+			if (typeof details.move === "string" && Number.isInteger(details.revision)) {
+				const { plan } = loadPlan(brainDir);
+				if (plan !== undefined) {
+					const recorded = reportMove(plan, details.move, details.revision, {
+						done: result.isError !== true && details.done === true,
+						report: id,
+						changes: details.changes,
+						commands: details.commands,
+						checkpoints: details.checkpoints,
+						proof: details.proof,
+						reason: details.scopeBreach ? `Changed outside declared targets: ${details.scopeBreach.join(", ")}.` : details.checkpointError ? `Checkpoint evidence failed: ${details.checkpointError}` : details.proofError ?? (details.done === false ? "The focus returned not done." : result.isError === true ? "The focus ended before a successful return." : undefined),
+					}, api.now());
+					if (recorded.changed) savePlan(brainDir, plan);
+					text += `\n\n[My record: ${recorded.line}]`;
+				}
+			}
+			addRecord(brainDir, { id, at: api.now(), mode: details.mode ?? POLICY.enums.planMode.look, item: details.item, ...(typeof details.move === "string" ? { move: details.move, revision: details.revision } : {}), brief: details.brief ?? args.brief ?? "focused work", report: text, summary: details.summary, failed: result.isError === true, undone: details.done === false, changed: details.changes?.length });
 			text += `\n\n${KEPT_AS(id)}`;
-			return { ...result, output: [{ type: "text", text }], details: { ...result.details, report: id, ...(handed.added.length > 0 ? { shelved: handed.added } : {}) } };
+			return { ...result, output: [{ type: "text", text }], details: { ...details, report: id, ...(handed.added.length > 0 ? { shelved: handed.added } : {}) } };
 		},
 	});
 
 	async function run(args, api, callContext) {
 		{
-			if (typeof args.brief !== "string" || args.brief.trim() === "") return fail("`brief` is empty. Say what the task must do and what it must report.");
-
 			// A rerun after a restart finds the task it already started, whatever happened to the plan since.
 			const started = await api.commit(async (tx) => {
 				const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, POLICY.limits.taskHistory.startLookupEntries)).items[0];
@@ -139,9 +193,10 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			let run = started?.run;
 			let outside;
 			if (run === undefined) {
-				const kind = kindOf(brainDir, args.item, gate);
+				const kind = kindOf(brainDir, args, gate, api.now());
 				if (kind.run === undefined) return fail(kind.refusal);
 				run = kind.run;
+				run.brief = assignedBrief(run, args.context);
 				// How commands run as the task starts. Kept with the task: its note and its record say it.
 				if (run.mode === POLICY.enums.planMode.change && runner.mode === "direct") run.direct = true;
 				if (run.mode === POLICY.enums.planMode.change) {
@@ -152,14 +207,21 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 							// What shell windows changed since the last checkpoint, with no task around them, is a step of its
 							// own and not this task's doing.
 							outside = windowStep(root, brainDir, windows?.takeActive() ?? []);
-							run.before = await api.memo("before", checkpoint(root, brainDir, `before ${run.item}: ${run.text}`), callContext);
+							run.before = await api.memo("before", checkpoint(root, brainDir, `before ${run.move ?? run.item}: ${run.text}`), callContext);
 						}
 					} catch (error) {
 						if (!(error instanceof CheckpointError)) throw error;
-						return fail(`No checkpoint could be taken, so the task was not started and nothing was changed: ${error.message}. Tell ${USER_NAME}.`);
+						if (run.move !== undefined && Number.isInteger(run.revision)) {
+							const { plan } = loadPlan(brainDir);
+							if (plan !== undefined && blockMove(plan, run.move, run.revision, `No checkpoint could be taken: ${error.message}`, api.now())) savePlan(brainDir, plan);
+						}
+						return fail(`No checkpoint could be taken, so the move was blocked and nothing was changed: ${error.message}. Tell ${USER_NAME}.`);
 					}
 				}
 			}
+			if (!Number.isInteger(run.turns)) run.turns = run.mode === POLICY.enums.planMode.change ? Math.min(config.taskTurns, POLICY.limits.plan.moveTurns.max) : POLICY.limits.plan.moveTurns.look;
+			if (typeof run.text !== "string") run.text = typeof args.brief === "string" ? args.brief.replace(/\s+/g, " ").trim() : "the assigned work";
+			if (typeof run.brief !== "string") run.brief = assignedBrief(run, args.context);
 
 			const child =
 				started?.id ??
@@ -178,16 +240,16 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					);
 					if (at === undefined) throw new Error("task: the entry of this call was not found");
 					const fork = await tx.forkConversation(api.conversationId, at.id, { ownership: { kind: "task", taskId: api.taskId } });
-					// The task's replies are counted in src/harness.mjs, which ends it at taskTurns; this is the net below that.
-					await configure(tx, fork.id, { maxTurns: config.taskTurns + 2 });
-					// Every call of the turn gets a result in the fork: the brief for this one, a note for the others.
-					// The harness sends results in the order of the calls, so a note may come after the brief.
-					const note = run.mode === POLICY.enums.planMode.change ? CHANGE_NOTE(run.item, run.text, { commands: run.direct ? "direct" : runner.mode === "none" ? "none" : "sandbox", network: run.network === true }) : LOOK_NOTE;
+					// The focus's replies are capped by the move itself; the Durable ceiling is only the safety net beneath the harness cap.
+					await configure(tx, fork.id, { maxTurns: run.turns + 2 });
+					// Every call of the turn gets a result in the fork: the move contract for this one, a note for the others.
+					// The harness sends results in the order of the calls, so a note may come after the contract.
+					const note = run.mode === POLICY.enums.planMode.change ? CHANGE_NOTE(run, { commands: run.direct ? "direct" : runner.mode === "none" ? "none" : "sandbox", network: run.network === true }) : LOOK_NOTE;
 					let briefGiven = false;
 					const tree = treeNow(root, brainDir, config);
 					for (const call of calls) {
 						const mine = call.id === api.callId;
-						const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\n${tree === "" ? "" : `${tree}\n\n`}Brief:\n${args.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
+							const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\n${tree === "" ? "" : `${tree}\n\n`}Move contract:\n${run.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
 						if (mine) briefGiven = true;
 						await tx.appendEntry(fork.id, {
 							kind: mine ? "carto.brief" : "carto.sibling",
@@ -200,11 +262,26 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					return fork.id;
 				}, callContext));
 			// A viewer of the main conversation finds the task's own conversation through this.
-			const details = { conversationId: child, brief: args.brief, mode: run.mode, ...(run.item ? { item: run.item } : {}), ...(run.network ? { network: true } : {}), ...(run.direct ? { direct: true } : {}) };
+			const details = {
+				conversationId: child,
+				brief: run.brief,
+				mode: run.mode,
+				turns: run.turns,
+				...(run.item ? { item: run.item } : {}),
+				...(run.move ? { move: run.move, revision: run.revision, targets: run.targets, capabilities: run.capabilities, budget: run.budget } : {}),
+				...(run.network ? { network: true } : {}),
+				...(run.direct ? { direct: true } : {}),
+			};
 			await api.details(details, callContext);
-			const purpose = args.brief.replace(/\s+/g, " ").trim().slice(0, POLICY.limits.context.briefChars);
+			const purpose = run.text.replace(/\s+/g, " ").trim().slice(0, POLICY.limits.context.briefChars);
 			updateContext(brainDir, (store) => {
-				Object.assign(taskState(store, child), { purpose, ...(run.item ? { item: run.item } : {}), mode: run.mode });
+				Object.assign(taskState(store, child), {
+					purpose,
+					...(run.item ? { item: run.item } : {}),
+					...(run.move ? { move: run.move, revision: run.revision, targets: run.targets, capabilities: run.capabilities, budget: run.budget, fileOps: 0, commandUses: 0, commands: [], windows: [] } : {}),
+					mode: run.mode,
+					turns: run.turns,
+				});
 			});
 
 			const handle = await api.conversation(child, callContext);
@@ -222,8 +299,10 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			const heard = active.heard.splice(0);
 			const unread = active.said.splice(0);
 
-			// What the task returned (src/tools/return.mjs), and what ended it when it did not return.
-			const returned = loadContext(brainDir).tasks[child]?.returned;
+			// What the task returned (src/tools/return.mjs), its recorded command evidence, and what ended it when it did not return.
+			const taskRecord = loadContext(brainDir).tasks[child];
+			const returned = taskRecord?.returned;
+			if (Array.isArray(taskRecord?.commands) && taskRecord.commands.length > 0) details.commands = taskRecord.commands;
 			const ended = ends?.get(child);
 			ends?.delete(child);
 			// The task's own words, newest last: what it leaves behind when it did not return.
@@ -244,6 +323,15 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			if (returned !== undefined) {
 				details.done = returned.done;
 				if (returned.summary !== undefined) details.summary = returned.summary;
+				// The required proof is a distinct durable claim, not an implication of a
+				// general report. The orchestrator still judges whether it satisfies the
+				// declared condition before accepting the move.
+				const evidence = String(returned.proof ?? "").replace(/\s+/g, " ").trim();
+				if (evidence !== "") details.proof = evidence.length > POLICY.limits.plan.proofChars ? `${evidence.slice(0, POLICY.limits.plan.proofChars - 1).trimEnd()}…` : evidence;
+				else if (run.move !== undefined && run.mode === POLICY.enums.planMode.change) {
+					details.done = false;
+					details.proofError = "The focus returned no stated proof for its declared evidence.";
+				}
 			}
 			// What the user typed while the task ran: the main agent was not there to read it.
 			let spoken = "";
@@ -253,12 +341,30 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				spoken = `\n\nWhile this task ran, ${USER_NAME} wrote to it:${missed}\n${heard.map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`).join("\n")}`;
 			}
 
-			// What the task changed, from the record. Told to the main agent whether or not the task finished.
-			let record = spoken;
-			if (run.mode === POLICY.enums.planMode.change && run.before !== undefined) {
+				// What the task changed, from the record. A program this move started cannot continue
+				// writing after its checkpoint closes, so busy windows owned by the move are closed first.
+				let record = spoken;
+				if (run.mode === POLICY.enums.planMode.change && run.before !== undefined) {
+					const owned = new Set(Array.isArray(taskRecord?.windows) ? taskRecord.windows : []);
+					const stoppedWindows = [];
+					for (const window of (windows?.list(0) ?? [])) {
+						if (!owned.has(window.name) || window.state !== POLICY.enums.windowStates.busy) continue;
+						try { windows.close(window.name); stoppedWindows.push(window.name); } catch { /* the checkpoint below still records what reached disk */ }
+					}
+					if (stoppedWindows.length > 0) {
+						details.closedWindows = stoppedWindows;
+						record += `\n\nClosed move-owned running ${stoppedWindows.length === 1 ? "window" : "windows"} before checkpointing: ${stoppedWindows.join(", ")}.`;
+					}
 				try {
-					const after = (await api.memo("after", callContext)) ?? (await api.memo("after", checkpoint(root, brainDir, `after ${run.item}`), callContext));
+					const after = (await api.memo("after", callContext)) ?? (await api.memo("after", checkpoint(root, brainDir, `after ${run.move ?? run.item}`), callContext));
+					details.checkpoints = { before: run.before, after };
 					details.changes = changesBetween(root, brainDir, run.before, after);
+					const outside = details.changes.filter((change) => !Array.isArray(run.targets) || !run.targets.includes(change.path));
+					if (outside.length > 0) {
+						details.scopeBreach = outside.map((change) => change.path);
+						details.done = false;
+						record += `\n\nMove scope breach: ${outside.map((change) => change.path).join(", ")} ${outside.length === 1 ? "is" : "are"} outside ${run.move}'s declared targets. The move is blocked and cannot be accepted.`;
+					}
 					// What windows did during the task is in that record. From here on they count for themselves again.
 					windows?.takeActive();
 					record +=
@@ -267,11 +373,15 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 							: `\n\nMy record of the files changed during this task:\n${changeRecord(details.changes).join("\n")}`;
 					// Without the sandbox a command can change what the checkpoints do not hold.
 					if (run.direct) record += "\nThe sandbox was off for this task. The record covers the project directory only: what a command changed outside it is not listed here and cannot be undone.";
-				} catch (error) {
-					if (!(error instanceof CheckpointError)) throw error;
-					record += `\n\nMy record could not keep what this task changed: ${error.message}.`;
-				}
+					} catch (error) {
+						if (!(error instanceof CheckpointError)) throw error;
+						details.done = false;
+						details.checkpointError = error.message;
+						record += `\n\nMy record could not keep what this task changed: ${error.message}. The move is blocked and cannot be accepted.`;
+					}
 			}
+
+			if (details.proofError !== undefined) record += `\n\nMove evidence missing: ${details.proofError} The move is blocked and cannot be accepted.`;
 
 			if (outside !== undefined) {
 				details.outside = { names: outside.names, changes: outside.changes };
@@ -290,6 +400,10 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			record += mapped.text;
 
 			const wrote = left === "" ? "It had written nothing." : `What it had written for itself:\n${left}`;
+			if (returned === undefined && run.move !== undefined && Number.isInteger(run.revision)) {
+				const { plan } = loadPlan(brainDir);
+				if (plan !== undefined && blockMove(plan, run.move, run.revision, "Focus ended without a report.", api.now())) savePlan(brainDir, plan);
+			}
 			if (returned === undefined && settled.status !== POLICY.enums.entryStatus.done) {
 				const why =
 					settled.reason === "turn_limit"
@@ -304,7 +418,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			}
 			if (returned === undefined && ended?.why === "limit") {
 				details.limit = ended.replies;
-				return fail(`I ended the task: it used all ${config.taskTurns} of its replies without calling \`return\`, so there is no report and nothing says the work is done.\n${wrote}\nGive a narrower brief, or split the work.${record}`, details);
+				return fail(`I ended the focus: it used all ${run.turns} of its replies without calling \`return\`, so there is no report and its move is blocked.\n${wrote}\nPlan a narrower successor move.${record}`, details);
 			}
 			if (returned === undefined && ended?.why === "same-note") {
 				details.looped = true;
@@ -316,27 +430,14 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				const what = loop === undefined ? "it sent the same failing call again and again." : `it sent the same call ${loop.total} times and it failed each time: \`${loop.call}\`\nThe error was:\n${loop.error}`;
 				return fail(`I ended the task: ${what}\n${wrote}\nIf the work is still needed, start another task whose brief says how to avoid this.${record}`, details);
 			}
-			if (returned === undefined) return fail(`The task ended without calling \`return\`, so there is no report.\n${wrote}\nRun it again with a brief that says what the report must contain.${record}`, details);
-			// A plan item's task says itself whether the item is done.
-			let marked = "";
-			if (run.item !== undefined) {
-				if (returned.done) {
-					try {
-						const { plan } = loadPlan(brainDir);
-						const item = plan?.items.find((entry) => entry.id === run.item);
-						if (item !== undefined && item.standing === true) marked = `\n\n[My record: ${run.item} is a standing item, so it stays open.]`;
-						else if (item !== undefined && item.status !== POLICY.enums.entryStatus.done) {
-							applyPlanOp(plan, { action: POLICY.enums.actions.done, id: run.item }, api.now(), { yolo: gate?.yolo === true });
-							savePlan(brainDir, plan);
-							details.marked = run.item;
-							marked = `\n\n[My record: the task returned done, so ${run.item} is marked done in the plan. If the report or the record below shows that something is missing, add an item for it.]`;
-						}
-					} catch (error) {
-						marked = `\n\n[My record: ${run.item} could not be marked done (${error.message}); mark it with \`book\` (target=plan, action=done).]`;
-					}
-				} else marked = `\n\n[My record: the task returned not done, so ${run.item} stays open in the plan.]`;
-			} else if (!returned.done) marked = "\n\n[My record: the task returned not done.]";
-			return { output: [{ type: "text", text: `${said}${marked}${record}` }], details };
+			if (returned === undefined) return fail(`The focus ended without calling \`return\`, so there is no report and its move is blocked.\n${wrote}\nPlan a narrower successor move.${record}`, details);
+			const completed = details.done === true && details.scopeBreach === undefined && details.checkpointError === undefined && details.proofError === undefined;
+			const state = run.move === undefined
+				? (completed ? "\n\n[My record: the inspect focus returned done.]" : "\n\n[My record: the inspect focus returned not done.]")
+				: (completed
+					? `\n\n[My record: ${run.move} claimed completion. The orchestrator must review its checkpoint, required proof and report, then accept the move.]`
+					: `\n\n[My record: ${run.move} did not complete within its contract and is blocked. Plan a successor move rather than rerunning it.]`);
+			return { output: [{ type: "text", text: `${said}${state}${record}` }], details };
 		}
 	}
 }

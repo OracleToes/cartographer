@@ -491,7 +491,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 				if (win.sandbox && win.network !== (network === true)) {
 					throw new WindowError(
 						win.network
-							? `Window ${name} was opened by a task whose plan item is marked network, and this task's item is not. Run this in a window of another name.`
+							? `Window ${name} was opened by a move whose capability allows network, and this move does not. Run this in a window of another name.`
 							: `Window ${name} was opened without network access, and it keeps it that way. This task may use the network: run this in a window of another name.`,
 					);
 				}

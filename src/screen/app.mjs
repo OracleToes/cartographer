@@ -35,7 +35,7 @@ import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
-import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mjs";
+import { applyPlanOp, isAuthorized, loadPlan, planPath, PlanError, savePlan, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
@@ -94,7 +94,7 @@ const SPIN_MS = POLICY.timing.spinnerMs;
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
-	["requests", "what waits for you: change items, questions of taste, "],
+	["requests", "what waits for you: change moves, questions of taste, "],
 	["approve", "approve requests by id, or the whole plan as it stands"],
 	["deny", "turn a request down: /deny ID [why]"],
 	["answer", "answer a question of taste: /answer ID words"],
@@ -111,10 +111,10 @@ const COMMANDS = [
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
-	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, or node"],
+	["archive", "take a row out of what the agent reads: a report, ledger entry, plan envelope or move, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["done", "settle a row the way the agent does: a ledger entry, a plan item, a node of the graph"],
-	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, or node"],
+	["done", "settle a row the way the agent does: a ledger entry, reported move after review, completed envelope, or node of the graph"],
+	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan envelope or move, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -122,7 +122,7 @@ const COMMANDS = [
 	["collapse", "collapse the context now"],
 	["new", "start a fresh context with nothing kept in view"],
 	["pin", "rewrite the copy of assessment and graph at the top of the context"],
-	["yolo", "let change items run without /approve while you watch", ["on", "off"]],
+	["yolo", "let declared change moves run without /approve while you watch", ["on", "off"]],
 	["initiate", "whether the agent starts working on its own when carto starts; default on", ["on", "off"]],
 	["bwrap", "how tasks' commands run: with the sandbox or without", ["on", "off"]],
 	["shells", "the shell windows: what runs in each, and its newest lines"],
@@ -160,8 +160,8 @@ export const KEYS_HELP = [
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
 	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Context), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
-	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a plan item done, a book entry settled, a node confirmed); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
-	"  n                a new ledger entry, plan item, book entry or node: the small box on a template, and what you save goes in through the same operations the agent uses (E opens the template in $EDITOR instead)",
+	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
+	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
@@ -416,9 +416,10 @@ export async function runScreen(session, options, runTerminal) {
 			next.waits = requests.some((request) => request.kind === "approval");
 			const { plan } = loadPlan(brainDir);
 			if (plan !== undefined && plan.items.length > 0) {
-				const open = openItems(plan).length;
+				const open = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true).length;
 				const awaiting = waiting(plan).length;
-				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${isAuthorized(plan) || awaiting === 0 ? " · approved" : ` · ${awaiting} awaiting`}`;
+				const ready = isAuthorized(plan);
+				next.plan = `plan ${plan.items.length - open}/${plan.items.length} envelopes · ${plan.moves.length} moves${awaiting > 0 ? ` · ${awaiting} awaiting` : ready ? " · move ready" : ""}`;
 			}
 			const { ledger } = loadLedger(brainDir);
 			if (ledger !== undefined) {
@@ -857,7 +858,7 @@ export async function runScreen(session, options, runTerminal) {
 	// ─── The fields the small box edits ───────────────────────────────────────
 	// The book views open one of these on e; E keeps the editor on the entry's own JSON. The limits are the books'
 	// own, so the box never holds more than the book would; the counter shows how much of the field is used.
-	const ROW_KEY = /^(?:entry|item|node):/;
+	const ROW_KEY = /^(?:entry|item|envelope|move|node):/;
 	const boxWidth = (fields, cols) => {
 		const longest = Math.max(...fields.map((field) => Math.min(field.limit, 80)));
 		const single = !fields.some((field) => field.multiline);
@@ -877,11 +878,37 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		if (viewId_ === "carto.plan") {
 			const { plan } = loadPlan(brainDir);
-			const item = plan?.items.find((entry) => entry.id === id);
-			if (item === undefined) return undefined;
-			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: item.text }];
-			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
-			return { id, fields };
+			const envelope = plan?.items.find((entry) => entry.id === id);
+			if (envelope !== undefined) {
+				const fields = [
+					{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: envelope.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: envelope.doneWhen ?? "" },
+				];
+				if (envelope.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: envelope.outcome ?? "" });
+				return { id, fields };
+			}
+			const move = plan?.moves.find((entry) => entry.id === id);
+			if (move === undefined) return undefined;
+			const parent = plan?.items.find((entry) => entry.id === move.parent);
+			const changing = parent?.mode === POLICY.enums.planMode.change;
+			const budget = move.budget ?? { replies: move.turns, fileOps: 0, commandStarts: 0 };
+			return {
+				id,
+				fields: [
+					{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: move.action ?? move.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: move.doneWhen ?? "" },
+					{ id: "proof", label: changing ? "Required proof" : "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: move.proof ?? "" },
+					{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: (move.targets ?? []).join("\n") },
+					...(changing ? [
+						{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: String(move.capabilities?.files === true) },
+						{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: String(move.capabilities?.commands === true) },
+						{ id: "networkAllowed", label: "Network allowed", limit: 5, value: String(move.capabilities?.network === true) },
+						{ id: "replies", label: "Reply budget", limit: 1, value: String(budget.replies ?? move.turns ?? POLICY.limits.plan.moveTurns.change) },
+						{ id: "fileOps", label: "File-operation budget", limit: 1, value: String(budget.fileOps ?? POLICY.limits.plan.moveBudget.fileOps) },
+						{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(budget.commandStarts ?? POLICY.limits.plan.moveBudget.commandStarts) },
+					] : []),
+				],
+			};
 		}
 		if (viewId_ === "carto.atlas") {
 			const { atlas } = loadAtlas(brainDir);
@@ -917,6 +944,25 @@ export async function runScreen(session, options, runTerminal) {
 					flash("nothing was changed");
 					return true;
 				}
+				// Move targets are a list in the plan but a readable line-per-path field in the box.
+				if (viewId_ === "carto.plan" && rowKey.startsWith("move:")) {
+					if (changes.targets !== undefined) changes.targets = String(changes.targets).split(/[\n,]/).map((path) => path.trim()).filter((path) => path !== "");
+					const capabilities = {};
+					for (const [field, key] of [["filesAllowed", "files"], ["commandsAllowed", "commands"], ["networkAllowed", "network"]]) {
+						if (changes[field] === undefined) continue;
+						capabilities[key] = boolOf(String(changes[field]));
+						delete changes[field];
+					}
+					if (Object.keys(capabilities).length > 0) changes.capabilities = capabilities;
+					const budget = {};
+					for (const [field, key] of [["replies", "replies"], ["fileOps", "fileOps"], ["commandStarts", "commandStarts"]]) {
+						if (changes[field] === undefined) continue;
+						const raw = String(changes[field]).trim();
+						budget[key] = /^\d+$/.test(raw) ? Number(raw) : raw;
+						delete changes[field];
+					}
+					if (Object.keys(budget).length > 0) changes.budget = budget;
+				}
 				const said = editRow(brainDir, id, changes, root);
 				flash(said.replace(/\n+/g, " "));
 				if (said.startsWith("! ")) return false;
@@ -935,8 +981,9 @@ export async function runScreen(session, options, runTerminal) {
 			{ id: "salient", label: "Salient", limit: 5, value: "false" },
 		],
 		plan: () => [
-			{ id: "mode", label: "Mode", limit: 6, value: "look" },
-			{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "mode", label: "Mode", limit: 6, value: "change" },
+			{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: "" },
 			{ id: "network", label: "Network", limit: 5, value: "false" },
 			{ id: "standing", label: "Standing", limit: 5, value: "false" },
 		],
@@ -958,7 +1005,7 @@ export async function runScreen(session, options, runTerminal) {
 			return { kind: said("kind").trim(), text: said("text"), ...(said("doneWhen").trim() !== "" ? { done_when: said("doneWhen") } : {}), ...(bool("salient") !== undefined ? { salient: bool("salient") } : {}) };
 		}
 		if (book === "plan") {
-			return { mode: said("mode").trim(), text: said("text"), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
+			return { mode: said("mode").trim(), text: said("text"), ...(said("doneWhen").trim() !== "" ? { done_when: said("doneWhen") } : {}), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
 		}
 		return { name: said("name"), gist: said("gist"), ...(said("detail").trim() !== "" ? { detail: said("detail") } : {}) };
 	};
@@ -979,6 +1026,67 @@ export async function runScreen(session, options, runTerminal) {
 				brain.at = 0;
 				refresh(viewId(), true);
 				return true;
+			},
+		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
+	};
+	/** `n` on an envelope declares a child move through the same plan operation as the agent. */
+	const openMoveBox = (parentId) => {
+		const { plan } = loadPlan(brainDir);
+		const parent = plan?.items.find((item) => item.id === parentId);
+		if (parent === undefined) return flash("that envelope is no longer in the plan");
+		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) return flash(`${parent.id} is not an open envelope`);
+		const changing = parent.mode === POLICY.enums.planMode.change;
+		const fields = [
+			{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: "" },
+			...(changing ? [
+				{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: "" },
+				{ id: "proof", label: "Required proof", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" },
+				{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: "true" },
+				{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: "true" },
+				{ id: "networkAllowed", label: "Network allowed", limit: 5, value: "false" },
+				{ id: "replies", label: "Reply budget", limit: 1, value: String(POLICY.limits.plan.moveTurns.change) },
+				{ id: "fileOps", label: "File-operation budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.fileOps) },
+				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
+			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
+		];
+		const handle = tui.showOverlay(new Box({
+			title: `new move under ${parent.id}`,
+			fields,
+			keyOf,
+			flash,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				const said = (key) => drafts.get(key) ?? "";
+				const number = (key) => {
+					const raw = said(key).trim();
+					return /^\d+$/.test(raw) ? Number(raw) : raw;
+				};
+				const op = {
+					action: "addMove",
+					parent: parent.id,
+					text: said("text"),
+					done_when: said("doneWhen"),
+					...(changing ? {
+						targets: said("targets").split(/[\n,]/).map((path) => path.trim()).filter((path) => path !== ""),
+						proof: said("proof"),
+						capabilities: { files: boolOf(said("filesAllowed")), commands: boolOf(said("commandsAllowed")), network: boolOf(said("networkAllowed")) },
+						budget: { replies: number("replies"), fileOps: number("fileOps"), commandStarts: number("commandStarts") },
+					} : said("proof").trim() !== "" ? { proof: said("proof") } : {}),
+				};
+				try {
+					const current = loadPlan(brainDir).plan;
+					if (current === undefined) return false;
+					const result = applyPlanOp(current, op, new Date().toISOString());
+					savePlan(brainDir, current);
+					flash(result.line);
+					brain.at = 0;
+					refresh(viewId(), true);
+					return true;
+				} catch (error) {
+					flash(error instanceof PlanError ? error.message : String(error.message ?? error));
+					return false;
+				}
 			},
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
@@ -1111,25 +1219,25 @@ export async function runScreen(session, options, runTerminal) {
 		// The rows of the views, in every tab but Chat: the same keys do everywhere what they do in Hands — f
 		// folds a report, v archives a row out of what the agent reads, d deletes it for good, t settles it, x unshelves a file.
 		// They stand on whatever the view shows: a report or a shelved file in Hands, a node of the graph, a
-		// ledger entry, a plan item in Carto, a request in Requests, a message of the user or the agent in the
+		// ledger entry, a plan envelope or move in Carto, a request in Requests, a message of the user or the agent in the
 		// Context window. The operations themselves are in src/ops.mjs, the same code the commands run.
 		if (!inChat) {
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
-			const deletable = rowKey !== undefined && (/^(?:report|entry|item|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
+			const deletable = rowKey !== undefined && (/^(?:report|entry|item|envelope|move|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
 			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
 				const said = foldRow(brainDir, bookId);
 				flash(said.replace(/\n+/g, " "));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
 				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
 				flash(settleRow(brainDir, bookId, root));
 				refresh(viewId(), true);
 				return;
@@ -1170,7 +1278,8 @@ export async function runScreen(session, options, runTerminal) {
 					return void submit(`/deny ${bookId}`);
 				}
 			}
-			// In a book view, n opens the box on a template for a new entry; E keeps the editor.
+			// In Plan, n on an envelope declares one child move; elsewhere it opens the book's new-entry box.
+			if (key === "n" && viewId() === "carto.plan" && rowKey?.startsWith("envelope:")) return void openMoveBox(bookId);
 			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void openAddBox(BOOK_VIEWS[viewId()]);
 			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
 			if (key === "a" && viewId() === "context.hands") {

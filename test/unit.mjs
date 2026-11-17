@@ -9,10 +9,10 @@ import assert from "node:assert/strict";
 
 import { POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
-import { applyPlanOp, loadPlan, savePlan } from "../src/plan.mjs";
+import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { loadAtlas, saveAtlas } from "../src/atlas.mjs";
 import { createRefDescriber } from "../src/refs.mjs";
-import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate } from "../src/ops.mjs";
+import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate, editRow } from "../src/ops.mjs";
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
@@ -25,6 +25,7 @@ import { bookTool } from "../src/tools/book.mjs";
 import { readTool } from "../src/tools/read.mjs";
 import { shelfTool } from "../src/tools/shelf.mjs";
 import { taskTool } from "../src/tools/task.mjs";
+import { returnTool } from "../src/tools/return.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
@@ -117,14 +118,21 @@ test("ledger: a settled goal says so when settled again", (t) => {
 
 // ─── The plan ───────────────────────────────────────────────────────────────
 
-test("plan: an item added through the same op the agent uses is done by settleRow", (t) => {
+test("plan: an envelope is not runnable and closes only after a declared move is accepted", (t) => {
 	const { brainDir } = fresh(t);
-	const added = applyAdd(brainDir, "plan", JSON.stringify({ mode: "look", text: "Look at the files." }), null);
-	assert.equal(added, "p1 added.");
-	const settled = settleRow(brainDir, "p1", null);
-	assert.match(settled, /p1 done\./);
+	const added = applyAdd(brainDir, "plan", JSON.stringify({ mode: "look", text: "Inspect the entry point." }), null);
+	assert.match(added, /^p1 added as an authorization envelope/);
+	assert.match(settleRow(brainDir, "p1", null), /has no execution moves/);
 	const { plan } = loadPlan(brainDir);
-	assert.equal(plan.items[0].status, POLICY.enums.entryStatus.done);
+	const moved = applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Read src/index.mjs", done_when: "Its entry point is identified." }, NOW);
+	assert.match(moved.line, /^m1 added under p1/);
+	const started = startMove(plan, "m1", NOW);
+	assert.equal(started.move.status, "running");
+	reportMove(plan, "m1", 1, { done: true, report: "t1", proof: "src/index.mjs was read" }, NOW);
+	savePlan(brainDir, plan);
+	assert.match(settleRow(brainDir, "m1", null), /m1 accepted\./);
+	assert.match(settleRow(brainDir, "p1", null), /p1 is done\./);
+	assert.equal(loadPlan(brainDir).plan.items[0].status, POLICY.enums.entryStatus.done);
 });
 
 test("plan: dropRow removes the named item, never the last one", (t) => {
@@ -144,10 +152,71 @@ test("plan: archive and unarchive round-trip persists through the file", (t) => 
 	assert.equal(loadPlan(brainDir).plan.items[0].archived, undefined);
 });
 
-test("plan: a change item added by the user goes through the same withdrawal as the agent's", (t) => {
+test("plan: a change move persists its concrete contract and has no approval until a user grants its revision", (t) => {
 	const { brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Change the palette." }), null);
-	assert.equal(loadPlan(brainDir).plan.authorized, undefined);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Improve the palette.", done_when: "The requested palette is visible." }, NOW);
+	applyPlanOp(plan, {
+		action: "addMove",
+		parent: "p1",
+		text: "Edit src/theme.mjs",
+		done_when: "The new palette values are exported.",
+		targets: ["src/theme.mjs"],
+		proof: "The focused report names the palette check.",
+		capabilities: { files: true, commands: false },
+		budget: { replies: 3, fileOps: 2, commandStarts: 0 },
+	}, NOW);
+	const move = findMove(plan, "m1");
+	assert.deepEqual({ action: move.action, targets: move.targets, doneWhen: move.doneWhen, proof: move.proof, capabilities: move.capabilities, budget: move.budget, revision: move.revision, status: move.status }, {
+		action: "Edit src/theme.mjs",
+		targets: ["src/theme.mjs"],
+		doneWhen: "The new palette values are exported.",
+		proof: "The focused report names the palette check.",
+		capabilities: { files: true, commands: false, network: false },
+		budget: { replies: 3, fileOps: 2, commandStarts: 0 },
+		revision: 1,
+		status: "open",
+	});
+	assert.equal(mayRun(plan, move), false, "the envelope is intent, not authority");
+	approve(plan, NOW, ["p1"]);
+	assert.equal(mayRun(plan, move), true);
+	savePlan(brainDir, plan);
+	assert.deepEqual(loadPlan(brainDir).plan.moves[0].budget, { replies: 3, fileOps: 2, commandStarts: 0 }, "the contract round-trips through disk");
+});
+
+test("plan: acceptance refuses a reported move from an earlier envelope revision", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change one export.", done_when: "The export is demonstrated." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/one.mjs", done_when: "The export changes.", targets: ["src/one.mjs"], proof: "Focused test output." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	reportMove(plan, "m1", 1, { done: true, report: "t1", checkpoints: { before: "c1", after: "c2" }, changes: [{ path: "src/one.mjs" }], proof: "Focused test exits zero." }, NOW);
+	plan.items[0].revision = 2; // A hand-edited plan file must not let an old report complete new intent.
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /earlier revision of p1/);
+	savePlan(brainDir, plan);
+	assert.equal(loadPlan(brainDir).plan.moves[0].parentRevision, 1, "the persisted move still records the envelope revision it ran under");
+});
+
+test("plan: a move field edit carries the UI's capability and budget changes, and withdraws only that move revision", (t) => {
+	const { brainDir, root } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten one check.", done_when: "The narrow check is recorded." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/check.mjs", done_when: "The check is updated.", targets: ["src/check.mjs"], proof: "The focused check output." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	savePlan(brainDir, plan);
+	const said = editRow(brainDir, "m1", {
+		proof: "The named focused test exits zero.",
+		capabilities: { commands: false },
+		budget: { replies: 3, fileOps: 1, commandStarts: 0 },
+	}, root);
+	assert.match(said, /m1 changed and needs approval again/);
+	const move = loadPlan(brainDir).plan.moves[0];
+	assert.equal(move.revision, 2);
+	assert.equal(move.approvedRevision, undefined);
+	assert.deepEqual(move.capabilities, { files: true, commands: false, network: false });
+	assert.deepEqual(move.budget, { replies: 3, fileOps: 1, commandStarts: 0 });
+	assert.equal(move.proof, "The named focused test exits zero.");
 });
 
 // ─── The assessment ─────────────────────────────────────────────────────────
@@ -172,62 +241,106 @@ test("assessment: the book tool writes it whole, and /assessment reads the file"
 
 // ─── The plan: approval in the user's own words ─────────────────────────────
 
-test("approval words: a bare affirmative authorizes the one item waiting", (t) => {
+test("approval words: i yes approves the one waiting move revision, while a named move may deliberately allow network", (t) => {
 	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "Change the palette.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "Change the schema.", network: true, status: "open", added: 1 },
-		{ id: "p3", mode: "look", text: "Look first.", status: "open", added: 1 },
-	] });
-	assert.deepEqual(approvalWords(brainDir, "yes"), ["p1"]);
 	const { plan } = loadPlan(brainDir);
-	assert.equal(plan.items.find((item) => item.id === "p1").approved !== undefined, true, "the change item is approved");
-	assert.equal(plan.items.find((item) => item.id === "p2").approved, undefined, "a network item never rides a bare word — name it or /approve it");
-	// Naming the network item approves it: deliberate, item by item.
-	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change the palette.", done_when: "The palette changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/theme.mjs", done_when: "The values are exported.", targets: ["src/theme.mjs"], proof: "A palette check." }, NOW);
+	savePlan(brainDir, plan);
+	assert.deepEqual(approvalWords(brainDir, "i yes", NOW), ["m1"]);
+	let loaded = loadPlan(brainDir).plan;
+	assert.equal(loaded.moves[0].approvedRevision, 1);
+	applyPlanOp(loaded, { action: "add", mode: "change", text: "Check the published schema.", done_when: "The schema response is checked." , network: true }, NOW);
+	applyPlanOp(loaded, { action: "addMove", parent: "p2", text: "Run the schema check", done_when: "The command reports the schema version.", targets: ["src/schema.mjs"], proof: "Command output.", capabilities: { network: true } }, NOW);
+	savePlan(brainDir, loaded);
+	assert.deepEqual(approvalWords(brainDir, "approved m2", NOW), ["m2"]);
+	assert.equal(loadPlan(brainDir).plan.moves[1].approvedRevision, 1);
 });
 
-test("approval words: a bare affirmative with a batch waiting approves nothing", (t) => {
+test("approval words: a bare affirmative does not sweep a batch, while scoped approval snapshots its current waiting moves", (t) => {
 	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "One.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "Two.", status: "open", added: 1 },
-	] });
-	assert.equal(approvalWords(brainDir, "yes"), undefined, "an unrelated yes never approves a queue of changes");
-	assert.equal(approvalWords(brainDir, "ok"), undefined);
-	assert.deepEqual(loadPlan(brainDir).plan.items.filter((item) => item.approved !== undefined), [], "nothing was approved");
-	// Scoped to the batch on purpose: "yes all" is a batch approval, minus the network items.
-	assert.deepEqual(approvalWords(brainDir, "yes all"), ["p1", "p2"]);
-});
-
-test("approval words: only the named items are approved; look items never wait", (t) => {
-	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "One.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "Two.", network: true, status: "open", added: 1 },
-	] });
-	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
 	const { plan } = loadPlan(brainDir);
-	assert.equal(plan.items.find((item) => item.id === "p1").approved, undefined);
-	assert.equal(approvalWords(brainDir, "approved p9"), undefined, "an unknown id approves nothing");
-});
-
-test("approval words: anything less than an affirmative is not an approval", (t) => {
-	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [{ id: "p1", mode: "change", text: "Change it.", status: "open", added: 1 }] });
-	for (const words of ["no, wait", "yes but not p1", "what does p1 do?", "maybe", "ok?", "approve it later", "I approved the plan yesterday"]) {
-		assert.equal(approvalWords(brainDir, words), undefined, JSON.stringify(words));
+	for (const [intent, action, path] of [["One", "Edit src/one.mjs", "src/one.mjs"], ["Two", "Edit src/two.mjs", "src/two.mjs"]]) {
+		applyPlanOp(plan, { action: "add", mode: "change", text: intent, done_when: `${intent} is complete.` }, NOW);
+		applyPlanOp(plan, { action: "addMove", parent: `p${plan.next - 1}`, text: action, done_when: `${intent} works.`, targets: [path], proof: `${intent} proof.` }, NOW);
 	}
-	assert.equal(loadPlan(brainDir).plan.items[0].approved, undefined);
+	savePlan(brainDir, plan);
+	assert.equal(approvalWords(brainDir, "yes", NOW), undefined, "an unrelated yes never approves a queue of moves");
+	assert.deepEqual(approvalWords(brainDir, "yes all", NOW), ["m1", "m2"]);
+	const loaded = loadPlan(brainDir).plan;
+	assert.deepEqual(loaded.moves.map((move) => move.approvedRevision), [1, 1]);
+	applyPlanOp(loaded, { action: "addMove", parent: "p1", text: "Add a later check", done_when: "The extra check runs.", targets: ["test/one.mjs"], proof: "Extra check output." }, NOW);
+	assert.equal(loaded.moves[2].approvedRevision, undefined, "a later addition never inherits the envelope snapshot");
 });
 
-test("approval words: the whole-plan wording authorizes the plan as it stands", (t) => {
+test("approval words: a named envelope selects only its waiting child revisions, and an unknown p or m selects nothing", (t) => {
 	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "Change it.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "And that.", status: "open", added: 1 },
-	] });
-	assert.deepEqual(approvalWords(brainDir, "i approved the plan"), ["p1", "p2"]);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "One.", done_when: "One is complete." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/one.mjs", done_when: "One works.", targets: ["src/one.mjs"], proof: "One proof." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Test src/one.mjs", done_when: "One is tested.", targets: ["test/one.mjs"], proof: "Test output." }, NOW);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Two.", done_when: "Two is complete." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p2", text: "Edit src/two.mjs", done_when: "Two works.", targets: ["src/two.mjs"], proof: "Two proof." }, NOW);
+	savePlan(brainDir, plan);
+	assert.deepEqual(approvalWords(brainDir, "approved p1", NOW), ["m1", "m2"]);
+	const loaded = loadPlan(brainDir).plan;
+	assert.equal(loaded.moves[2].approvedRevision, undefined);
+	assert.equal(approvalWords(brainDir, "approved p9", NOW), undefined);
+	assert.equal(approvalWords(brainDir, "approved m99", NOW), undefined);
+});
+
+test("approval words: anything less than an affirmative is not approval of a move", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change it.", done_when: "It changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/it.mjs", done_when: "It works.", targets: ["src/it.mjs"], proof: "A check." }, NOW);
+	savePlan(brainDir, plan);
+	for (const words of ["no, wait", "yes but not p1", "what does p1 do?", "maybe", "ok?", "approve it later", "I approved the plan yesterday"]) {
+		assert.equal(approvalWords(brainDir, words, NOW), undefined, JSON.stringify(words));
+	}
+	assert.equal(loadPlan(brainDir).plan.moves[0].approvedRevision, undefined);
+});
+
+test("approval words: whole-plan wording approves the current moves, and an edit creates a fresh unapproved revision", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change it.", done_when: "It changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/it.mjs", done_when: "It works.", targets: ["src/it.mjs"], proof: "A check." }, NOW);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "And that.", done_when: "That changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p2", text: "Edit src/that.mjs", done_when: "That works.", targets: ["src/that.mjs"], proof: "Another check." }, NOW);
+	savePlan(brainDir, plan);
+	assert.deepEqual(approvalWords(brainDir, "i approved the plan", NOW), ["m1", "m2"]);
+	const loaded = loadPlan(brainDir).plan;
+	applyPlanOp(loaded, { action: "editMove", id: "m1", proof: "A newer check." }, NOW);
+	assert.equal(loaded.moves[0].revision, 2);
+	assert.equal(loaded.moves[0].approvedRevision, undefined);
+	assert.equal(mayRun(loaded, "m1"), false);
+});
+
+
+test("plan: a reported change move needs report, checkpoints, changed paths and proof before orchestration may accept it", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Ship a narrow change.", done_when: "The narrow change is demonstrated." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/one.mjs", done_when: "The export changes.", targets: ["src/one.mjs"], proof: "The focused test output." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Check src/two.mjs", done_when: "The check passes.", targets: ["src/two.mjs"], proof: "The second test output." }, NOW);
+	approve(plan, NOW, ["p1"]);
+	startMove(plan, "m1", NOW);
+	reportMove(plan, "m1", 1, { done: true, report: "t1", checkpoints: { before: "c1", after: "c2" }, changes: [{ path: "src/other.mjs" }], proof: "test output" }, NOW);
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /outside its declared targets/);
+	plan.moves[0].reported.changes = [{ path: "src/one.mjs" }];
+	assert.doesNotThrow(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW));
+	assert.throws(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW), /still has m2 \(open\)/);
+	startMove(plan, "m2", NOW);
+	reportMove(plan, "m2", 1, { done: true, report: "t2", checkpoints: { before: "c2", after: "c3" }, changes: [{ path: "src/two.mjs" }], proof: "second test output" }, NOW);
+	applyPlanOp(plan, { action: "acceptMove", id: "m2" }, NOW);
+	assert.doesNotThrow(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW));
+	undoMove(plan, "m1", NOW);
+	assert.equal(plan.moves[0].status, "open");
+	assert.equal(plan.moves[0].approvedRevision, undefined);
+	assert.equal(plan.items[0].status, "open");
+	assert.equal(plan.items[0].closed, undefined);
+	assert.equal(plan.moves[1].status, "blocked", "a later accepted sibling is stale after an earlier undo");
 });
 
 // ─── The atlas ──────────────────────────────────────────────────────────────
@@ -351,11 +464,14 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 
 test("templates: every book has a template that parses and applies", (t) => {
 	const { brainDir, root } = fresh(t);
-	for (const [book, expect] of [["ledger", /added\.$/], ["plan", /added\.$/]]) {
+	for (const [book, expect] of [["ledger", /added\.$/], ["plan", /added as an authorization envelope\./]]) {
 		const template = addTemplate(book);
 		assert.equal(typeof template, "string");
 		assert.doesNotThrow(() => JSON.parse(template));
-		const filled = template.replace('"text": ""', '"text": "from the template."').replace('"gist": ""', '"gist": "from the template."');
+		const filled = template
+			.replace('"text": ""', '"text": "from the template."')
+			.replace('"done_when": ""', '"done_when": "the declared work is complete."')
+			.replace('"gist": ""', '"gist": "from the template."');
 		const line = applyAdd(brainDir, book, filled, root);
 		assert.match(line, expect, `${book} template should apply once filled in: ${line}`);
 	}
@@ -394,15 +510,55 @@ test("shell: arguments an action does not use are named in the result, not swall
 	assert.equal(ignoredLine({ action: "run", command: "ls" }, "run"), "");
 });
 
-test("shell: a run with a cross-action argument still runs, and says so", async (t) => {
-	const tool = shellTool({ config: { shellWait: 30 }, runner: { mode: "sandbox" }, windows: stubWindows(), runOf: () => ({ mode: "change" }) });
-	const result = await tool.execute({ action: "run", command: "ls", text: "typed?" }, { conversationId: "c", taskId: "t", now: () => Date.now() }, {});
+test("shell: a read-only inline run with a cross-action argument still runs, and says so", async () => {
+	const tool = shellTool({ config: { shellWait: 30 }, runner: { mode: "sandbox" }, windows: stubWindows(), runOf: () => ({ mode: "look" }) });
+	const result = await tool.execute({ action: "run", command: "ls", text: "typed?" }, { conversationId: ROOT_CONVERSATION_ID, taskId: "t", now: () => Date.now() }, {});
 	assert.match(result.output[0].text, /Ignored as not for `run`: `text` \(send only\)\./);
 });
 
-test("shell: TOOLS.shell and the charter both say the lane survives the sandbox being off while bubblewrap works", () => {
-	assert.match(TOOLS.shell, /when it says they run directly, I still run only in a read-only window, and only when bubblewrap works — when it does not, I run none at all\./);
+test("shell: TOOLS.shell distinguishes the confined inline lane from an authorized direct move", () => {
+	assert.match(TOOLS.shell, /Inline commands from the orchestrating context always use the read-only lane; in direct mode that lane still needs working bubblewrap and is refused without it\./);
+	assert.match(TOOLS.shell, /A declared change move is different: in direct mode it runs directly under its live move token even when bubblewrap is unavailable/);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
+});
+
+test("shell: a live move owns its window, spends command starts, and loses stop authority when its revision changes", async (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Run the narrow check.", done_when: "The check is recorded." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run npm test", done_when: "The test exits.", targets: ["src/check.mjs"], proof: "Test output.", budget: { replies: 3, fileOps: 0, commandStarts: 1 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
+	const focus = "shell-focus";
+	updateContext(brainDir, (store) => { Object.assign(taskState(store, focus), { mode: "change", move: "m1", revision: 1, commandUses: 0, windows: [], commands: [] }); });
+	const open = new Set();
+	const result = (window, more = {}) => ({ text: "", ms: 1, reason: "time", window, cwd: ".", lines: 0, kept: 0, sandbox: true, network: false, state: "busy", ...more });
+	let stopped = 0;
+	const windows = {
+		list: () => [...open].map((name) => ({ name, state: "busy" })),
+		run: async (name) => { open.add(name); return result(name); },
+		send: async (name) => result(name),
+		stop: async (name) => { stopped++; return result(name, { wasBusy: true, ended: true, exit: 130, state: "idle" }); },
+		close: (name) => ({ wasGone: !open.delete(name) }),
+	};
+	const tool = shellTool({ brainDir, config: { shellWait: 30 }, gate: { yolo: false }, runner: { mode: "sandbox" }, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
+	const api = { conversationId: focus, taskId: "shell-focus" };
+	const started = await tool.execute({ action: "run", command: "npm test", window: "check" }, api, {});
+	assert.equal(started.isError, false, started.output[0].text);
+	assert.equal(loadContext(brainDir).tasks[focus].commandUses, 1);
+	assert.deepEqual(loadContext(brainDir).tasks[focus].windows, ["check"]);
+	const sent = await tool.execute({ action: "send", window: "check", text: "q" }, api, {});
+	assert.equal(sent.isError, false, sent.output[0].text);
+	const exhausted = await tool.execute({ action: "run", command: "npm test", window: "other" }, api, {});
+	assert.equal(exhausted.isError, true);
+	assert.match(exhausted.output[0].text, /started all 1 commands/);
+	const altered = loadPlan(brainDir).plan;
+	applyPlanOp(altered, { action: "editMove", id: "m1", proof: "A newer test output." }, NOW);
+	savePlan(brainDir, altered);
+	const refusedStop = await tool.execute({ action: "stop", window: "check" }, api, {});
+	assert.equal(refusedStop.isError, true);
+	assert.equal(stopped, 0, "a stale move cannot control its old shell window");
 });
 
 // ─── Reference ids count up per project ─────────────────────────────────────
@@ -591,6 +747,33 @@ test("lane: with no sandbox and the switch not taken, the main agent cannot run 
 	assert.equal(called, false);
 });
 
+test("lane: a declared direct change move still runs when bubblewrap is absent", async (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Run the direct check.", done_when: "The direct check is recorded." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run the direct check", done_when: "The command exits.", targets: ["src/check.mjs"], proof: "Command output.", budget: { replies: 2, fileOps: 0, commandStarts: 1 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
+	const focus = "direct-shell-focus";
+	updateContext(brainDir, (store) => { Object.assign(taskState(store, focus), { mode: "change", move: "m1", revision: 1, commandUses: 0, windows: [], commands: [] }); });
+	let called;
+	const windows = {
+		...stubWindows(),
+		list: () => [],
+		async run(name, command, options) {
+			called = { name, command, options };
+			return { text: "ok", ms: 1, reason: "done", exit: 0, window: name, cwd: ".", lines: 1, kept: 1, sandbox: false, network: true, state: "idle" };
+		},
+	};
+	const runner = gatedRunnerOf(true, { ok: false, why: "bubblewrap (the bwrap command) is not installed" });
+	const tool = shellTool({ brainDir, config: { shellWait: 1 }, gate: { yolo: false }, runner, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
+	const result = await tool.execute({ action: "run", command: "npm test", window: "direct" }, { conversationId: focus, taskId: focus }, {});
+	assert.equal(result.isError, false, result.output[0].text);
+	assert.deepEqual(called, { name: "direct", command: "npm test", options: { network: false, waitMs: 1_000, signal: undefined, readOnly: false } });
+	assert.equal(loadContext(brainDir).tasks[focus].commandUses, 1);
+});
+
 // ─── The state block ────────────────────────────────────────────────────────
 
 const runnerOf = (off, available) => ({ off, available, get mode() { return this.off ? "direct" : this.available.ok ? "sandbox" : "none"; } });
@@ -603,7 +786,7 @@ const blockOf = (t, runner) => {
 
 test("state: the sandbox-off line says the main agent keeps a read-only lane while bubblewrap works", (t) => {
 	const block = blockOf(t, runnerOf(true, { ok: true, version: "0.13.1", shell: "bash" }));
-	assert.match(block, /always in a read-only window, when bubblewrap works/);
+	assert.match(block, /Inline commands remain read-only when bubblewrap works; when it does not, none run\./);
 });
 
 test("state: the no-sandbox line says no command can be run at all", (t) => {
@@ -745,82 +928,93 @@ test("trace: one call to the model is one JSON line: the request as sent, the re
 
 // ─── The approval gate, as the live run taught it ────────────────────────────
 
-test("plan: an item approved one by one is authorized everywhere the agent is told so", (t) => {
+test("plan: named request approval expands an envelope's current moves and state names the move contract", (t) => {
 	const { brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "And the tests for it." }), null);
-	let { plan } = loadPlan(brainDir);
-	assert.equal(awaitsApproval(plan), true, "two change items wait for the user");
-	assert.match(authorizationLine(plan), /^Not approved/);
-	assert.match(planSummary(plan), /2 change items not authorized/);
+	const { plan } = loadPlan(brainDir);
+	for (const [intent, action, path] of [["Add the wrist throw.", "Edit src/throw.mjs", "src/throw.mjs"], ["Test the throw.", "Edit test/throw.mjs", "test/throw.mjs"]]) {
+		applyPlanOp(plan, { action: "add", mode: "change", text: intent, done_when: `${intent} is demonstrated.` }, NOW);
+		applyPlanOp(plan, { action: "addMove", parent: `p${plan.next - 1}`, text: action, done_when: `${intent} works.`, targets: [path], proof: `${intent} proof.` }, NOW);
+	}
+	savePlan(brainDir, plan);
+	let loaded = loadPlan(brainDir).plan;
+	assert.equal(awaitsApproval(loaded), true, "two change moves wait for the user");
+	assert.match(authorizationLine(loaded), /^Not approved/);
+	assert.match(planSummary(loaded), /2 moves wait for approval/);
 	const done = approveRequests(brainDir, ["p1"]);
-	assert.deepEqual(done.items, ["p1"]);
-	({ plan } = loadPlan(brainDir));
-	assert.equal(awaitsApproval(plan), true, "p2 still waits");
-	assert.match(authorizationLine(plan), /^Not approved/);
-	assert.match(planSummary(plan), /1 change item not authorized/);
-	approveRequests(brainDir, ["p2"]);
-	({ plan } = loadPlan(brainDir));
-	assert.equal(awaitsApproval(plan), false);
-	assert.match(authorizationLine(plan), new RegExp("^Authorized by " + USER_NAME));
-	assert.match(planSummary(plan), /authorized$/);
+	assert.deepEqual(done.items, ["m1"]);
+	loaded = loadPlan(brainDir).plan;
+	assert.equal(awaitsApproval(loaded), true, "m2 still waits");
+	assert.match(authorizationLine(loaded), /^Not approved/);
+	approveRequests(brainDir, ["m2"]);
+	loaded = loadPlan(brainDir).plan;
+	assert.equal(awaitsApproval(loaded), false);
+	assert.match(authorizationLine(loaded), new RegExp("^Authorized by " + USER_NAME));
+	assert.match(planSummary(loaded), /2 moves approved/);
 });
 
-test("change gate: a focus carries an approved item whatever the history's length; planItem is inferred; a stranger is refused", async (t) => {
+test("change gate: a focus carries one approved move revision; direct file authority is target- and budget-scoped", async (t) => {
 	const { root, brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
-	approveRequests(brainDir, ["p1"]);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Add the wrist throw.", done_when: "The throw is available." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Create src/throw.mjs", done_when: "The module exists.", targets: ["src/throw.mjs"], proof: "The module is read back.", budget: { replies: 3, fileOps: 1, commandStarts: 0 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	/** A focus conversation id (7777), not the root: ROOT_CONVERSATION_ID is the main agent. Record it as the
-	 * context store does when the fork is created. */
-	const focus = 7777;
+	const [write] = changeTools({ root, brainDir, gate: { yolo: false }, write: { newOnly: true, maxLines: 60 } });
+	const focus = "focus-7777";
 	updateContext(brainDir, (store) => {
-		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
+		Object.assign(taskState(store, focus), { purpose: "create the throw", item: "p1", move: "m1", revision: 1, mode: "change", fileOps: 0, commandUses: 0, windows: [] });
 	});
-	const writes = [];
-	const apis = {
-		carry: { conversationId: focus, executeTool: async (name, args) => { writes.push([name, args]); return { isError: false, structuredOutput: "Wrote src/new.txt: 1 line, a new file." } } },
-		stranger: { conversationId: 4242, executeTool: async () => { throw new Error("must not be reached"); } },
+	const focusApi = {
+		conversationId: focus,
+		taskId: "file-focus",
+		executeTool: async (name, args) => {
+			assert.equal(name, "write");
+			const nested = await write.execute(args, focusApi, undefined);
+			return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
+		},
 	};
-	// Omitting `planItem` infers `p1` directly from the focus's recorded task state.
-	const inferred = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/new.txt", content: "hello\n" }), apis.carry, undefined);
-	assert.equal(writes.length, 1, "the authorized focus reached the nested write without repeating planItem");
-	assert.equal(writes[0][0], "write");
-	assert.equal(inferred.isError, false);
-	// Matching `planItem` still works; a mismatched explicit `planItem` is refused.
-	const matching = await tool.execute({ target: "file", action: "create", path: "src/new2.txt", content: "hello\n", planItem: "p1" }, apis.carry, undefined);
-	assert.equal(matching.isError, false);
-	const mismatch = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n", planItem: "p9" }, apis.carry, undefined);
-	assert.equal(mismatch.isError, true);
-	assert.match(mismatch.output[0].text, /not carrying/);
-	updateContext(brainDir, (store) => {
-		Object.assign(taskState(store, "4242"), { purpose: "nosy", item: "p2", mode: "look" });
-	});
-	const no = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n" }, apis.stranger, undefined);
-	assert.equal(no.isError, true);
-	assert.match(no.output[0].text, /not carrying/);
+	const outside = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/outside.mjs", content: "export {};\n" }), focusApi, undefined);
+	assert.equal(outside.isError, true);
+	assert.match(outside.output[0].text, /outside m1's declared targets/);
+	assert.equal(loadContext(brainDir).tasks[focus].fileOps, 0, "a refused path does not spend the move's file budget");
+	const created = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/throw.mjs", content: "export const throwDie = () => 1;\n" }), focusApi, undefined);
+	assert.equal(created.isError, false, created.output[0].text);
+	assert.equal(existsSync(join(root, "src", "throw.mjs")), true);
+	assert.equal(loadContext(brainDir).tasks[focus].fileOps, 1, "the successful write spends the move's file budget");
+	const spent = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/throw.mjs", content: "export {};\n" }), focusApi, undefined);
+	assert.equal(spent.isError, true);
+	assert.match(spent.output[0].text, /used all 1 direct file mutations/);
+	const stranger = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/throw.mjs", content: "export {};\n" }), { conversationId: "focus-4242", executeTool: async () => { throw new Error("must not run"); } }, undefined);
+	assert.equal(stranger.isError, true);
+	assert.match(stranger.output[0].text, /not carrying a live authorized change move/);
 });
 
 test("file edit: top-level id or path is enough, and always points at the live version", async (t) => {
 	const { root, brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the throw." }), null);
-	approveRequests(brainDir, ["p1"]);
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "dice.js"), "const a = 1;\nconst b = 2;\n");
 	writeFileSync(join(root, "src", "extra.js"), "export const x = 1;\n");
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Edit the throw files.", done_when: "The module and its helper are updated." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Update src/dice.js and src/extra.js", done_when: "Both source files have the intended edits.", targets: ["src/dice.js", "src/extra.js"], proof: "The files are read back." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
 	const { ref } = observeFile(root, brainDir, "src/dice.js");
 	const id = ref.id;
 	// The agent never sees a namespace, a kind or a 64-character hash: only the file's ID or path.
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	const focus = 7777;
+	const focus = "focus-7777";
 	updateContext(brainDir, (store) => {
-		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
+		Object.assign(taskState(store, focus), { purpose: "edit the throw", item: "p1", move: "m1", revision: 1, mode: "change", fileOps: 0, commandUses: 0, windows: [] });
 	});
-	const [, edit, rm] = changeTools({ root, brainDir });
-	const focusApi = { conversationId: focus, executeTool: async (name, args) => {
+	const [, edit, rm] = changeTools({ root, brainDir, gate: { yolo: false } });
+	const focusApi = { conversationId: focus, taskId: "file-edit-focus", executeTool: async (name, args) => {
 		const impl = name === "edit" ? edit : name === "rm" ? rm : undefined;
 		if (!impl) throw new Error(`unexpected nested tool ${name}`);
-		const nested = await impl.execute(args);
+		const nested = await impl.execute(args, focusApi, undefined);
 		// What the harness does with a nested call's result: flag + structured output.
 		return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
 	} };
@@ -848,6 +1042,11 @@ test("file edit: top-level id or path is enough, and always points at the live v
 	assert.equal(secondEdit.isError, false, `the second edit by ID succeeded: ${secondEdit.output[0].text}`);
 	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 10;\nconst b = 3;\n");
 
+	// A pinned ref is still honored as an optimistic check, and fails only because it is stale by choice.
+	const stale = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n" }), focusApi, undefined);
+	assert.equal(stale.isError, true);
+	assert.match(stale.output[0].text, /Stale|status/);
+
 	// `file edit` and `file remove` also accept `path` directly (and empty `newText` deletes the passage).
 	const byPathEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", path: "src/extra.js", oldText: "export const x = 1;\n", newText: "" }), focusApi, undefined);
 	assert.equal(byPathEdit.isError, false, byPathEdit.output[0].text);
@@ -855,11 +1054,6 @@ test("file edit: top-level id or path is enough, and always points at the live v
 	const byPathRemove = await tool.execute(tool.prepareArguments({ target: "file", action: "remove", path: "src/extra.js" }), focusApi, undefined);
 	assert.equal(byPathRemove.isError, false, byPathRemove.output[0].text);
 	assert.equal(existsSync(join(root, "src", "extra.js")), false);
-
-	// A pinned ref is still honored as an optimistic check, and fails only because it is stale by choice.
-	const stale = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n" }), focusApi, undefined);
-	assert.equal(stale.isError, true);
-	assert.match(stale.output[0].text, /Stale|status/);
 
 	// The call label names the tool that carries it, and the result summary strips the file header like `edit`.
 	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", id, oldText: "x", newText: "y" } }), `book file edit ${id}`);
@@ -982,6 +1176,16 @@ test("prepareArguments: book, read, and shelf repair deeply frozen harness argum
 	assert.throws(() => book.prepareArguments({ target: "file", action: "edit", id: "f1", ref: { id: "f2" }, oldText: "a", newText: "b" }), /matching `id` and `ref\.id`/);
 });
 
+test("return: a declared proof is durable and separate from the task report", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const tool = returnTool({ root, brainDir, config: {} });
+	const result = await tool.execute({ report: "The targeted test passed.", proof: "npm test -- focused exits 0.", done: true }, { conversationId: "proof-focus", now: () => Date.parse(NOW) }, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.report, "The targeted test passed.");
+	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.proof, "npm test -- focused exits 0.");
+	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.done, true);
+});
+
 test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let messages = [];
@@ -991,18 +1195,26 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `flat-${++seq}`, now: () => 1700000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
 	const run = (args) => tool.execute(tool.prepareArguments(args), api(), undefined);
 
-	// Plan: flat add, edit, done, remove, and clear.
+	// Plan: flat envelope/move add, a reported move's acceptance, edit, remove, and clear.
 	const p1 = await run({ target: "plan", action: "add", mode: "look", text: "Map the entry point." });
-	assert.ok(!p1.isError && /p1 added/.test(p1.output[0].text), p1.output[0].text);
-	const p2 = await run({ target: "plan", action: "add", mode: "change", text: "Fix the roller.", before: "p1" });
-	assert.ok(!p2.isError && /p2 added/.test(p2.output[0].text), p2.output[0].text);
+	assert.ok(!p1.isError && /p1 added as an authorization envelope/.test(p1.output[0].text), p1.output[0].text);
+	const m1 = await run({ target: "plan", action: "addMove", parent: "p1", text: "Read src/index.mjs", done_when: "The entry point is named." });
+	assert.ok(!m1.isError && /m1 added under p1/.test(m1.output[0].text), m1.output[0].text);
+	const reportPlan = loadPlan(brainDir).plan;
+	startMove(reportPlan, "m1", NOW);
+	reportMove(reportPlan, "m1", 1, { done: true, report: "t-flat", proof: "src/index.mjs was read" }, NOW);
+	savePlan(brainDir, reportPlan);
+	const mDone = await run({ target: "plan", action: "acceptMove", id: "m1" });
+	assert.ok(!mDone.isError && /m1 accepted\./.test(mDone.output[0].text), mDone.output[0].text);
+	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
+	assert.ok(!pDone.isError && /p1 is done\./.test(pDone.output[0].text), pDone.output[0].text);
+	const p2 = await run({ target: "plan", action: "add", mode: "change", text: "Fix the roller.", done_when: "The roller works.", before: "p1" });
+	assert.ok(!p2.isError && /p2 added as an authorization envelope/.test(p2.output[0].text), p2.output[0].text);
 	const pEdit = await run({ target: "plan", action: "edit", id: "p2", text: "Fix the dice roller." });
 	assert.ok(!pEdit.isError, pEdit.output[0].text);
-	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
-	assert.ok(!pDone.isError && /p1 done\./.test(pDone.output[0].text), pDone.output[0].text);
 	const pRemove = await run({ target: "plan", action: "remove", id: "p2" });
 	assert.ok(!pRemove.isError && /p2 removed/.test(pRemove.output[0].text), pRemove.output[0].text);
-	await run({ target: "plan", action: "add", mode: "look", text: "Leftover item." });
+	await run({ target: "plan", action: "add", mode: "look", text: "Leftover envelope." });
 	const cleared = await run({ target: "plan", action: "clear" });
 	assert.ok(!cleared.isError && /The plan is empty now\./.test(cleared.output[0].text), cleared.output[0].text);
 	assert.equal(loadPlan(brainDir).plan.items.length, 0);
@@ -1032,7 +1244,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	// Task tool no longer appends the unconditional "Internal checkpoint" prompt to task reports.
 	const memos = new Map();
 	const tTool = taskTool({ root, brainDir, config: { taskTurns: 4, maxTokens: 4096 } });
-	const taskRes = await tTool.execute({ brief: "Read index" }, {
+	const taskRes = await tTool.execute({ brief: "Read index", done_when: "The index entry point is reported." }, {
 		conversationId: ROOT_CONVERSATION_ID,
 		taskId: "task-run-1",
 		callId: "call-1",
@@ -1063,7 +1275,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 		TOOLS.shelf,
 		TOOLS.book,
 		LOOK_NOTE,
-		CHANGE_NOTE("p1", "Edit file", { commands: "sandbox", network: false }),
+		CHANGE_NOTE({ item: "p1", move: "m1", revision: 1, text: "Edit file", doneWhen: "The file is updated.", proof: "The focused check.", targets: ["src/file.mjs"] }, { commands: "sandbox", network: false }),
 		HANDOFF_IN_TURN("test"),
 		HANDOFF_NOTE("test"),
 		TASK_HANDOFF,
@@ -1073,7 +1285,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	assert.match(TOOLS.read, /next successful read batch replaces/);
 	assert.match(TOOLS.read, /shared ledger, atlas or assessment/);
 	assert.match(LOOK_NOTE, /retain lasting conclusions in the shared ledger, atlas or assessment/);
-	assert.match(CHANGE_NOTE("p1", "Edit file"), /retain lasting conclusions in the shared ledger, atlas or assessment/);
+	assert.match(CHANGE_NOTE({ item: "p1", move: "m1", revision: 1, text: "Edit file", doneWhen: "The file is updated.", proof: "A check.", targets: ["src/file.mjs"] }), /keep lasting findings before return/);
 	assert.doesNotMatch(TOOLS.read, /one `read` comes back per reply/);
 	assert.match(TOOLS.shelf, /action/);
 });

@@ -28,7 +28,7 @@ import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { authorize, awaitsApproval, loadPlan, planPath, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { listRequests, approveRequests, denyRequest, answerQuestion, approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -194,12 +194,12 @@ export function describeResult(message) {
 /**
  * @param {{ harness: any, main: any, context: any, windows?: ReturnType<typeof import("./windows.mjs").createWindows>, wakes?: ReturnType<typeof import("./wakes.mjs").createWakes> }} session
  * @param {{ input: NodeJS.ReadableStream, output: NodeJS.WritableStream, interactive: boolean, contextWindow: number, root: string, brainDir: string, oneShot?: string, gate?: { yolo: boolean }, initiation?: { on: boolean }, wakeMin?: number }} options
- *   gate: whether change items run without /approve; /yolo changes it, and the tools read it (src/harness.mjs)
+ *   gate: whether declared change moves run without /approve; /yolo changes it, and the tools read it (src/harness.mjs)
  * @returns {Promise<number>} exit code
  */
 /** Sent for the user when /approve finds nothing to authorize; like the message that follows an approval, in their voice. */
 const NOTHING_TO_APPROVE =
-	"I typed /approve, but the plan holds no open change item, so nothing was authorized. I can only approve what the plan holds: what you describe in the chat is not in it. If you have changes for me to approve, write them with `plan` now, then ask me again.";
+	"I typed /approve, but the plan holds no declared change move waiting for approval, so nothing changed. I can only approve the current move revisions stored in the plan; chat wording is not a move. Add a narrow move, then ask me again.";
 
 export async function runTerminal(session, options) {
 	const { harness, main, context, windows, wakes, engine, asks } = session;
@@ -455,9 +455,9 @@ export async function runTerminal(session, options) {
 						else {
 							lastReport = text;
 							line(`${bold("◂")} report${message.details?.report ? ` ${message.details.report}` : ""}  ${count(text.length)} characters${message.details?.done === false ? " · returned not done" : ""}  ${dim("(/report shows it)")}`);
-							// A plan item's task says itself whether the item is done.
-							if (message.details?.marked !== undefined) line(`${bold("●")} plan  ✓ ${message.details.marked} marked done by its task`);
-							else if (message.details?.done === false && message.details?.item !== undefined) line(`${bold("●")} plan  ${message.details.item} stays open: its task returned not done`);
+							// A focus reports one move; only the orchestrator accepts it after review.
+							if (message.details?.move !== undefined && message.details?.done === true) line(`${bold("●")} plan  ${message.details.move} reported; review its evidence before accepting it`);
+							else if (message.details?.done === false && message.details?.move !== undefined) line(`${bold("●")} plan  ${message.details.move} is blocked: ${message.details.reason ?? "the focus returned not done"}`);
 						}
 						// What the task put on the main agent's shelf.
 						if (Array.isArray(message.details?.shelved)) {
@@ -986,9 +986,9 @@ export async function runTerminal(session, options) {
 	/** One line on the plan, when there is one. */
 	const planLine = () => {
 		const { plan, error } = loadPlan(options.brainDir);
-		if (plan === undefined) return line(`! The plan cannot be read: ${error}. Repair the file; until then no plan item can run.`);
+		if (plan === undefined) return line(`! The plan cannot be read: ${error}. Repair the file; until then no declared move can run.`);
 		if (plan.items.length === 0) return;
-		line(dim(`plan: ${planSummary(plan)} · /plan shows it${awaitsApproval(plan) && !gate.yolo ? ", /approve authorizes it" : ""}`));
+			line(dim(`plan: ${planSummary(plan)} · /plan shows envelopes and moves${awaitsApproval(plan) && !gate.yolo ? ", /approve snapshots current move revisions" : ""}`));
 	};
 
 	/** Said once for each state of the plan that waits for the user, when the agent has stopped. */
@@ -1000,13 +1000,12 @@ export async function runTerminal(session, options) {
 			return;
 		}
 		const waiting = waitingItems(plan);
-		const mark = JSON.stringify(waiting.map((item) => [item.id, item.text, item.network === true, item.standing === true]));
-		const online = waiting.filter((item) => item.network === true).length;
-		const duties = waiting.filter((item) => item.standing === true).length;
-		const notes = [online > 0 ? `${online} with network access` : "", duties > 0 ? `${duties} standing` : ""].filter((note) => note !== "");
+		const mark = JSON.stringify(waiting.map((move) => [move.id, move.action ?? move.text, move.capabilities?.network === true]));
+		const online = waiting.filter((move) => move.capabilities?.network === true).length;
+		const notes = [online > 0 ? `${online} with network access` : ""].filter((note) => note !== "");
 		if (mark === reminded) return;
 		reminded = mark;
-		line(`${bold("plan")}  ${plural(waiting.length, "change item")} ${waiting.length === 1 ? "waits" : "wait"} for you${notes.length > 0 ? ` (${notes.join(", ")})` : ""}: /plan shows the plan, /approve authorizes it`);
+		line(`${bold("plan")}  ${plural(waiting.length, "change move")} ${waiting.length === 1 ? "waits" : "wait"} for you${notes.length > 0 ? ` (${notes.join(", ")})` : ""}: /plan shows the move contracts, /approve snapshots their current revisions`);
 	};
 
 	const submit = async (content) => {
@@ -1134,12 +1133,12 @@ export async function runTerminal(session, options) {
 						"  /atlas    the tree as the agent sees it, the graph's nodes, and where the file is",
 						"  /assessment  the agent's summary of the project, and where the file is",
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
-						"  /requests what waits for you: change items, questions of taste, and ",
-						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
+						"  /requests what waits for you: declared move revisions and questions of taste",
+						"  /approve  /approve ID ... approves those requests; /approve alone snapshots every current waiting move revision",
 						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
 						"  /pause    hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream",
-												"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
+						"  /yolo     /yolo on lets declared change moves run without /approve while you watch; /yolo off ends that",
 						"  /initiate /initiate off keeps the agent waiting for you at the start; /initiate on lets it start on its own again",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
 						"  /diff     what the last change task did to the files (/diff all: the whole patch)",
@@ -1152,9 +1151,9 @@ export async function runTerminal(session, options) {
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
-					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
-					"  /done ID …  settle a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a node of the graph",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph; the row stays on disk either way",
+					"  /done ID …  settle a row the way the agent does: a ledger entry closes, a reported move is accepted after review, a completed envelope closes, a node confirms",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1286,35 +1285,33 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "approve": {
-				// One or more ids: approve those requests, one item at a time. The agent goes on meanwhile and is
-				// told what changed; it does not have to have been waiting. With no ids the old whole-plan /approve
-				// still works, so a plan described in a few lines can be agreed to in one word.
+				// `/approve p7` expands only to p7's waiting child moves now. `/approve` snapshots every
+				// waiting move at this moment; adding another move later never inherits this decision.
 				if (args.length > 0) {
 					const done = approveRequests(options.brainDir, args);
 					const names = done.items;
-					if (names.length === 0) line(`  None of ${args.join(", ")} names a request that waits. /requests lists them.`);
+					if (names.length === 0) line(`  None of ${args.join(", ")} names a move revision that waits. /requests lists them.`);
 					else {
-						line(`${bold("●")} requests  approved ${names.join(", ")}`);
-						await send(`I approved ${names.join(", ")}. What waited on these requests can go on; everything else you were doing does not stop.`);
+						line(`${bold("●")} moves  approved ${names.join(", ")}`);
+						await send(`I approved the current revisions of ${names.join(", ")}. Only those declared moves may now run; later moves still need their own approval.`);
 					}
-					for (const id of done.unknown) line(dim(`  ${id} is not a request that waits. /requests lists them.`));
+					for (const id of done.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
 					return true;
 				}
 				const { plan, error } = loadPlan(options.brainDir);
 				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
-				else if (openItems(plan, POLICY.enums.planMode.change).length === 0) {
-					line("  The plan has no open change item, so there is nothing to authorize. /plan shows it. The agent is told.");
-					// A model that described its plan in the chat instead of writing it would wait for an approval that cannot come.
-					await send(NOTHING_TO_APPROVE);
-				}
-				else if (isAuthorized(plan)) line("  The plan is already authorized.");
 				else {
-					const covered = authorize(plan, new Date().toISOString());
-					savePlan(options.brainDir, plan);
-					line(`${bold("●")} plan  authorized by you: ${plural(covered, "change item")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
-					for (const item of openItems(plan, POLICY.enums.planMode.change)) line(dim(`  ${item.id} ${item.text}${item.network === true ? "  · its commands reach the network" : ""}${item.standing === true ? "  · standing: the agent may carry it out again and again" : ""}`));
-					// The agent is told, so that it starts on the plan without another message from the user.
-					await send("I authorize the plan as it stands. Carry it out.");
+					const pending = waitingItems(plan);
+					if (pending.length === 0) {
+						line("  The plan has no declared change move waiting for approval. /plan shows envelopes and moves. The agent is told.");
+						await send(NOTHING_TO_APPROVE);
+					} else {
+						const covered = authorize(plan, new Date().toISOString());
+						savePlan(options.brainDir, plan);
+						line(`${bold("●")} moves  approved by you: ${plural(covered, "change move")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
+						for (const move of pending) line(dim(`  ${move.id} ${move.action ?? move.text}${move.capabilities?.network === true ? "  · its commands reach the network" : ""}`));
+						await send(`I approve the current declared move revisions: ${pending.map((move) => move.id).join(", ")}. Carry out only one move per focus and review each report before accepting it.`);
+					}
 				}
 				return true;
 			}
@@ -1346,26 +1343,26 @@ export async function runTerminal(session, options) {
 			}
 			case "yolo": {
 				const { plan } = loadPlan(options.brainDir);
-				const waiting = plan === undefined ? [] : openItems(plan, POLICY.enums.planMode.change);
+				const waiting = plan === undefined ? [] : waitingItems(plan);
 				if (argument === undefined) {
-					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · change items wait for /approve"}`);
-					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets change items run without /approve"}`));
+					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · declared change moves wait for /approve"}`);
+					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets declared change moves run without /approve"}`));
 				} else if (argument === "on") {
 					if (gate.yolo) line("  Approval is already off.");
 					else {
 						gate.yolo = true;
 						line(`${bold("●")} ${YOLO_LINE}`);
-						line(dim("  Every change is still a plan item with a checkpoint. The sandbox is a separate switch (/bwrap). Not remembered: the next start asks for approval again."));
+						line(dim("  Every change is still one declared move with its own targets, budget, checkpoint and report. The sandbox is a separate switch (/bwrap). Not remembered: the next start asks for approval again."));
 						if (options.runner?.mode === "direct") line("! The sandbox is OFF as well: commands run directly on this machine, and nothing asks you first.");
 						setPrompt();
 						// The agent may be resting in front of a plan that waited for the user: tell it, as /approve does.
-						if (!busy && plan !== undefined && awaitsApproval(plan)) await send(`I have switched approval off: change items may run without /approve while it stays off. Carry out the plan${waiting.length === 1 ? ` (${waiting[0].id})` : ""}.`);
+						if (!busy && plan !== undefined && awaitsApproval(plan)) await send(`I have switched approval off: declared change moves may run without /approve while it stays off. Carry out exactly one current move revision per focus${waiting.length === 1 ? ` (${waiting[0].id})` : ""}; its targets, capabilities, budgets, checkpoints, report and acceptance still apply.`);
 					}
 				} else if (argument === "off") {
 					if (!gate.yolo) line("  Approval is already on.");
 					else {
 						gate.yolo = false;
-						line(`${bold("●")} approval: on · change items wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
+						line(`${bold("●")} approval: on · declared change moves wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
 						setPrompt();
 						reminded = undefined;
 						if (!busy) approvalLine();
@@ -1467,29 +1464,20 @@ export async function runTerminal(session, options) {
 					line(`${bold("●")} undone  ${result.item ?? (result.windows ? `window ${result.windows.join(", ")}` : "change task")} · ${result.text}`);
 					if (result.changes.length === 0) line(dim("  The files were already as they were before it."));
 					for (const text of changeRecord(result.changes)) line(dim(text));
-					// The agent learns of it from the plan: the item is open again, marked, and nothing more may change
-					// until the user says so. An item the agent already cleared away is put back, or the agent would go on
-					// believing in files that are gone.
+					// A checkpoint belongs to one move. Undoing it makes that exact move a new, unapproved
+					// revision; later accepted siblings are blocked for deliberate review.
 					const { plan } = loadPlan(options.brainDir);
 					if (plan === undefined) {
-						line("! The plan file cannot be read, so the undo is not noted in it. Tell the agent that you took this task back.");
+						line("! The plan file cannot be read, so the undo is not noted in it. Tell the agent which move you took back.");
 					} else if (result.item !== undefined) {
 						const now = new Date().toISOString();
-						let item = plan.items.find((entry) => entry.id === result.item);
-						const back = item === undefined;
-						if (back) {
-							item = { id: result.item, mode: POLICY.enums.planMode.change, text: result.text, status: POLICY.enums.entryStatus.open, added: now };
-							plan.items.unshift(item);
-							const number = Number(result.item.slice(POLICY.idPrefixes.plan.length));
-							if (Number.isInteger(number) && number >= plan.next) plan.next = number + 1;
+						try {
+							const changed = undoMove(plan, result.item, now);
+							savePlan(options.brainDir, plan);
+							line(dim(`  ${changed.line} ${gate.yolo ? "Approval is off, but the new revision still has to stay within its move contract." : "Its new revision needs /approve before another focus can run it."}`));
+						} catch (error) {
+							line(`! The files were undone, but ${result.item} could not be updated in the plan: ${error.message}. Tell the agent before any further change.`);
 						}
-						Object.assign(item, { status: POLICY.enums.entryStatus.open, undone: now });
-						delete item.outcome;
-						delete item.closed;
-						delete item.approved;
-						delete plan.authorized;
-						savePlan(options.brainDir, plan);
-						line(dim(`  ${item.id} is ${back ? "back in the plan, open" : "open again"}. ${gate.yolo ? "Approval is off, so the agent may carry it out again: tell it what you want instead." : "The plan needs /approve again before a change item runs. Tell the agent what you want instead."}`));
 					}
 					if (result.windows !== undefined) line(dim("  The plan is as it was, and the window may still be running: /shells shows it. Tell the agent what you took back."));
 					line(dim("  /undo again takes back the change task before this one."));
@@ -1526,8 +1514,8 @@ export async function runTerminal(session, options) {
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
 						const { plan } = loadPlan(options.brainDir);
-						const open = plan !== undefined && isAuthorized(plan) ? openItems(plan, POLICY.enums.planMode.change).length : 0;
-						if (open > 0) line(`  The plan is authorized: its ${plural(open, "open change item")} will run without the sandbox.`);
+						const open = plan === undefined ? 0 : runnableMoves(plan).length;
+						if (open > 0) line(`  The plan has ${plural(open, "approved move")} ready to run without the sandbox.`);
 						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
 					}
 				} else if (!runner.off) line(runner.mode === "sandbox" ? "  The sandbox is already on." : `  ${sandboxLine(runner)}`);
@@ -1749,7 +1737,7 @@ export async function runTerminal(session, options) {
 			case "unarchive": {
 				const ids = args;
 				if (ids.length === 0) {
-					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
 				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
@@ -1757,7 +1745,7 @@ export async function runTerminal(session, options) {
 			}
 			case "done": {
 				if (argument === undefined || args.length === 0) {
-					line("  /done ID …  settles a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed.");
+					line("  /done ID …  settles a row the way the agent does: a ledger entry closes, a reported move is accepted after review, a completed envelope closes, a node confirms.");
 					return true;
 				}
 				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);
@@ -1766,7 +1754,7 @@ export async function runTerminal(session, options) {
 			case "delete": {
 				const ids = args;
 				if (ids.length === 0) {
-					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan item, a node of the graph. /archive hides a row and keeps it.");
+					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan envelope or move, a node of the graph. /archive hides a row and keeps it.");
 					return true;
 				}
 				line(`  ${dropRows(options.brainDir, ids)}`);
@@ -2010,15 +1998,15 @@ export async function runTerminal(session, options) {
 					asks.answer(text);
 					return;
 				}
-				// Their words carry the approval: an unambiguous yes while change items wait approves them (the gate reads it, not the agent).
+				// Their words carry an exact current move approval; a bare yes never sweeps a batch (the gate reads it, not the agent).
 				if (gate.yolo !== true) {
 					const approved = approvalWords(options.brainDir, text);
 					if (approved !== undefined) {
 						// An item marked network is never approved by bare words — say so when that is what is left.
-						const named = /p\d+/i.test(text);
+							const named = /[pm]\d+/i.test(text);
 						let held = [];
-						if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((item) => item.network === true).map((item) => item.id); } catch { held = []; }
-						line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+							if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((move) => move.capabilities?.network === true).map((move) => move.id); } catch { held = []; }
+							line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
 					}
 				}
 				const wasBusy = busy;

@@ -43,8 +43,9 @@ export function returnTool({ root, brainDir, config }) {
 		].join(" "),
 		parameters: obj({
 			report: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Everything the orchestrating context needs: what I found or changed, with file paths and line numbers, and what I could not find or do." }),
-			done: bool({ description: "true when the brief is carried out. false when something is left; say what in the report. For a plan item, true marks the item done." }),
+			done: bool({ description: "true when the brief is carried out. false when something is left; say what in the report. For a declared move, true only reports a completion claim; the orchestrator reviews the evidence and accepts it separately." }),
 			summary: opt(str({ description: "One or two lines the main agent keeps of this task after its context is collapsed. Leave out, and the start of the report is used." })),
+			proof: opt(str({ description: "For a declared change move, the observed evidence required by its contract: the named check and result, or other concrete proof. A done claim without it is blocked for review." })),
 			shelf: opt(str({ description: "Paths or typed references to add to my shelf if not present, then hand to the shared context on return; separate multiple entries with commas." })),
 		}),
 		executionMode: "sequential",
@@ -69,7 +70,8 @@ export function returnTool({ root, brainDir, config }) {
 					if (at >= 0) state.shelf[at] = { ...state.shelf[at], handOn: true };
 					else state.shelf.push({ ...item, handOn: true });
 				}
-				state.returned = { report, done: args.done === true, at: api.now(), ...(String(args.summary ?? "").trim() !== "" ? { summary: String(args.summary).trim() } : {}) };
+				const proof = String(args.proof ?? "").trim();
+				state.returned = { report, done: args.done === true, at: api.now(), ...(String(args.summary ?? "").trim() !== "" ? { summary: String(args.summary).trim() } : {}), ...(proof !== "" ? { proof } : {}) };
 			});
 			return { output: [{ type: "text", text: "Returned. This focus has ended; requested items are queued for handoff to the shared shelf." }], details: { returned: true, done: args.done === true, handedOn: handoff.map(shelfLabel) }, control: { ...POLICY.control.terminate } };
 		},

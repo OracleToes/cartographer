@@ -1,7 +1,7 @@
 // The two tools a change task alters the project with: write and edit.
 //
 // They work only inside the project directory, and only for a task that runs a
-// change item of an authorized plan (the rule is in src/harness.mjs). Every path
+// declared change move revision (the rule is in src/harness.mjs). Every path
 // they accept is one a checkpoint holds, so whatever they do can be undone:
 //   - not outside the project, also not through a symlinked folder;
 //   - not the brain folder `.brain/` and not `.git/`;
@@ -17,6 +17,8 @@ import { isIgnored } from "../checkpoints.mjs";
 import { BRAIN } from "../project.mjs";
 import { fileReference } from "../catalog.mjs";
 import { USER_NAME } from "../user.mjs";
+import { loadContext, taskState, updateContext } from "../context.mjs";
+import { liveMove, loadPlan, targetAllows } from "../plan.mjs";
 
 const CONTENT_MAX_BYTES = POLICY.limits.change.contentBytes;
 /** Rough character budget for a new file: the line cap is the main limit; this one stops a runaway. */
@@ -181,17 +183,47 @@ export function editOne(root, brainDir, given, oldText, newText, { expectedVersi
 	return `Edited ${path.rel}: ${plural(before, "line")} from line ${line} replaced by ${plural(after, "line")}.`;
 }
 
-const run = (work) => {
+/**
+ * The primitive is also an authority boundary. `book` resolves stable file identities before it calls this,
+ * but a tool-to-tool call still cannot turn a broad envelope or a stale focus into a write.
+ */
+function fileAuthority(brainDir, api, path, gate) {
+	const task = loadContext(brainDir).tasks[api?.conversationId];
+	if (task?.mode !== POLICY.enums.planMode.change || typeof task.move !== "string" || !Number.isInteger(task.revision)) {
+		throw new ChangeError("this focus is not carrying a live authorized change move");
+	}
+	const { plan, error } = loadPlan(brainDir);
+	if (plan === undefined) throw new ChangeError(`the plan cannot be read (${error})`);
+	const live = liveMove(plan, task.move, task.revision, { yolo: gate?.yolo === true });
+	if (live.error !== undefined) throw new ChangeError(live.error);
+	if (live.move.capabilities?.files !== true) throw new ChangeError(`${live.move.id} does not allow direct file operations`);
+	if (!targetAllows(live.move, path)) throw new ChangeError(`${String(path).replace(/^\.\//, "")} is outside ${live.move.id}'s declared targets (${live.move.targets.join(", ")})`);
+	const ceiling = live.move.budget?.fileOps ?? POLICY.limits.plan.moveBudget.fileOps;
+	if ((task.fileOps ?? 0) >= ceiling) throw new ChangeError(`${live.move.id} already used all ${ceiling} direct file operations; return blocked and plan a successor move`);
+	return { task, move: live.move, ceiling };
+}
+
+function recordFileUse(brainDir, conversationId) {
+	updateContext(brainDir, (store) => {
+		const task = taskState(store, conversationId);
+		task.fileOps = (task.fileOps ?? 0) + 1;
+	});
+}
+
+const authorizedRun = (brainDir, api, path, gate, work) => {
 	try {
-		return { output: [{ type: "text", text: work() }] };
+		fileAuthority(brainDir, api, path, gate);
+		const text = work();
+		recordFileUse(brainDir, api.conversationId);
+		return { output: [{ type: "text", text }] };
 	} catch (error) {
 		if (error instanceof ChangeError) return { isError: true, output: [{ type: "text", text: `Refused: ${error.message}.` }] };
 		throw error;
 	}
 };
 
-/** @param {{ root: string, brainDir: string, write?: { newOnly?: boolean, maxLines?: number } }} project  root: real path of the project */
-export function changeTools({ root, brainDir, write = {} }) {
+/** @param {{ root: string, brainDir: string, gate?: { yolo: boolean }, write?: { newOnly?: boolean, maxLines?: number } }} project  root: real path of the project */
+export function changeTools({ root, brainDir, gate, write = {} }) {
 	return [
 		defineTool({
 			name: "write",
@@ -213,7 +245,7 @@ export function changeTools({ root, brainDir, write = {} }) {
 			executionMode: "sequential",
 			// Writing the same text twice leaves the same file.
 			replay: POLICY.enums.toolReplay.safe,
-				execute: async (args) => run(() => writeOne(root, brainDir, args.path, args.content, write)),
+				execute: async (args, api) => authorizedRun(brainDir, api, args.path, gate, () => writeOne(root, brainDir, args.path, args.content, write)),
 		}),
 		defineTool({
 			name: "edit",
@@ -228,7 +260,7 @@ export function changeTools({ root, brainDir, write = {} }) {
 			executionMode: "sequential",
 			// Not run a second time after a crash: the passage may already be replaced, and the task reads the file again.
 			replay: POLICY.enums.toolReplay.unsafe,
-			execute: async (args) => run(() => editOne(root, brainDir, args.path, args.old_text, args.new_text, { expectedVersion: args.expectedVersion })),
+				execute: async (args, api) => authorizedRun(brainDir, api, args.path, gate, () => editOne(root, brainDir, args.path, args.old_text, args.new_text, { expectedVersion: args.expectedVersion })),
 		}),
 		defineTool({
 			name: "rm",
@@ -241,7 +273,7 @@ export function changeTools({ root, brainDir, write = {} }) {
 			executionMode: "sequential",
 			// Not run a second time after a crash: the file may already be gone, and the task reads the folder again.
 			replay: POLICY.enums.toolReplay.unsafe,
-			execute: async (args) => run(() => removeOne(root, brainDir, args.path, { expectedVersion: args.expectedVersion })),
+				execute: async (args, api) => authorizedRun(brainDir, api, args.path, gate, () => removeOne(root, brainDir, args.path, { expectedVersion: args.expectedVersion })),
 		}),
 	];
 }

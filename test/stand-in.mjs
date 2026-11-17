@@ -6,7 +6,7 @@
 // tool calls among them are made together in one turn:
 //   say: TEXT            answer TEXT
 //   task: BRIEF          call `task` with BRIEF; when the report is back, answer "Report received: <report>"
-//   task(p2): BRIEF      the same for plan item p2
+//   task(m2): BRIEF      run declared move m2; the stored move contract supplies the brief
 //   look: DIRECTIVE      call a look or change tool itself (the harness should refuse it)
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
@@ -160,7 +160,10 @@ function mainCalls(text) {
 	for (const part of text.split(" || ").map((entry) => entry.trim())) {
 		const task = /^task(?:\((\w+)\))?:(.*)$/s.exec(part);
 		// A \n in the brief is a line break, a \\n stays a \n for the task's own directives.
-		if (task) calls.push({ name: "task", args: { brief: task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n"), ...(task[1] ? { item: task[1] } : {}) } });
+		if (task) {
+			const brief = task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n");
+			calls.push({ name: "task", args: task[1] ? { move: task[1] } : { brief, done_when: "The requested observation is stated in the report." } });
+		}
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
 		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));
 		else if (part === "sleep") calls.push({ name: "sleep", args: {} });
@@ -188,8 +191,11 @@ export function decide(messages) {
 		// The block that stands for a task's collapsed steps is not a message to obey.
 		if (message.role === "user" && /steps up to here \(\d+ repl/.test(raw)) continue;
 		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
+			const contractAt = text.indexOf("Move contract:\n");
+			const briefAt = text.indexOf("Brief:\n");
 			const given = text
-				.slice(text.indexOf("Brief:\n") + 7)
+				.slice(contractAt >= 0 ? contractAt + "Move contract:\n".length : briefAt >= 0 ? briefAt + "Brief:\n".length : 0)
+				.replaceAll(/\s+\|\|\|\s+/g, "\n")
 				.split("\n")
 				.map((line) => line.trim())
 				.filter((line) => line !== "" && !line.startsWith("ON COLLAPSE"));
@@ -212,7 +218,7 @@ export function decide(messages) {
 				if (calls.length > 0) return { calls, ...(words !== undefined ? { say: words } : {}) };
 			}
 			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, done: !undone } }] };
+			return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, proof: "Stand-in observed the task results above.", done: !undone } }] };
 		}
 		if (message.role === "user") {
 			// The main agent speaks to the user with `chat`; plain text is its own.

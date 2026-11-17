@@ -237,11 +237,9 @@ function checkedGist(value) {
 }
 
 /**
- * Paths the agent gave, as project paths that exist. A path that names nothing yet is created, as an empty file
- * (or a folder, when it ends with a slash): a node may be written for a file that is planned, and the map and the
- * project then agree from the start. `created` collects what was made, so that the agent is told. Making a file
- * changes the project, so it is done only while changes may be made at all (`mayCreate`: the plan is authorized,
- * or approval is switched off).
+ * Paths the agent gave, as project paths that exist. Callers may opt in to creating a missing empty path, but the
+ * public book path keeps that off: project files are created only through a declared move's file action. `created`
+ * remains for controlled internal callers that can prove their own authority.
  */
 function checkedFiles(root, given, created = [], mayCreate = false) {
 	if (given === undefined || given === null) return [];
@@ -256,7 +254,7 @@ function checkedFiles(root, given, created = [], mayCreate = false) {
 		}
 		if (!existsSync(join(root, rel))) {
 			if (rel === "" || /^(\.brain|\.atlas|\.git)(\/|$)/.test(rel)) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project, and none can be made there.`);
-			if (!mayCreate) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project. Check the path against the tree. If the file is planned, write the node without it for now, since a node needs no file: once ${USER_NAME} has authorized the plan, linking a missing file creates it, empty.`);
+			if (!mayCreate) throw new AtlasError(`\`files\`: there is no file or folder ${rel} in the project. Check the path against the tree. A node needs no file: create it through a declared move's file action first, then link it.`);
 			const folder = /\/\s*$/.test(String(path));
 			try {
 				if (folder) mkdirSync(join(root, rel), { recursive: true });

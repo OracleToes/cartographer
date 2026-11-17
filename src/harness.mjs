@@ -50,7 +50,7 @@ const MAIN_ONLY = MAIN_ONLY_TEXT;
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
  * network. The brief entry at the start of the conversation says it (src/tools/task.mjs); `runs` remembers the
  * answer for this run of the program.
- * @returns {Promise<{ mode: "look" | "change", network?: boolean }>}
+ * @returns {Promise<{ mode: "look" | "change", network?: boolean, move?: string, revision?: number, targets?: string[], turns?: number }>}
  */
 async function runOf(runs, api, context) {
 	const known = runs.get(api.conversationId);
@@ -63,7 +63,17 @@ async function runOf(runs, api, context) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
 			if (entry.kind === "carto.brief") {
-				if (entry.data?.mode === POLICY.enums.planMode.change) run = { mode: POLICY.enums.planMode.change, network: entry.data.network === true };
+				const stored = entry.data;
+				if (stored?.mode === POLICY.enums.planMode.change || stored?.mode === POLICY.enums.planMode.look) {
+					run = {
+						mode: stored.mode,
+						...(stored.network === true ? { network: true } : {}),
+						...(typeof stored.move === "string" ? { move: stored.move } : {}),
+						...(Number.isInteger(stored.revision) ? { revision: stored.revision } : {}),
+						...(Array.isArray(stored.targets) ? { targets: stored.targets } : {}),
+						...(Number.isInteger(stored.turns) ? { turns: stored.turns } : {}),
+					};
+				}
 				break search;
 			}
 		}
@@ -77,7 +87,7 @@ async function runOf(runs, api, context) {
 /**
  * @param {{ root: string, brainDir: string, config: ReturnType<typeof import("./config.mjs").loadConfig>, runner: ReturnType<typeof import("./sandbox.mjs").createRunner> }} input
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
- *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
+ *   gate: `{ yolo }`, whether declared change moves run without /approve; the terminal changes it when the user types /yolo
  */
 export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
@@ -260,8 +270,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		shelfTool({ root, brainDir, config }),
 		bookTool({ root, brainDir, config, engine, gate }),
 		...lookTools(root),
-		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
-		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		...changeTools({ root, brainDir, gate, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
+		shellTool({ config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
 		consultTool({ root, brainDir, config }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
@@ -298,10 +308,13 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					}
 					// A task that reaches for a tool of the main agent is told so and goes on. It ends with `return`.
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
-					// Writing is for a task that carries out a change item of the authorized plan, and for no one else.
+					// Writing is for a task that carries out a live approved change move revision, and for no one else.
 					// So is running a command. The answer is kept in `runs`, where the shell tool finds it.
-					if ((CHANGE.has(call.name) || types(call)) && (await runOf(runs, api, hookContext)).mode !== POLICY.enums.planMode.change) {
-						return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
+					if (CHANGE.has(call.name) || types(call)) {
+						const run = await runOf(runs, api, hookContext);
+						if (run.mode !== POLICY.enums.planMode.change || typeof run.move !== "string" || !Number.isInteger(run.revision)) {
+							return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
+						}
 					}
 					return undefined;
 				},
@@ -314,7 +327,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 						const id = api.conversationId;
 						// A file read again: the earlier copy of the same lines becomes one line (src/context.mjs).
 						if (call.name === "read" && out.isError !== true) engine.afterTaskRead(id, call.arguments ?? {});
-						const left = config.taskTurns - (steps.get(id)?.n ?? 0);
+						const run = await runOf(runs, api, hookContext);
+						const taskLimit = Number.isInteger(run.turns) ? run.turns : config.taskTurns;
+						const left = taskLimit - (steps.get(id)?.n ?? 0);
 						const lastOfRound = [...(waiting.get(id) ?? new Map()).values()].every((open) => open <= 0);
 						let told = out;
 						// A round that holds `return` ends the task, whatever else it called. A `return` that was refused does not.
@@ -351,6 +366,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// assessment and the graph in front, the times, and for the main agent the state block at the end.
 				beforeRequest: async ({ messages }, api) => {
 					const main = api.conversationId === ROOT_CONVERSATION_ID;
+					// Cache the durable move contract before its first reply: a focus that writes only notes
+					// still receives its move-specific reply ceiling.
+					if (!main) await runOf(runs, api, context);
 					rounds.set(api.conversationId, (rounds.get(api.conversationId) ?? 0) + 1);
 					const turn = turnOf(messages);
 					// One more reply in this stretch: a turn of the main agent (a collapse in the middle of it does not
@@ -403,7 +421,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					// A turn that a wake started and in which nothing was done is a rest already.
 					if (main && (turn === undefined || (turn.by === "note" && turn.calls === 0))) return undefined;
 					const step = steps.get(id) ?? { key: undefined, n: 0 };
-					const limit = main ? config.mainTurns : config.taskTurns;
+					const taskRun = main ? undefined : runs.get(id);
+					const limit = main ? config.mainTurns : (Number.isInteger(taskRun?.turns) ? taskRun.turns : config.taskTurns);
 					const text = textOfAnswer(answer);
 					// The same note, word for word (ignoring layout and case), written again and again: the run ends.
 					const key = noteKey(text);

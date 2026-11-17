@@ -5,7 +5,7 @@
 // it, send its program a line, stop what runs there, close it.
 //
 // Typing into a window, a command or input, is for a task that carries out a change
-// item of the authorized plan; src/harness.mjs refuses everyone else before this code
+// move of the authorized plan; src/harness.mjs refuses everyone else before this code
 // runs. The main conversation may run a command without a task, on its own authority,
 // but only in a read-only window (src/windows.mjs): the project, the brain and .git are
 // mounted read-only and the window never reaches the network. A read-only window needs
@@ -13,8 +13,8 @@
 // run in, when bubblewrap works; when it does not, nothing holds a command to read-only,
 // and the main agent runs none. Good for tests, lints, typechecks and git status.
 // Reading, waiting, stopping and closing are open to the main agent and to every task:
-// none of them starts anything. Whether a window reaches the network is the plan item's
-// `network` mark at the moment the window is opened.
+// none of them starts anything. Whether a window reaches the network is the move's
+// `network` capability at the moment the window is opened.
 //
 // When the user has switched the sandbox off, a new window runs on the machine itself.
 import { POLICY } from "../config.mjs";
@@ -25,6 +25,8 @@ import { SandboxError } from "../sandbox.mjs";
 import { ago, took } from "../time.mjs";
 import { WAIT_MAX, WindowError } from "../windows.mjs";
 import { USER_NAME } from "../user.mjs";
+import { loadContext, taskState, updateContext } from "../context.mjs";
+import { liveMove, loadPlan } from "../plan.mjs";
 
 export const SHELL_ACTIONS = POLICY.enums.shellActions;
 /** The actions that only deal with a window that is open. */
@@ -100,12 +102,42 @@ const details = (result, extra = {}) => ({
 
 const waitOf = (given, fallback) => Math.min(Number.isFinite(given) && given >= 0 ? given : fallback, WAIT_MAX);
 
+/** Re-read the move at command time. A cached task brief is never continuing authority. */
+function commandAuthority(brainDir, api, run, gate, { start = false, window } = {}) {
+	const task = loadContext(brainDir).tasks[api.conversationId];
+	if (run?.mode !== POLICY.enums.planMode.change || typeof run?.move !== "string" || !Number.isInteger(run.revision) || task?.move !== run.move || task?.revision !== run.revision) {
+		return { error: "this focus has no live move token, so it cannot type into a shell window" };
+	}
+	const { plan, error } = loadPlan(brainDir);
+	if (plan === undefined) return { error: `the plan cannot be read (${error})` };
+	const live = liveMove(plan, run.move, run.revision, { yolo: gate?.yolo === true });
+	if (live.error !== undefined) return { error: live.error };
+	if (live.move.capabilities?.commands !== true) return { error: `${live.move.id} does not allow commands` };
+	if (start) {
+		const ceiling = live.move.budget?.commandStarts ?? POLICY.limits.plan.moveBudget.commandStarts;
+		if ((task.commandUses ?? 0) >= ceiling) return { error: `${live.move.id} already started all ${ceiling} commands; return blocked and plan a successor move` };
+	}
+	if (window !== undefined && !(task.windows ?? []).includes(window)) return { error: `window ${window} was not started by this move; do not type into another move's program` };
+	return { task, live };
+}
+
+function recordCommand(brainDir, conversationId, entry, { started = false, window } = {}) {
+	updateContext(brainDir, (store) => {
+		const task = taskState(store, conversationId);
+		if (started) task.commandUses = (task.commandUses ?? 0) + 1;
+		if (window !== undefined && !(task.windows ?? []).includes(window)) (task.windows ??= []).push(window);
+		const commands = (task.commands ??= []);
+		commands.push(entry);
+		if (commands.length > POLICY.limits.task.commandRecords) commands.splice(0, commands.length - POLICY.limits.task.commandRecords);
+	});
+}
+
 /**
- * @param {{ config: { shellWait: number }, runner: ReturnType<typeof import("../sandbox.mjs").createRunner>, windows: ReturnType<typeof import("../windows.mjs").createWindows>, runOf: (conversationId: string) => { mode: string, network?: boolean } | undefined }} input
+ * @param {{ config: { shellWait: number }, brainDir: string, gate?: { yolo: boolean }, runner: ReturnType<typeof import("../sandbox.mjs").createRunner>, windows: ReturnType<typeof import("../windows.mjs").createWindows>, runOf: (conversationId: string) => { mode: string, network?: boolean, move?: string, revision?: number } | undefined }} input
  *   runner: how commands run in this session, read at each call because the user can change it
  *   runOf: what kind of task a conversation is, as the harness last found it
  */
-export function shellTool({ config, runner, windows, runOf }) {
+export function shellTool({ config, brainDir, gate, runner, windows, runOf }) {
 	return defineTool({
 		name: "shell",
 		description: describe("shell"),
@@ -156,28 +188,48 @@ export function shellTool({ config, runner, windows, runOf }) {
 				// (the project, the brain and .git mounted read-only, no network). Typing into a running program is not a read.
 				const confined = api.conversationId === ROOT_CONVERSATION_ID && run?.mode !== POLICY.enums.planMode.change;
 				if (run?.mode !== POLICY.enums.planMode.change && !confined) return refuse(REFUSALS.lookTaskRuns);
-				const canSandbox = runner.mode === "sandbox" || (runner.mode === "direct" && runner.available?.ok === true);
-				if (!canSandbox) {
-					if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available?.why ?? "no sandbox")); // no sandbox, no confinement, no read-only lane either
-					return refuse(REFUSALS.mainReadOnlyOff(runner.available?.why)); // the sandbox is off and bubblewrap is not working here: nothing can hold the lane to read-only
-				}
+					const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
+					// A free window still carries another move's shell state. A change move may open
+					// a fresh name or reuse only a name it already opened; it cannot inherit a peer's
+					// directory, environment, network lane, or future process control.
+					const existing = windows.list(0).some((window) => window.name === name);
+					const authority = confined ? undefined : commandAuthority(brainDir, api, run, gate, { start: true, ...(existing ? { window: name } : {}) });
+				if (authority?.error !== undefined) return refuse(authority.error);
+				// A direct change move deliberately runs without bubblewrap. Only the main agent's
+				// read-only lane needs bubblewrap, because it is the mechanism that keeps that lane read-only.
+				const canReadOnly = runner.mode === "sandbox" || (runner.mode === "direct" && runner.available?.ok === true);
+				if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available?.why ?? "no sandbox"));
+				if (confined && !canReadOnly) return refuse(REFUSALS.mainReadOnlyOff(runner.available?.why));
 				if (typeof args.command !== "string" || args.command.trim() === "") return refuse("`command` is empty: give the command line to run.");
-				const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : MAIN_WINDOW;
 				let result;
 				try {
-					result = await windows.run(name, args.command, { network: confined ? false : run.network === true, waitMs: waitOf(args.seconds, config.shellWait) * 1000, signal: callContext.abortSignal, readOnly: confined });
+					result = await windows.run(name, args.command, {
+						network: confined ? false : authority.live.move.capabilities.network === true,
+						waitMs: waitOf(args.seconds, config.shellWait) * 1000,
+						signal: callContext.abortSignal,
+						readOnly: confined,
+					});
 				} catch (error) {
 					if (error instanceof WindowError) return refuse(error.message);
 					if (error instanceof SandboxError) return refuse(REFUSALS.noSandbox(error.message));
 					throw error;
 				}
+				if (!confined) {
+					recordCommand(brainDir, api.conversationId, {
+						move: authority.live.move.id,
+						command: firstLine(args.command),
+						window: name,
+						reason: result.reason,
+						...(result.exit !== undefined ? { exit: result.exit } : {}),
+					}, { started: true, window: name });
+				}
 				const failed = ((result.reason === POLICY.enums.windowWaitReasons.done || result.reason === POLICY.enums.windowWaitReasons.closed) && result.exit !== 0) || result.reason === POLICY.enums.windowWaitReasons.stopped;
 				// A read-only window mounts the project read-only, so a command that must write there ends with an error; say so.
-				const hint = confined && failed ? "\n[this window is read-only: the project and the brain are mounted read-only, and it has no network. A command that must write runs in a change task of the plan.]" : "";
+				const hint = confined && failed ? "\n[this window is read-only: the project and the brain are mounted read-only, and it has no network. A command that must write runs in a declared change move.]" : "";
 				return {
 					isError: failed,
 					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}${ignoredLine(args, action)}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]${hint}` }],
-					details: details(result, confined ? { readOnly: true } : {}),
+					details: details(result, confined ? { readOnly: true } : { move: authority.live.move.id }),
 				};
 			}
 			const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : "";
@@ -206,29 +258,38 @@ export function shellTool({ config, runner, windows, runOf }) {
 				if (action === POLICY.enums.shellAction.send) {
 					const run = runOf(api.conversationId);
 					if (run?.mode !== POLICY.enums.planMode.change) return refuse(REFUSALS.lookTaskRuns);
+					const authority = commandAuthority(brainDir, api, run, gate, { window: name });
+					if (authority.error !== undefined) return refuse(authority.error);
 					if (typeof args.text !== "string") return refuse("`text` is missing: give the line to type into the program.");
-					const found = windows.list(0).find((entry) => entry.name === name);
-					if (found?.sandbox && found.network && run.network !== true) return refuse(`Window ${name} was opened by a task whose plan item is marked network, and this task's item is not.`);
 					const result = await windows.send(name, args.text, { waitMs: waitOf(args.seconds, POLICY.timing.windows.sendWaitSeconds) * 1000, signal: callContext.abortSignal });
-					return out(result, result.reason === POLICY.enums.windowWaitReasons.done && result.exit !== 0);
+					recordCommand(brainDir, api.conversationId, { move: authority.live.move.id, window: name, input: firstLine(args.text), reason: result.reason, ...(result.exit !== undefined ? { exit: result.exit } : {}) });
+					return out(result, result.reason === POLICY.enums.windowWaitReasons.done && result.exit !== 0, { move: authority.live.move.id });
 				}
-				if (action === POLICY.enums.shellAction.stop) {
-					const result = await windows.stop(name);
-					if (!result.wasBusy) return { output: [{ type: "text", text: `[nothing is running in window ${name}, so there was nothing to stop${lastOf(windows, name)}]` }], details: details(result, { action }) };
-					if (!result.ended) {
-						return {
-							isError: true,
-							output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[the command in window ${name} did not end on Ctrl-C. \`shell\` with action close ends the window and everything in it.]` }],
-							details: details(result, { action }),
-						};
+					if (action === POLICY.enums.shellAction.stop) {
+						const run = api.conversationId === ROOT_CONVERSATION_ID ? undefined : runOf(api.conversationId);
+						const authority = run === undefined ? undefined : commandAuthority(brainDir, api, run, gate, { window: name });
+						if (authority?.error !== undefined) return refuse(authority.error);
+						const result = await windows.stop(name);
+						if (authority !== undefined) recordCommand(brainDir, api.conversationId, { move: authority.live.move.id, window: name, action: "stop", reason: result.ended ? "stopped" : "still-running" });
+						if (!result.wasBusy) return { output: [{ type: "text", text: `[nothing is running in window ${name}, so there was nothing to stop${lastOf(windows, name)}]` }], details: details(result, { action, ...(authority ? { move: authority.live.move.id } : {}) }) };
+						if (!result.ended) {
+							return {
+								isError: true,
+								output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[the command in window ${name} did not end on Ctrl-C. \`shell\` with action close ends the window and everything in it.]` }],
+								details: details(result, { action, ...(authority ? { move: authority.live.move.id } : {}) }),
+							};
+						}
+						return { output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[stopped with Ctrl-C: exit ${result.exit} · window ${name} is free]` }], details: details(result, { action, stopped: true, ...(authority ? { move: authority.live.move.id } : {}) }) };
 					}
-					return { output: [{ type: "text", text: `${result.text === "" ? "(no new output)" : result.text}\n[stopped with Ctrl-C: exit ${result.exit} · window ${name} is free]` }], details: details(result, { action, stopped: true }) };
-				}
-				const result = windows.close(name);
-				const text = result.wasGone
-					? `Window ${name} is noted as gone.`
-					: `Window ${name} is closed${result.running ? `, and \`${firstLine(result.running)}\` ended with it` : ""}.`;
-				return { output: [{ type: "text", text }], details: { window: name, action, closed: true } };
+					const run = api.conversationId === ROOT_CONVERSATION_ID ? undefined : runOf(api.conversationId);
+					const authority = run === undefined ? undefined : commandAuthority(brainDir, api, run, gate, { window: name });
+					if (authority?.error !== undefined) return refuse(authority.error);
+					const result = windows.close(name);
+					if (authority !== undefined) recordCommand(brainDir, api.conversationId, { move: authority.live.move.id, window: name, action: "close", reason: result.wasGone ? "gone" : "closed" });
+					const text = result.wasGone
+						? `Window ${name} is noted as gone.`
+						: `Window ${name} is closed${result.running ? `, and \`${firstLine(result.running)}\` ended with it` : ""}.`;
+					return { output: [{ type: "text", text }], details: { window: name, action, closed: true, ...(authority ? { move: authority.live.move.id } : {}) } };
 			} catch (error) {
 				if (error instanceof WindowError) return refuse(error.message);
 				throw error;

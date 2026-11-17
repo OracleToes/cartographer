@@ -19,7 +19,7 @@ const HELP = `carto: Cartographer, run from a project folder.
   --fork-brain          mark this copied brain as an independent namespace and rebind its internal refs
   --no-bwrap            run the tasks' commands without the sandbox: directly on this
                         machine, as you, able to reach whatever you can. Also: /bwrap
-  --yolo                let the agent carry out change items without /approve, also
+  --yolo                let the agent carry out declared change moves without /approve, also
                         ones that use the network. For when you are watching. Also: /yolo
   --plain               the line-by-line terminal instead of the full screen with tabs
                         (the default whenever input or output is not a terminal)
@@ -170,7 +170,7 @@ export async function main(argv) {
 		const { YOLO_LINE } = await import("./plan.mjs");
 		const runner = createRunner({ off: flags.noBwrap === true || config.bwrap === false });
 		say(sandboxLine(runner));
-		// Whether change items run without /approve. The settings hold the default (--yolo overrides it for one
+		// Whether declared change moves run without /approve. The settings hold the default (--yolo overrides it for one
 		// run); switching it while carto runs (/yolo) is never remembered.
 		const gate = { yolo: flags.yolo === true || config.yolo === true };
 		if (gate.yolo) say(YOLO_LINE);

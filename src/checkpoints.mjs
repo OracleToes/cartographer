@@ -217,10 +217,10 @@ function newestTask(log) {
 	return undefined;
 }
 
-/** `before p2: write the roller` → { item: "p2", text: "write the roller" } */
+/** `before m2: write the roller` → { item: "m2", text: "write the roller" } */
 function parseBefore(label) {
 	const [, item, text] = /^before (\S+?): (.*)$/.exec(label) ?? [];
-	// A step of shell windows that ran with no task around (`windowStep`) belongs to no plan item.
+	// A step of shell windows that ran with no task around (`windowStep`) belongs to no declared move.
 	if (item?.startsWith("window:")) return { windows: item.slice(7).split("+"), text: text ?? label };
 	return { item, text: text ?? label };
 }

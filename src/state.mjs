@@ -15,7 +15,7 @@ import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
 import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
 import { loadLedger, open, renderLedger } from "./ledger.mjs";
-import { awaitsApproval, loadPlan, openItems, openOnce, openStanding, renderPlan } from "./plan.mjs";
+import { awaitsApproval, loadPlan, movesOf, reportedMoves, runnableMoves, renderPlan } from "./plan.mjs";
 import { requestLines } from "./requests.mjs";
 import { eventLine } from "./wake.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -36,59 +36,58 @@ const HEAD = `${RECORD} This is the current state; it supersedes any earlier cop
 const FIRST = `${USER_HEAD}'s newest message comes first.`;
 /** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
 const MAP =
-	"I need not sit idle meanwhile: in the same reply I may start a task (no item, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
+	"I need not sit idle meanwhile: in the same reply I may start an inspect focus (no move, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
 const names = (list, max = POLICY.limits.state.listedNames) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
 
-/** What the block says to do next. One situation, one instruction; a session with approval off is told only the workflow of that session, as plain state. */
+/** What the block says to do next. An envelope is intent, never a runnable clearance. */
 function direction(ledger, plan, yolo = false) {
 	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
 	if (plan === undefined || plan.items.length === 0) {
-		if (goals) {
-			return `${FIRST} Beyond that, I work toward the open goals. If reaching one needs changes to the project, I find out what I need with read-only tasks, then write the plan. When a goal is reached, I close it and tell ${USER_NAME} what was achieved.`;
-		}
-		return [
-			"No goal is set. Looking and answering questions is fine without one.",
-			`I find out what ${USER_NAME} wants to achieve. When we agree on it, I record it as a goal with a done-when line.`,
-			MAP,
-		].join(" ");
+		if (goals) return `${FIRST} Beyond that, I work toward the open goals. I may investigate inline or in an inspect focus; when a project change is warranted, I write an envelope and its narrow moves before asking for approval.`;
+		return ["No goal is set. Looking and answering questions is fine without one.", `I find out what ${USER_NAME} wants to achieve. When we agree on it, I record it as a goal with a done-when line.`, MAP].join(" ");
 	}
-	// A plan stands for a goal. One without is possible (the user closed the goal, or wrote the plan by hand).
 	const noGoal = goals ? "" : ` No goal is recorded for this plan: I agree one with ${USER_NAME} and record it with a done-when line.`;
-	// A standing item is a duty: it is never "next", and it does not keep the plan from being finished otherwise.
-	const duties = openStanding(plan);
-	const standing =
-		duties.length === 0
-			? ""
-			: ` ${duties.length === 1 ? `${duties[0].id} is a standing duty` : `${names(duties.map((item) => item.id))} are standing duties`}: I start a task for ${duties.length === 1 ? "it" : "one"} whenever its text calls for it, as often as that is, and I do not mark it done while the duty lasts. A wake set with \`wake\` brings me back to check on it.`;
-	const next = openOnce(plan)[0];
-	const waits = awaitsApproval(plan) && !yolo;
-	if (next === undefined && duties.length > 0) {
-		if (waits) return `${FIRST} Change items wait for ${USER_NAME}: I show them the plan in a few lines and ask them to type /approve. I do not start ${duties[0].id} before that.${noGoal} ${MAP}`;
-		return `${FIRST} Beyond that, nothing of the plan is left to do once.${standing}${noGoal}`;
+	const reports = reportedMoves(plan);
+	if (reports.length > 0) {
+		const move = reports[0];
+		return `${FIRST} ${move.id} reported completion. I read its report and checkpoint evidence, compare the changed paths with its declared targets and its proof requirement, then explicitly accept it with \`book\` (target=plan, action=acceptMove, id:${move.id}) only when it holds. A focus never accepts its own move.${noGoal}`;
 	}
-	if (next === undefined) {
-		const check = goals ? ` I check each open goal against its done-when line. Before I close one, I rewrite the assessment with \`book\` (target=assessment, action=write) if the work changed my picture of the project: the copy at the top of my context is rewritten when a goal closes. I close the goals that are reached, tell ${USER_NAME} what was achieved and how to try it, and clear the plan.` : ` I tell ${USER_NAME} what was done and how to try it, and clear the plan.`;
-		return `${FIRST} Every item of the plan is done.${check} If something is still missing, I add items for it.`;
+	const blocked = plan.moves.filter((move) => move.status === POLICY.enums.moveStatus.blocked && move.archived !== true);
+	if (blocked.length > 0) return `${FIRST} ${blocked.map((move) => move.id).join(", ")} ${blocked.length === 1 ? "is" : "are"} blocked. I inspect the report and checkpoint record, then add a narrower successor move instead of rerunning broad work.${noGoal}`;
+	const missing = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && movesOf(plan, item.id).length === 0);
+	if (missing.length > 0) return `${FIRST} ${missing.map((item) => item.id).join(", ")} need declared executable moves. I can still read, reason and plan inline, but I do not start a change focus until one exact move names its action, targets, done-when line and proof.${noGoal}`;
+	const pending = awaitsApproval(plan) && !yolo;
+	const ready = runnableMoves(plan, { yolo });
+	if (ready.length > 0) {
+		const move = ready[0];
+		if (move.capabilities?.files === true || move.capabilities?.commands === true) {
+			if (pending && !yolo && !move.approvedRevision) return `${FIRST} Declared change moves wait for ${USER_NAME}: I show their exact contracts and ask for /approve. I do not start ${move.id} before approval; inline reading and planning continue.${noGoal}`;
+			return `${FIRST} Beyond that, ${move.id} is ready. I call \`task\` with \`move:${move.id}\` only — not a new brief — and later review its report before accepting it.${noGoal}`;
+		}
+		return `${FIRST} Beyond that, ${move.id} is a read-only declared move. I call \`task\` with \`move:${move.id}\`; it changes no files or commands and its report still returns to this context.${noGoal}`;
 	}
-	if (waits) {
-		const wait = `Change items wait for ${USER_NAME}: I show them the plan in a few lines and ask them to type /approve.`;
-		if (next.mode === POLICY.enums.planMode.look) return `${FIRST} Beyond that, I carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
-		return `${FIRST} ${wait} I do not start ${next.id} before that.${noGoal} ${MAP}`;
+	if (pending) return `${FIRST} Declared change moves wait for ${USER_NAME}: I show their exact contracts and ask for /approve. Inline reading, reasoning and planning continue; I do not turn an envelope into a change focus.${noGoal}`;
+	const incomplete = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true);
+	if (incomplete.length === 0) {
+		const check = goals ? " I check each open goal against its done-when line, update the assessment when needed, and close goals that hold." : " I tell the user what was done and how to try it.";
+		return `${FIRST} Every envelope is done.${check}`;
 	}
-	return `${FIRST} Beyond that, I carry out the plan: ${next.id} is next. I call \`task\` with its id and a brief, and mark it done when the report and the record of changed files show that it is.${standing}${noGoal}`;
+	return `${FIRST} The open envelopes have no runnable move. I inspect the plan and reports, accept only evidence that holds, or declare the next narrow move.${noGoal}`;
 }
 
 /** The current purpose and forget boundary for a focused context. */
 function focusDirection(task) {
 	const purpose = String(task?.purpose ?? task?.brief ?? "the assigned work").replace(/\s+/g, " ").trim();
-	const item = task?.item === undefined ? "" : ` Assigned plan item: ${task.item}.`;
-	return `Focus${item}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan.`;
+	const item = task?.item === undefined ? "" : ` Envelope: ${task.item}.`;
+	const move = task?.move === undefined ? "" : ` Move: ${task.move} revision ${task.revision}.`;
+	const limits = task?.budget === undefined ? "" : ` Budget: ${task.budget.replies} replies, ${task.budget.fileOps} file operations, ${task.budget.commandStarts} command starts.`;
+	return `Focus${item}${move}${limits}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan and accepts a reported move.`;
 }
 
 /** Said only while approval is off, as the plain state of how this session runs. Here and not in the system prompt, because the user can change it while the session runs, and the present state is all the prompt needs to carry. */
 function approval(yolo) {
 	if (!yolo) return "";
-	return `Approval\nChange items may run without /approve, also ones marked network or standing; I do not ask for /approve. Every change still needs a plan item: I write the item, then start its task. I keep items small, so that ${USER_NAME} can follow each step and take one back with /undo.\n\n`;
+	return `Approval\nDeclared change moves may run without /approve. This bypasses only the human decision: each focus still receives one move revision, its targets, capabilities and hard budget; checkpoints, scope review, reporting and explicit acceptance still apply. New moves do not inherit anything from earlier ones.\n\n`;
 }
 
 /**
@@ -109,7 +108,7 @@ function wakesText(lines = [], fired = []) {
  */
 function commands(runner) {
 	if (runner?.mode === "direct") {
-		return `Commands\nCommands of a change task run directly on this machine, as ${USER_NAME}: they can read and change files outside the project directory, and they reach the network. Only the project directory is in my checkpoints, so what a command does outside it cannot be undone. I keep the work inside the project directory unless ${USER_NAME} asks for something outside it, and then I name the path in the brief. I myself may still run commands in this session, always in a read-only window, when bubblewrap works; when it does not, I run none at all.\n\n`;
+		return `Commands\nCommands of a declared change move run directly on this machine, as ${USER_NAME}: they can read and change files outside the project directory, and they reach the network. Only the project directory is checkpointed; what a command changes outside it cannot be undone. Inside the project, Cartographer compares the final checkpoint diff with the move's declared targets and blocks a breach after the fact; direct mode does not confine shell writes to those paths. Inline commands remain read-only when bubblewrap works; when it does not, none run.\n\n`;
 	}
 	if (runner?.mode === "none") {
 		return `Commands\nNo command can be run in this session: ${runner.available.why}. \`shell\` is refused. After a change, I tell ${USER_NAME} how to run or try what was written, and say plainly that it has not been run. Whether a done-when line that needs a run is met is for ${USER_NAME} to confirm.\n\n`;
@@ -253,7 +252,7 @@ function atlasText(brainDir, root, config, now) {
 	const linked = atlas.nodes.length === 0 ? "" : ` Files a node links to: ${linkedCount(atlas, tree.files)} of ${tree.files.length}.`;
 	lines.push(
 		`Graph: ${atlas.nodes.length === 0 ? "no nodes yet" : atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`}.${linked} Assessment: ${
-			assessment.text === "" ? "none yet. I write one with `book` (target=assessment, action=write, operation { text }) once I know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
+			assessment.text === "" ? "none yet. I write one with `book` (target=assessment, action=write, text) once I know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
 		}`,
 	);
 	const since = sinceTop(brainDir, atlas, assessment.text);
@@ -294,9 +293,9 @@ export function stateBlock(brainDir, runner, more = {}) {
 		} else {
 			// No plan, no section: the instruction below says when to write one.
 			let planText = "";
-			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, no plan item can run.\n\n`;
+			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, no plan move can run.\n\n`;
 			else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
-			// What waits for the user: approvals of change items, questions of taste, and proposed edits to the
+			// What waits for the user: approvals of change moves, questions of taste, and proposed edits to the
 			// prompt. Put at the very end, so the shape of the block before it stays as it was. The agent keeps
 			// working on whatever does not depend on one.
 			const waiting = more.requests === true ? requestLines(brainDir, { yolo: more.yolo === true }) : "";

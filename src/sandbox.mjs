@@ -15,7 +15,7 @@
 //   /run, /mnt, /media             empty: no sockets of the user's session, no other drives
 //   toolchains in the home folder  read-only: the PATH entries that lie there, and the
 //                                  folders named in TOOLCHAINS
-//   the network                    off, unless the plan item is marked `network`
+//   the network                    off, unless its declared move allows `network`
 //   processes                      only its own; every one of them ends with the window
 //   the environment                a short fixed list: no variable of the user's shell
 //

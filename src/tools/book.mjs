@@ -16,7 +16,7 @@ import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { arr, bool, compile, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
-import { applyPlanOp, authorizationLine, isAuthorized, loadPlan, PlanError, savePlan } from "../plan.mjs";
+import { applyPlanOp, authorizationLine, liveMove, loadPlan, PlanError, savePlan, targetAllows } from "../plan.mjs";
 import { applyAtlasOp, AtlasError, findNode, loadAtlas, saveAtlas } from "../atlas.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed, pin } from "../top.mjs";
@@ -96,6 +96,9 @@ const CAPABILITIES = {
 		remove: { ref: "required" },
 		before: { ref: "required" },
 		clear: {},
+		addMove: { fields: ["parent", "text", "done_when"] },
+		editMove: { ref: "required" },
+		acceptMove: { ref: "required" },
 	},
 	atlas: {
 		list: {},
@@ -160,12 +163,15 @@ const ACTION_GUIDE = {
 		remove: "id",
 	},
 	plan: {
-		add: "mode (look | change) and text — before, network and standing optional (network/standing only with change)",
-		edit: "id, plus text, mode, network, standing, or outcome (when done)",
-		done: "id, plus an optional text outcome",
+		add: "mode (look | change), text, and for change done_when — this adds an authorization envelope, not runnable work",
+		edit: "id, plus text, mode, done_when, network, standing, or outcome (when done)",
+		addMove: "parent (p<N>), text (one concrete action), done_when, and for a change move proof plus targets (one or more project-relative paths); optional turns, capabilities and budget narrow its fixed limits",
+		editMove: "id (m<N>), plus text, done_when, proof, targets, turns, capabilities or budget; changing it needs approval again",
+		acceptMove: "id (m<N>) after its focus reported completion and evidence",
+		done: "id (m<N> accepts a reported move; p<N> completes an envelope only after every move is accepted)",
 		remove: "id",
-		before: "id, plus optional before (omit to move to the end)",
-		clear: "no other fields — clears the plan",
+		before: "id, plus optional before (omit to move an envelope to the end)",
+		clear: "no other fields — clears envelopes and moves",
 	},
 	assessment: {
 		write: "text (the whole assessment; it replaces the current one)",
@@ -240,13 +246,13 @@ const listRef = (namespace, kind, id, version) => ({ namespace, kind, id, ...(ve
 const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "context"]);
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
-	plan: new Set(["add", "edit", "done", "remove", "before", "clear"]),
+	plan: new Set(["add", "edit", "done", "remove", "before", "clear", "addMove", "editMove", "acceptMove"]),
 	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove", "rename"]),
 	context: new Set(["archive", "restore"]),
 };
 function listBrainRecords(target, brainDir) {
 	if (target === "ledger") { const loaded = loadLedger(brainDir); if (!loaded.ledger) throw new Error(`The ledger cannot be read: ${loaded.error}`); return loaded.ledger.items; }
-	if (target === "plan") { const loaded = loadPlan(brainDir); if (!loaded.plan) throw new Error(`The plan cannot be read: ${loaded.error}`); return loaded.plan.items; }
+	if (target === "plan") { const loaded = loadPlan(brainDir); if (!loaded.plan) throw new Error(`The plan cannot be read: ${loaded.error}`); return [...loaded.plan.items, ...loaded.plan.moves]; }
 	if (target === "atlas") { const loaded = loadAtlas(brainDir); if (!loaded.atlas) throw new Error(`The atlas cannot be read: ${loaded.error}`); return loaded.atlas.nodes; }
 	if (target === "context") return composedRows(loadContext(brainDir));
 	return [];
@@ -281,23 +287,33 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		} catch (error) { return fail(`File rebind refused: ${error.message}.`); }
 	}
 	if (target === "file" && ["create", "edit", "remove"].includes(action)) {
-		if (main) return fail("Project-file create/edit/remove must run in a focused change task for an authorized plan item.");
-		// What this focus carries, recorded when it was created (src/tools/task.mjs) in the durable context store:
-		// the plan item it carries out and that it is a change. Inferred automatically; an explicit planItem must match.
+		if (main) return fail("Project-file create/edit/remove must run in a focused change move.");
+		// A focus carries a live move token. The plan is re-read for every mutation so an
+		// edit, revoked approval, or exhausted move cannot keep spending old authority.
 		const task = loadContext(brainDir).tasks[api.conversationId];
-		if (task?.mode !== POLICY.enums.planMode.change || typeof task.item !== "string" || task.item.trim() === "") {
-			return fail("File mutation refused: this focus is not carrying an authorized change plan item.");
+		if (task?.mode !== POLICY.enums.planMode.change || typeof task.move !== "string" || !Number.isInteger(task.revision)) {
+			return fail("File mutation refused: this focus is not carrying a live authorized change move.");
 		}
-		if (args.planItem !== undefined && String(args.planItem).trim() !== "" && args.planItem !== task.item) {
-			return fail("File mutation refused: this focus is not carrying that authorized change plan item.");
-		}
+		if (args.planItem !== undefined) return fail("File mutation refused: planItem is no longer an authority field; this focus carries its move automatically.");
+		const { plan, error: planError } = loadPlan(brainDir);
+		if (plan === undefined) return fail(`File mutation refused: the plan cannot be read (${planError}).`);
+		const live = liveMove(plan, task.move, task.revision, { yolo: gate?.yolo === true });
+		if (live.error !== undefined) return fail(`File mutation refused: ${live.error}`);
+			if (live.move.capabilities?.files !== true) return fail(`File mutation refused: ${task.move} does not allow direct file operations.`);
+			const fileBudget = live.move.budget?.fileOps ?? POLICY.limits.plan.moveBudget.fileOps;
+			if ((task.fileOps ?? 0) >= fileBudget) return fail(`File mutation refused: ${task.move} already used all ${fileBudget} direct file mutations. Return blocked and plan a successor move.`);
+			const allow = (path) => targetAllows(live.move, path)
+			? undefined
+			: `File mutation refused: ${String(path).replace(/^\.\//, "")} is outside ${task.move}'s declared targets (${live.move.targets.join(", ")}). Return blocked and plan another move.`;
 		let filePath = args.path;
 		let expectedVersion;
 		if (action === "create") {
 			if (typeof filePath !== "string" || filePath.trim() === "" || typeof args.content !== "string") return fail("file create needs path and content.");
+			const refused = allow(filePath);
+			if (refused !== undefined) return fail(refused);
 			const nested = await api.executeTool("write", { path: filePath, content: args.content }, callContext, { key: "book-file-create" });
 			const output = nested.structuredOutput;
-			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, change: true } };
+			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, move: task.move, change: true } };
 		}
 		let ref = args.ref;
 		if (ref === undefined) {
@@ -325,18 +341,20 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		if (resolved.status !== "live") return fail(`File ${action} refused: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`}`);
 		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file ${action}: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was ${action === "remove" ? "removed" : "changed"}.`);
 		filePath = resolved.record.path;
+		const refused = allow(filePath);
+		if (refused !== undefined) return fail(refused);
 		// The ID points at the live version; the version handed to the nested call is resolved here, never asked of the agent.
 		expectedVersion = resolved.currentVersion;
 		if (action === "remove") {
 			// Deletion goes through the same gate as write and edit: confined, checkpoint-recorded, undoable.
 			const nested = await api.executeTool("rm", { path: filePath, expectedVersion }, callContext, { key: "book-file-remove" });
 			const output = nested.structuredOutput;
-			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
+			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, move: task.move, change: true } };
 		}
 		if (typeof args.oldText !== "string" || args.oldText === "" || typeof args.newText !== "string") return fail("file edit needs exact oldText and newText.");
 		const nested = await api.executeTool("edit", { path: filePath, old_text: args.oldText, new_text: args.newText, expectedVersion }, callContext, { key: "book-file-edit" });
 		const output = nested.structuredOutput;
-		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
+		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, move: task.move, change: true } };
 	}
 	// Unadvertised transcript-replay fallback: new calls go through the top-level `read` tool.
 	if (target === "file" && action === "read") {
@@ -520,19 +538,18 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		if (target === "atlas" && (action === "look" || action === "tree")) {
 			const { atlas, error } = loadAtlas(brainDir);
 			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
-			const { plan } = loadPlan(brainDir);
-			const atlasOp = action === "look"
+				const atlasOp = action === "look"
 				? { action, ...(args.name !== undefined || args.path !== undefined || args.id !== undefined ? { name: args.name ?? args.path ?? args.id } : {}) }
 				: { action, ...(args.anchor !== undefined ? { anchor: args.anchor } : {}), ...(args.depth !== undefined ? { depth: args.depth } : {}) };
 			try {
-				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
+				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
 				if (result.changed) saveAtlas(brainDir, atlas);
 				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
 			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
 		}
 		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
 		if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
-		const needsRef = action !== "add" && !(target === "plan" && action === "clear") && !(target === "atlas" && action === "confirm" && args.ref === undefined);
+		const needsRef = action !== "add" && !(target === "plan" && (action === "clear" || action === "addMove")) && !(target === "atlas" && action === "confirm" && args.ref === undefined);
 		let current;
 		if (needsRef) {
 			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
@@ -562,7 +579,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			};
 			const { plan } = loadPlan(brainDir);
 			try {
-				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
+				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
 				if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
 				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
 			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
@@ -583,8 +600,15 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			const planOp = {
 				action,
 				...(needsRef ? { id: current.record.id } : {}),
+				...(args.parent !== undefined ? { parent: args.parent } : {}),
 				...(args.mode !== undefined ? { mode: args.mode } : {}),
 				...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+				...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
+				...(args.targets !== undefined ? { targets: args.targets } : {}),
+				...(args.proof !== undefined ? { proof: args.proof } : {}),
+				...(args.turns !== undefined ? { turns: args.turns } : {}),
+				...(args.capabilities !== undefined ? { capabilities: args.capabilities } : {}),
+				...(args.budget !== undefined ? { budget: args.budget } : {}),
 				...(args.before !== undefined ? { before: args.before } : {}),
 				...(args.network !== undefined ? { network: args.network } : {}),
 				...(args.standing !== undefined ? { standing: args.standing } : {}),
@@ -722,8 +746,8 @@ function runPlan({ brainDir, gate }, args, api) {
 			if (!(problem instanceof PlanError)) throw problem;
 			let message = problem.message;
 			if (op?.action === POLICY.enums.actions.add && (typeof op.text !== "string" || op.text.trim() === "")) {
-				const expected = { target: "plan", action: POLICY.enums.actions.add, mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "one-line description of what this item covers" };
-				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe item's wording belongs in \`text\`, not \`lines\`. Correct the call; do not repeat it unchanged.`;
+				const expected = { target: "plan", action: "add", mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "authorization-envelope intent", done_when: "observable envelope completion condition" };
+				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe envelope wording belongs in \`text\`; add executable work separately with action=addMove. Correct the call; do not repeat it unchanged.`;
 			}
 			lines.push(`Op ${index + 1} (${opLabel(op, "mode")}) not applied: ${message}`);
 		}
@@ -731,7 +755,7 @@ function runPlan({ brainDir, gate }, args, api) {
 	if (applied === 0) return fail(lines.join("\n"));
 	if (applied < ops.length) lines.push(`${applied} of ${ops.length} applied and saved; send only the ones not applied again.`);
 	if (plan.items.length > 0) lines.push(authorizationLine(plan, { yolo: gate?.yolo === true }));
-	if (withdrawn) shown.push("authorization withdrawn: a change item was added or changed");
+	if (withdrawn) shown.push("authorization withdrawn: an incomplete move or its envelope changed");
 	plan.lastCall = api.taskId;
 	savePlan(brainDir, plan);
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
@@ -921,13 +945,19 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
 		text: opt(str({ description: "Body text for ledger add/edit/done, plan add/edit/done, assessment write, or context note/collapse." })),
 		kind: opt(str({ enum: Object.values(POLICY.enums.ledgerKind), description: "Ledger entry kind on ledger add: goal, question, or note." })),
-		done_when: opt(str({ description: "Observable completion test for a ledger goal (required on ledger add when kind is goal; editable on a goal)." })),
+		done_when: opt(str({ description: "Observable completion test: required on a ledger goal, a change plan envelope, and every plan move." })),
 		salient: opt(bool({ description: "Mark or unmark a ledger note as salient so it stands in every request and across collapses." })),
-		mode: opt(str({ enum: Object.values(POLICY.enums.planMode), description: "Plan item mode on plan add/edit: look or change." })),
-		before: opt(str({ description: "Plan item ID to insert or move this item before (omit on plan before to move to the end)." })),
-		network: opt(bool({ description: "Allow outbound network access on a change plan item." })),
-		standing: opt(bool({ description: "Allow long-lived processes on a change plan item." })),
-		outcome: opt(str({ description: "Outcome wording when editing an already closed ledger entry or done plan item." })),
+		mode: opt(str({ enum: Object.values(POLICY.enums.planMode), description: "Plan envelope mode on plan add/edit: look or change." })),
+		parent: opt(str({ description: "Parent plan envelope ID for plan addMove (p<N>)." })),
+		targets: opt(arr(str(), { description: "Project-relative file paths a change move may change; addMove requires one or more under a change envelope." })),
+		proof: opt(str({ description: "Observable evidence a plan move must return, such as the named test and expected result." })),
+		turns: opt(int({ minimum: 1, maximum: POLICY.limits.plan.moveTurns.max, description: `Reply limit for one plan move, 1 to ${POLICY.limits.plan.moveTurns.max}.` })),
+		capabilities: opt(obj({ files: opt(bool()), commands: opt(bool()), network: opt(bool()) }, { description: "Optional narrower move capability policy. A move cannot grant network unless its envelope grants it." })),
+		budget: opt(obj({ replies: opt(int({ minimum: 1, maximum: POLICY.limits.plan.moveTurns.max })), fileOps: opt(int({ minimum: 0, maximum: POLICY.limits.plan.moveBudget.fileOps })), commandStarts: opt(int({ minimum: 0, maximum: POLICY.limits.plan.moveBudget.commandStarts })) }, { description: "Optional narrower hard move budget; omitted fields use the fixed defaults." })),
+		before: opt(str({ description: "Plan envelope ID to insert or move this envelope before (omit on plan before to move to the end)." })),
+		network: opt(bool({ description: "Allow a change envelope to grant network access to narrowly declared child moves." })),
+		standing: opt(bool({ description: "Allow long-lived processes under a change envelope when a child move declares commands." })),
+		outcome: opt(str({ description: "Outcome wording when editing an already closed ledger entry or completed plan envelope." })),
 		name: opt(str({ description: "Atlas node name on atlas add, confirm, or look." })),
 		gist: opt(str({ description: "One-line summary of an atlas node on atlas add/edit." })),
 		detail: opt(str({ description: "Expanded body of an atlas node on atlas add/edit (empty string clears it)." })),
@@ -941,7 +971,6 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
 		newText: opt(str({ description: "Replacement passage in file edit (empty string deletes oldText)." })),
 		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition (required on file rebind; omit elsewhere for the live version)." })),
-		planItem: opt(str({ description: "Optional authorized change plan item ID on file create/edit/remove; inferred from the active change focus when omitted." })),
 	});
 	const validate = compile(validationSchema, { coerce: true });
 	const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";

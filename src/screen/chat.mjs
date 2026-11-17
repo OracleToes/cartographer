@@ -243,7 +243,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					row.receipt = row.name === "consult" ? text : undefined;
 					row.detail = row.name === "consult" ? undefined : text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
 					row.details = message.details;
-					// What a task leaves behind is said in full: the report line, the files it changed, the plan item.
+					// What a task leaves behind is said in full: the report line, changed files and declared move.
 					if (depth === 0 && row.name === "task" && printed.trim() !== "") {
 						const outcome = printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
 						say({ type: "console", text: outcome.endsWith("\n") ? outcome : `${outcome}\n`, sealed: true, of: row.id });
@@ -311,7 +311,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			const last = items.at(-1);
 			const running = last?.type === "group" && !last.closed ? last.rows.filter((row) => row.kind === "call" && row.state === "running") : [];
 			const taskRow = running.find((row) => row.name === "task");
-			const task = taskRow === undefined ? undefined : taskRow.args?.item ? `task ${taskRow.args.item}` : "task";
+			const task = taskRow === undefined ? undefined : taskRow.args?.move ? `move ${taskRow.args.move}` : taskRow.args?.item ? `task ${taskRow.args.item}` : "task";
 			const deepest = [...live.keys()].sort((a, b) => b - a)[0];
 			if (deepest !== undefined) {
 				const { message } = live.get(deepest);
@@ -551,7 +551,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					const running = !item.closed;
 					const open = item.open || running;
 					const failed = calls.filter((row) => row.state === "failed").length;
-					const tasks = calls.filter((row) => row.name === "task").map((row) => row.details?.report ?? (row.args?.item ? `task ${row.args.item}` : "task"));
+					const tasks = calls.filter((row) => row.name === "task").map((row) => row.details?.report ?? (row.args?.move ? `move ${row.args.move}` : row.args?.item ? `task ${row.args.item}` : "task"));
 					const consults = calls.filter((row) => row.name === "consult").map((row) => cut(String(row.args?.question ?? "").replace(/\s+/g, " "), 48)).filter((text) => text !== "");
 					const took = span((item.ended ?? now()) - item.started);
 					const head = [`${calls.length === 1 ? "1 call" : `${calls.length} calls`}`, ...new Set([...tasks, ...consults]), took].join(" · ");
