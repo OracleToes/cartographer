@@ -238,6 +238,10 @@ export function createEngine({ root, brainDir, config }) {
 		seen(conversationId, messages) {
 			of(conversationId).messages = messages;
 		},
+		/** The pure request plan built for this generation attempt, before pi-ai formats its provider payload. */
+		planned(conversationId, plan) {
+			of(conversationId).plan = copyJson(plan);
+		},
 		messagesOf: (conversationId) => of(conversationId).messages,
 		/** The provider body at the last hook before dispatch. It is copied now: a screen view may never acquire later
 		 * provider, response, or brain changes and still call itself a sent request. */
@@ -252,6 +256,9 @@ export function createEngine({ root, brainDir, config }) {
 			state.payloadJson = frozen.json;
 			state.payloadHash = frozen.hash;
 			state.model = modelRef(model);
+			// The semantic plan and its provenance are frozen beside the provider body. A later preview has its own
+			// plan; it cannot edit or fill in this one.
+			state.plan = copyJson(state.plan);
 			state.reply = undefined;
 			state.usage = undefined;
 			state.results = new Map();
@@ -279,7 +286,7 @@ export function createEngine({ root, brainDir, config }) {
 		 * response is deliberately separate from `payload`: it belongs to a possible later request, never to the one
 		 * already sent. `which` is "main" for the main agent, anything else for the newest conversation. Undefined
 		 * before the first request of this run of carto.
-		 * @returns {undefined | { task: boolean, conversationId: string, requestId: string, payload: any, payloadJson?: string, payloadHash?: string, model: object, reply?: any, results: Map<string, string>, at: number, count: number, usage?: object, used?: number, collapsedSince: boolean }}
+		 * @returns {undefined | { task: boolean, conversationId: string, requestId: string, payload: any, payloadJson?: string, payloadHash?: string, model: object, plan?: object, reply?: any, results: Map<string, string>, at: number, count: number, usage?: object, used?: number, collapsedSince: boolean }}
 		 */
 		window(which) {
 			const id = which === "main" || newest === undefined ? ROOT_CONVERSATION_ID : newest;
@@ -295,6 +302,7 @@ export function createEngine({ root, brainDir, config }) {
 				...(state.payloadJson === undefined ? {} : { payloadJson: state.payloadJson }),
 				...(state.payloadHash === undefined ? {} : { payloadHash: state.payloadHash }),
 				model: copyJson(state.model ?? {}),
+				...(state.plan === undefined ? {} : { plan: copyJson(state.plan) }),
 				...(state.reply === undefined ? {} : { reply: copyJson(state.reply) }),
 				results: new Map(state.results ?? []),
 				at: state.sentAt,

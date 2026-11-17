@@ -21,7 +21,7 @@ import { chatTool } from "./tools/chat.mjs";
 import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs";
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted, noteKey } from "./wake.mjs";
-import { dressRequest } from "./request.mjs";
+import { planRequest, prepareRequest } from "./request.mjs";
 import { beginReadBatch, readBatchCheck } from "./read-batch.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { changeTools } from "./tools/change.mjs";
@@ -397,7 +397,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					let note;
 					if (main) noteUserMessages(brainDir, messages);
 					else note = await engine.beforeTaskRequest(api.conversationId, messages);
-					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) }) };
+					const planned = prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) });
+					engine.planned(api.conversationId, planned);
+					return { messages: planned.messages };
 				},
 				// The request as it is sent: the question before a collapse is put behind exactly this.
 				beforeProviderRequest: ({ payload, model }, api) => {
@@ -513,6 +515,27 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		windows,
 		wakes,
 		engine,
+		/** A pure main-agent request plan for the screen. It reads the active Durable context and current brain without
+		 * checking/consuming wakes, marking window output shown, starting an attempt, or retaining history. */
+		preview: async () => {
+			const view = await main.context(context);
+			return {
+				at: Date.now(),
+				plan: planRequest(view.messages, {
+					brainDir,
+					root,
+					runner,
+					config,
+					gate,
+					main: true,
+					conversationId: main.id,
+					used: engine.usedBy(main.id),
+					fired: [],
+					wakeLines: wakes.lines(),
+					windowRows: windows.list(config.windowTail),
+				}),
+			};
+		},
 		asks,
 		/** `listener` hears what is in no conversation: { type: "prefill" | "limit" | "same-note" | "told", ... }. */
 		on(listener) {

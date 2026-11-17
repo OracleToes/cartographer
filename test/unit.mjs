@@ -31,7 +31,7 @@ import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
-import { dressRequest, withoutAdditions } from "../src/request.mjs";
+import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { createEngine } from "../src/engine.mjs";
 import { runFromBrief } from "../src/harness.mjs";
 import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
@@ -857,6 +857,38 @@ test("dressRequest: the replay build equals the live build, for the same inputs"
 	assert.equal(JSON.stringify(live), JSON.stringify(replay), "the view the screen renders is byte-identical to the request the model got");
 });
 
+test("request plan: it is a pure current calculation with ordered source facts", (t) => {
+	const { brainDir, root } = fresh(t);
+	const at = Date.parse("2026-11-15T10:00:00.000Z");
+	const messages = [
+		{ role: "user", content: [{ type: "text", text: "Map the parser." }], timestamp: at },
+		{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } }] },
+		{ role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "alpha\nbeta\n" }] },
+	];
+	const before = JSON.stringify(messages);
+	const plan = planRequest(messages, {
+		brainDir,
+		root,
+		runner: { mode: "sandbox", available: { ok: true, version: "0.9.0", shell: "bash" } },
+		config: { contextWindow: 100_000 },
+		gate: { yolo: false },
+		main: true,
+		conversationId: ROOT_CONVERSATION_ID,
+		used: 4321,
+		fired: [],
+		wakeLines: ["one scheduled wake"],
+		windowRows: [],
+		// A planner never looks at these live-effect doors. Passing them makes an accidental call fail this test.
+		wakes: { check: () => { throw new Error("preview checked wakes"); }, noteShown: () => { throw new Error("preview consumed wakes"); } },
+		windows: { noteShown: () => { throw new Error("preview consumed windows"); } },
+	});
+	assert.equal(JSON.stringify(messages), before, "planning never mutates the active conversation");
+	assert.match(plan.messages.at(-1).content.at(-1).text, /<read-tail>/, "the current read batch is planned at the tail");
+	assert.deepEqual(plan.parts.map((part) => part.kind), ["active-message", "active-message", "active-message", "generated-state", "transient-read-tail"], "the plan captures source order before provider formatting");
+	assert.equal(plan.parts[0].source, `active:${ROOT_CONVERSATION_ID}:0`, "a source has an identity rather than a text-match key");
+	assert.match(plan.parts.find((part) => part.kind === "generated-state").fragment, /^<state>/, "generated state has its exact planned fragment");
+});
+
 test("dressRequest: a task carries the context lines and the requests, as the live agent does", (t) => {
 	const { brainDir, root } = fresh(t);
 	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
@@ -1429,8 +1461,11 @@ test("engine: a sent provider request is an immutable snapshot with separate pro
 	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
 	const focus = "focus-snapshot";
 	const payload = { model: "qwen", stream: true, messages: [{ role: "user", content: "first words" }], tools: [{ type: "function", function: { name: "read" } }] };
+	const plan = { messages: [{ role: "user", content: [{ type: "text", text: "first words" }] }], parts: [{ id: "part:focus-snapshot:message:0", kind: "active-message", source: "durable:focus-snapshot:42", lifecycle: "planned" }] };
+	engine.planned(focus, plan);
 	engine.sending(focus, payload, { provider: "local", api: "openai-completions", id: "qwen" });
 	payload.messages[0].content = "changed after dispatch";
+	plan.parts[0].source = "changed after dispatch";
 	payload.tools[0].function.name = "changed";
 	engine.replied(focus, { role: "assistant", content: [{ type: "text", text: "reply" }], usage: { input: 10, cacheRead: 7, output: 3 } });
 
@@ -1440,6 +1475,7 @@ test("engine: a sent provider request is an immutable snapshot with separate pro
 	assert.equal(first.payload.tools[0].function.name, "read");
 	assert.equal(first.payloadHash?.length, 16, "the frozen JSON has a short comparison hash");
 	assert.deepEqual(first.model, { provider: "local", api: "openai-completions", id: "qwen" });
+	assert.equal(first.plan.parts[0].source, "durable:focus-snapshot:42", "the pre-formatting plan and its source fact freeze with the provider body");
 	assert.deepEqual(first.usage, { input: 10, cacheRead: 7, output: 3 }, "provider fields stay separate from the old collapse accounting total");
 	assert.equal(first.used, 20, "the existing total keeps its old collapse meaning");
 	first.payload.messages[0].content = "a screen cannot mutate the snapshot";
