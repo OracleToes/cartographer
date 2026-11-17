@@ -292,7 +292,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					let briefGiven = false;
 					for (const call of calls) {
 						const mine = call.id === api.callId;
-							const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\n${run.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
+							const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\nMove contract:\n${run.text}\n\n${run.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
 						if (mine) briefGiven = true;
 						await tx.appendEntry(fork.id, {
 							kind: mine ? "carto.brief" : "carto.sibling",

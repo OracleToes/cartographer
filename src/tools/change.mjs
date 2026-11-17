@@ -105,7 +105,7 @@ function prepareEdit(root, brainDir, given, oldText, newText, { expectedVersion 
 	if (typeof oldText !== "string" || oldText === "") throw new ChangeError("`old_text` is required: the passage to replace, copied exactly from the file");
 	if (typeof newText !== "string") throw new ChangeError("`new_text` is required: what replaces the passage (an empty string deletes it)");
 	const path = confineWrite(root, brainDir, given);
-	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Use file create to make it`);
+	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Use \`write\` to create a file`);
 	const beforeBuffer = readFileSync(path.abs);
 	if (expectedVersion !== undefined) {
 		const actual = digest(beforeBuffer);
