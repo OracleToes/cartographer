@@ -338,7 +338,7 @@ export function stateBlock(brainDir, runner, more = {}) {
 	const front = more.task === undefined ? `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now, more.task)}` : "";
 	let body;
 	if (more.task !== undefined) {
-		body = `${more.context ?? ""}${commands(runner)}${focusDirection(more.task)}`;
+		body = `${commands(runner)}${focusDirection(more.task)}`;
 	} else if (ledger === undefined) {
 		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, the ledger cannot be shown or changed.`;
 		} else {

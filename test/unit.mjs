@@ -913,7 +913,7 @@ test("state: Dispatch is main-only mechanical evidence, not an automatic task co
 	assert.match(main, /This lens neither delegates work nor approves a move/);
 	assert.doesNotMatch(main, /I call `task` with `move:m1`/, "a ready move is a fact, not an imperative");
 	const focused = stateBlock(brainDir, { mode: "sandbox" }, { root, task: { purpose: "check the source", move: "m1", revision: 1, budget: { replies: 2, fileOps: 1, commandStarts: 0 } }, context: "Context\nFocus evidence and local shelf: empty.\n\n" });
-	assert.match(focused, /Focus\n/);
+	assert.match(focused, /Focus Move: m1 revision 1\./);
 	assert.doesNotMatch(focused, /Dispatch\n/);
 	assert.doesNotMatch(focused, /Ledger\n/);
 	assert.doesNotMatch(focused, /Plan\n/);

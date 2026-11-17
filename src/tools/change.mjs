@@ -117,7 +117,7 @@ function prepareEdit(root, brainDir, given, oldText, newText, { expectedVersion 
 	const places = before.split(oldText).length - 1;
 	if (places > 1) throw new ChangeError(`\`old_text\` is found ${places} times in ${path.rel}. Add the lines around the passage until it matches one place only`);
 	if (oldText === newText) throw new ChangeError("`old_text` and `new_text` are the same, so nothing would change");
-	return { kind: "edit", path, beforeBuffer, before, after: before.slice(0, first) + newText + before.slice(first + oldText.length), line: before.slice(0, first).split("\n").length, replaced: lineCount(oldText), replacement: lineCount(newText) };
+	return { kind: "edit", path, beforeBuffer, before, after: before.slice(0, first) + newText + before.slice(first + oldText.length), line: before.slice(0, first).split("\n").length, replaced: oldText.split("\n").length, replacement: newText === "" ? 0 : newText.split("\n").length };
 }
 
 /** Resolve a removal without touching disk. */

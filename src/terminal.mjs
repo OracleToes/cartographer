@@ -184,8 +184,11 @@ export function describeResult(message) {
 	}
 	// "Wrote roll.py: 34 lines, a new file." / "Edited roll.py: …" / "Removed roll.py."
 	if (message.toolName === "write" || message.toolName === "edit" || (message.toolName === "book" && message.details?.target === "file" && message.details?.change === true)) {
-		const colon = text.indexOf(": ");
-		const summary = colon >= 0 ? text.slice(colon + 2).replace(/\s+File id:.*$/, "").replace(/\.$/, "") : text.replace(/\.$/, "");
+		// A direct-file result may follow its receipt with the focus-local surface accounting. The terminal's one-line
+		// summary names the mutation; the full result still carries the visible allowance facts.
+		const first = text.split("\n")[0];
+		const colon = first.indexOf(": ");
+		const summary = colon >= 0 ? first.slice(colon + 2).replace(/\s+File id:.*$/, "").replace(/\.$/, "") : first.replace(/\.$/, "");
 		return oneLine(summary, POLICY.limits.terminal.resultSummary.write);
 	}
 	const lines = text.split("\n").length;
