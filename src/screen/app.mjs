@@ -1,10 +1,11 @@
 // The full screen: tabs, a status strip that is always there, and a place to type.
 //
-//   1 Chat     the conversation; the agent's work folded into pointers (src/screen/chat.mjs)
-//   2 Carto    the agent's brain: Atlas, Ledger, Plan, Tree, Assessment, one at a time
-//   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
-//   4 Shells   the shell windows, live
-//   5 Model    sent provider payloads, current accounting, and the live shared brain
+//   1 Talk     what reached the user or is being sent (src/screen/chat.mjs)
+//   2 Work     the private shared-brain activity, not user-directed speech
+//   3 Carto    the agent's brain: Atlas, Ledger, Plan, Tree, Assessment, one at a time
+//   4 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
+//   5 Shells   the shell windows, live
+//   6 Model    sent provider payloads, current accounting, and the live shared brain
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -52,7 +53,8 @@ import { USER_NAME } from "../user.mjs";
 const USER_SPEAKER = `${USER_NAME}: `;
 
 export const TABS = [
-	{ id: "chat", name: "Chat" },
+	{ id: "chat", name: "Talk" },
+	{ id: "work", name: "Work" },
 	{ id: "carto", name: "Carto" },
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
@@ -152,15 +154,15 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 5           go to a tab",
+	"  1 to 6           go to a tab (Talk is direct speech; Work is private shared-brain activity)",
 	"  [ and ]          the previous and the next view inside Carto, Diff and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter opens a long live reasoning stream or takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); sent Model payloads are read-only`,
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk, a submitted message or delivered agent speech; private work cannot be edited; sent Model payloads are read-only`,
 	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Current brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current brain)",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
@@ -505,11 +507,12 @@ export async function runScreen(session, options, runTerminal) {
 		"context.main": "Enter open · y copy",
 		"context.preview": "Enter open · y copy",
 		"context.parts": "Enter open · + all · y copy",
+		work: "j k move · Enter open · y copy",
 		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
 	};
 	const legend = () => {
 		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
-		const id = state.tab === "chat" ? "chat" : viewId();
+		const id = state.tab === "chat" ? "chat" : state.tab === "work" ? "work" : viewId();
 		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
 	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
@@ -609,9 +612,9 @@ export async function runScreen(session, options, runTerminal) {
 		chat.seal();
 		draw();
 	};
-	const tabName = () => (state.tab === "chat" ? "the Chat tab" : `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`);
+	const tabName = () => ((state.tab === "chat" || state.tab === "work") ? `the ${TABS.find((tab) => tab.id === state.tab).name} tab` : `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`);
 	const copyTab = () => {
-		if (state.tab === "chat") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), "chat", tabName(), "txt");
+		if (state.tab === "chat" || state.tab === "work") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), state.tab, tabName(), "txt");
 		return copy(pageOf().list.text(), viewId().replace(".", "-"), tabName(), "txt");
 	};
 	const copyCommand = (argument) => {
@@ -623,7 +626,8 @@ export async function runScreen(session, options, runTerminal) {
 	};
 
 	// ─── Tabs, views and what scrolls ───────────────────────────────────────
-	const scrollOf = () => (state.tab === "chat" ? chatScroll : pageOf().scroll);
+	const chatTab = () => state.tab === "chat" || state.tab === "work";
+	const scrollOf = () => (chatTab() ? chatScroll : pageOf().scroll);
 	const setTab = (id) => {
 		if (!TABS.some((tab) => tab.id === id)) return;
 		state.tab = id;
@@ -666,7 +670,7 @@ export async function runScreen(session, options, runTerminal) {
 		const text = given.trim();
 		if (text === "") return;
 		prompt.addToHistory(text);
-		// What is sent is answered in Chat, at its end.
+		// New user speech belongs in Talk, even when private Work was open.
 		if (state.tab !== "chat") setTab("chat");
 		chatScroll.scrollToEnd();
 		const [name, argument] = text.slice(1).trim().split(/\s+/);
@@ -718,24 +722,24 @@ export async function runScreen(session, options, runTerminal) {
 		writeFileSync(file, `${text}\n`);
 		return file;
 	};
-	/** e in the Chat tab: the words of the user and of the agent can be said anew; tool work cannot. */
+	/** e in Talk keeps the existing future-talk edit path; Work is private and read-only until its sources have durable ids. */
 	const editChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (!chat.editable(line.item)) {
-			return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : `tool work cannot be edited: e opens a message of ${USER_NAME} or the agent`);
-		}
+		if (state.tab === "work") return flash("private work cannot be edited");
 		const item = chat.items.find((entry) => entry.key === line.item);
+		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
+		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : `only submitted speech can be edited: tool work and undelivered speech stay private`);
 		const file = scratch("message.md", item.text);
 		if (!runEditor(file)) return;
 		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
 		if (now === item.text || now === "") return flash("the message stands as it was");
 		const was = item.text;
 		inPlace(() => chat.revise(item.key, now));
-		// What the talk keeps is rewritten to match, so what comes after reads the edited words. A note of the
-		// agent stands nowhere in the talk, so for one the edit is in the tab only.
+		// Talk only presents submitted user speech and delivered chat speech; this preserves the existing future-talk path
+		// until Stage 4 replaces its text match with a Durable message identity.
 		if (item.type !== "note") reviseNote(brainDir, was, now);
-		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the agent's words are edited · the talk the context keeps says the same");
+		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the delivered agent speech is edited · the talk the context keeps says the same");
 	};
 	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
 	/** What the user has said anew in the editor, by the text it was sent with. The tab shows the new words where the old stood; the sizes stay those of what was sent. */
@@ -1121,7 +1125,7 @@ export async function runScreen(session, options, runTerminal) {
 		refresh(viewId(), true);
 	};
 	const edit = () => {
-		if (state.tab === "chat") return editChat();
+		if (chatTab()) return editChat();
 		if (state.tab === "context") return editContext();
 		if (BOOK_VIEWS[viewId()] !== undefined) {
 			const item = pageOf().list.selected();
@@ -1134,7 +1138,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
 	const editInEditor = () => {
-		if (state.tab === "chat") return editChat();
+		if (chatTab()) return editChat();
 		if (state.tab === "context") return editContext();
 		const book = BOOK_VIEWS[viewId()];
 		if (book !== undefined) {
@@ -1170,6 +1174,8 @@ export async function runScreen(session, options, runTerminal) {
 		change();
 		reveal(chatScroll, selectedRow() + chatBody.leadNow());
 	};
+	/** The shared chat model shown in the projection selected by the top-level Talk or Work tab. */
+	const chatProjection = () => (state.tab === "work" ? "work" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
 		if (all.length === 0) return;
@@ -1190,7 +1196,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (line === undefined) return;
 		if (line.kind === "live") return void inPlace(() => chat.toggleLive(line.liveDepth, to));
 		else if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
-		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
+		else if (line.kind === "call" || line.kind === "note" || line.kind === "reasoning" || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
 			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
@@ -1204,7 +1210,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 	};
 	const copySelected = () => {
-		if (state.tab !== "chat") {
+		if (!chatTab()) {
 			const { list } = pageOf();
 			const item = list.selected();
 			if (item === undefined) return copyTab();
@@ -1223,7 +1229,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
-		const inChat = state.tab === "chat";
+		const inChat = chatTab();
 		const page = inChat ? undefined : pageOf();
 		const list = page?.list;
 		const scroll = scrollOf();
@@ -1316,7 +1322,7 @@ export async function runScreen(session, options, runTerminal) {
 			return;
 		}
 		if (key === "/") return void terminal.press?.(SEARCH_KEY);
-		if (/^[1-5]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
+		if (/^[1-6]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
 		if (key === "?") return void showKeys();
 		if (key === "]" || key === "L") return void stepView(1);
 		if (key === "[" || key === "H") return void stepView(-1);
@@ -1425,6 +1431,7 @@ export async function runScreen(session, options, runTerminal) {
 	const ui = {
 		state,
 		chat,
+		chatProjection,
 		tabs: TABS,
 		themeVersion: () => themeVersion,
 		chatRows: () => chatScroll.viewportHeight,
@@ -1522,8 +1529,8 @@ export async function runScreen(session, options, runTerminal) {
 			new TabBar(ui),
 			{ component: new ViewBar(ui), visible: () => VIEWS[state.tab] !== undefined },
 			{ component: new Air(), visible: airy },
-			{ component: chatScroll, ...full, visible: () => state.tab === "chat" },
-			...PAGES.map((id) => ({ component: pages.get(id).scroll, ...full, visible: () => state.tab !== "chat" && viewId() === id })),
+			{ component: chatScroll, ...full, visible: () => chatTab() },
+			...PAGES.map((id) => ({ component: pages.get(id).scroll, ...full, visible: () => !chatTab() && viewId() === id })),
 			{ component: new Air(), visible: airy },
 			new Strip(ui),
 			{ component: prompt, basis: "auto" },
@@ -1536,7 +1543,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pasted = createPasteWatch();
 	const watchInput = (chunk) => pasted.read(chunk);
 	/** The keys the commands mode takes that the editor has no use for with Alt held. */
-	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazR+-[]HL?/: "]);
+	const AFTER_ESCAPE = new Set([..."123456jkgGhloeYriazR+-[]HL?/: "]);
 	tui.addInputListener((data) => {
 		if (state.closed || isKeyRelease(data)) return undefined;
 		// A sheet lies over the screen: the keys are its own.
@@ -1600,7 +1607,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (state.closed) return;
 		measure();
 		syncThinking();
-		if (state.tab !== "chat") refresh();
+		if (!chatTab()) refresh();
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();

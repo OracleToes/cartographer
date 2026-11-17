@@ -1,10 +1,10 @@
-// The Chat tab: the conversation, with the agent's work folded into pointers.
+// The Chat tab has two projections of the same local event feed.
 //
-// What the user and the agent say to each other stands in full. What the agent does in between is a run of calls,
-// and a run is one line, "▸ 20 calls · 1m 12s": opening it shows one line per call, and opening a call shows what
-// it returned, or leads to the tab where that work lives (a write to Diff, a command to Shells, the plan to
-// Carto). The run that is going on now is open by itself, with its newest calls, and the reply that is being
-// written is shown as it grows, whatever it holds: notes, a message, or the arguments of a call.
+// Talk holds only the user's submitted speech and an agent `chat` call while it is sending or after its result says
+// it was delivered. Work holds private reasoning, ordinary agent notes, calls/results, failures, harness notices,
+// and request blocks. A failed `chat` call leaves Talk and stands in Work as a failed speech attempt. Work keeps the
+// old useful grouping: a run is one line, "▸ 20 calls · 1m 12s"; opening it shows its calls and results, or leads
+// to the tab where that work lives (a write to Diff, a command to Shells, the plan to Carto).
 //
 // How it looks is a hierarchy, and a line says where it stands in it (src/screen/theme.mjs has the colours):
 //   what you say           a block in your hue, bold
@@ -69,6 +69,8 @@ const thinkingOf = (message) => (message?.content ?? []).flatMap((part) => (part
 /** What the live note shows and copies: the model's reasoning followed by its ordinary text. */
 const noteOf = (message) => [thinkingOf(message), textOf(message)].filter((part) => part.trim() !== "").join("\n");
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
+/** A Talk item is direct two-party speech. Failed delivery is private work, not a statement that reached the user. */
+const inTalk = (item) => item?.type === "user" || (item?.type === "agent" && item.delivery !== "failed");
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?/, "").trim();
 /** The argument of a call that is worth watching while it is written: the longest text in it. */
 function bodyOf(call) {
@@ -216,26 +218,26 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			for (const message of entry.model ?? []) {
 				if (message.role === "assistant") {
 					live.delete(depth);
-					const notes = noteOf(message).trim();
+					const reasoning = thinkingOf(message).trim();
+					const note = textOf(message).trim();
 					const calls = message.stopReason === "length" ? [] : callsOf(message);
-					if (notes !== "") {
-						// A note of the main agent with no call beside it stands on its own; any other is a row of the run.
-						if (depth === 0 && calls.length === 0) say({ type: "note", text: notes });
-						else group().rows.push({ kind: "note", depth, text: notes });
-					}
+					const privateRow = (kind, text) => {
+						if (text === "") return;
+						const row = { kind, depth, text, origin: "provider response" };
+						if (depth === 0 && calls.length === 0) say({ type: kind, text, depth, origin: row.origin });
+						else group().rows.push(row);
+					};
+					privateRow("reasoning", reasoning);
+					privateRow("note", note);
 					if (depth === 0 && message.stopReason === "length") say({ type: "console", text: `! The agent's reply was cut off at the output limit (maxTokens in the settings). Say "continue" to let it go on.\n`, sealed: true });
 					for (const call of calls) {
 						if (call.name === "chat") {
-							if (typeof call.arguments?.text === "string" && call.arguments.text.trim() !== "") say({ type: "agent", text: call.arguments.text, task: depth > 0 });
-							rows.set(call.id, { quiet: true });
+							const text = typeof call.arguments?.text === "string" ? call.arguments.text.trim() : "";
+							const speech = text === "" ? undefined : say({ type: "agent", text, task: depth > 0, depth, callId: call.id, delivery: "sending" });
+							rows.set(call.id, { quiet: true, name: "chat", speech });
 							continue;
 						}
-						// A question is shown when it is put, and `return` is the report line of its task.
-						if (call.name === "ask" || call.name === "return") {
-							rows.set(call.id, { quiet: true, name: call.name });
-							continue;
-						}
-						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now() };
+						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}) };
 						rows.set(call.id, row);
 						group().rows.push(row);
 					}
@@ -243,6 +245,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				} else if (message.role === "toolResult") {
 					const row = rows.get(message.toolCallId);
 					const text = textOf(message);
+					if (row?.speech !== undefined) {
+						row.speech.delivery = message.isError ? "failed" : "delivered";
+						row.speech.result = message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.consoleErrorChars) : undefined;
+						touch();
+						continue;
+					}
 					if (row === undefined || row.quiet) {
 						if (message.isError && row?.quiet) say({ type: "console", text: `! ${row.name ?? "chat"}: ${cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.consoleErrorChars)}\n`, sealed: true });
 						continue;
@@ -348,8 +356,8 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (taskRow !== undefined) return { what: "between two steps", depth: 1, task };
 			return undefined;
 		},
-		/** The last thing the agent said to the user. */
-		lastAgent: () => items.findLast((item) => item.type === "agent")?.text,
+		/** The last agent speech whose chat result says it was delivered. */
+		lastAgent: () => items.findLast((item) => item.type === "agent" && item.delivery === "delivered")?.text,
 		toggle(key, to) {
 			const item = items.find((entry) => entry.key === key);
 			if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
@@ -415,7 +423,8 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		 * The tab as lines of `cols` cells. Each line says what it belongs to, so that a selection or a click can
 		 * act on it: { spans, item, row?, kind }.
 		 */
-		lines(cols) {
+		// `all` keeps the old mixed projection for direct callers during the migration; the screen always names Talk or Work.
+		lines(cols, projection = "all") {
 			const out = [];
 			// Where the lines being made go: the lines of one item while it is made, else the tab's.
 			let sink = out;
@@ -448,18 +457,24 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				const style = row.state === "failed" ? "err" : row.state === "running" ? "warn" : "ok";
 				const indent = row.depth > 0 ? "  │ " : "  ";
 				const result = row.result !== undefined ? `  → ${row.result}` : row.state === "running" ? `  ${span(now() - row.started)}` : "";
+				const source = row.depth > 0 ? "Focus" : "Main";
+				const lifecycle = row.state === "running" ? "running" : row.state === "failed" ? "failed" : "completed";
+				const label = projection === "work" ? `${source} · call · ${row.label.replace(/\n/g, " ")} · ${lifecycle}` : row.label.replace(/\n/g, " ");
 				const room = Math.max(10, inner - width(indent) - 2 - width(result));
-				return [[indent, "faint"], [`${mark} `, style], [cut(row.label.replace(/\n/g, " "), room), ""], [result, row.state === "failed" ? "err" : "muted"]];
+				return [[indent, "faint"], [`${mark} `, style], [cut(label, room), ""], [result, row.state === "failed" ? "err" : "muted"]];
 			};
 			const rowLines = (item, index) => {
 				const row = item.rows[index];
 				const ref = { item: item.key, row: index, bg: "bgTool" };
-				if (row.kind === "note") {
+				if (row.kind === "note" || row.kind === "reasoning") {
 					if (!thinking) return;
 					const indent = row.depth > 0 ? "  │ ┊ " : "  ┊ ";
 					const text = wrap(row.text, inner - width(indent));
-					for (const piece of row.open ? text : text.slice(0, POLICY.limits.screen.notePreviewLines)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: "note" });
-					if (!row.open && text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [`… ${text.length - POLICY.limits.screen.notePreviewLines} more lines`, "faint"]], { ...ref, kind: "note" });
+					const source = row.depth > 0 ? "Focus" : "Main";
+					const label = row.kind === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : "Agent note · provider response · replay: active-context dependent";
+					if (projection === "work" || row.open || text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [projection === "work" ? `${source} · ${label}` : label, "faint"]], { ...ref, kind: row.kind });
+					for (const piece of row.open ? text : text.slice(0, POLICY.limits.screen.notePreviewLines)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: row.kind });
+					if (!row.open && text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [`… ${text.length - POLICY.limits.screen.notePreviewLines} more lines`, "faint"]], { ...ref, kind: row.kind });
 					return;
 				}
 				if (row.name === "consult") {
@@ -543,10 +558,16 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			const make = (item) => {
 				if (item.type === "user") {
 					for (const [index, piece] of wrap(item.text, inner - 2).entries()) add([[index === 0 ? "› " : "  ", "user bold"], [piece, "bold"]], { item: item.key, kind: "user", bg: "bgUser" });
+					if (projection === "talk") add([["  You → agent · submitted", "faint"]], { item: item.key, kind: "user", bg: "bgUser" });
 				} else if (item.type === "agent") {
-					said(item.text, { item: item.key, kind: "agent" }, item);
+					const state = item.delivery === "failed" ? "failed" : item.delivery === "delivered" ? "delivered" : "sending";
+					const ref = { item: item.key, kind: "agent", ...(state === "failed" ? { bg: "bgTool" } : {}) };
+					if (projection !== "all") add([[`Agent speech${item.task ? " · focus" : ""} · ${state}${item.callId === undefined ? "" : ` · chat call ${item.callId}`}`, state === "failed" ? "err" : state === "sending" ? "warn" : "faint"]], ref);
+					said(item.text, ref, item);
+					if (state === "failed" && item.result !== undefined) add([[`  Failed delivery · ${item.result}`, "err"]], ref);
 				} else if (item.type === "block") {
 					const ref = { item: item.key, kind: "block", bg: "bgTool" };
+					if (projection === "work") add([["Harness · request block · active context", "faint"]], ref);
 					add([[item.open ? "▾ " : "▸ ", "carto"], [cut(item.label, inner - 2), "muted"]], ref);
 					if (item.open) {
 						const indent = "  ";
@@ -554,10 +575,13 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						for (const piece of pieces.slice(0, BLOCK_ROWS)) add([[indent, "faint"], [piece, "muted"]], ref);
 						if (pieces.length > BLOCK_ROWS) add([[indent, "faint"], [`… ${pieces.length - BLOCK_ROWS} more lines (y copies it)`, "faint"]], ref);
 					}
-				} else if (item.type === "note") {
+				} else if (item.type === "note" || item.type === "reasoning") {
 					if (!thinking) return;
-					for (const piece of wrap(item.text, cols - 2)) add([["┊ ", "faint"], [piece, "note italic"]], { item: item.key, kind: "note" });
+					const label = item.type === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : "Agent note · provider response · replay: active-context dependent";
+					if (projection === "work") add([[`┊ Main · ${label}`, "faint"]], { item: item.key, kind: item.type });
+					for (const piece of wrap(item.text, cols - 2)) add([["┊ ", "faint"], [piece, "note italic"]], { item: item.key, kind: item.type });
 				} else if (item.type === "console") {
+					if (projection === "work") add([["Harness · notice", "faint"]], { item: item.key, kind: "console" });
 					const question = /^\? /.test(item.text);
 					for (const [index, piece] of item.text.replace(/\n$/, "").split("\n").entries()) {
 						const rows = wrap(piece, cols);
@@ -567,28 +591,31 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						for (const part of rows.slice(1)) add([[part, head.at(-1)[1]]], { item: item.key, kind: "console" });
 					}
 				} else if (item.type === "group") {
-					const calls = item.rows.filter((row) => row.kind === "call");
-					if (calls.length === 0 && (!thinking || item.rows.length === 0)) return;
+					const indexes = item.rows.map((_row, index) => index).filter((index) => projection !== "all" || item.rows[index].hiddenInAll !== true);
+					const shownRows = indexes.map((index) => item.rows[index]);
+					const calls = shownRows.filter((row) => row.kind === "call");
+					const privateRows = shownRows.filter((row) => row.kind === "note" || row.kind === "reasoning");
+					if (calls.length === 0 && (!thinking || privateRows.length === 0)) return;
 					const running = !item.closed;
 					const open = item.open || running;
 					const failed = calls.filter((row) => row.state === "failed").length;
 					const tasks = calls.filter((row) => row.name === "task").map((row) => row.details?.report ?? (row.args?.move ? `move ${row.args.move}` : row.args?.item ? `task ${row.args.item}` : "task"));
 					const consults = calls.filter((row) => row.name === "consult").map((row) => cut(String(row.args?.question ?? "").replace(/\s+/g, " "), 48)).filter((text) => text !== "");
 					const took = span((item.ended ?? now()) - item.started);
-					const head = [`${calls.length === 1 ? "1 call" : `${calls.length} calls`}`, ...new Set([...tasks, ...consults]), took].join(" · ");
+					const head = [calls.length === 0 ? "Private response" : calls.length === 1 ? "1 call" : `${calls.length} calls`, ...new Set([...tasks, ...consults]), took].join(" · ");
 					add([[open ? "▾ " : "▸ ", running ? "warn" : "tool"], [head, running ? "" : "muted"], [failed > 0 ? ` · ${failed} failed` : "", "err"]], { item: item.key, kind: "group", bg: "bgTool" });
 					if (open) {
 						// A run that is going on shows its newest rows; opened by hand, it shows all of them.
-						const from = item.open ? 0 : Math.max(0, item.rows.length - LIVE_ROWS);
+						const from = item.open ? 0 : Math.max(0, indexes.length - LIVE_ROWS);
 						if (from > 0) add([["  ", ""], [`… ${from} earlier: Enter on the line above shows all`, "faint"]], { item: item.key, kind: "group", bg: "bgTool" });
-						for (let index = from; index < item.rows.length; index++) rowLines(item, index);
+						for (const index of indexes.slice(from)) rowLines(item, index);
 					}
 				}
 			};
 			// An item's lines are made once and kept until the item changes: a long conversation is not made again
 			// for every word the agent writes. What the lines depend on is put into one string; a run of calls
 			// that is going on, or that shows a clock, is made every time.
-			const base = `${cols}|${thinking}|${styleRev}`;
+			const base = `${cols}|${thinking}|${styleRev}|${projection}`;
 			const linesOf = (item) => {
 				const still = item.type !== "group" || (item.closed && !item.rows.some((row) => row.kind === "call" && row.state === "running"));
 				const sign = !still ? undefined : item.type === "group" ? `${base}|${item.rev ?? 0}|${item.rows.length}|${item.open}` : item.type === "block" ? `${base}|${item.text.length}|${item.open ?? ""}` : `${base}|${item.text.length}`;
@@ -602,48 +629,66 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			};
 			let before;
 			for (const item of items) {
+				if (projection === "talk" && !inTalk(item)) continue;
+				if (projection === "work" && inTalk(item)) continue;
 				const own = linesOf(item);
 				if (own.length === 0) continue;
 				// Blocks of different kinds stand an empty row apart; what a task left behind stands under its run.
-				const apart = item.type === "note" ? before !== "note" : item.type === "console" ? before !== "console" && !(before === "group" && item.of !== undefined) : true;
+				const privateItem = item.type === "note" || item.type === "reasoning";
+				const apart = privateItem ? before !== "note" && before !== "reasoning" : item.type === "console" ? before !== "console" && !(before === "group" && item.of !== undefined) : true;
 				if (apart) blank();
 				for (const line of own) out.push(line);
 				before = item.type;
 			}
-			// What is being written now, whatever it is. A long reasoning stream is a small, named tail until it is
-			// deliberately opened; then its whole text continues to grow in place. The state belongs only to this live reply.
+			// A live provider response has the same boundary as completed work: its `chat` call is prospective speech in
+			// Talk, while private response material and other calls are Work. Nothing here has a delivery result yet.
 			for (const depth of [...live.keys()].sort((a, b) => a - b)) {
 				const current = live.get(depth);
 				const { message } = current;
 				const indent = depth > 0 ? "  │ " : "";
-				const thoughts = thinkingOf(message);
-				const notes = noteOf(message);
 				const calls = callsOf(message);
-				// Inside a task, what is written belongs to the task's run, and has its background.
+				if (projection !== "work") {
+					for (const call of calls.filter((entry) => entry.name === "chat" && typeof entry.arguments?.text === "string" && entry.arguments.text.trim() !== "")) {
+						if (depth === 0 && before !== "agent") blank();
+						if (projection === "talk") add([[`Agent speech${depth > 0 ? " · focus" : ""} · sending · chat call ${call.id}`, "warn"]], { kind: "live-speech" });
+						said(call.arguments.text.trim(), { kind: "live-speech" });
+						before = "agent";
+					}
+				}
+				if (projection === "talk") continue;
 				const block = depth > 0 ? { bg: "bgTool" } : {};
-				if (depth === 0 && (notes.trim() !== "" || calls.length > 0) && before !== "note") blank();
-				if (notes.trim() !== "" && thinking) {
+				const privateResponse = (kind, text) => {
+					if (text.trim() === "" || !thinking) return;
 					const room = inner - width(indent) - 2;
-					const full = current.open ? wrap(notes, room) : undefined;
-					const preview = current.open ? undefined : previewTail(notes, room, LIVE_NOTE_ROWS);
+					const full = current.open ? wrap(text, room) : undefined;
+					const preview = current.open ? undefined : previewTail(text, room, LIVE_NOTE_ROWS);
 					const pieces = full ?? preview.lines;
 					const omitted = preview?.omitted ?? 0;
 					const expandable = current.open || omitted > 0;
 					const ref = expandable ? { item: `live:${depth}`, kind: "live", liveDepth: depth, ...block } : { kind: "live", ...block };
+					const label = kind === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : kind === "note" ? "Agent note · provider response · replay: active-context dependent" : kind;
+					if (depth === 0 && before !== kind) blank();
 					if (expandable) {
-						const kind = thoughts.trim() === "" ? "note" : "thinking";
 						const lines = current.open ? `${full.length} ${full.length === 1 ? "line" : "lines"} · Enter folds` : `${omitted} earlier ${omitted === 1 ? "line" : "lines"} · Enter opens all`;
-						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${kind} · ${lines}`, "faint"]], ref);
-					}
+						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${projection === "work" ? `${depth > 0 ? "Focus" : "Main"} · ` : ""}${label} · ${lines}`, "faint"]], ref);
+					} else if (projection === "work") add([[`${indent}┊ `, "faint"], [`${depth > 0 ? "Focus" : "Main"} · ${label}`, "faint"]], ref);
 					for (const piece of pieces) add([[`${indent}┊ `, "faint"], [piece, "note italic"]], ref);
-				} else if (notes.trim() !== "" && calls.length === 0) add([[`${indent}┊ `, "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
-				for (const call of calls) {
-					if (call.name === "chat") {
-						if (depth === 0) blank();
-						said(String(call.arguments?.text ?? ""), { kind: "live" });
-						continue;
-					}
-					add([[`${indent}✎ `, "warn"], [cut(describeCall(call, describeRef).replace(/\n/g, " "), inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
+					before = kind;
+				};
+				if (projection === "all") privateResponse(thinkingOf(message).trim() === "" ? "note" : "thinking", noteOf(message));
+				else {
+					privateResponse("reasoning", thinkingOf(message));
+					privateResponse("note", textOf(message));
+				}
+				if (!thinking && projection === "all" && noteOf(message).trim() !== "" && calls.length === 0) {
+					if (depth === 0 && before !== "note") blank();
+					add([[`${indent}┊ `, "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
+					before = "note";
+				}
+				for (const call of calls.filter((entry) => entry.name !== "chat")) {
+					const label = describeCall(call, describeRef).replace(/\n/g, " ");
+					const shown = projection === "work" ? `${depth > 0 ? "Focus" : "Main"} · call · ${label} · sending` : label;
+					add([[`${indent}✎ `, "warn"], [cut(shown, inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
 					const body = bodyOf(call);
 					if (body !== "") {
 						const text = wrap(body, inner - width(indent) - 4);
@@ -666,7 +711,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (item.type === "block") return item.text;
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
-				if (row?.kind === "note") return row.text;
+				if (row?.kind === "note" || row?.kind === "reasoning") return row.text;
 				if (row?.name === "consult") {
 					const story = storyOf(row);
 					const parts = [row.label];
@@ -684,7 +729,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					return parts.join("\n");
 				}
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
-				return item.rows.map((entry) => (entry.kind === "note" ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
+				return item.rows.map((entry) => ((entry.kind === "note" || entry.kind === "reasoning") ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
 			}
 			return item.text ?? "";
 		},
@@ -693,13 +738,15 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			const parts = [`# ${title}`, ""];
 			for (const item of items) {
 				if (item.type === "user") parts.push("## You", "", item.text, "");
-				else if (item.type === "agent") parts.push(`## Cartographer${item.task ? " (from a task)" : ""}`, "", item.text, "");
-				else if (item.type === "note") parts.push(...item.text.split("\n").map((line) => `> ${line}`), "");
+				else if (item.type === "agent" && item.delivery === "delivered") parts.push(`## Cartographer${item.task ? " (from a task)" : ""}`, "", item.text, "");
+				else if (item.type === "agent") parts.push(`> Private work — speech ${item.delivery ?? "not delivered"}: ${item.text.replace(/\s+/g, " ")}`, "");
+				else if (item.type === "note" || item.type === "reasoning") parts.push(...item.text.split("\n").map((line) => `> Private ${item.type}: ${line}`), "");
 				else if (item.type === "block") parts.push("```text", `// ${item.label}`, item.text.replace(/\n+$/, ""), "```", "");
 				else if (item.type === "console") parts.push("```text", item.text.replace(/\n+$/, ""), "```", "");
 				else if (item.type === "group" && item.rows.length > 0) {
 					for (const row of item.rows) {
-						if (row.kind === "note") parts.push(`${row.depth > 0 ? "  " : ""}- _note:_ ${row.text.replace(/\s+/g, " ")}`);
+						if (row.hiddenInAll === true) continue;
+						if (row.kind === "note" || row.kind === "reasoning") parts.push(`${row.depth > 0 ? "  " : ""}- _private ${row.kind}:_ ${row.text.replace(/\s+/g, " ")}`);
 						else parts.push(`${row.depth > 0 ? "  " : ""}- \`${row.label.replace(/\n/g, " ").replace(/`/g, "'")}\`${row.result ? ` → ${row.result}` : ""}${row.state === "failed" ? " (failed)" : ""}`);
 					}
 					parts.push("");

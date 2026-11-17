@@ -1590,6 +1590,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	chat.entry(1, result("c4", "return", "Returned. The task has ended."));
 	chat.entry(0, result("c1", "task", "It rolls one die.", { details: { report: "t1" } }), "◂ report t1  17 characters  (/report shows it)\n");
 	chat.entry(0, reply([call("c5", "chat", { text: "It rolls one die." })], 4));
+	chat.entry(0, result("c5", "chat", "Delivered."));
 	clock += 60_000;
 	has(text(), "› Look at the roller\n\n▸ 3 calls · t1 · 3s · 1 failed\n◂ report t1  17 characters  (/report shows it)\n\nIt rolls one die.", "once something is said, the run is one line, with how many calls, which task and how long");
 	hasNot(text(), "read roll.py", "its calls are folded away");
@@ -1637,8 +1638,66 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	has(text(), "● plan  authorized by you\n  p1 Write it", "printed text stands as printed");
 
 	const transcript = chat.transcript({ title: "T" });
-	has(transcript, "# T\n\n## You\n\nLook at the roller\n\n- _note:_ I should look first.\n- `task  Read the roller` → report t1\n  - `read roll.py` → 3 lines\n  - `search /seed/` → refused: no match for seed (failed)\n\n```text\n◂ report t1  17 characters  (/report shows it)\n```\n\n## Cartographer\n\nIt rolls one die.\n", "the session as Markdown: what was said in full, a line for each call");
+	has(transcript, "# T\n\n## You\n\nLook at the roller\n\n- _private note:_ I should look first.\n- `task  Read the roller` → report t1\n  - `read roll.py` → 3 lines\n  - `search /seed/` → refused: no match for seed (failed)\n\n```text\n◂ report t1  17 characters  (/report shows it)\n```\n\n## Cartographer\n\nIt rolls one die.\n", "the session as Markdown: what was said in full, a line for each call");
 	assert.equal(chat.lastAgent(), "It rolls one die.");
+});
+
+test("screen: Talk separates delivered speech from private Work", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	let clock = 1000;
+	const chat = createChat({ now: () => clock });
+	const text = (projection, cols = 120) => chat.lines(cols, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
+	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
+
+	chat.user("Please inspect the roller.");
+	chat.entry(0, reply([
+		{ type: "thinking", thinking: "Private chain of thought." },
+		{ type: "text", text: "I should inspect the implementation first." },
+		call("read-1", "read", { path: "roll.py" }),
+		call("chat-1", "chat", { text: "I am checking it." }),
+	], 1));
+	chat.entry(0, result("read-1", "read", "== roll.py\n1  return 1"));
+	chat.entry(0, result("chat-1", "chat", "Delivered."));
+	chat.print("◆ active context changed\n");
+	chat.setAll(true);
+
+	const talk = text("talk");
+	has(talk, "Please inspect the roller.", "Talk keeps submitted user speech");
+	has(talk, "You → agent · submitted", "Talk names the user-speech lifecycle");
+	has(talk, "Agent speech · delivered · chat call chat-1", "a successful chat result makes speech delivered");
+	has(talk, "I am checking it.", "Talk keeps delivered agent speech");
+	hasNot(talk, "Private chain of thought.", "reasoning never becomes Talk");
+	hasNot(talk, "I should inspect the implementation first.", "an ordinary assistant note never becomes Talk");
+	hasNot(talk, "read roll.py", "tool work never becomes Talk");
+	hasNot(talk, "active context changed", "harness notices never become Talk");
+
+	const work = text("work");
+	has(work, "Main · Private reasoning · provider response · replay: provider-bound", "Work labels provider reasoning and its replay boundary");
+	has(work, "Main · Agent note · provider response · replay: active-context dependent", "Work labels an undelivered assistant note");
+	has(work, "Main · call · read roll.py · completed", "Work names call source and completion");
+	has(work, "Harness · notice", "Work labels harness output");
+	hasNot(work, "Please inspect the roller.", "submitted user speech is not duplicated in Work");
+	hasNot(work, "I am checking it.", "delivered agent speech is not duplicated in Work");
+
+	chat.entry(0, reply([call("chat-2", "chat", { text: "This delivery failed." })], 2));
+	chat.entry(0, result("chat-2", "chat", "the provider refused it", { isError: true }));
+	hasNot(text("talk"), "This delivery failed.", "failed chat speech does not read as something said to the user");
+	has(text("work"), "Agent speech · failed · chat call chat-2", "a failed chat call stays in Work with its source");
+	has(text("work"), "Failed delivery · the provider refused it", "Work shows why that attempted speech failed");
+	assert.equal(chat.lastAgent(), "I am checking it.", "copying the last agent message ignores a failed delivery");
+	chat.entry(1, reply([call("chat-focus", "chat", { text: "The focus checked it too." })], 3));
+	chat.entry(1, result("chat-focus", "chat", "Delivered."));
+	has(text("talk"), "Agent speech · focus · delivered · chat call chat-focus", "focus speech keeps the same agent-speech label and names its scope");
+
+	chat.live(0, { timestamp: 4, content: [call("chat-3", "chat", { text: "Still checking." })] });
+	has(text("talk"), "Agent speech · sending · chat call chat-3", "a live chat call is visibly sending in Talk");
+	hasNot(text("work"), "Still checking.", "a live speech attempt is not private Work");
+	chat.live(0, undefined);
+	chat.setThinking(false);
+	hasNot(text("work"), "Private chain of thought.", "Ctrl-T hides private Work material");
+	has(text("work"), "read roll.py", "Ctrl-T leaves tool work visible");
 });
 
 test("screen: long live reasoning names its compact tail, opens in Chat, and resets when it finishes", async () => {

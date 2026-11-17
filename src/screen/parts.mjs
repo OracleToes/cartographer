@@ -207,7 +207,8 @@ export class ChatBody {
 	/** The model's lines at the width last drawn. */
 	lines() {
 		const { chat } = this.ui;
-		if (this.made === undefined || this.made.version !== chat.version || this.made.cols !== this.cols) this.made = { version: chat.version, cols: this.cols, lines: chat.lines(this.cols) };
+		const projection = this.ui.chatProjection();
+		if (this.made === undefined || this.made.version !== chat.version || this.made.cols !== this.cols || this.made.projection !== projection) this.made = { version: chat.version, cols: this.cols, projection, lines: chat.lines(this.cols, projection) };
 		return this.made.lines;
 	}
 	/** How many empty rows stand above the conversation as it is now. */
@@ -223,7 +224,7 @@ export class ChatBody {
 			// A short conversation stands at the bottom of its window, next to where it is continued.
 			this.rows = ui.chatRows();
 			this.lead = Math.max(0, this.rows - lines.length);
-			const key = `${ui.chat.version}|${width}|${chosen ?? ""}|${ui.themeVersion()}|${this.lead}`;
+			const key = `${ui.chat.version}|${ui.chatProjection()}|${width}|${chosen ?? ""}|${ui.themeVersion()}|${this.lead}`;
 			if (this.painted?.key !== key) {
 				// A line is painted once and kept with it: the model keeps the lines of what did not change.
 				const how = `${width}|${ui.themeVersion()}`;
@@ -644,6 +645,6 @@ export class Farewell {
 	}
 	invalidate() {}
 	render(width) {
-		return guarded(width, () => this.ui.chat.lines(Math.max(8, width - 2 * marginOf(width))).map((line) => contentRow(line, width)));
+		return guarded(width, () => this.ui.chat.lines(Math.max(8, width - 2 * marginOf(width)), "talk").map((line) => contentRow(line, width)));
 	}
 }
