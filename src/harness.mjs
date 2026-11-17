@@ -314,7 +314,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		shelfTool({ root, brainDir, config }),
 		bookTool({ root, brainDir, config, engine, gate }),
 		...lookTools(root),
-		...changeTools({ root, brainDir, gate, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
+		...changeTools({ root, brainDir, gate }),
 		shellTool({ config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
 		consultTool({ root, brainDir, config }),
 		forMain(wakeTool({ wakes, config })),

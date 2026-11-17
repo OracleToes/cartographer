@@ -21,36 +21,34 @@ import { loadContext, taskState, updateContext } from "../context.mjs";
 import { liveMove, loadPlan, targetAllows } from "../plan.mjs";
 
 const CONTENT_MAX_BYTES = POLICY.limits.change.contentBytes;
-/** Rough character budget for a new file: the line cap is the main limit; this one stops a runaway. */
-const WRITE_CHARS_PER_LINE = 250;
-const writeBudget = (maxLines) => maxLines * WRITE_CHARS_PER_LINE;
+const SURFACE_BYTES = POLICY.limits.change.surfaceBytes;
+const SURFACE_LINES = POLICY.limits.change.surfaceLines;
 
 export class ChangeError extends Error {}
 
 const lineCount = (text) => (text === "" ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0));
+const bufferLineCount = (buffer) => {
+	if (buffer.length === 0) return 0;
+	let rows = 0;
+	for (const byte of buffer) if (byte === 10) rows++;
+	return rows + (buffer.at(-1) === 10 ? 0 : 1);
+};
 const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const digest = (value) => createHash("sha256").update(value).digest("hex");
 
-/**
- * Clip `content` to what the tool keeps of a new file: at most `maxLines` lines and at most
- * `maxLines * WRITE_CHARS_PER_LINE` characters, whichever binds first; whole lines, unless one line
- * is longer than the whole budget, in which case it is cut at the budget.
- * @returns {{ text: string, clipped: boolean }}
- */
-export function clipWriteContent(content, maxLines) {
-	const budget = writeBudget(maxLines);
-	if (content.length <= budget && lineCount(content) <= maxLines) return { text: content, clipped: false };
-	const lines = content.split("\n");
-	const kept = [];
-	let chars = 0;
-	for (const line of lines) {
-		if (kept.length >= maxLines) break;
-		const add = kept.length === 0 ? line.length : line.length + 1;
-		if (chars + add > budget) break;
-		kept.push(line);
-		chars += add;
-	}
-	if (kept.length === 0) return { text: lines[0].slice(0, budget), clipped: true };
-	return { text: kept.join("\n"), clipped: true };
+/** The actual changed spans, measured symmetrically before any write lands. A large one-line replacement is bounded
+ * by bytes; multi-line changes are bounded by both added and removed lines. */
+export function changedSurface(before, after) {
+	const oldText = String(before ?? "");
+	const newText = String(after ?? "");
+	let head = 0;
+	const common = Math.min(oldText.length, newText.length);
+	while (head < common && oldText.charCodeAt(head) === newText.charCodeAt(head)) head++;
+	let tail = 0;
+	while (tail < oldText.length - head && tail < newText.length - head && oldText.charCodeAt(oldText.length - 1 - tail) === newText.charCodeAt(newText.length - 1 - tail)) tail++;
+	const removed = oldText.slice(head, oldText.length - tail);
+	const added = newText.slice(head, newText.length - tail);
+	return { bytes: Buffer.byteLength(removed) + Buffer.byteLength(added), lines: lineCount(removed) + lineCount(added), added: { bytes: Buffer.byteLength(added), lines: lineCount(added) }, removed: { bytes: Buffer.byteLength(removed), lines: lineCount(removed) } };
 }
 
 /**
@@ -85,102 +83,124 @@ export function confineWrite(root, brainDir, given) {
 	return { abs, rel };
 }
 
-/**
- * Create a file. With `options` the mechanical limit for building from the ground up is enforced:
- * `newOnly` refuses to replace an existing file (use `edit`), and `maxLines` caps how long a brand-new
- * file may be. Called without options it keeps the old create-or-replace behaviour, for callers that
- * predate the limit (and for tests of the primitive itself).
- * @param {{ newOnly?: boolean, maxLines?: number }} [options]
- * @returns {string} what happened, one line
- */
-export function writeOne(root, brainDir, given, content, options = {}) {
+/** Return stable text for a direct-file surface comparison, refusing a binary replacement path. */
+function textFromBuffer(buffer, path) {
+	if (buffer.subarray(0, POLICY.limits.change.binaryProbeChars).includes(0)) throw new ChangeError(`${path} is not a text file`);
+	return buffer.toString("utf8");
+}
+
+/** Resolve a create (or legacy replacement) without touching disk. */
+function prepareWrite(root, brainDir, given, content, options = {}) {
 	if (typeof content !== "string") throw new ChangeError("`content` is required: the whole text of the file");
-	let written = content;
-	let atCap = false;
-	if (options.maxLines !== undefined) {
-		const clipped = clipWriteContent(content, options.maxLines);
-		written = clipped.text;
-		atCap = clipped.clipped
-			|| lineCount(clipped.text) >= options.maxLines
-			|| clipped.text.length >= writeBudget(options.maxLines);
-	}
-	if (Buffer.byteLength(written) > CONTENT_MAX_BYTES) throw new ChangeError(`\`content\` is larger than ${CONTENT_MAX_BYTES / 1_000_000} MB; write the file in parts, or generate it another way`);
+	if (Buffer.byteLength(content) > CONTENT_MAX_BYTES) throw new ChangeError(`\`content\` is larger than ${CONTENT_MAX_BYTES / 1_000_000} MB; split the local outcome into bounded changes`);
 	const path = confineWrite(root, brainDir, given);
-	const lines = lineCount(written);
-	const priorBytes = existsSync(path.abs) ? readFileSync(path.abs) : undefined;
-	const had = priorBytes === undefined ? undefined : lineCount(priorBytes.toString("utf8"));
-	if (options.newOnly === true && had !== undefined) {
-		throw new ChangeError(`${path.rel} already exists, so \`write\` will not replace it whole. Change it with \`edit\`, one exact passage at a time (or give a new path)`);
-	}
-	mkdirSync(dirname(path.abs), { recursive: true });
-	try {
-		writeFileSync(path.abs, written, options.newOnly === true ? { flag: "wx" } : undefined);
-	} catch (error) {
-		if (options.newOnly === true && error.code === "EEXIST") throw new ChangeError(`${path.rel} was created by another operation; nothing was overwritten`);
-		throw error;
-	}
-	let ref;
-	try { ref = fileReference(root, brainDir, path.rel); }
-	catch (error) {
-		try {
-			if (had === undefined) unlinkSync(path.abs);
-			else writeFileSync(path.abs, priorBytes);
-		} catch (rollbackError) {
-			throw new ChangeError(`The write landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell ${USER_NAME}.`);
-		}
-		throw new ChangeError(`The stable file identity could not be recorded (${error.message}); the file was restored and nothing was changed.`);
-	}
-	const cap = atCap ? ` — the most a new file created with write keeps (or ${writeBudget(options.maxLines)} characters); if you wrote more, the rest is not in the file, and the way to finish it is \`edit\`, anchored on the end of the file` : "";
-	return `Wrote ${path.rel}: ${plural(lines, "line")}${had === undefined ? ", a new file" : `, replacing a file of ${plural(had, "line")}`}${cap}. File id: ${ref.id} (to read or change it: { "id": "${ref.id}" }).`;
+	const beforeBuffer = existsSync(path.abs) ? readFileSync(path.abs) : undefined;
+	if (options.newOnly === true && beforeBuffer !== undefined) throw new ChangeError(`${path.rel} already exists; file create does not replace it whole. Use an exact edit or plan another local outcome`);
+	const before = beforeBuffer === undefined ? "" : textFromBuffer(beforeBuffer, path.rel);
+	return { kind: beforeBuffer === undefined ? "create" : "replace", path, beforeBuffer, before, after: content };
 }
 
-/**
- * Delete a file. The path goes through the same door as write and edit: inside the project, not the brain, not
- * git's own files, not ignored, not through a symlink, not a folder. A checkpoint records the deletion, so
- * `/undo` brings the file back. @returns {string} what happened, one line
- */
-export function removeOne(root, brainDir, given, { expectedVersion } = {}) {
-	const path = confineWrite(root, brainDir, given);
-	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Nothing was removed`);
-	if (expectedVersion !== undefined) {
-		const actual = createHash("sha256").update(readFileSync(path.abs)).digest("hex");
-		if (actual !== expectedVersion) throw new ChangeError(`${path.rel} changed since version ${expectedVersion}; current version is ${actual}. Nothing was removed`);
-	}
-	unlinkSync(path.abs);
-	return `Removed ${path.rel}.`;
-}
-
-/** Replace one passage of a file. @returns {string} what happened, one line */
-export function editOne(root, brainDir, given, oldText, newText, { expectedVersion } = {}) {
+/** Resolve an exact edit without touching disk. */
+function prepareEdit(root, brainDir, given, oldText, newText, { expectedVersion } = {}) {
 	if (typeof oldText !== "string" || oldText === "") throw new ChangeError("`old_text` is required: the passage to replace, copied exactly from the file");
 	if (typeof newText !== "string") throw new ChangeError("`new_text` is required: what replaces the passage (an empty string deletes it)");
 	const path = confineWrite(root, brainDir, given);
-	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Use \`write\` to create a file`);
-	const buffer = readFileSync(path.abs);
+	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Use file create to make it`);
+	const beforeBuffer = readFileSync(path.abs);
 	if (expectedVersion !== undefined) {
-		const actual = createHash("sha256").update(buffer).digest("hex");
+		const actual = digest(beforeBuffer);
 		if (actual !== expectedVersion) throw new ChangeError(`${path.rel} changed since version ${expectedVersion}; current version is ${actual}. Nothing was changed`);
 	}
-	if (buffer.subarray(0, POLICY.limits.change.binaryProbeChars).includes(0)) throw new ChangeError(`${path.rel} is not a text file`);
-	const text = buffer.toString("utf8");
-	const first = text.indexOf(oldText);
-	if (first === -1) {
-		throw new ChangeError(`\`old_text\` was not found in ${path.rel}. It must match the file exactly, spaces and line breaks included. If indentation is unclear, inspect the exact source with \`sed -n 'A,Bp' ${path.rel} | cat -A\` and retry without guessing`);
-	}
-	const places = text.split(oldText).length - 1;
+	const before = textFromBuffer(beforeBuffer, path.rel);
+	const first = before.indexOf(oldText);
+	if (first === -1) throw new ChangeError(`\`old_text\` was not found in ${path.rel}. It must match the file exactly, spaces and line breaks included. If indentation is unclear, inspect the exact source with \`sed -n 'A,Bp' ${path.rel} | cat -A\` and retry without guessing`);
+	const places = before.split(oldText).length - 1;
 	if (places > 1) throw new ChangeError(`\`old_text\` is found ${places} times in ${path.rel}. Add the lines around the passage until it matches one place only`);
 	if (oldText === newText) throw new ChangeError("`old_text` and `new_text` are the same, so nothing would change");
-	writeFileSync(path.abs, text.slice(0, first) + newText + text.slice(first + oldText.length));
-	try { fileReference(root, brainDir, path.rel); }
+	return { kind: "edit", path, beforeBuffer, before, after: before.slice(0, first) + newText + before.slice(first + oldText.length), line: before.slice(0, first).split("\n").length, replaced: lineCount(oldText), replacement: lineCount(newText) };
+}
+
+/** Resolve a removal without touching disk. */
+function prepareRemove(root, brainDir, given, { expectedVersion } = {}) {
+	const path = confineWrite(root, brainDir, given);
+	if (!existsSync(path.abs)) throw new ChangeError(`${path.rel} does not exist. Nothing was removed`);
+	const beforeBuffer = readFileSync(path.abs);
+	if (expectedVersion !== undefined) {
+		const actual = digest(beforeBuffer);
+		if (actual !== expectedVersion) throw new ChangeError(`${path.rel} changed since version ${expectedVersion}; current version is ${actual}. Nothing was removed`);
+	}
+	const binary = beforeBuffer.subarray(0, POLICY.limits.change.binaryProbeChars).includes(0);
+	return binary
+		? { kind: "remove", path, beforeBuffer, before: "", after: "", surface: { bytes: beforeBuffer.length, lines: bufferLineCount(beforeBuffer), added: { bytes: 0, lines: 0 }, removed: { bytes: beforeBuffer.length, lines: bufferLineCount(beforeBuffer) } } }
+		: { kind: "remove", path, beforeBuffer, before: beforeBuffer.toString("utf8"), after: "" };
+}
+
+/** Refuse a changed surface before disk is touched. This is deliberately separate from file-operation count. */
+function surfaceAuthority(task, prepared) {
+	const surface = prepared.surface ?? changedSurface(prepared.before, prepared.after);
+	const used = task.changedSurface ?? { bytes: 0, lines: 0 };
+	const total = { bytes: (used.bytes ?? 0) + surface.bytes, lines: (used.lines ?? 0) + surface.lines };
+	if (total.bytes > SURFACE_BYTES || total.lines > SURFACE_LINES) {
+		throw new ChangeError(`the proposed ${prepared.kind} changes ${surface.bytes} bytes and ${surface.lines} lines; this focus has ${Math.max(0, SURFACE_BYTES - (used.bytes ?? 0))} bytes and ${Math.max(0, SURFACE_LINES - (used.lines ?? 0))} lines of changed surface remaining. Nothing was changed; return blocked and plan a successor move or a more deliberate bounded construction`);
+	}
+	if (prepared.kind === "create" && Array.isArray(task.removedPaths) && task.removedPaths.includes(prepared.path.rel)) {
+		throw new ChangeError(`${prepared.path.rel} was removed in this focus and cannot be recreated as a rewrite path. Plan a successor move`);
+	}
+	return { surface, total };
+}
+
+/** Ensure a prepared operation is still comparing against the exact bytes it inspected. */
+function unchangedSincePrepared(prepared) {
+	const exists = existsSync(prepared.path.abs);
+	if (prepared.beforeBuffer === undefined) return !exists;
+	return exists && digest(readFileSync(prepared.path.abs)) === digest(prepared.beforeBuffer);
+}
+
+/** Apply an already-authorized operation and undo it if its stable catalog identity cannot be recorded. */
+function commitPrepared(root, brainDir, prepared) {
+	if (!unchangedSincePrepared(prepared)) throw new ChangeError(`${prepared.path.rel} changed after this operation was prepared. Nothing was changed; read it again before retrying`);
+	if (prepared.kind === "remove") {
+		unlinkSync(prepared.path.abs);
+		return `Removed ${prepared.path.rel}.`;
+	}
+	mkdirSync(dirname(prepared.path.abs), { recursive: true });
+	try {
+		writeFileSync(prepared.path.abs, prepared.after, prepared.beforeBuffer === undefined ? { flag: "wx" } : undefined);
+	} catch (error) {
+		if (prepared.beforeBuffer === undefined && error.code === "EEXIST") throw new ChangeError(`${prepared.path.rel} was created by another operation; nothing was overwritten`);
+		throw error;
+	}
+	let ref;
+	try { ref = fileReference(root, brainDir, prepared.path.rel); }
 	catch (error) {
-		try { writeFileSync(path.abs, buffer); }
-		catch (rollbackError) { throw new ChangeError(`The edit landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell ${USER_NAME}.`); }
+		try {
+			if (prepared.beforeBuffer === undefined) unlinkSync(prepared.path.abs);
+			else writeFileSync(prepared.path.abs, prepared.beforeBuffer);
+		} catch (rollbackError) {
+			throw new ChangeError(`The ${prepared.kind} landed but its identity could not be recorded (${error.message}); rollback also failed (${rollbackError.message}). Stop and tell ${USER_NAME}.`);
+		}
 		throw new ChangeError(`The stable file identity could not be recorded (${error.message}); the file was restored and nothing was changed.`);
 	}
-	const line = text.slice(0, first).split("\n").length;
-	const before = oldText.split("\n").length;
-	const after = newText === "" ? 0 : newText.split("\n").length;
-	return `Edited ${path.rel}: ${plural(before, "line")} from line ${line} replaced by ${plural(after, "line")}.`;
+	if (prepared.kind === "edit") return `Edited ${prepared.path.rel}: ${plural(prepared.replaced, "line")} from line ${prepared.line} replaced by ${plural(prepared.replacement, "line")}.`;
+	return `Wrote ${prepared.path.rel}: ${plural(lineCount(prepared.after), "line")}${prepared.beforeBuffer === undefined ? ", a new file" : `, replacing a file of ${plural(lineCount(prepared.before), "line")}`}. File id: ${ref.id} (to read or change it: { "id": "${ref.id}" }).`;
+}
+
+/**
+ * Create a file, or replace it only when the low-level caller explicitly opts out of create-only behavior. The
+ * focused tool path always measures and authorizes the full before/after surface first.
+ */
+export function writeOne(root, brainDir, given, content, options = {}) {
+	return commitPrepared(root, brainDir, prepareWrite(root, brainDir, given, content, options));
+}
+
+/** Delete one regular project file without bypassing the shared preparation rules. */
+export function removeOne(root, brainDir, given, options = {}) {
+	return commitPrepared(root, brainDir, prepareRemove(root, brainDir, given, options));
+}
+
+/** Replace one exact passage of a file without bypassing the shared preparation rules. */
+export function editOne(root, brainDir, given, oldText, newText, options = {}) {
+	return commitPrepared(root, brainDir, prepareEdit(root, brainDir, given, oldText, newText, options));
 }
 
 /**
@@ -203,49 +223,46 @@ function fileAuthority(brainDir, api, path, gate) {
 	return { task, move: live.move, ceiling };
 }
 
-function recordFileUse(brainDir, conversationId) {
+function recordFileUse(brainDir, conversationId, prepared, total) {
 	updateContext(brainDir, (store) => {
 		const task = taskState(store, conversationId);
 		task.fileOps = (task.fileOps ?? 0) + 1;
+		task.changedSurface = total;
+		if (prepared.kind === "remove") task.removedPaths = [...new Set([...(task.removedPaths ?? []), prepared.path.rel])];
 	});
 }
 
-const authorizedRun = (brainDir, api, path, gate, work) => {
+const surfaceLine = (total) => `Direct changed surface: ${total.bytes}/${SURFACE_BYTES} bytes and ${total.lines}/${SURFACE_LINES} lines used; ${Math.max(0, SURFACE_BYTES - total.bytes)} bytes and ${Math.max(0, SURFACE_LINES - total.lines)} lines remain.`;
+
+const authorizedRun = (root, brainDir, api, path, gate, prepare) => {
 	try {
-		fileAuthority(brainDir, api, path, gate);
-		const text = work();
-		recordFileUse(brainDir, api.conversationId);
-		return { output: [{ type: "text", text }] };
+		const authority = fileAuthority(brainDir, api, path, gate);
+		const prepared = prepare();
+		const measured = surfaceAuthority(authority.task, prepared);
+		const text = commitPrepared(root, brainDir, prepared);
+		recordFileUse(brainDir, api.conversationId, prepared, measured.total);
+		return { output: [{ type: "text", text: `${text}\n${surfaceLine(measured.total)}` }] };
 	} catch (error) {
 		if (error instanceof ChangeError) return { isError: true, output: [{ type: "text", text: `Refused: ${error.message}.` }] };
 		throw error;
 	}
 };
 
-/** @param {{ root: string, brainDir: string, gate?: { yolo: boolean }, write?: { newOnly?: boolean, maxLines?: number } }} project  root: real path of the project */
+/** @param {{ root: string, brainDir: string, gate?: { yolo: boolean }, write?: { newOnly?: boolean } }} project  root: real path of the project */
 export function changeTools({ root, brainDir, gate, write = {} }) {
 	return [
 		defineTool({
 			name: "write",
-			description: "Create a NEW file of the project with a short piece of boilerplate. `write` refuses to replace an existing file; what it keeps of a new file is limited — beyond the limit the rest is not written and the result says so — so build and grow files with `edit`, one exact passage at a time. Folders are created as needed.",
+			description: "Create one new UTF-8 project file. The proposed whole file is measured before anything lands; an over-limit create is refused atomically, never clipped. Folders are created as needed.",
 			parameters: obj({
 				path: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Path relative to the project directory" }),
-				content: str({ maxLength: writeBudget(write.maxLines ?? 4096), description: "The whole text of the file; over the cap, the tail is not written" }),
+				content: str({ maxLength: CONTENT_MAX_BYTES, description: "The whole UTF-8 text of the new file. It must fit the focus's remaining changed-surface allowance." }),
 			}),
-			prepareArguments(args) {
-				// Clipped here, before validation sees it, so an oversized call keeps the head of the file instead of being refused whole.
-				const maxLines = write.maxLines ?? 4096;
-				if (args !== null && typeof args === "object" && typeof args.content === "string") {
-					const clipped = clipWriteContent(args.content, maxLines);
-					if (clipped.clipped) return { ...args, content: clipped.text };
-				}
-				return args;
-			},
 			callers: ["tools"], // Internal primitive for book; the model uses target=file, action=create.
 			executionMode: "sequential",
 			// Writing the same text twice leaves the same file.
 			replay: POLICY.enums.toolReplay.safe,
-				execute: async (args, api) => authorizedRun(brainDir, api, args.path, gate, () => writeOne(root, brainDir, args.path, args.content, write)),
+			execute: async (args, api) => authorizedRun(root, brainDir, api, args.path, gate, () => prepareWrite(root, brainDir, args.path, args.content, { newOnly: write.newOnly !== false })),
 		}),
 		defineTool({
 			name: "edit",
@@ -260,7 +277,7 @@ export function changeTools({ root, brainDir, gate, write = {} }) {
 			executionMode: "sequential",
 			// Not run a second time after a crash: the passage may already be replaced, and the task reads the file again.
 			replay: POLICY.enums.toolReplay.unsafe,
-				execute: async (args, api) => authorizedRun(brainDir, api, args.path, gate, () => editOne(root, brainDir, args.path, args.old_text, args.new_text, { expectedVersion: args.expectedVersion })),
+				execute: async (args, api) => authorizedRun(root, brainDir, api, args.path, gate, () => prepareEdit(root, brainDir, args.path, args.old_text, args.new_text, { expectedVersion: args.expectedVersion })),
 		}),
 		defineTool({
 			name: "rm",
@@ -273,7 +290,7 @@ export function changeTools({ root, brainDir, gate, write = {} }) {
 			executionMode: "sequential",
 			// Not run a second time after a crash: the file may already be gone, and the task reads the folder again.
 			replay: POLICY.enums.toolReplay.unsafe,
-				execute: async (args, api) => authorizedRun(brainDir, api, args.path, gate, () => removeOne(root, brainDir, args.path, { expectedVersion: args.expectedVersion })),
+				execute: async (args, api) => authorizedRun(root, brainDir, api, args.path, gate, () => prepareRemove(root, brainDir, args.path, { expectedVersion: args.expectedVersion })),
 		}),
 	];
 }

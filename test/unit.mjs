@@ -29,7 +29,7 @@ import { returnTool } from "../src/tools/return.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
-import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
+import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
@@ -895,6 +895,30 @@ test("state: the sandboxed block does not claim the main agent is blocked", (t) 
 	assert.doesNotMatch(block, /You yourself may still run commands in this session/);
 });
 
+test("state: Dispatch is main-only mechanical evidence, not an automatic task command", (t) => {
+	const { brainDir, root } = fresh(t);
+	writeFileSync(join(root, "src.txt"), "source\n");
+	const shelved = shelfItem(root, "src.txt", undefined, brainDir, []);
+	updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change source.", done_when: "The source changes." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src.txt", done_when: "The source has the local edit.", targets: ["src.txt"], proof: "A named check passes." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	savePlan(brainDir, plan);
+	const main = stateBlock(brainDir, { mode: "sandbox" }, { root, messages: [] });
+	assert.match(main, /Dispatch\n/);
+	assert.match(main, /Eligible move facts:/);
+	assert.match(main, /m1 revision 1/);
+	assert.match(main, /src\.txt: .*shelf sh1 current/);
+	assert.match(main, /This lens neither delegates work nor approves a move/);
+	assert.doesNotMatch(main, /I call `task` with `move:m1`/, "a ready move is a fact, not an imperative");
+	const focused = stateBlock(brainDir, { mode: "sandbox" }, { root, task: { purpose: "check the source", move: "m1", revision: 1, budget: { replies: 2, fileOps: 1, commandStarts: 0 } }, context: "Context\nFocus evidence and local shelf: empty.\n\n" });
+	assert.match(focused, /Focus\n/);
+	assert.doesNotMatch(focused, /Dispatch\n/);
+	assert.doesNotMatch(focused, /Ledger\n/);
+	assert.doesNotMatch(focused, /Plan\n/);
+});
+
 test("dressRequest: the replay build equals the live build, for the same inputs", (t) => {
 	const { brainDir, root } = fresh(t);
 	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
@@ -1012,7 +1036,72 @@ test("talk source mutations: equal visible words cannot select one another", (t)
 	assert.equal(equalAfterForget[0].source, undefined, "an equal legacy saying is not removed by its text");
 });
 
-test("dressRequest: a task carries the context lines and the requests, as the live agent does", (t) => {
+test("task: selected main shelf evidence is captured into the durable focus capsule and replay stays local", async (t) => {
+	const { brainDir, root } = fresh(t);
+	writeFileSync(join(root, "evidence.txt"), "captured first version\n");
+	const selected = shelfItem(root, "evidence.txt", undefined, brainDir, []);
+	updateContext(brainDir, (store) => { store.shelf.push(selected.item); });
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "look", text: "Inspect captured evidence.", done_when: "The evidence is reported." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Read the captured evidence", done_when: "Its relevant fact is reported." }, NOW);
+	savePlan(brainDir, plan);
+	const entries = [];
+	const memos = new Map();
+	const child = "capsule-focus";
+	const now = Date.parse(NOW);
+	const tool = taskTool({ root, brainDir, config: { taskTurns: 4, maxTokens: 4096 } });
+	const result = await tool.execute({ move: "m1", context: "Read this source only; leave adjacent work for later.", shelf: [selected.item.id] }, {
+		conversationId: ROOT_CONVERSATION_ID,
+		taskId: "capsule-task",
+		callId: "task-call",
+		now: () => now,
+		memo: async (key, value) => { if (value !== undefined) memos.set(key, value); return memos.get(key); },
+		details: async () => {},
+		commit: async (fn) => fn({
+			scanConversations: async () => ({ items: [] }),
+			scanEntries: async ({ conversationId }) => {
+				if (conversationId === ROOT_CONVERSATION_ID) return { items: [{ id: "parent-call", model: [{ role: "assistant", content: [{ type: "toolCall", id: "task-call", name: "task", arguments: {} }] }] }] };
+				return { items: [] };
+			},
+			forkConversation: async () => ({ id: child }),
+			doc: async () => ({}),
+			appendEntry: async (_conversation, entry) => { entries.push(entry); },
+		}),
+		conversation: async () => ({
+			submit: async () => ({ wait: async () => {
+				updateContext(brainDir, (store) => { taskState(store, child).returned = { report: "Observed the captured source.", done: true }; });
+				return { status: "done" };
+			} }),
+		}),
+	}, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	const run = entries.find((entry) => entry.kind === "carto.brief")?.data;
+	assert.ok(run, "the focus durable brief stores its run");
+	assert.equal(run.evidence.length, 1);
+	assert.equal(run.evidence[0].placement, selected.item.id);
+	assert.equal(run.evidence[0].item.snapshot, selected.item.snapshot, "the exact rendered snapshot is retained");
+	assert.match(run.evidence[0].digest, /^[a-f0-9]{64}$/);
+	assert.match(run.brief, /Boundary and facts from the main context/);
+	assert.match(run.brief, /captured first version/);
+	assert.match(run.brief, /do not add targets, capabilities, proof, approval, or completion authority/);
+	writeFileSync(join(root, "evidence.txt"), "later live version\n");
+	updateContext(brainDir, (store) => {
+		store.shelf = [];
+		Object.assign(taskState(store, child), { mode: run.mode, move: run.move, revision: run.revision, budget: run.budget, evidence: run.evidence, changedSurface: { bytes: 0, lines: 0 } });
+	});
+	const request = dressRequest([
+		{ role: "user", content: [{ type: "text", text: "Broad parent planning history must not be sent." }] },
+		{ role: "toolResult", toolCallId: "task-call", toolName: "task", content: [{ type: "text", text: `${TASK_HEADER}\n\n${run.brief}` }] },
+	], { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: false, conversationId: child });
+	const rendered = request.map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("")).join("\n");
+	assert.match(rendered, /captured first version/, "replay uses the captured snapshot");
+	assert.doesNotMatch(rendered, /later live version/, "a later shelf/source change cannot rewrite the handoff");
+	assert.doesNotMatch(rendered, /Broad parent planning history/, "the parent conversation is not replayed into the provider request");
+	assert.doesNotMatch(rendered, /Dispatch\n/, "the main-only Dispatch lens stays out of the focus");
+	assert.doesNotMatch(rendered, /Requests\n/, "the main request queue stays out of the focus");
+});
+
+test("dressRequest: a task gets compact local state, not main requests, reports, or shelf", (t) => {
 	const { brainDir, root } = fresh(t);
 	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
 	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ version: 1, items: [] }, null, "\t"));
@@ -1033,10 +1122,11 @@ test("dressRequest: a task carries the context lines and the requests, as the li
 	assert.ok(block !== undefined, "a task's request ends with its state block");
 	assert.match(block, /Focus\n/, "with its one-line purpose");
 	assert.match(block, /My context holds about 1,234 of 100,000 tokens\./, "and its own server count");
-	assert.match(block, /Shelf items \(stable ID; unshelve by ID or path\):/, "and the shelf lines");
-	assert.match(block, /In view in full: s1 \(about [\d,]+ tokens\)\./, "and which reports stand in view in full");
-	assert.match(block, /Requests\nThese wait for /, "and what waits for the user");
-	assert.match(block, /q1 {2}Which parser\?/, "named, not counted");
+	assert.match(block, /Focus evidence and local shelf: empty\./, "it does not inherit the main shelf");
+	assert.doesNotMatch(block, /In view in full: s1/, "main reports stay out of a focus");
+	assert.doesNotMatch(block, /Requests\nThese wait for /, "the main request queue stays out of a focus");
+	assert.doesNotMatch(block, /Which parser\?/, "unrelated ledger material stays out too");
+	assert.doesNotMatch(block, /Dispatch\n/, "the main Dispatch lens is never replayed into a focus");
 	assert.doesNotMatch(block, /Wakes\n/, "wakes alone stay the main agent's");
 	const main = dressRequest(messages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID, used: 1234 });
 	const mainBlock = new RegExp(`<state>\\n[\\s\\S]*\\n</state>`).exec(textOf(main.at(-1)))?.[0];
@@ -1249,24 +1339,50 @@ test("file edit: top-level id or path is enough, and always points at the live v
 	assert.equal(describeResult({ toolName: "book", content: firstEdit.output, details: firstEdit.details, isError: firstEdit.isError }), "2 lines from line 2 replaced by 2 lines");
 });
 
-test("write create: over the line cap the head is written and the agent is told", (t) => {
+test("write create: standalone writes keep the complete requested file; focus tools measure surface before writing", (t) => {
 	const { root, brainDir } = fresh(t);
 	const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
-	const [write] = changeTools({ root, brainDir, write: { newOnly: true, maxLines: 60 } });
-	const prepared = write.prepareArguments({ path: "long.txt", content });
-	assert.equal(prepared.content.split("\n").length, 60, "prepareArguments clips to the line cap before validation sees it");
-	assert.equal(prepared.content, Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n"));
-	const result = writeOne(root, brainDir, "long.txt", content, { newOnly: true, maxLines: 60 });
-	assert.equal(readFileSync(join(root, "long.txt"), "utf8"), prepared.content, "the file holds the head, and only the head");
-	assert.match(result, /60 lines, a new file/);
-	assert.match(result, /if you wrote more, the rest is not in the file/);
-	// A file written exactly at the cap carries the same honest advisory; below the cap, no advisory.
-	assert.match(writeOne(root, brainDir, "exact.txt", "a\nb\n", { newOnly: true, maxLines: 2 }), /at most|most a new file/, "the exact-cap file is told the rule");
-	assert.doesNotMatch(writeOne(root, brainDir, "small.txt", "a\nb\n", { newOnly: true, maxLines: 60 }), /most a new file/);
-	// One pathological line is cut at the character budget, not kept whole.
-	const clipped = clipWriteContent("z".repeat(300), 1);
-	assert.equal(clipped.text.length, 250);
-	assert.equal(clipped.clipped, true);
+	const result = writeOne(root, brainDir, "long.txt", content, { newOnly: true });
+	assert.equal(readFileSync(join(root, "long.txt"), "utf8"), content, "the low-level primitive never clips a requested file");
+	assert.match(result, /100 lines, a new file/);
+	assert.throws(() => writeOne(root, brainDir, "long.txt", "replacement", { newOnly: true }), /already exists/);
+	assert.deepEqual(changedSurface("one\ntwo\n", "one\nthree\n"), { bytes: 6, lines: 2, added: { bytes: 4, lines: 1 }, removed: { bytes: 2, lines: 1 } }, "added and removed spans both count");
+	const oneLine = changedSurface("x".repeat(500), "y".repeat(500));
+	assert.equal(oneLine.bytes, 1000, "a one-line replacement is bounded by bytes too");
+	assert.equal(oneLine.lines, 2, "and still reports both replaced text spans");
+});
+
+test("direct file changes use one atomic symmetric changed-surface allowance", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Make one bounded file change.", done_when: "The file is changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Change src/surface.txt", done_when: "The bounded file change is present.", targets: ["src/surface.txt"], proof: "The file is read back.", budget: { replies: 3, fileOps: 4, commandStarts: 0 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
+	const focus = "surface-focus";
+	updateContext(brainDir, (store) => { Object.assign(taskState(store, focus), { mode: "change", move: "m1", revision: 1, fileOps: 0, changedSurface: { bytes: 0, lines: 0 } }); });
+	const [write, edit, rm] = changeTools({ root, brainDir, gate: { yolo: false } });
+	const api = { conversationId: focus, taskId: "surface-task" };
+	const over = await write.execute({ path: "src/surface.txt", content: "x".repeat(POLICY.limits.change.surfaceBytes + 1) }, api, undefined);
+	assert.equal(over.isError, true);
+	assert.match(over.output[0].text, /Nothing was changed/);
+	assert.equal(existsSync(join(root, "src", "surface.txt")), false, "an oversized create never leaves a clipped or partial file");
+	assert.deepEqual(loadContext(brainDir).tasks[focus].changedSurface, { bytes: 0, lines: 0 }, "a refusal spends no surface");
+	const made = await write.execute({ path: "src/surface.txt", content: "old" }, api, undefined);
+	assert.equal(made.isError, undefined, made.output[0].text);
+	assert.match(made.output[0].text, /Direct changed surface: 3\//, "the tool makes used surface visible");
+	const rewrite = await edit.execute({ path: "src/surface.txt", old_text: "old", new_text: "y".repeat(POLICY.limits.change.surfaceBytes) }, api, undefined);
+	assert.equal(rewrite.isError, true);
+	assert.match(rewrite.output[0].text, /proposed edit changes/);
+	assert.equal(readFileSync(join(root, "src", "surface.txt"), "utf8"), "old", "a whole-file edit receives the same atomic refusal");
+	const removed = await rm.execute({ path: "src/surface.txt" }, api, undefined);
+	assert.equal(removed.isError, undefined, removed.output[0].text);
+	assert.equal(existsSync(join(root, "src", "surface.txt")), false);
+	const recreated = await write.execute({ path: "src/surface.txt", content: "new" }, api, undefined);
+	assert.equal(recreated.isError, true);
+	assert.match(recreated.output[0].text, /cannot be recreated as a rewrite path/);
+	assert.equal(existsSync(join(root, "src", "surface.txt")), false, "remove then create cannot evade the shared allowance in one focus");
 });
 
 test("shelf tool: first-class add/remove/list, one-line receipt, range refresh by placement id, and focus shelf in state", async (t) => {

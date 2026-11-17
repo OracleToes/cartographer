@@ -899,8 +899,6 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `consultMaxTokens` | 40960 | Longest answer a `consult` call may write — the model card's ceiling for hard problems |
 | `consultTemperature` | 0.6 | Sampling temperature for `consult` calls — the model card's recommendation for single-shot reasoning |
 | `consultTimeoutSeconds` | 1800 | How long a `consult` call may wait before giving up. Generation at the ceiling can alone take that long |
-| `writeLines` | 60 | Longest new file one `write` call creates, in lines (or 250 characters a line, whichever binds first). What a `write` call keeps is the head of the file; the result says so when it was cut, and the way to finish such a file is `edit` anchored on its end |
-| `writeCreatesOnly` | true | Whether `write` refuses to replace an existing file whole, pointing at `edit` instead. false: the old create-or-replace |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Planning and accepting one move take several orchestration replies |
 | `taskTurns` | 6 | Fallback reply ceiling for a focus without a stored move contract; new declared moves carry their own hard 1–8 reply budget (6 by default) |
 | `askMinutes` | 0 | Minutes an `ask` waits for your answer before the agent is told there was none. 0: without limit |

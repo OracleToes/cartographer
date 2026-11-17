@@ -73,10 +73,6 @@ export const DEFAULTS = freezeTree({
 	colors: "auto",
 	// "auto" asks the terminal for its background; "dark" or "light" says it.
 	theme: "auto",
-	// Building from the ground up: `write` creates a new file only, and no longer than this many lines,
-	// so a project is assembled one small, exact edit at a time. Adjustable per install/project.
-	writeLines: 60,
-	writeCreatesOnly: true,
 	// Whether the agent starts working on its own when carto starts, without waiting to be addressed: it looks
 	// around, keeps the map and works what is approved, or sleeps when there is nothing to do. /initiate switches
 	// it while carto runs, and that switch is never remembered.
@@ -134,12 +130,14 @@ export const POLICY = freezeTree({
 		look: { readDefaultLines: 1024, readMaxLines: 2048, readMaxFiles: 8, lineChars: 2000, readTokenCeiling: 8192, fileBytes: 2_000_000, binaryProbeChars: 8000, searchDefault: 60, searchMax: 200, searchHitChars: 240, listLines: 400, walkFiles: 20_000, maxBufferBytes: 64 * 1024 * 1024 },
 		taskDisplay: { listedNodes: 20, staleNodes: 12 },
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
-		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8 },
+		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8, handoffChars: 1200, evidenceItems: 8, evidenceChars: 32_000 },
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
 		book: { listCap: 200, listCursorTokens: 64 },
-		change: { contentBytes: 1_000_000, binaryProbeChars: 8000 },
+		// One fixed direct-file changed-surface allowance per focus. This is deliberately policy, not configuration:
+		// it is visible to the focus and measured before every direct mutation.
+		change: { contentBytes: 1_000_000, binaryProbeChars: 8000, surfaceBytes: 24_000, surfaceLines: 240 },
 		consult: { contextChars: 64_000, modelChars: 128, bodyChars: 400 },
 		shellOutput: { maxBytes: 64_000, maxLines: 1000, pendingChars: 64_000 },
 		windows: { open: 4, waitSeconds: 300, keptLines: 2000, outputReadDefaultLines: 40, outputReadMaxLines: 400, commandSummaryChars: 80, partialChars: 64_000, markerChars: 4200, askLineChars: 200, startupErrorLines: 3, ptyColumns: 120, ptyRows: 40, commandPreviewLines: 5 },
@@ -285,7 +283,6 @@ export const POLICY = freezeTree({
 		reservedContextDivisor: 2,
 		collapsePercent: { min: 30, max: 95 },
 		windowTailMax: 40,
-		writeLinesMin: 1,
 		nonNegativeMin: 0,
 		prefillTokensMin: 0,
 		userChars: 80,
@@ -343,11 +340,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 		...(flags.url ? { server: flags.url } : {}),
 		...(flags.model ? { model: flags.model } : {}),
 	};
-	// The write limit may be overridden for one run (the stand-in tests exercise the old create-or-replace
-	// behaviour, so they relax it); real runs keep the strict default above.
-	if (env.CARTO_WRITE_LINES !== undefined && env.CARTO_WRITE_LINES !== "") config.writeLines = Number(env.CARTO_WRITE_LINES);
 	if (env.CARTO_CONSULT_MODEL !== undefined && env.CARTO_CONSULT_MODEL !== "") config.consultModel = env.CARTO_CONSULT_MODEL.trim();
-	if (env.CARTO_WRITE_CREATES_ONLY !== undefined && env.CARTO_WRITE_CREATES_ONLY !== "") config.writeCreatesOnly = env.CARTO_WRITE_CREATES_ONLY === "1" || env.CARTO_WRITE_CREATES_ONLY === "true";
 	if (typeof config.server !== "string" || typeof config.model !== "string") {
 		throw new ConfigError(
 			[
@@ -382,8 +375,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	if (config.chatWindow > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
-	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
-	if (!Number.isInteger(config.writeLines) || config.writeLines < POLICY.validation.writeLinesMin) throw new ConfigError(`config: writeLines must be a whole number of lines, ${POLICY.validation.writeLinesMin} or more`);
+	for (const key of ["screen", "repeatCut", "prefill", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
 	if (!POLICY.enums.colors.includes(config.colors)) throw new ConfigError(`config: colors must be ${POLICY.enums.colors.slice(0, -1).map((color) => JSON.stringify(color)).join(", ")} or ${JSON.stringify(POLICY.enums.colors.at(-1))}`);
 	if (!POLICY.enums.themes.includes(config.theme)) throw new ConfigError(`config: theme must be ${POLICY.enums.themes.slice(0, -1).map((theme) => JSON.stringify(theme)).join(", ")} or ${JSON.stringify(POLICY.enums.themes.at(-1))}`);
 	if (!Number.isInteger(config.prefillTokens) || config.prefillTokens < POLICY.validation.prefillTokensMin) throw new ConfigError(`config: prefillTokens must be a whole number of tokens, ${POLICY.validation.prefillTokensMin} or more`);

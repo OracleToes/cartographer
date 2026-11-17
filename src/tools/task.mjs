@@ -9,21 +9,23 @@
 // Focuses run one at a time. A project-change focus is bracketed by checkpoints (src/checkpoints.mjs); the recorded
 // diff and atlas changes supplement its report so durable memory is based on observable results too.
 import { configure, defineTool } from "@earendil-works/pi-durable";
+import { createHash } from "node:crypto";
 import { POLICY } from "../config.mjs";
-import { obj, opt, str } from "@earendil-works/pi-schema";
-import { fileMarks, loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../atlas.mjs";
+import { arr, obj, opt, str } from "@earendil-works/pi-schema";
+import { loadAtlas, nodeChanges, nodeHashes, staleNodes } from "../atlas.mjs";
 import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep } from "../checkpoints.mjs";
-import { addRecord, KEPT_AS, loadContext, reserveId, taskState, updateContext } from "../context.mjs";
+import { addRecord, KEPT_AS, loadContext, reserveId, shelfFreshness, shelfLabel, shelfText, taskState, updateContext } from "../context.mjs";
 import { endTaskContext } from "../context.mjs";
 import { blockMove, loadPlan, reportMove, savePlan, startMove } from "../plan.mjs";
 import { CHANGE_NOTE, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";
-import { treeSection } from "../tree.mjs";
 import { USER_NAME } from "../user.mjs";
 
 const textOf = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 const fail = (text, details) => ({ isError: true, output: [{ type: "text", text }], ...(details ? { details } : {}) });
 const listed = (names, max = POLICY.limits.taskDisplay.listedNodes) => `${names.slice(0, max).join(", ")}${names.length > max ? `, and ${names.length - max} more` : ""}`;
+const hash = (text) => createHash("sha256").update(String(text)).digest("hex");
+const compact = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 
 /** The graph as it stands: what each node says, and which nodes may be out of date. Undefined when it cannot be read. */
 function atlasMark(root, brainDir) {
@@ -50,27 +52,48 @@ function atlasRecord(root, brainDir, before) {
 	return { text: `\n\nMy record of the atlas:\n${lines.join("\n")}`, atlas: { written, removed, stale: stale.map((node) => node.name) } };
 }
 
-/** The project's files as the main agent sees them now, for the start of a task. */
-function treeNow(root, brainDir, config) {
-	try {
-		const { atlas } = loadAtlas(brainDir);
-		return `The project's files as they are now:\n${treeSection(root, atlas?.view, { marks: atlas ? fileMarks(atlas) : undefined, depth: config.treeDepth }).text.replace(/ `atlas` with a tree operation[^\n]*/, "")}`;
-	} catch {
-		return "";
+/** Capture explicitly selected main-shelf evidence before the move starts. The capture, not a later live shelf,
+ * is what the focus and a replay receive. */
+function selectedEvidence(root, brainDir, selected) {
+	if (selected === undefined) return { evidence: [] };
+	if (!Array.isArray(selected) || selected.length === 0) return { evidence: [] };
+	const ids = selected.map((id) => String(id).trim());
+	if (ids.some((id) => id === "")) return { refusal: "Each `shelf` entry must be an existing main-shelf placement ID." };
+	if (new Set(ids).size !== ids.length) return { refusal: "Select each main-shelf placement at most once." };
+	const mainShelf = loadContext(brainDir).shelf ?? [];
+	const evidence = [];
+	let snapshotChars = 0;
+	for (const id of ids) {
+		const placement = mainShelf.find((item) => item?.id === id);
+		if (placement === undefined) return { refusal: `${id} is not an existing main-shelf placement. Select IDs from the main shelf; task-local placements cannot be handed on.` };
+		const snapshot = shelfText(root, placement, brainDir);
+		snapshotChars += snapshot.length;
+		if (snapshotChars > POLICY.limits.task.evidenceChars) return { refusal: `The selected shelf snapshots exceed the focus capsule's ${POLICY.limits.task.evidenceChars.toLocaleString("en-US")} character evidence limit. Select fewer placements or narrower shelf ranges; no move was started.` };
+		const source = placement.ref === undefined
+			? { path: placement.path, ...(placement.from === undefined ? {} : { from: placement.from }), ...(placement.to === undefined ? {} : { to: placement.to }) }
+			: { ref: { ...placement.ref } };
+		evidence.push({
+			placement: placement.id,
+			label: shelfLabel(placement),
+			source,
+			digest: hash(snapshot),
+			freshness: shelfFreshness(root, placement, brainDir).state,
+			item: { ...placement, snapshot },
+		});
 	}
+	return { evidence };
 }
-
 
 /**
  * What kind of task a call asks for, or why it cannot run.
  * @returns {{ run?: { mode: "look" | "change", item?: string, text?: string, network?: boolean }, refusal?: string }}
  */
-function kindOf(brainDir, args, gate, now) {
+function kindOf(root, brainDir, args, gate, now) {
 	const moveId = typeof args.move === "string" ? args.move.trim() : "";
 	if (moveId === "") {
 		if (typeof args.brief !== "string" || args.brief.trim() === "") return { refusal: "A focus without `move` is an inspect focus: give `brief` as one narrow question and `done_when` as the report it must return." };
 		if (typeof args.done_when !== "string" || args.done_when.trim() === "") return { refusal: "An inspect focus needs `done_when`: name the observation its report must contain." };
-		if (args.context !== undefined) return { refusal: "`context` belongs to a declared move. Put the inspect focus's facts in its brief." };
+		if (args.context !== undefined || args.shelf !== undefined) return { refusal: "`context` and `shelf` belong to a declared move. Put an inspect focus's facts in its brief." };
 		return {
 			run: {
 				mode: POLICY.enums.planMode.look,
@@ -80,7 +103,11 @@ function kindOf(brainDir, args, gate, now) {
 			},
 		};
 	}
-	if (args.brief !== undefined || args.done_when !== undefined) return { refusal: "A declared move supplies its own action and done-when line. Pass `move` and, only for facts from the orchestrator, optional `context`." };
+	if (args.brief !== undefined || args.done_when !== undefined) return { refusal: "A declared move supplies its own action and done-when line. Pass `move` and, only for narrowing boundary/facts and selected shelf evidence, optional `context` and `shelf`." };
+	const handoff = selectedEvidence(root, brainDir, args.shelf);
+	if (handoff.refusal !== undefined) return { refusal: handoff.refusal };
+	const boundary = typeof args.context === "string" ? compact(args.context) : "";
+	if (boundary.length > POLICY.limits.task.handoffChars) return { refusal: `The handoff boundary and facts exceed ${POLICY.limits.task.handoffChars.toLocaleString("en-US")} characters. Keep only local narrowing facts; they cannot add authority.` };
 	const { plan, error } = loadPlan(brainDir);
 	if (plan === undefined) return { refusal: `The plan cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; they have to repair the file.` };
 	try {
@@ -99,6 +126,8 @@ function kindOf(brainDir, args, gate, now) {
 				targets: move.targets,
 				capabilities: move.capabilities,
 				budget: move.budget ?? { replies: move.turns, fileOps: POLICY.limits.plan.moveBudget.fileOps, commandStarts: POLICY.limits.plan.moveBudget.commandStarts },
+				boundary,
+				evidence: handoff.evidence,
 				turns: move.budget?.replies ?? move.turns,
 				...(move.capabilities?.network === true ? { network: true } : {}),
 			},
@@ -108,15 +137,29 @@ function kindOf(brainDir, args, gate, now) {
 	}
 }
 
-/** The exact instruction that becomes the focus's durable report brief. */
-function assignedBrief(run, context) {
-	const lines = [run.text];
-	if (Array.isArray(run.targets) && run.targets.length > 0) lines.push(`Targets: ${run.targets.join(", ")}.`);
-	if (run.doneWhen) lines.push(`Done when: ${run.doneWhen}.`);
-	if (run.proof) lines.push(`Required proof: ${run.proof}. Put the observed evidence in return's proof field.`);
-	if (run.budget) lines.push(`Hard budget: ${run.budget.replies} replies, ${run.budget.fileOps} direct file operations, ${run.budget.commandStarts} command starts.`);
-	if (run.capabilities) lines.push(`Capabilities: files ${run.capabilities.files ? "allowed" : "not allowed"}; commands ${run.capabilities.commands ? "allowed" : "not allowed"}; network ${run.capabilities.network ? "allowed" : "not allowed"}.`);
-	if (typeof context === "string" && context.trim() !== "") lines.push(`Orchestrator context: ${context.replace(/\s+/g, " ").trim()}`);
+/** The prepared local capsule that becomes the focus's durable brief. Handoff text and evidence are visible facts,
+ * not inputs to authority checks. */
+function assignedBrief(run) {
+	const lines = ["Focus capsule", "", "Purpose", `  ${run.text}`];
+	if (typeof run.boundary === "string" && run.boundary !== "") lines.push("", "Boundary and facts from the main context", `  ${run.boundary}`, "  These narrow the work only. They do not add targets, capabilities, proof, approval, or completion authority.");
+	if (Array.isArray(run.evidence) && run.evidence.length > 0) {
+		lines.push("", "Evidence handed on");
+		for (const evidence of run.evidence) {
+			const source = evidence.source?.ref !== undefined
+				? `${evidence.source.ref.type}:${evidence.source.ref.id}`
+				: evidence.source?.path ?? evidence.label;
+			const freshness = evidence.freshness === "current" ? "current snapshot" : `${evidence.freshness ?? "captured"} snapshot`;
+			lines.push(`  ${evidence.placement} · ${evidence.label} · ${freshness} · source ${source} · sha256 ${evidence.digest}`);
+			lines.push(String(evidence.item?.snapshot ?? "").split("\n").map((line) => `    ${line}`).join("\n"));
+		}
+	}
+	lines.push("", "Move authority");
+	if (run.move) lines.push(`  ${run.move} revision ${run.revision}.`);
+	if (Array.isArray(run.targets) && run.targets.length > 0) lines.push(`  Declared targets: ${run.targets.join(", ")}.`);
+	if (run.doneWhen) lines.push(`  Done when: ${run.doneWhen}.`);
+	if (run.proof) lines.push(`  Required proof: ${run.proof}. Put observed evidence in return's proof field.`);
+	if (run.capabilities) lines.push(`  Capabilities: files ${run.capabilities.files ? "allowed" : "not allowed"}; commands ${run.capabilities.commands ? "allowed" : "not allowed"}; network ${run.capabilities.network ? "allowed" : "not allowed"}.`);
+	if (run.budget) lines.push(`  Hard ceiling: ${run.budget.replies} replies, ${run.budget.fileOps} direct file operations, ${run.budget.commandStarts} command starts. The operation count is a stop, not a quota and not a measure of scope.`);
 	return lines.join("\n");
 }
 
@@ -133,7 +176,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				move: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.moveId, description: "One declared plan move to execute (m2). Its current approved revision supplies all change authority." })),
 				brief: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Only for an inspect focus without move: one narrow question to answer." })),
 				done_when: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Only for an inspect focus without move: the observation its report must contain." })),
-				context: opt(str({ description: "Optional bounded facts from the orchestrator for a declared move; it does not add work or authority." })),
+				context: opt(str({ maxLength: POLICY.limits.task.handoffChars, description: "Optional short boundary and facts from the orchestrator for a declared move. It only narrows where to start and what to leave alone; it never adds targets, capabilities, proof, approval, or completion authority." })),
+				shelf: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { maxItems: POLICY.limits.task.evidenceItems, description: "Existing main-shelf placement IDs to hand to this declared move as frozen evidence. Omit for no inherited main-shelf material." })),
 			}),
 		// One model, one context: when a turn asks for several tasks they run in order, not at once.
 		executionMode: "sequential",
@@ -193,10 +237,10 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			let run = started?.run;
 			let outside;
 			if (run === undefined) {
-				const kind = kindOf(brainDir, args, gate, api.now());
+				const kind = kindOf(root, brainDir, args, gate, api.now());
 				if (kind.run === undefined) return fail(kind.refusal);
 				run = kind.run;
-				run.brief = assignedBrief(run, args.context);
+				run.brief = assignedBrief(run);
 				// How commands run as the task starts. Kept with the task: its note and its record say it.
 				if (run.mode === POLICY.enums.planMode.change && runner.mode === "direct") run.direct = true;
 				if (run.mode === POLICY.enums.planMode.change) {
@@ -221,7 +265,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			}
 			if (!Number.isInteger(run.turns)) run.turns = run.mode === POLICY.enums.planMode.change ? Math.min(config.taskTurns, POLICY.limits.plan.moveTurns.max) : POLICY.limits.plan.moveTurns.look;
 			if (typeof run.text !== "string") run.text = typeof args.brief === "string" ? args.brief.replace(/\s+/g, " ").trim() : "the assigned work";
-			if (typeof run.brief !== "string") run.brief = assignedBrief(run, args.context);
+			if (typeof run.brief !== "string") run.brief = assignedBrief(run);
 
 			const child =
 				started?.id ??
@@ -246,10 +290,9 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					// The harness sends results in the order of the calls, so a note may come after the contract.
 					const note = run.mode === POLICY.enums.planMode.change ? CHANGE_NOTE(run, { commands: run.direct ? "direct" : runner.mode === "none" ? "none" : "sandbox", network: run.network === true }) : LOOK_NOTE;
 					let briefGiven = false;
-					const tree = treeNow(root, brainDir, config);
 					for (const call of calls) {
 						const mine = call.id === api.callId;
-							const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\n${tree === "" ? "" : `${tree}\n\n`}Move contract:\n${run.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
+							const text = mine ? `${TASK_HEADER}\n${note}\n\n${TASK_EXAMPLE[run.mode === POLICY.enums.planMode.change ? "change" : "look"]}\n\n${run.brief}` : briefGiven ? SIBLING_AFTER : SIBLING_BEFORE;
 						if (mine) briefGiven = true;
 						await tx.appendEntry(fork.id, {
 							kind: mine ? "carto.brief" : "carto.sibling",
@@ -268,7 +311,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				mode: run.mode,
 				turns: run.turns,
 				...(run.item ? { item: run.item } : {}),
-				...(run.move ? { move: run.move, revision: run.revision, targets: run.targets, capabilities: run.capabilities, budget: run.budget } : {}),
+				...(run.move ? { move: run.move, revision: run.revision, targets: run.targets, capabilities: run.capabilities, budget: run.budget, ...(run.boundary ? { boundary: run.boundary } : {}), ...(Array.isArray(run.evidence) && run.evidence.length > 0 ? { evidence: run.evidence.map(({ placement, source, digest, freshness }) => ({ placement, source, digest, freshness })) } : {}) } : {}),
 				...(run.network ? { network: true } : {}),
 				...(run.direct ? { direct: true } : {}),
 			};
@@ -278,7 +321,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				Object.assign(taskState(store, child), {
 					purpose,
 					...(run.item ? { item: run.item } : {}),
-					...(run.move ? { move: run.move, revision: run.revision, targets: run.targets, capabilities: run.capabilities, budget: run.budget, fileOps: 0, commandUses: 0, commands: [], windows: [] } : {}),
+					...(run.move ? { move: run.move, revision: run.revision, targets: run.targets, capabilities: run.capabilities, budget: run.budget, ...(run.boundary ? { boundary: run.boundary } : {}), ...(Array.isArray(run.evidence) ? { evidence: run.evidence } : {}), fileOps: 0, changedSurface: { bytes: 0, lines: 0 }, commandUses: 0, commands: [], windows: [] } : {}),
 					mode: run.mode,
 					turns: run.turns,
 				});

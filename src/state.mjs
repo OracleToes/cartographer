@@ -13,9 +13,10 @@
 // waits for its user; its working conversation will be forgotten when it leaves view.
 import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
-import { activeMoveOverlays, attentionSnapshot, fileMarks, linkedCount, loadAtlas, renderAttention } from "./atlas.mjs";
-import { loadLedger, open, renderLedger } from "./ledger.mjs";
+import { activeMoveOverlays, attentionSnapshot, fileMarks, linkedCount, loadAtlas, nodesForPath, renderAttention } from "./atlas.mjs";
+import { loadLedger, open, renderLedger, salientNotes } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, movesOf, reportedMoves, runnableMoves, renderPlan } from "./plan.mjs";
+import { loadContext, shelfFreshness, shelfLabel } from "./context.mjs";
 import { requestLines } from "./requests.mjs";
 import { eventLine } from "./wake.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -33,46 +34,92 @@ const CLOSE = POLICY.markup.state.close;
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const HEAD = `${RECORD} This is the current state; it supersedes any earlier copy I carry.`;
 
-const FIRST = `${USER_HEAD}'s newest message comes first.`;
-/** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
-const MAP =
-	"I need not sit idle meanwhile: in the same reply I may start an inspect focus (no move, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
 const names = (list, max = POLICY.limits.state.listedNames) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
 
-/** What the block says to do next. An envelope is intent, never a runnable clearance. */
-function direction(ledger, plan, yolo = false) {
-	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
-	if (plan === undefined || plan.items.length === 0) {
-		if (goals) return `${FIRST} Beyond that, I work toward the open goals. I may investigate inline or in an inspect focus; when a project change is warranted, I write an envelope and its narrow moves before asking for approval.`;
-		return ["No goal is set. Looking and answering questions is fine without one.", `I find out what ${USER_NAME} wants to achieve. When we agree on it, I record it as a goal with a done-when line.`, MAP].join(" ");
+const clip = (text, max = 180) => {
+	const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+	return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
+};
+
+/** A main-only facts projection. It deliberately describes state without selecting or delegating work. */
+function dispatch(ledger, plan, brainDir, root, yolo = false) {
+	const lines = ["Dispatch"];
+	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length;
+	const salient = salientNotes(ledger);
+	lines.push(`Goals: ${goals === 0 ? "none open" : `${goals} open`}.`);
+	if (salient.length > 0) lines.push(`Salient notes: ${salient.map((note) => `${note.id} ${clip(note.text, 120)}`).join("; ")}.`);
+	let shelf = [];
+	let atlas;
+	let attention;
+	if (root !== undefined) {
+		try { shelf = Array.isArray(loadContext(brainDir).shelf) ? loadContext(brainDir).shelf : []; } catch { shelf = []; }
+		try {
+			atlas = loadAtlas(brainDir).atlas;
+			if (atlas !== undefined) attention = attentionSnapshot(root, atlas, { active: activeMoveOverlays(plan) });
+		} catch { atlas = undefined; }
 	}
-	const noGoal = goals ? "" : ` No goal is recorded for this plan: I agree one with ${USER_NAME} and record it with a done-when line.`;
-	const reports = reportedMoves(plan);
-	if (reports.length > 0) {
-		const move = reports[0];
-		return `${FIRST} ${move.id} reported completion. I read its report and checkpoint evidence, compare the changed paths with its declared targets and its proof requirement, then explicitly accept it with \`book\` (target=plan, action=acceptMove, id:${move.id}) only when it holds. A focus never accepts its own move.${noGoal}`;
-	}
-	const blocked = plan.moves.filter((move) => move.status === POLICY.enums.moveStatus.blocked && move.archived !== true);
-	if (blocked.length > 0) return `${FIRST} ${blocked.map((move) => move.id).join(", ")} ${blocked.length === 1 ? "is" : "are"} blocked. I inspect the report and checkpoint record, then add a narrower successor move instead of rerunning broad work.${noGoal}`;
-	const missing = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && movesOf(plan, item.id).length === 0);
-	if (missing.length > 0) return `${FIRST} ${missing.map((item) => item.id).join(", ")} need declared executable moves. I can still read, reason and plan inline, but I do not start a change focus until one exact move names its action, targets, done-when line and proof.${noGoal}`;
-	const pending = awaitsApproval(plan) && !yolo;
-	const ready = runnableMoves(plan, { yolo });
-	if (ready.length > 0) {
-		const move = ready[0];
-		if (move.capabilities?.files === true || move.capabilities?.commands === true) {
-			if (pending && !yolo && !move.approvedRevision) return `${FIRST} Declared change moves wait for ${USER_NAME}: I show their exact contracts and ask for /approve. I do not start ${move.id} before approval; inline reading and planning continue.${noGoal}`;
-			return `${FIRST} Beyond that, ${move.id} is ready. I call \`task\` with \`move:${move.id}\` only — not a new brief — and later review its report before accepting it.${noGoal}`;
+	const shelfFacts = (path) => shelf.filter((item) => item.ref === undefined && item.path === path).map((item) => {
+		const freshness = root === undefined ? "captured" : shelfFreshness(root, item, brainDir).state;
+		return `${item.id} ${freshness === "current" ? "current" : `${freshness} snapshot`}`;
+	});
+	const atlasFacts = (path) => {
+		if (atlas === undefined) return "atlas unavailable";
+		const nodes = nodesForPath(atlas, path);
+		const ids = new Set(nodes.map((node) => node.id));
+		const states = [];
+		if (attention?.focus?.target?.kind === "path" && attention.focus.target.path === path) states.push(`focus ${attention.focus.label}`);
+		if (attention?.focus?.target?.kind === "node" && ids.has(attention.focus.target.id)) states.push(`focus ${attention.focus.label}`);
+		if (attention?.hot?.some((entry) => ids.has(entry.node.id))) states.push("direct-hot");
+		if (attention?.warm?.some((entry) => ids.has(entry.node.id))) states.push("nearby/warm");
+		if (attention?.care?.some((entry) => ids.has(entry.node.id))) states.push("needs checking");
+		if (attention?.gaps?.some((entry) => entry.path === path)) states.push("mapping gap");
+		const mapped = nodes.length === 0 ? "unmapped" : `nodes ${nodes.map((node) => node.id).join(", ")}`;
+		return `${mapped}${states.length > 0 ? `; ${states.join(", ")}` : ""}`;
+	};
+	if (plan === undefined) {
+		lines.push("Plan: unreadable; no move can run until it is repaired.");
+	} else if (plan.items.length === 0) {
+		lines.push("Plan: no envelopes or moves.");
+	} else {
+		const reports = reportedMoves(plan);
+		const blocked = plan.moves.filter((move) => move.status === POLICY.enums.moveStatus.blocked && move.archived !== true);
+		const ready = runnableMoves(plan, { yolo });
+		const waiting = awaitsApproval(plan) && !yolo;
+		lines.push(`Moves: ${ready.length} ready${ready.length ? ` (${names(ready.map((move) => move.id))})` : ""}; ${reports.length} reported; ${blocked.length} blocked; ${waiting ? "approval waits" : "no approval wait"}.`);
+		if (reports.length > 0) {
+			lines.push("Review before acceptance:");
+			for (const move of reports.slice(0, POLICY.limits.state.listedNames)) {
+				const checkpoints = move.reported?.checkpoints;
+				lines.push(`  ${move.id}: report ${move.reported?.id ?? "missing"}; checkpoints ${checkpoints?.before && checkpoints?.after ? `${checkpoints.before} → ${checkpoints.after}` : "missing"}; proof ${move.reported?.proof ? "stated" : "missing"}; targets ${(move.targets ?? []).join(", ") || "none"}.`);
+			}
 		}
-		return `${FIRST} Beyond that, ${move.id} is a read-only declared move. I call \`task\` with \`move:${move.id}\`; it changes no files or commands and its report still returns to this context.${noGoal}`;
+		if (blocked.length > 0) lines.push(`Blocked: ${names(blocked.map((move) => move.id))}.`);
+		const undeclared = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && movesOf(plan, item.id).length === 0);
+		if (undeclared.length > 0) lines.push(`Needs executable moves: ${names(undeclared.map((item) => item.id))}.`);
+		if (ready.length > 0) {
+			lines.push("Eligible move facts:");
+			for (const move of ready.slice(0, POLICY.limits.state.listedNames)) {
+				const approval = move.capabilities?.files === true || move.capabilities?.commands === true ? (move.approvedRevision === move.revision || yolo ? "approved/current" : "awaits approval") : "read-only";
+				lines.push(`  ${move.id} revision ${move.revision} · ${approval}`);
+				lines.push(`    Action: ${clip(move.action ?? move.text)}.`);
+				lines.push(`    Targets: ${(move.targets ?? []).join(", ") || "none"}. Done when: ${clip(move.doneWhen)}. Proof: ${clip(move.proof ?? "none")}.`);
+				lines.push(`    Capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}.`);
+				for (const path of move.targets ?? []) {
+					const matched = shelfFacts(path);
+					lines.push(`    ${path}: ${atlasFacts(path)}; shelf ${matched.length > 0 ? matched.join(", ") : "no matching placement"}.`);
+				}
+			}
+		}
 	}
-	if (pending) return `${FIRST} Declared change moves wait for ${USER_NAME}: I show their exact contracts and ask for /approve. Inline reading, reasoning and planning continue; I do not turn an envelope into a change focus.${noGoal}`;
-	const incomplete = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true);
-	if (incomplete.length === 0) {
-		const check = goals ? " I check each open goal against its done-when line, update the assessment when needed, and close goals that hold." : " I tell the user what was done and how to try it.";
-		return `${FIRST} Every envelope is done.${check}`;
-	}
-	return `${FIRST} The open envelopes have no runnable move. I inspect the plan and reports, accept only evidence that holds, or declare the next narrow move.${noGoal}`;
+	if (shelf.length > 0) {
+		const entries = shelf.slice(0, POLICY.limits.state.listedNames).map((item) => {
+			const freshness = root === undefined ? "captured" : shelfFreshness(root, item, brainDir).state;
+			return `${item.id} ${shelfLabel(item)}${freshness === "current" ? "" : ` (${freshness} snapshot)`}`;
+		});
+		lines.push(`Main shelf: ${entries.join("; ")}${shelf.length > entries.length ? `; and ${shelf.length - entries.length} more` : ""}.`);
+	} else lines.push("Main shelf: empty.");
+	lines.push("Before a focus, I decide whether one local outcome and current evidence are clear; if not, I read, map, or revise first. I choose selected shelf evidence and a narrowing boundary. This lens neither delegates work nor approves a move.");
+	return lines.join("\n");
 }
 
 /** The current purpose and forget boundary for a focused context. */
@@ -286,9 +333,13 @@ export function stateBlock(brainDir, runner, more = {}) {
 	const now = more.now ?? Date.now();
 	const { ledger, error } = loadLedger(brainDir);
 	const { plan, error: planError } = loadPlan(brainDir);
-	const front = `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now, more.task)}`;
+	// The main state is a broad live dispatch view. A focus instead gets its local capsule plus compact operational
+	// facts; it must not replay the parent atlas/tree/plan environment.
+	const front = more.task === undefined ? `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now, more.task)}` : "";
 	let body;
-	if (ledger === undefined) {
+	if (more.task !== undefined) {
+		body = `${more.context ?? ""}${commands(runner)}${focusDirection(more.task)}`;
+	} else if (ledger === undefined) {
 		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, the ledger cannot be shown or changed.`;
 		} else {
 			// No plan, no section: the instruction below says when to write one.
@@ -300,7 +351,7 @@ export function stateBlock(brainDir, runner, more = {}) {
 			// working on whatever does not depend on one.
 			const waiting = more.requests === true ? requestLines(brainDir, { yolo: more.yolo === true }) : "";
 			const requests = waiting === "" ? "" : `\n\nRequests\nThese wait for ${USER_NAME}; carry on with what does not depend on them:\n${waiting}\n`;
-			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${more.task === undefined ? direction(ledger, plan, more.yolo === true) : focusDirection(more.task)}${requests}`;
+			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${dispatch(ledger, plan, brainDir, more.root, more.yolo === true)}${requests}`;
 		}
 	// How full the context is and what on the shelf is not as shown (src/context.mjs).
 	return `${OPEN}\n${HEAD}\n\n${front}${more.context ?? ""}${body}\n${CLOSE}`;

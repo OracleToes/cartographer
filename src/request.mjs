@@ -25,6 +25,7 @@ import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } fro
 import { STAMP, stamp, took } from "./time.mjs";
 import { loadTop, withoutTop, withTop } from "./top.mjs";
 import { USER_NAME } from "./user.mjs";
+import { TASK_HEADER } from "./prompt.mjs";
 
 const USER_SPEAKER = `${USER_NAME}: `;
 
@@ -97,6 +98,24 @@ export function withoutAdditions(text) {
 	return stripped.startsWith(USER_SPEAKER) ? stripped.slice(USER_SPEAKER.length) : stripped;
 }
 
+/** Project a Durable focus fork into its local provider context. Fork lineage remains durable, but the provider sees
+ * only shared system messages, its prepared capsule, and its own subsequent work. */
+function focusProjection(messages) {
+	const briefAt = messages.findLastIndex((message) => message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER));
+	if (briefAt < 0) return messages;
+	const system = messages.slice(0, briefAt).filter((message) => message.role === "system");
+	const own = [messages[briefAt]];
+	let replied = false;
+	for (const message of messages.slice(briefAt + 1)) {
+		// Results for sibling calls made in the parent turn can sit beside the fork brief. They are neither local
+		// evidence nor task work, so do not leak them into this capsule.
+		if (!replied && message.role === "toolResult" && /^That call is a separate task\b/.test(textOf(message))) continue;
+		own.push(message);
+		if (message.role === "assistant") replied = true;
+	}
+	return [...system, ...own];
+}
+
 /**
  * A non-mutating request plan. It reads the active conversation and shared brain as they stand, but never checks or
  * consumes wakes, marks windows shown, advances an attempt, or retains a snapshot. The live send and the prospective
@@ -115,16 +134,18 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 	for (const [index, message] of messages.entries()) if (message !== null && typeof message === "object") originalSources.set(message, sourceAt(index));
 	let kept = withoutQuietWakes(messages);
 	let keptSources = kept.map((message, index) => originalSources.get(message) ?? fallbackSource(index));
-	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
-	// dressMain is one-for-one: a changed request-only rendering keeps its Durable source identity.
-	kept = dressMain(kept, brainDir);
-	// File-read results are ephemeral: the newest successful reply's read batch is at the very end; earlier batches are one line.
-	// Dressing that tail is request-only and never asks the context engine to collapse.
-	const ephemeral = dressReads(kept);
-	kept = ephemeral.messages;
 	let focus;
-	if (!main) {
+	let ephemeral;
+	if (main) {
+		// Main requests retain their active conversation and live planning view.
+		kept = dressMain(kept, brainDir);
+		ephemeral = dressReads(kept);
+		kept = ephemeral.messages;
+	} else {
 		focus = conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId];
+		const projectedSources = new WeakMap(kept.map((message, index) => [message, keptSources[index]]));
+		kept = focusProjection(kept);
+		keptSources = kept.map((message, index) => projectedSources.get(message) ?? fallbackSource(index, "focus-capsule"));
 		const beforeTask = kept;
 		const sourcesBeforeTask = new WeakMap(beforeTask.map((message, index) => [message, keptSources[index]]));
 		const resultSources = new Map(beforeTask.filter((message) => message.role === "toolResult").map((message, index) => [message.toolCallId, sourcesBeforeTask.get(message) ?? fallbackSource(index)]));
@@ -134,6 +155,8 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 		keptSources = kept.map((message, index) => sourcesBeforeTask.get(message)
 			?? (message.role === "toolResult" ? resultSources.get(message.toolCallId) : undefined)
 			?? { id: `transformed-active:${conversationId ?? "unknown"}:${index}`, kind: "transformed-active", conversationId: String(conversationId ?? "unknown") });
+		ephemeral = dressReads(kept);
+		kept = ephemeral.messages;
 	}
 	// Only chat the person sent gets the speaker label. The task's one-request note is appended afterward.
 	let requestMessages = withSpeaker(withNotes(kept));
@@ -143,8 +166,11 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 		requestMessages = [...requestMessages, taskNote];
 		keptSources.push({ id: `task-note:${conversationId ?? "unknown"}`, kind: "task-note", conversationId: String(conversationId ?? "unknown") });
 	}
-	const top = loadTop(brainDir);
-	let dressed = withTop(withTimes(requestMessages), top?.text);
+	// The frozen project-top copy is main working memory. A focus begins from its prepared capsule instead of replaying
+	// that broad orientation; Durable lineage still retains the parent fork.
+	const top = main ? loadTop(brainDir) : undefined;
+	let dressed = withTimes(requestMessages);
+	if (main) dressed = withTop(dressed, top?.text);
 	// Capture this plan's ordered sources before transient blocks are glued to the final message. These records are
 	// not a reconstruction of a provider payload: they name the active message or request-only addition that planned it.
 	const parts = [];
@@ -154,14 +180,16 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 	}
 	for (const [index, message] of dressed.entries()) {
 		const source = keptSources[index] ?? { id: `planned:${conversationId ?? "unknown"}:${index}`, kind: "planned", conversationId: String(conversationId ?? "unknown") };
-		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: "active-message", source: source.id, sourceRef: source, lifecycle: "planned", message: index, role: message.role, fragment: message });
+		const capsule = !main && message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER);
+		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: capsule ? "focus-capsule" : "active-message", source: source.id, sourceRef: source, lifecycle: "planned", message: index, role: message.role, fragment: message });
 	}
 	let state;
 	if (main) {
 		state = stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakeLines, fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: true, conversationId }) });
 	} else {
-		// A focus is a live agent too: it gets the lines about the context itself (how full it is, its own + inherited shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
-		state = stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: false, conversationId }) });
+		// A focus receives local operational state only. Requests, the main plan queue, Dispatch, and unrelated main
+		// shelf/report material stay with the orchestrating context.
+		state = stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: false, conversationId }) });
 	}
 	const withPlannedState = withState(dressed, state);
 	if (withPlannedState !== dressed) {

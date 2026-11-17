@@ -752,7 +752,7 @@ export async function runTerminal(session, options) {
 		try {
 			const plan = planRequest(raw, { brainDir: options.brainDir, root: options.root, runner: options.runner, config, gate, main: depth === 0, conversationId: depth === 0 ? undefined : id, used: engine.usedBy(id), sources, fired: [], wakeLines: depth === 0 ? wakes?.lines() : undefined, windowRows: windows?.list(config.windowTail) });
 			dressed = plan.messages;
-			dressedSources = new Map(plan.parts.filter((part) => part.kind === "active-message").map((part) => [part.message, part.sourceRef]));
+			dressedSources = new Map(plan.parts.filter((part) => part.kind === "active-message" || part.kind === "focus-capsule").map((part) => [part.message, part.sourceRef]));
 		} catch (error) {
 			ui.print(`! the stored conversation could not be shown as the agent sees it (${error?.message ?? error}); it is stored safely\n`);
 			dressed = raw;

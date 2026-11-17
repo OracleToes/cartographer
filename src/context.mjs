@@ -812,6 +812,20 @@ export function shelfText(root, item, brainDir) {
 	return typeof item.snapshot === "string" ? item.snapshot : resolveShelfText(root, item, brainDir);
 }
 
+/** Whether a shelf snapshot still describes the source it was taken from. The saved snapshot remains evidence even
+ * when it has changed; callers use this only to label it honestly, never to replace it invisibly. */
+export function shelfFreshness(root, item, brainDir) {
+	try {
+		const current = shelfIdLine(resolveShelfText(root, item, brainDir), item);
+		if (typeof item?.snapshot !== "string") return { state: "unknown" };
+		if (current === item.snapshot) return { state: "current" };
+		if (/\nNot found\. /.test(current)) return { state: "stale" };
+		return { state: "changed" };
+	} catch (error) {
+		return { state: "stale", why: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 export const shelfLabel = (item) => item.ref === undefined ? `${item.path}${item.from === undefined ? "" : ` (lines ${item.from}-${item.to})`}` : `${item.ref.type}:${item.ref.id}`;
 export const sameShelfItem = (a, b) => a.ref !== undefined || b.ref !== undefined
 	? a.ref?.type === b.ref?.type && a.ref?.id === b.ref?.id
@@ -1096,23 +1110,20 @@ export function droppable(messages) {
 }
 
 /**
- * Merge the main shelf inherited at fork time with a focus's own shelf placements (focus entries win on collision).
+ * A focus owns its local shelf and receives only launch-captured evidence. It never silently inherits the whole
+ * main shelf: a task needs a stable capsule, not the orchestrator's changing working set.
  */
 function effectiveShelfFor(store, main, conversationId) {
 	if (main !== false) return { activeShelf: store.shelf, shown: store.front?.shelf ?? [], deferred: store.front?.left ?? [] };
 	const focus = conversationId !== undefined ? store.tasks[conversationId] : undefined;
+	const evidence = Array.isArray(focus?.evidence) ? focus.evidence.map((entry) => entry.item).filter((item) => item !== undefined) : [];
 	const focusShelf = Array.isArray(focus?.shelf) ? focus.shelf : [];
-	const merged = store.shelf.map((inherited) => focusShelf.find((local) => local.id === inherited.id || sameShelfItem(local, inherited)) ?? inherited);
+	const merged = [...evidence];
 	for (const local of focusShelf) {
 		if (!merged.some((entry) => entry.id === local.id || sameShelfItem(entry, local))) merged.push(local);
 	}
-	const frontShown = store.front?.shelf ?? [];
 	const cutShown = Array.isArray(focus?.cutShelf) ? focus.cutShelf : [];
-	const shown = frontShown.map((inherited) => cutShown.find((local) => local.id === inherited.id || sameShelfItem(local, inherited)) ?? inherited);
-	for (const local of cutShown) {
-		if (!shown.some((entry) => entry.id === local.id || sameShelfItem(entry, local))) shown.push(local);
-	}
-	return { activeShelf: merged, shown, deferred: store.front?.left ?? [] };
+	return { activeShelf: merged, shown: cutShown, deferred: [] };
 }
 
 /**
@@ -1124,6 +1135,23 @@ export function contextLines(brainDir, root, { used, window, main = true, conver
 	const { activeShelf, shown, deferred } = effectiveShelfFor(store, main, conversationId);
 	const lines = [];
 	if (Number.isFinite(used) && used > 0) lines.push(`My context holds about ${count(used)} of ${count(window)} tokens.`);
+	if (main === false) {
+		const task = conversationId === undefined ? undefined : store.tasks[conversationId];
+		if (activeShelf.length > 0) lines.push(`Focus evidence and local shelf: ${activeShelf.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}.`);
+		else lines.push("Focus evidence and local shelf: empty.");
+		const localShelf = Array.isArray(task?.shelf) ? task.shelf : [];
+		if (localShelf.length > 0) {
+			lines.push("Focus-local shelf snapshots:");
+			for (const item of localShelf) lines.push(shelfText(root, item, brainDir));
+		}
+		if (task?.move !== undefined) {
+			const surface = task.changedSurface ?? { bytes: 0, lines: 0 };
+			const bytes = Math.max(0, POLICY.limits.change.surfaceBytes - (surface.bytes ?? 0));
+			const rows = Math.max(0, POLICY.limits.change.surfaceLines - (surface.lines ?? 0));
+			lines.push(`Direct changed surface: ${surface.bytes ?? 0}/${POLICY.limits.change.surfaceBytes} bytes and ${surface.lines ?? 0}/${POLICY.limits.change.surfaceLines} lines used; ${bytes} bytes and ${rows} lines remain. It is a hard local ceiling; file-operation count is only an anti-loop stop.`);
+		}
+		return `Context\n${lines.join("\n")}\n\n`;
+	}
 	if (activeShelf.length > 0) lines.push(shelfFillLine(root, brainDir, activeShelf, window));
 	// Folding by the agent: it sees exactly which reports stand in view in full, with their size, so it can
 	// decide when each has had its bookkeeping done and fold it to its one-line record (recallable by id).

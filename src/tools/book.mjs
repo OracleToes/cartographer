@@ -181,7 +181,7 @@ const ACTION_GUIDE = {
 		write: "text (the whole assessment; it replaces the current one)",
 	},
 	file: {
-		create: "path and content — a new file keeps at most the line cap (see the session's `writeLines`); the rest is not written and the result says so. The result names the new file's `File id:`",
+		create: "path and content — the whole proposed file is measured against this focus's remaining changed-surface allowance and either lands whole or is refused. The result names the new file's `File id:`",
 		edit: "id or path, oldText and newText",
 		remove: "id or path",
 		rebind: "id, path and expectedVersion — a `read` header shows `· file f1 @<64 hex>`: the id and the digest",
