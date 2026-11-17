@@ -175,7 +175,7 @@ function mainCalls(text) {
 const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
-export function decide(messages) {
+export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof } = {}) {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		const text = textOf(message);
@@ -199,8 +199,9 @@ export function decide(messages) {
 				.split("\n")
 				.map((line) => line.trim())
 				.filter((line) => line !== "" && !line.startsWith("ON COLLAPSE"));
-			const undone = given.includes("undone");
-			const lines = given.filter((line) => line !== "undone");
+			const scripted = Array.isArray(forcedFocusSteps) ? forcedFocusSteps.map((step) => String(step).trim()).filter((step) => step !== "") : given;
+			const undone = scripted.includes("undone");
+			const lines = scripted.filter((line) => line !== "undone");
 			// Replies that a collapse took out of view still count: the brief goes on where it was.
 			const collapsed = later.map((entry) => /steps up to here \((\d+) repl/.exec(entry.role === "user" ? rawOf(entry) : "")?.[1]).find((found) => found !== undefined);
 			const turns = later.filter((entry) => entry.role === "assistant").length + Number(collapsed ?? 0);
@@ -210,6 +211,11 @@ export function decide(messages) {
 			if (lines.includes("mumble")) return { text: "Mumble." };
 			if (turns < lines.length && lines[turns].startsWith("spam:")) return { text: `${lines[turns].slice(5).trim()} `.repeat(400) };
 			if (turns < lines.length && lines[turns].startsWith("note:")) return { text: lines[turns].slice(5).trim() };
+			if (turns < lines.length && lines[turns].startsWith("closure_gap:")) {
+				const closureGap = lines[turns].slice("closure_gap:".length).trim();
+				const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
+				return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, proof: "Stand-in observed the task results above.", done: false, closure_gap: closureGap } }] };
+			}
 			if (lines[turns] === "cut") return { calls: [{ name: "write", args: { path: "cut-off.txt", content: "text ".repeat(60) } }], cut: true };
 			if (turns < lines.length) {
 				// `saying WORDS >> directive`: text and a call in one reply. Several directives joined by ` +++ ` are several calls.
@@ -218,7 +224,8 @@ export function decide(messages) {
 				if (calls.length > 0) return { calls, ...(words !== undefined ? { say: words } : {}) };
 			}
 			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, proof: "Stand-in observed the task results above.", done: !undone } }] };
+			const closureGap = forcedClosureGap ?? lines.find((line) => line.startsWith("closure_gap:"))?.slice("closure_gap:".length).trim();
+			return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, proof: forcedReturnProof ?? "Stand-in observed the task results above.", done: !undone && closureGap === undefined, ...(closureGap === undefined ? {} : { closure_gap: closureGap }) } }] };
 		}
 		if (message.role === "user") {
 			// The main agent speaks to the user with `chat`; plain text is its own.
@@ -316,9 +323,15 @@ export function decide(messages) {
  *   refuseAsides: answer Cartographer's own requests with an error, as a server would that cannot take them.
  *   models: what GET /models lists; a name, or a whole entry as the server would give it.
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
+ *   closureGap: when set, a focused task's automatic return reports this exact durable closure gap.
+ *   focusSteps: a fixed sequence of focused-task directives, used instead of what a capsule's brief says.
+ *   returnProof: the proof text for that focused task's automatic return.
  */
 export async function startStandIn(options = {}) {
 	const tokenDelayMs = options.tokenDelayMs ?? 1;
+	const closureGap = typeof options.closureGap === "string" && options.closureGap.trim() !== "" ? options.closureGap.trim() : undefined;
+	const focusSteps = Array.isArray(options.focusSteps) ? options.focusSteps : undefined;
+	const returnProof = typeof options.returnProof === "string" && options.returnProof.trim() !== "" ? options.returnProof.trim() : undefined;
 	const requests = [];
 	const asides = [];
 	const held = [];
@@ -362,7 +375,7 @@ export async function startStandIn(options = {}) {
 			return;
 		}
 		requests.push(body);
-		const decision = decide(body.messages ?? []);
+		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof });
 		const promptTokens = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 
 		response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });

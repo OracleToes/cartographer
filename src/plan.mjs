@@ -210,6 +210,7 @@ function normalizeMove(raw, where, plan, seen) {
 	}
 	if (typeof raw.startedAt === "string") item.startedAt = raw.startedAt;
 	if (raw.reported !== undefined && raw.reported !== null && typeof raw.reported === "object") item.reported = raw.reported;
+	if (typeof raw.acceptedReview === "string" && flat(raw.acceptedReview) !== "") item.acceptedReview = text(raw.acceptedReview, `${where} \"acceptedReview\"`, POLICY.limits.plan.proofChars);
 	if (typeof raw.blocked === "string") item.blocked = raw.blocked;
 	if (typeof raw.outcome === "string") item.outcome = raw.outcome;
 	if (typeof raw.closed === "string") item.closed = raw.closed;
@@ -336,7 +337,8 @@ export function reportMove(plan, id, revision, result, now) {
 	const move = moveAt(plan, id);
 	if (move === undefined || move.revision !== revision) return { changed: false, line: `${id} changed while its focus ran; its result was not accepted.` };
 	if (move.status !== MOVE_STATUS.running) return { changed: false, line: `${id} is ${move.status}; its result was not accepted.` };
-	const claimed = result?.done === true;
+	const closureGap = typeof result?.closureGap === "string" ? flat(result.closureGap) : "";
+	const claimed = result?.done === true && closureGap === "";
 	const report = {
 		at: stamp(now),
 		claimed,
@@ -345,6 +347,7 @@ export function reportMove(plan, id, revision, result, now) {
 		...(Array.isArray(result?.commands) ? { commands: result.commands } : {}),
 		...(ownObject(result?.checkpoints) ? { checkpoints: result.checkpoints } : {}),
 		...(typeof result?.proof === "string" && flat(result.proof) !== "" ? { proof: flat(result.proof) } : {}),
+		...(typeof result?.closureGap === "string" && flat(result.closureGap) !== "" ? { closureGap: flat(result.closureGap) } : {}),
 		...(typeof result?.reason === "string" ? { reason: result.reason } : {}),
 	};
 	if (claimed) {
@@ -354,7 +357,7 @@ export function reportMove(plan, id, revision, result, now) {
 		return { changed: true, line: `${move.id} reported completion. Review its evidence, then accept the move.` };
 	}
 	move.status = MOVE_STATUS.blocked;
-	move.blocked = typeof result?.reason === "string" && result.reason !== "" ? result.reason : "The focus returned not done.";
+	move.blocked = typeof result?.reason === "string" && result.reason !== "" ? result.reason : closureGap !== "" ? `Closure gap: ${closureGap}` : "The focus returned not done.";
 	move.reported = report;
 	return { changed: true, line: `${move.id} is blocked: ${move.blocked}` };
 }
@@ -557,9 +560,10 @@ const editMove = (plan, move, op) => {
 	return { line: `${move.id} changed and needs approval again.`, shown: moveLine(move), withdrawn: true };
 };
 
-const acceptMove = (plan, move, now) => {
+const acceptMove = (plan, move, op, now) => {
 	if (move.status !== MOVE_STATUS.reported) throw new PlanError(`${move.id} is ${move.status}; only a reported move can be accepted.`);
 	if (move.reported?.claimed !== true) throw new PlanError(`${move.id} did not claim completion.`);
+	if (typeof move.reported?.closureGap === "string" && flat(move.reported.closureGap) !== "") throw new PlanError(`${move.id} reported a closure gap: ${flat(move.reported.closureGap)}. Revise the move or plan a successor instead of accepting it.`);
 	const parent = parentOf(plan, move);
 	if (parent === undefined || !envelopeOpen(parent)) throw new PlanError(`${move.id}'s envelope is no longer open.`);
 	if (move.parentRevision !== parent.revision) throw new PlanError(`${move.id} belongs to an earlier revision of ${parent.id}; it cannot be accepted as current work.`);
@@ -575,8 +579,10 @@ const acceptMove = (plan, move, now) => {
 	} else if (move.proof !== undefined && (typeof move.reported?.proof !== "string" || flat(move.reported.proof) === "")) {
 		throw new PlanError(`${move.id} has no stated proof for its required evidence.`);
 	}
+	const review = text(op?.review, "`review` (how the reported proof witnesses this move's done-when)", POLICY.limits.plan.proofChars);
 	move.status = MOVE_STATUS.done;
 	move.closed = stamp(now);
+	move.acceptedReview = review;
 	move.outcome = `accepted after report${move.reported?.id ? ` ${move.reported.id}` : ""}`;
 	delete move.approvedRevision;
 	delete move.approvedAt;
@@ -624,10 +630,10 @@ export function applyPlanOp(plan, op, now, { yolo = false } = {}) {
 	}
 	if (action === "acceptMove") {
 		if (move === undefined) throw new PlanError(`There is no move ${JSON.stringify(id)}.`);
-		return acceptMove(plan, move, now);
+		return acceptMove(plan, move, op, now);
 	}
 	if (action === POLICY.enums.actions.done) {
-		if (move !== undefined) return acceptMove(plan, move, now);
+		if (move !== undefined) return acceptMove(plan, move, op, now);
 		if (envelope === undefined) throw new PlanError(`There is no plan record ${JSON.stringify(id)}.`);
 		return completeEnvelope(plan, envelope, op, now);
 	}
@@ -723,6 +729,7 @@ export function undoMove(plan, id, now) {
 	delete move.approvedAt;
 	delete move.outcome;
 	delete move.closed;
+	delete move.acceptedReview;
 	delete move.blocked;
 	delete move.reported;
 	delete move.startedAt;

@@ -1202,7 +1202,7 @@ export async function runTerminal(session, options) {
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
 					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph; the row stays on disk either way",
-					"  /done ID …  settle a row the way the agent does: a ledger entry closes, a reported move is accepted after review, a completed envelope closes, a node confirms",
+					"  /done ID …  settle rows; a reported move needs /done mN -- REVIEW saying why its proof witnesses its done-when",
 					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
@@ -1834,7 +1834,16 @@ export async function runTerminal(session, options) {
 			}
 			case "done": {
 				if (argument === undefined || args.length === 0) {
-					line("  /done ID …  settles a row the way the agent does: a ledger entry closes, a reported move is accepted after review, a completed envelope closes, a node confirms.");
+					line("  /done ID … settles rows. To accept a reported move, write /done mN -- REVIEW, saying how its reported proof witnesses its done-when.");
+					return true;
+				}
+				const reviewAt = parts.indexOf("--");
+				if (reviewAt >= 0) {
+					if (reviewAt !== 1 || parts.length < 3) {
+						line("  /done mN -- REVIEW accepts one reported move. Put the exact evidence review after --.");
+						return true;
+					}
+					line(`  ${settleRow(options.brainDir, argument, options.root, parts.slice(2).join(" "))}`);
 					return true;
 				}
 				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);

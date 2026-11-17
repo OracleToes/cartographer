@@ -792,7 +792,51 @@ test("task: a change focus executes the cached declared move contract through an
 		const focusOnly = contractRequest.messages.filter((message) => message.role !== "system").map(rawText).join("\n");
 		assert.doesNotMatch(focusOnly, /ignore this free-form text/, "the parent request is not replayed into the focus");
 		assert.match(focusOnly, /Required proof: The read output names the entry point\./);
+		assert.match(focusOnly, /Closure: this focus is done only when its declared result is observed within its declared authority/);
 		assert.ok(server.requests.some((request) => request.messages.some((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.function?.name === "read"))), "the focus continues past its capsule with a normal focus-local read call");
+	} finally {
+		await server.close();
+	}
+});
+
+test("task: browser evidence outside m2's JavaScript boundary becomes a durable closure gap without undeclared edits", async () => {
+	const root = makeProject("browser-closure-gap", { git: false });
+	configure(root, { initiate: false });
+	writeFileSync(join(root, "index.html"), "<!doctype html><script type=\"module\" src=\"js/main.js\"></script>\n");
+	mkdirSync(join(root, "js"), { recursive: true });
+	const { brainDir } = setUpBrain(root);
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "change", text: "Show the browser simulation.", doneWhen: "The browser visibly runs the simulation.", status: "open", revision: 1 }],
+		moves: [{
+			id: "m2", parent: "p1", action: "Create the simulation module.", text: "Create the simulation module.",
+			doneWhen: "The browser loads and runs js/main.js.", targets: ["js/main.js"], proof: "Browser observation shows the running simulation.",
+			capabilities: { files: true, commands: false, network: false }, budget: { replies: 3, fileOps: 1, commandStarts: 0 }, turns: 3,
+			revision: 1, parentRevision: 1, status: "open", approvedRevision: 1, approvedAt: "2026-11-15T00:00:00.000Z",
+		}],
+	});
+	const server = await startStandIn({
+		focusSteps: ["book: {\"target\":\"file\",\"action\":\"create\",\"path\":\"js/main.js\",\"content\":\"console.log('simulation');\"}"],
+		returnProof: "node --check js/main.js exits zero.",
+		closureGap: "Browser proof depends on index.html loading js/main.js, but index.html is outside m2's declared targets.",
+	});
+	try {
+		const result = await carto(root, server, ["-p", "task(m2): inspect the JavaScript-only browser claim || then think"]);
+		ok(result, "browser closure gap");
+		const plan = readPlan(root);
+		const move = plan.moves.find((entry) => entry.id === "m2");
+		assert.equal(move.status, "blocked", "the focus cannot claim browser completion from a JavaScript-only check");
+		assert.equal(move.reported.claimed, false);
+		assert.equal(move.reported.proof, "node --check js/main.js exits zero.", "JavaScript syntax evidence remains distinct from browser evidence");
+		assert.match(move.reported.closureGap, /index\.html loading js\/main\.js/);
+		assert.match(move.blocked, /^Closure gap:/);
+		assert.equal(readFileSync(join(root, "js", "main.js"), "utf8"), "console.log('simulation');", "the declared JavaScript surface may change without closing the browser claim");
+		assert.equal(readFileSync(join(root, "index.html"), "utf8"), "<!doctype html><script type=\"module\" src=\"js/main.js\"></script>\n", "the undeclared browser-integration path is not edited");
+		const focusRequest = server.requests.find((request) => request.messages.some((message) => rawText(message).includes("Move contract:\nCreate the simulation module.")));
+		assert.ok(focusRequest, "the focused request was made");
+		assert.match(focusRequest.messages.map(rawText).join("\n"), /Closure: this focus is done only when its declared result is observed within its declared authority/);
 	} finally {
 		await server.close();
 	}

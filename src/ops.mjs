@@ -185,10 +185,10 @@ export const dropRows = (brainDir, ids) => rows(brainDir, ids, dropRow);
 
 /**
  * Mark a row of a view settled, with the same operations the agent uses: a ledger entry is closed (with the
- * outcome line the agent would give), a reported plan move is accepted or a plan envelope is closed, a node of the graph is confirmed (the node's own
- * "still true"). @returns the line to show
+ * outcome line the agent would give), a reported plan move is accepted with a user-written evidence review or a
+ * plan envelope is closed, and a node of the graph is confirmed (the node's own "still true"). @returns the line to show
  */
-export function settleRow(brainDir, id, root) {
+export function settleRow(brainDir, id, root, review) {
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
 	const now = new Date().toISOString();
@@ -210,7 +210,16 @@ export function settleRow(brainDir, id, root) {
 		if (found.what === "plan envelope" || found.what === "plan move") {
 			const { plan, error } = loadPlan(brainDir);
 			if (plan === undefined) return `! The plan cannot be read: ${error}`;
-			const result = applyPlanOp(plan, { action: POLICY.enums.actions.done, id }, now);
+			const move = found.what === "plan move" ? plan.moves.find((entry) => entry.id === id) : undefined;
+			const acceptedReview = typeof review === "string" ? review.replace(/\s+/g, " ").trim() : "";
+			if (move?.status === POLICY.enums.moveStatus.reported && acceptedReview === "") {
+				return `! ${id} needs an acceptance review: say how its reported proof witnesses “${move.doneWhen}”. Use /done ${id} -- YOUR REVIEW, or plan acceptMove with review.`;
+			}
+			const result = applyPlanOp(plan, {
+				action: POLICY.enums.actions.done,
+				id,
+				...(move !== undefined && acceptedReview !== "" ? { review: acceptedReview } : {}),
+			}, now);
 			savePlan(brainDir, plan);
 			return result.line;
 		}

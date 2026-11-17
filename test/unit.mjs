@@ -165,7 +165,9 @@ test("plan: an envelope is not runnable and closes only after a declared move is
 	assert.equal(started.move.status, "running");
 	reportMove(plan, "m1", 1, { done: true, report: "t1", proof: "src/index.mjs was read" }, NOW);
 	savePlan(brainDir, plan);
-	assert.match(settleRow(brainDir, "m1", null), /m1 accepted\./);
+	assert.match(settleRow(brainDir, "m1", null), /needs an acceptance review/);
+	assert.match(settleRow(brainDir, "m1", null, "The recorded source read identifies the entry point required by this move."), /m1 accepted\./);
+	assert.equal(loadPlan(brainDir).plan.moves[0].acceptedReview, "The recorded source read identifies the entry point required by this move.");
 	assert.match(settleRow(brainDir, "p1", null), /p1 is done\./);
 	assert.equal(loadPlan(brainDir).plan.items[0].status, POLICY.enums.entryStatus.done);
 });
@@ -364,11 +366,13 @@ test("plan: a reported change move needs report, checkpoints, changed paths and 
 	reportMove(plan, "m1", 1, { done: true, report: "t1", checkpoints: { before: "c1", after: "c2" }, changes: [{ path: "src/other.mjs" }], proof: "test output" }, NOW);
 	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /outside its declared targets/);
 	plan.moves[0].reported.changes = [{ path: "src/one.mjs" }];
-	assert.doesNotThrow(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW));
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /`review`/);
+	assert.doesNotThrow(() => applyPlanOp(plan, { action: "acceptMove", id: "m1", review: "The focused test output witnesses that the export changed." }, NOW));
+	assert.equal(plan.moves[0].acceptedReview, "The focused test output witnesses that the export changed.");
 	assert.throws(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW), /still has m2 \(open\)/);
 	startMove(plan, "m2", NOW);
 	reportMove(plan, "m2", 1, { done: true, report: "t2", checkpoints: { before: "c2", after: "c3" }, changes: [{ path: "src/two.mjs" }], proof: "second test output" }, NOW);
-	applyPlanOp(plan, { action: "acceptMove", id: "m2" }, NOW);
+	applyPlanOp(plan, { action: "acceptMove", id: "m2", review: "The second test output witnesses that the check passed." }, NOW);
 	assert.doesNotThrow(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW));
 	undoMove(plan, "m1", NOW);
 	assert.equal(plan.moves[0].status, "open");
@@ -376,6 +380,29 @@ test("plan: a reported change move needs report, checkpoints, changed paths and 
 	assert.equal(plan.items[0].status, "open");
 	assert.equal(plan.items[0].closed, undefined);
 	assert.equal(plan.moves[1].status, "blocked", "a later accepted sibling is stale after an earlier undo");
+});
+
+test("plan: a recorded closure gap blocks a completion claim and survives a hand-edited reported state", (t) => {
+	const { plan } = loadPlan(fresh(t).brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Show the simulation.", done_when: "The browser visibly runs it." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Create js/main.js", done_when: "The browser loads the simulation.", targets: ["js/main.js"], proof: "Browser observation shows the running simulation." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	reportMove(plan, "m1", 1, {
+		done: true,
+		report: "t1",
+		checkpoints: { before: "c1", after: "c2" },
+		changes: [{ path: "js/main.js" }],
+		proof: "node --check js/main.js exits zero.",
+		closureGap: "index.html must load js/main.js before the browser witness is reachable.",
+	}, NOW);
+	assert.equal(plan.moves[0].status, "blocked");
+	assert.equal(plan.moves[0].reported.claimed, false);
+	assert.match(plan.moves[0].blocked, /Closure gap: index\.html/);
+	assert.equal(plan.moves[0].reported.closureGap, "index.html must load js/main.js before the browser witness is reachable.");
+	plan.moves[0].status = "reported";
+	plan.moves[0].reported.claimed = true;
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1", review: "A syntax check proves the browser runs it." }, NOW), /reported a closure gap/);
 });
 
 // ─── The atlas ──────────────────────────────────────────────────────────────
@@ -909,6 +936,7 @@ test("state: Dispatch is main-only mechanical evidence, not an automatic task co
 	assert.match(main, /Dispatch\n/);
 	assert.match(main, /Eligible move facts:/);
 	assert.match(main, /m1 revision 1/);
+	assert.match(main, /Closure facts — boundary: src\.txt\. Claim: The source has the local edit\. Witness: A named check passes\./);
 	assert.match(main, /src\.txt: .*shelf sh1 current/);
 	assert.match(main, /This lens neither delegates work nor approves a move/);
 	assert.doesNotMatch(main, /I call `task` with `move:m1`/, "a ready move is a fact, not an imperative");
@@ -1084,6 +1112,7 @@ test("task: selected main shelf evidence is captured into the durable focus caps
 	assert.match(run.brief, /Boundary and facts from the main context/);
 	assert.match(run.brief, /captured first version/);
 	assert.match(run.brief, /do not add targets, capabilities, proof, approval, or completion authority/);
+	assert.match(run.brief, /Closure: this focus is done only when its declared result is observed within its declared authority/);
 	writeFileSync(join(root, "evidence.txt"), "later live version\n");
 	updateContext(brainDir, (store) => {
 		store.shelf = [];
@@ -1491,6 +1520,20 @@ test("return: a declared proof is durable and separate from the task report", as
 	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.done, true);
 });
 
+test("return: a closure gap cannot accompany a completion claim and is kept for the orchestrator", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const tool = returnTool({ root, brainDir, config: {} });
+	const api = { conversationId: "gap-focus", now: () => Date.parse(NOW) };
+	const contradictory = await tool.execute({ report: "The script parses, but the page cannot load it.", proof: "node --check exits 0.", done: true, closure_gap: "index.html is outside the declared targets." }, api, undefined);
+	assert.equal(contradictory.isError, true);
+	assert.match(contradictory.output[0].text, /`closure_gap`.*`done` must be false/);
+	assert.equal(loadContext(brainDir).tasks["gap-focus"], undefined, "a contradictory return does not end or persist the focus");
+	const blocked = await tool.execute({ report: "The script parses, but the page cannot load it.", proof: "node --check exits 0.", done: false, closure_gap: "index.html is outside the declared targets." }, api, undefined);
+	assert.equal(blocked.isError, undefined, blocked.output[0].text);
+	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.done, false);
+	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.closureGap, "index.html is outside the declared targets.");
+});
+
 test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let messages = [];
@@ -1509,7 +1552,8 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	startMove(reportPlan, "m1", NOW);
 	reportMove(reportPlan, "m1", 1, { done: true, report: "t-flat", proof: "src/index.mjs was read" }, NOW);
 	savePlan(brainDir, reportPlan);
-	const mDone = await run({ target: "plan", action: "acceptMove", id: "m1" });
+	assert.throws(() => tool.prepareArguments({ target: "plan", action: "acceptMove", id: "m1" }), /review/);
+	const mDone = await run({ target: "plan", action: "acceptMove", id: "m1", review: "Reading src/index.mjs witnesses that its entry point is named." });
 	assert.ok(!mDone.isError && /m1 accepted\./.test(mDone.output[0].text), mDone.output[0].text);
 	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
 	assert.ok(!pDone.isError && /p1 is done\./.test(pDone.output[0].text), pDone.output[0].text);

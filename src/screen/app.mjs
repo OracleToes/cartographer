@@ -116,7 +116,7 @@ const COMMANDS = [
 	["fold", "take a kept report out of the context's view, leaving its one line"],
 	["archive", "take a row out of what the agent reads: a report, ledger entry, plan envelope or move, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["done", "settle a row the way the agent does: a ledger entry, reported move after review, completed envelope, or node of the graph"],
+	["done", "settle a row; a reported move opens an evidence-review prompt before it can be accepted"],
 	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan envelope or move, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
@@ -163,7 +163,7 @@ export const KEYS_HELP = [
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
 	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk it rewords a stable source for a future kept talk; private work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Talk, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Talk, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -495,7 +495,7 @@ export async function runScreen(session, options, runTerminal) {
 		chat: "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
 		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
 		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
-		"carto.plan": "t done · n new · v archive · d delete · e edit",
+		"carto.plan": "t done/review · n new · v archive · d delete · e edit",
 		"carto.requests": "a approve · n deny · d forget · e edit",
 		"carto.tree": "Enter fold · y copy · e edit",
 		"carto.hands": "f fold · v archive · d delete · x unshelve · e edit",
@@ -1219,6 +1219,13 @@ export async function runScreen(session, options, runTerminal) {
 				return;
 			}
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
+				const move = rowKey.startsWith("move:") ? loadPlan(brainDir).plan?.moves.find((entry) => entry.id === bookId) : undefined;
+				if (move?.status === POLICY.enums.moveStatus.reported) {
+					setMode("type");
+					prompt.insertTextAtCursor(`/done ${bookId} -- `);
+					flash(`Write why ${bookId}'s reported proof witnesses its done-when, then press Enter.`);
+					return;
+				}
 				flash(settleRow(brainDir, bookId, root));
 				refresh(viewId(), true);
 				return;

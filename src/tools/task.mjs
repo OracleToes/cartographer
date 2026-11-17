@@ -17,7 +17,7 @@ import { changeRecord, changesBetween, checkpoint, CheckpointError, windowStep }
 import { addRecord, KEPT_AS, loadContext, reserveId, shelfFreshness, shelfLabel, shelfText, taskState, updateContext } from "../context.mjs";
 import { endTaskContext } from "../context.mjs";
 import { blockMove, loadPlan, reportMove, savePlan, startMove } from "../plan.mjs";
-import { CHANGE_NOTE, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
+import { CHANGE_NOTE, describe, LOOK_NOTE, REFUSALS, SIBLING_AFTER, SIBLING_BEFORE, TASK_EXAMPLE, TASK_HEADER } from "../prompt.mjs";
 import { stamp, took } from "../time.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -158,6 +158,7 @@ function assignedBrief(run) {
 	if (Array.isArray(run.targets) && run.targets.length > 0) lines.push(`  Declared targets: ${run.targets.join(", ")}.`);
 	if (run.doneWhen) lines.push(`  Done when: ${run.doneWhen}.`);
 	if (run.proof) lines.push(`  Required proof: ${run.proof}. Put observed evidence in return's proof field.`);
+	if (run.doneWhen || run.proof) lines.push("  Closure: this focus is done only when its declared result is observed within its declared authority; otherwise return done false with the exact closure_gap.");
 	if (run.capabilities) lines.push(`  Capabilities: files ${run.capabilities.files ? "allowed" : "not allowed"}; commands ${run.capabilities.commands ? "allowed" : "not allowed"}; network ${run.capabilities.network ? "allowed" : "not allowed"}.`);
 	if (run.budget) lines.push(`  Hard ceiling: ${run.budget.replies} replies, ${run.budget.fileOps} direct file operations, ${run.budget.commandStarts} command starts. The operation count is a stop, not a quota and not a measure of scope.`);
 	return lines.join("\n");
@@ -170,8 +171,7 @@ function assignedBrief(run) {
 export function taskTool({ root, brainDir, config, runner = { mode: "none" }, windows, gate, loops, ends, active = { id: undefined, said: [], heard: [] } }) {
 	return defineTool({
 		name: "task",
-			description:
-				"Enter one small focused execution context. A change focus carries exactly one approved plan move (`move`, such as m2); its action, targets, evidence and reply limit come from that stored move, not from a free-form brief. Without `move`, this is a read-only inspect focus and needs one narrow `brief` plus `done_when`. The focus shares the ledger and atlas, but its working conversation is temporary; keep lasting findings before returning a report.",
+			description: describe("task"),
 			parameters: obj({
 				move: opt(str({ minLength: POLICY.validation.planIdMinLength, pattern: POLICY.patterns.moveId, description: "One declared plan move to execute (m2). Its current approved revision supplies all change authority." })),
 				brief: opt(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Only for an inspect focus without move: one narrow question to answer." })),
@@ -207,7 +207,8 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 						commands: details.commands,
 						checkpoints: details.checkpoints,
 						proof: details.proof,
-						reason: details.scopeBreach ? `Changed outside declared targets: ${details.scopeBreach.join(", ")}.` : details.checkpointError ? `Checkpoint evidence failed: ${details.checkpointError}` : details.proofError ?? (details.done === false ? "The focus returned not done." : result.isError === true ? "The focus ended before a successful return." : undefined),
+						closureGap: details.closureGap,
+						reason: details.scopeBreach ? `Changed outside declared targets: ${details.scopeBreach.join(", ")}.` : details.checkpointError ? `Checkpoint evidence failed: ${details.checkpointError}` : details.closureGap ? `Closure gap: ${details.closureGap}` : details.proofError ?? (details.done === false ? "The focus returned not done." : result.isError === true ? "The focus ended before a successful return." : undefined),
 					}, api.now());
 					if (recorded.changed) savePlan(brainDir, plan);
 					text += `\n\n[My record: ${recorded.line}]`;
@@ -366,6 +367,13 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			if (returned !== undefined) {
 				details.done = returned.done;
 				if (returned.summary !== undefined) details.summary = returned.summary;
+				const closureGap = String(returned.closureGap ?? "").replace(/\s+/g, " ").trim();
+				// A focus can never report a closed outcome while it has named a dependency
+				// outside its local authority. Keep the gap as durable plan evidence instead.
+				if (closureGap !== "") {
+					details.done = false;
+					details.closureGap = closureGap.length > POLICY.limits.plan.proofChars ? `${closureGap.slice(0, POLICY.limits.plan.proofChars - 1).trimEnd()}…` : closureGap;
+				}
 				// The required proof is a distinct durable claim, not an implication of a
 				// general report. The orchestrator still judges whether it satisfies the
 				// declared condition before accepting the move.
@@ -424,6 +432,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 					}
 			}
 
+			if (details.closureGap !== undefined) record += `\n\nClosure gap: ${details.closureGap} The move is blocked and cannot be accepted.`;
 			if (details.proofError !== undefined) record += `\n\nMove evidence missing: ${details.proofError} The move is blocked and cannot be accepted.`;
 
 			if (outside !== undefined) {
@@ -474,7 +483,7 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 				return fail(`I ended the task: ${what}\n${wrote}\nIf the work is still needed, start another task whose brief says how to avoid this.${record}`, details);
 			}
 			if (returned === undefined) return fail(`The focus ended without calling \`return\`, so there is no report and its move is blocked.\n${wrote}\nPlan a narrower successor move.${record}`, details);
-			const completed = details.done === true && details.scopeBreach === undefined && details.checkpointError === undefined && details.proofError === undefined;
+			const completed = details.done === true && details.scopeBreach === undefined && details.checkpointError === undefined && details.closureGap === undefined && details.proofError === undefined;
 			const state = run.move === undefined
 				? (completed ? "\n\n[My record: the inspect focus returned done.]" : "\n\n[My record: the inspect focus returned not done.]")
 				: (completed

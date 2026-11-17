@@ -193,12 +193,15 @@ export function planView({ brainDir, yolo }) {
 					`required proof: ${move.proof ?? "none"}`,
 					`capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}`,
 					`budget: ${budget.replies} replies${budget.fileOps === undefined ? "" : `; ${budget.fileOps} file operations`}${budget.commandStarts === undefined ? "" : `; ${budget.commandStarts} command starts`}`,
-					move.status === "reported" ? `reported: ${move.reported?.id ?? "no report id"}; inspect the report and checkpoints, then settle to accept` : undefined,
+					move.status === "reported" ? `reported: ${move.reported?.id ?? "no report id"}; inspect the report and checkpoints, then press t and write why its proof witnesses this move's done-when` : undefined,
 					move.status === "reported" && move.reported?.checkpoints ? `checkpoints: ${move.reported.checkpoints.before} → ${move.reported.checkpoints.after}` : undefined,
 					move.status === "reported" && Array.isArray(move.reported?.changes) ? `changed paths: ${move.reported.changes.map((change) => change.path).join(", ") || "none"}` : undefined,
 					move.status === "reported" && move.reported?.proof ? `reported proof: ${move.reported.proof}` : undefined,
+					move.status === "reported" && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
 					move.status === "blocked" ? `blocked: ${move.blocked ?? "no reason recorded"}` : undefined,
+					move.status === "blocked" && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
 					move.status === "done" ? `accepted${when(move.closed) ? ` ${when(move.closed)}` : ""}${move.outcome ? `: ${move.outcome}` : ""}` : undefined,
+					move.status === "done" && move.acceptedReview ? `acceptance review: ${move.acceptedReview}` : undefined,
 				]
 					.filter((line) => line !== undefined)
 					.join("\n"),
