@@ -2006,7 +2006,7 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 	assert.equal(list.text(40), "Three things\nHeading\n▸ alpha\n▸ dir/\n▸ gamma", "the tab as text, for copying");
 });
 
-test("screen: the Context tab shows the request the agent was sent, part by part in the order the model reads it, and what came since", async () => {
+test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
 	const { contextBar, contextView } = await import("../src/screen/views.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
@@ -2061,6 +2061,28 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("Response, as it is being written"), writing.body], [true, "Half a tho"], "and unfinished response material is explicitly not sent");
 	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
+});
+
+test("screen: the Next preview is explicit that its request plan was not sent", async () => {
+	const { accountingView, previewView } = await import("../src/screen/views.mjs");
+	const view = previewView({
+		at: Date.parse("2026-11-16T14:05:00.000Z"),
+		plan: {
+			parts: [
+				{ id: "part:1:message:0", kind: "active-message", source: "active:1:0", lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
+				{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
+			],
+		},
+	});
+	const header = view.header.map((line) => line.map(([part]) => part).join(" ")).join("\n");
+	assert.match(header, /Next request preview · not sent/, "the prospective boundary is in the title");
+	assert.match(header, /wakes were not checked or consumed/, "the preview names its non-effect");
+	assert.match(header, /Provider JSON does not exist for a preview/, "it does not present an unsent plan as a provider payload");
+	assert.equal(view.items[0].body, "Please inspect the parser.");
+	assert.match(view.items[0].head.map(([part]) => part).join(""), /active:1:0 · preview only/, "each row names its planned source and lifecycle");
+	assert.equal(view.items[0].editKind, undefined, "a preview has no historical or mutable edit route");
+	const accounting = accountingView("about 4k tokens");
+	assert.match(accounting.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /neither a sent provider payload nor a promise of the next request/, "current accounting has its own temporal boundary");
 });
 
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {

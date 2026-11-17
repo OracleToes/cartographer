@@ -240,7 +240,7 @@ export function createEngine({ root, brainDir, config }) {
 		},
 		/** The pure request plan built for this generation attempt, before pi-ai formats its provider payload. */
 		planned(conversationId, plan) {
-			of(conversationId).plan = copyJson(plan);
+			of(conversationId).nextPlan = copyJson(plan);
 		},
 		messagesOf: (conversationId) => of(conversationId).messages,
 		/** The provider body at the last hook before dispatch. It is copied now: a screen view may never acquire later
@@ -257,8 +257,10 @@ export function createEngine({ root, brainDir, config }) {
 			state.payloadHash = frozen.hash;
 			state.model = modelRef(model);
 			// The semantic plan and its provenance are frozen beside the provider body. A later preview has its own
-			// plan; it cannot edit or fill in this one.
-			state.plan = copyJson(state.plan);
+			// plan; it cannot edit or fill in this one. Clear the pending plan so an unusual direct send cannot inherit
+			// a previous request's source facts.
+			state.plan = copyJson(state.nextPlan);
+			state.nextPlan = undefined;
 			state.reply = undefined;
 			state.usage = undefined;
 			state.results = new Map();

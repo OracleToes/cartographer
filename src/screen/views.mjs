@@ -657,9 +657,69 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 	return { header, items, parts, since };
 }
 
+/** The current request plan is not a provider payload yet. It keeps source facts alongside the exact fragments the
+ * planner produced, so this renderer need not guess a lifecycle from completed provider JSON. */
+const plannedText = (fragment) => {
+	if (typeof fragment === "string") return fragment;
+	if (fragment === null || typeof fragment !== "object") return String(fragment ?? "");
+	if (!Array.isArray(fragment.content)) return pretty(fragment);
+	return fragment.content.map((part) => {
+		if (part?.type === "text") return part.text ?? "";
+		if (part?.type === "thinking") return `(private reasoning)\n${part.thinking ?? ""}`;
+		if (part?.type === "toolCall") return callText(part.name ?? "?", part.arguments);
+		return pretty(part);
+	}).filter((text) => text !== "").join("\n\n");
+};
+const plannedTitle = (part) => {
+	if (part.kind === "brain-copy") return "Frozen brain copy for this preview";
+	if (part.kind === "generated-state") return "Generated state block";
+	if (part.kind === "generated-windows") return "Generated windows block";
+	if (part.kind === "transient-read-tail") return "Current read batch · transient";
+	return `${part.role ?? "active"} message from active conversation`;
+};
+
+/** The explicitly prospective main-agent plan. It has no provider payload because pi-ai has not formatted one and no
+ * request has been sent. */
+export function previewView(preview) {
+	if (preview === undefined) return { header: [[["Next request preview · not sent", "bold"]]], items: [note("  Calculating the current main-agent plan without consuming wakes…")] };
+	if (preview?.error !== undefined) return { header: [[["Next request preview · not sent", "bold"]]], items: [note(`  ! ${preview.error}`, "warn")] };
+	const plan = preview.plan;
+	if (plan === undefined) return { header: [[["Next request preview · not sent", "bold"]]], items: [note("  No main-agent request can be planned now.")] };
+	const at = Number.isFinite(preview.at) ? stamp(preview.at).split(", ").at(-1) : "just now";
+	const header = [
+		[["Next request preview · not sent", "bold"], [`  ·  main agent · rebuilt ${at}`, ""]],
+		[["Pure current calculation: wakes were not checked or consumed, and no provider request was made or retained.", "muted"]],
+		[["State, windows, the read batch, a collapse, or a new message can change this before any send. Provider JSON does not exist for a preview.", "faint"]],
+	];
+	const items = [];
+	for (const part of plan.parts ?? []) {
+		const text = plannedText(part.fragment);
+		items.push({
+			key: `preview:${part.id}`,
+			head: [["◇ ", "catState"], [`${plannedTitle(part)}  `, ""], [`${part.source} · preview only`, "faint"]],
+			body: text === "" ? "(empty)" : text,
+			copy: text,
+		});
+	}
+	if (items.length === 0) items.push(note("  The current plan has no displayable parts."));
+	return { header, items };
+}
+
 /** A view of plain lines, for text that a command prints. */
 export function textView(text) {
 	return { header: [], items: String(text ?? "").replace(/\n+$/, "").split("\n").map((line, index) => ({ key: `line:${index}`, plain: true, head: [[line, /^\s*!/.test(line) ? "warn" : ""]] })) };
+}
+
+/** Current `/context` accounting, deliberately not a historical request inspector or a preview. */
+export function accountingView(text) {
+	const view = textView(text);
+	return {
+		...view,
+		header: [
+			[["Current active-context accounting", "bold"]],
+			[["Calculated now from the active conversation and brain. It is neither a sent provider payload nor a promise of the next request.", "muted"]],
+		],
+	};
 }
 
 /**

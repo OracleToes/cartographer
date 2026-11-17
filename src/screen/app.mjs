@@ -46,7 +46,7 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
+import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
 const USER_SPEAKER = `${USER_NAME}: `;
@@ -79,12 +79,13 @@ const VIEWS = {
 	context: [
 		{ id: "window", name: "Latest sent" },
 		{ id: "main", name: "Main sent" },
+		{ id: "preview", name: "Next preview" },
 		{ id: "parts", name: "Current accounting" },
 		{ id: "hands", name: "Current brain" },
 	],
 };
 /** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.preview", "context.parts", "context.hands"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -502,6 +503,7 @@ export async function runScreen(session, options, runTerminal) {
 		"shells.out": "Enter back",
 		"context.window": "Enter open · y copy",
 		"context.main": "Enter open · y copy",
+		"context.preview": "Enter open · y copy",
 		"context.parts": "Enter open · + all · y copy",
 		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
 	};
@@ -536,7 +538,8 @@ export async function runScreen(session, options, runTerminal) {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
 			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
 		}
-		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
+		if (id === "context.preview") return previewView(pageOf(id).preview);
+		if (id === "context.parts") return accountingView(pageOf(id).text ?? "  …");
 		if (id === "context.hands") return handsView({ root, brainDir });
 		return { header: [], items: [] };
 	};
@@ -555,6 +558,22 @@ export async function runScreen(session, options, runTerminal) {
 		if (page === undefined) return;
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
+		if (id === "context.preview" && page.loading !== true) {
+			page.loading = true;
+			Promise.resolve(session.preview?.())
+				.then((preview) => {
+					page.loading = false;
+					page.preview = preview;
+					rebuild(id);
+					draw();
+				})
+				.catch((error) => {
+					page.loading = false;
+					page.preview = { error: error?.message ?? String(error) };
+					rebuild(id);
+					draw();
+				});
+		}
 		if (id === "context.parts") {
 			Promise.resolve(core.capture("/context"))
 				.then((text) => {

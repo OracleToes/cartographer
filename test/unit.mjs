@@ -1483,6 +1483,8 @@ test("engine: a sent provider request is an immutable snapshot with separate pro
 	const again = engine.window("newest");
 	assert.equal(again.payload.messages[0].content, "first words", "window callers get copies too");
 	assert.equal(again.reply.content[0].text, "reply");
+	engine.sending(focus, { messages: [{ role: "user", content: "a later direct send" }] }, { provider: "local", id: "qwen" });
+	assert.equal(engine.window("newest").plan, undefined, "a send without a fresh plan never inherits prior request provenance");
 });
 
 test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped cleanly", () => {
