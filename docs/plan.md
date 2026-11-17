@@ -1,6 +1,6 @@
 # Cartographer delivery plan
 
-**Status:** current verified plan and proposed slices, 2026-11-16.
+**Status:** current verified plan and proposed slices, 2026-11-17.
 
 `docs/design.md` is the recorded source of intent. It is not a live delivery plan or a changelog. `README.md` describes the shipped harness. This document is the one place for verified implementation status, the remaining work, and the order in which new work may be taken. Git history retains the superseded working proposals and completed slices.
 
@@ -15,7 +15,7 @@ The former working documents describe several different pieces of work. Their st
 | Material folded here | Verified state | Evidence in the current tree | Plan disposition |
 | --- | --- | --- | --- |
 | Talk, Work, Model, request snapshots, and truthful mutations | Shipped through the former four implementation stages | `planRequest()` separates pure planning from send effects; `engine.sending()` freezes provider payloads; the Model views separate Sent, Since, Raw payload, Preview, and current accounting; Talk uses Durable identities rather than equal text. | Baseline, not an active feature slice. |
-| State-led dispatch and focus capsules | Shipped except for preventative containment of **writable shell commands** | Main-only `Dispatch` is in `src/state.mjs`; focus projection and captured shelf evidence are in `src/request.mjs`, `src/context.mjs`, and `src/tools/task.mjs`; direct file operations have atomic changed-surface accounting in `src/tools/change.mjs`. | Preserve the shipped contract. Complete the distinct command-staging gap in S1–S2. |
+| State-led dispatch, focus capsules, and normal writable-command staging | Shipped | Main-only `Dispatch` is in `src/state.mjs`; focus projection and captured shelf evidence are in `src/request.mjs`, `src/context.mjs`, and `src/tools/task.mjs`; direct file operations have atomic changed-surface accounting in `src/tools/change.mjs`; `src/stage.mjs` materializes a disposable command candidate and promotes it only through the live move gate. | Baseline. Direct mode remains intentionally detection-only. |
 | Bounded evidence cases | v1 is shipped; v2 is not implemented | `src/case.mjs` and `src/tools/case.mjs` persist a frozen capsule, construct → blind falsify → source-only witness phases, stopping/resume, and main-only synthesis. | The active future workstream, C1–C4. |
 | Long-form external consultation | Shipped as a separate, supplied-context advisory lane | `consult` wording, durable thread handling, screen rendering, and tests are current. | Keep it distinct; evaluate an explicit escalation policy only in E1. |
 | Atlas heat and focus | Shipped | `src/atlas.mjs`, `src/state.mjs`, and coverage for direct-hot, warm, care, mapping gaps, and reversible archive candidates. | Baseline. The stale public “not here yet” claim is removed with this consolidation. |
@@ -33,10 +33,11 @@ The current offline suite passes **103 unit tests and 67 ported integration test
 
 ### 1.1 What is deliberately not claimed as complete
 
-Two safety/evidence gaps matter more than another prompt rewrite:
+The remaining safety/evidence gap matters more than another prompt rewrite:
 
-1. **Writable shell commands are not preventative scope confinement today.** Normal sandboxed change windows mount the live project writable. Their final checkpoint diff detects target breaches after the command ran; direct file tools already enforce changed surface before disk changes, but shell writes do not. The sandbox home is persistent under `.brain`, so it is also not a disposable case workspace. Direct mode is explicitly user-selected and must remain visibly unconfined.
-2. **Case v2 is a design contract, not runtime behavior.** Current cases do not enforce structured artifacts, do not conduct a post-blind cross-examination, cannot execute a test/trace/reproduction as a witness, have no disposable scratch space, and have no benchmark-backed `consult` escalation rule.
+1. **Case v2 is a design contract, not runtime behavior.** Current cases do not enforce structured artifacts, do not conduct a post-blind cross-examination, cannot execute a test/trace/reproduction as a witness, have no disposable scratch space, and have no benchmark-backed `consult` escalation rule.
+
+Sandboxed normal change commands now use a per-focus disposable source stage. Its candidate diff is validated against the current approved move, source digest, targets, operation/surface limits, and checkpoint path before promotion; direct mode remains explicitly user-selected detection-only execution. This stage is not case scratch and supplies no case authority.
 
 Plugins, durable transcript/catalog pruning, and the measurement decision for live 27B sessions remain parked. They are not silently promoted into this plan.
 
@@ -52,7 +53,7 @@ The design intent and shipped harness establish these boundaries. A slice that n
 4. **The brain is durable; the provider request is a finite cache.** Sent payloads are frozen historical records; previews are explicitly unsent; current brain records are never rendered as historical request content.
 5. **Provenance beats prose.** Sources, snapshots, artifacts, command receipts, user input, and closure gaps carry stable identities/digests and a lifecycle. A summary remains a claim until its source is checked.
 6. **No ambient side channel.** A case phase cannot use the shared shelf, brain, shell windows, nested work, or `consult` to smuggle information across its intended boundary.
-7. **Do not misdescribe confinement.** Direct-file scope is preventative. Ordinary writable shell scope remains detection-only until S2 ships. Case scratch is unavailable until C4 ships; it must refuse rather than silently degrade to host execution.
+7. **Do not misdescribe confinement.** Direct-file scope and sandboxed normal command promotion are preventative; user-selected direct command mode remains detection-only. Case scratch is unavailable until C4 ships; it must refuse rather than silently degrade to host execution.
 8. **Offline mechanics first.** Every slice proves its own data flow and authority boundaries in the bounded test suite. A live run is a deliberately labelled observation, never a general model-quality pass.
 
 ---
@@ -112,19 +113,13 @@ The goal is to turn the existing “compare the final checkpoint diff” detecti
 
 ### S2 — Implement sandboxed command staging and promotion
 
-**Status:** accepted implementation slice; follows S1 exactly.
+**Status:** completed 2026-11-17.
 
-Implement the smallest route that makes normal command moves truthful:
+`src/stage.mjs` creates an OS-private, random disposable work root for each sandboxed change focus. `src/tools/shell.mjs` routes its commands only to that stage; `src/windows.mjs` mounts the stage at `/work`, gives it a fresh home, hides the live brain/git paths, and makes any dependency overlay read-only. `src/tools/task.mjs` closes all stage-owned windows, records the bounded candidate manifest and receipts, rechecks the live approved move and source manifest, validates targets/operation/surface/file rules, then promotes the complete candidate or records a closure gap before checkpointing. The task report retains the staging receipt; direct mode remains clearly detection-only. Dead-process stages are cleaned on the next session start.
 
-1. create and destroy one private per-move workspace;
-2. run only sandbox-capable command moves there;
-3. collect a bounded, manifest-backed candidate diff and receipt;
-4. validate the candidate against the existing target and changed-surface rules; and
-5. apply or refuse it atomically through the normal approved-move/checkpoint path.
+The implementation does not broaden the command API or create a project-local scratch folder. It does not treat an exit status as a project mutation.
 
-Do not broaden the command API, create project-local scratch folders, or make direct mode look safer than it is. A formatter/generator is the first acceptance fixture because it exercises a meaningful multi-file command change.
-
-**Exit evidence:** tests prove that a command cannot mutate the live tree before promotion; a valid candidate applies only inside an approved current move; target, changed-surface, network, timeout, output, cleanup, and rollback/refusal cases are explicit; ordinary direct-file tests keep passing.
+**Verified exit evidence:** portable unit fixtures prove no live-tree mutation before promotion, blocked `.brain`/`.git` candidate paths, target and stale-source refusal, source/diff bounds, atomic rollback, and cleanup. A bubblewrap integration fixture checks the actual staged mount and is explicitly skipped on this machine because `bwrap` is unavailable; it is not claimed as a local confinement observation. `npm test` passed with 107 unit tests and 67 ported integration tests; two bubblewrap checks skipped; total 9.0 seconds under the ten-second budget.
 
 ---
 
@@ -257,6 +252,6 @@ These items remain visible so that they are not accidentally reintroduced as “
 - `README.md` describes behavior already shipped. It must not promise an unimplemented slice.
 - Source, tests, and git history are the proof of implementation. The prior working proposals are intentionally retired rather than maintained as competing status records.
 
-## Next decision
+## Next slice
 
-Approve the work order rather than beginning a broad implementation: accept S1's normal command-staging direction and choose whether C1 (structured case v2 artifacts) or S1 is the first code slice. The two tracks can advance independently until C4, but neither should bypass its explicit acceptance gate.
+S1–S2 are complete. Continue with C1's versioned case capsule and structured artifacts, preserving readable v1 records and without adding scratch execution or cross-examination ahead of their own slices.
