@@ -60,6 +60,17 @@ const NO_SANDBOX = () => (findSandbox().ok ? undefined : `no sandbox on this mac
 /** The windows manager for one project, as carto builds it. */
 const windowsOf = (root, brainDir, { mode = "sandbox", read = [] } = {}) => createWindows({ root, brainDir, config: { shellRead: read }, runner: { mode, available: findSandbox() } });
 const LOOP = (file) => `while :; do echo $(date +%s%N) > ${file}; sleep 0.05; done`;
+const caseArtifact = (candidate, values = {}) => ({
+	candidate,
+	observations: [],
+	assumptions: [],
+	citations: [],
+	falsifiers: [],
+	proposed_witness: "No further witness is available in this fixture.",
+	closure_gaps: [],
+	uncertainty: [],
+	...values,
+});
 async function beating(file) {
 	const before = readFileSync(file, "utf8");
 	await new Promise((resolve) => setTimeout(resolve, 400))
@@ -868,6 +879,34 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 	}
 });
 
+test("case v2: source reads append immutable phase receipts outside the frozen capsule", async () => {
+	const root = makeProject("evidence-case-receipt", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({ tokenDelayMs: 0, caseSteps: { construct: ["read: src/main.js"] } });
+	try {
+		const result = await carto(root, server, ["-p", "case: Does src/main.js import add? || then think"]);
+		ok(result, "recording a case source receipt");
+		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
+		assert.equal(evidence.version, 2);
+		assert.deepEqual(evidence.capsule.ledger, [], "the frozen capsule keeps only its initial ledger; phase inspection does not mutate it");
+		const receipts = evidence.ledger.filter((entry) => entry.kind === "receipt");
+		assert.equal(receipts.length, 1, "the successful case read has one immutable receipt");
+		assert.deepEqual([receipts[0].phase, receipts[0].tool], ["construct", "read"]);
+		assert.match(receipts[0].digest, /^[a-f0-9]{64}$/);
+		assert.match(receipts[0].inputDigest, /^[a-f0-9]{64}$/);
+		assert.match(receipts[0].outputDigest, /^[a-f0-9]{64}$/);
+		assert.deepEqual(receipts[0].input, { path: "src/main.js" }, "the receipt retains the exact bounded source-tool input it digests");
+		assert.match(receipts[0].output, /src\/main\.js/, "the receipt retains the bounded source-tool output it digests");
+		assert.deepEqual(evidence.phases[0].artifact.data.citations, [{ ref: receipts[0].id, kind: "receipt" }], "the phase's subsequent structured return actually cites the receipt it was shown");
+		assert.deepEqual(evidence.phases[0].artifact.data.observations[0].citations, [receipts[0].id], "the citation is attached to a direct observation rather than only named in prose");
+		assert.equal(existsSync(join(root, ".brain", "carto-atlas.json")), false, "a case source read does not mutate the shared atlas as an implicit evidence side channel");
+		const constructRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase"));
+		assert.match(constructRequests.at(-1).messages.map(rawText).join("\n"), new RegExp(`Case evidence receipt ${receipts[0].id} is durable`), "the same phase receives the receipt id it must cite on return");
+	} finally {
+		await server.close();
+	}
+});
+
 test("case: /case stop interrupts a held phase and leaves a stopped durable trail", async () => {
 	const root = makeProject("evidence-case-stop", { git: false });
 	configure(root, { initiate: false });
@@ -938,7 +977,7 @@ test("case: a fresh session resumes durable unfinished phases without rerunning 
 	const brainDir = join(root, ".brain");
 	const prior = createCase(brainDir, { question: "Does src/main.js call the exported add function?", context: "Resume only the phases that were not completed before the restart.", at: 100 });
 	beginCasePhase(brainDir, prior.id, "construct", { conversationId: "prior-session-construct", at: 101 });
-	finishCasePhase(brainDir, prior.id, "construct", { returned: true, done: true, report: "construction artifact survives the restart" }, { at: 102 });
+	finishCasePhase(brainDir, prior.id, "construct", { returned: true, done: true, artifact: caseArtifact("construction artifact survives the restart") }, { at: 102 });
 	const server = await startStandIn({ tokenDelayMs: 0 });
 	try {
 		const result = await carto(root, server, ["-p", "case resume: c1 || then think"]);
@@ -946,7 +985,7 @@ test("case: a fresh session resumes durable unfinished phases without rerunning 
 		const evidence = JSON.parse(readFileSync(join(brainDir, "cases", "c1.json"), "utf8"));
 		assert.equal(evidence.status, "ready");
 		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["complete", "complete", "complete"]);
-		assert.equal(evidence.phases[0].artifact.text, "construction artifact survives the restart", "resume keeps the already durable construction artifact byte-for-byte");
+		assert.equal(evidence.phases[0].artifact.data.candidate, "construction artifact survives the restart", "resume keeps the already durable structured construction artifact byte-for-byte");
 		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
 		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase")).length, 0, "a completed phase is not replayed after restart");
 		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the blind falsification phase")).length, 1);

@@ -213,7 +213,18 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 				if (calls.length > 0) return { calls };
 			}
 			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: true } }] };
+			const receiptId = /Case evidence receipt (r\d+) is durable/.exec(later.map(rawOf).join("\n"))?.[1];
+			const artifact = {
+				candidate: `CASE ${phase} ARTIFACT`,
+				observations: receiptId === undefined ? [] : [{ kind: "direct", text: `The phase received immutable source receipt ${receiptId}.`, citations: [receiptId] }],
+				assumptions: [],
+				citations: receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }],
+				falsifiers: [],
+				proposed_witness: "No additional witness is proposed in the stand-in fixture.",
+				closure_gaps: [],
+				uncertainty: [],
+			};
+			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: true, artifact } }] };
 		}
 		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
 			const contractAt = text.indexOf("Move contract:\n");

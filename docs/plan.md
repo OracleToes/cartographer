@@ -1,6 +1,6 @@
 # Cartographer delivery plan
 
-**Status:** current verified plan and proposed slices, 2026-11-17.
+**Status:** current verified plan and proposed slices, 2026-11-16.
 
 `docs/design.md` is the recorded source of intent. It is not a live delivery plan or a changelog. `README.md` describes the shipped harness. This document is the one place for verified implementation status, the remaining work, and the order in which new work may be taken. Git history retains the superseded working proposals and completed slices.
 
@@ -16,7 +16,7 @@ The former working documents describe several different pieces of work. Their st
 | --- | --- | --- | --- |
 | Talk, Work, Model, request snapshots, and truthful mutations | Shipped through the former four implementation stages | `planRequest()` separates pure planning from send effects; `engine.sending()` freezes provider payloads; the Model views separate Sent, Since, Raw payload, Preview, and current accounting; Talk uses Durable identities rather than equal text. | Baseline, not an active feature slice. |
 | State-led dispatch, focus capsules, and normal writable-command staging | Shipped | Main-only `Dispatch` is in `src/state.mjs`; focus projection and captured shelf evidence are in `src/request.mjs`, `src/context.mjs`, and `src/tools/task.mjs`; direct file operations have atomic changed-surface accounting in `src/tools/change.mjs`; `src/stage.mjs` materializes a disposable command candidate and promotes it only through the live move gate. | Baseline. Direct mode remains intentionally detection-only. |
-| Bounded evidence cases | v1 is shipped; v2 is not implemented | `src/case.mjs` and `src/tools/case.mjs` persist a frozen capsule, construct → blind falsify → source-only witness phases, stopping/resume, and main-only synthesis. | The active future workstream, C1–C4. |
+| Bounded evidence cases | v1 is shipped; C1 capsule/artifact v2 is shipped; C2–C4 remain | `src/case.mjs` and `src/tools/case.mjs` preserve v1 rendering, persist v2 frozen source provenance and schema-validated artifacts, append phase-local source receipts, and retain the existing construct → blind falsify → source-only witness compatibility flow. | Continue sequentially with C2; do not represent C1 as cross-examination or scratch execution. |
 | Long-form external consultation | Shipped as a separate, supplied-context advisory lane | `consult` wording, durable thread handling, screen rendering, and tests are current. | Keep it distinct; evaluate an explicit escalation policy only in E1. |
 | Atlas heat and focus | Shipped | `src/atlas.mjs`, `src/state.mjs`, and coverage for direct-hot, warm, care, mapping gaps, and reversible archive candidates. | Baseline. The stale public “not here yet” claim is removed with this consolidation. |
 
@@ -29,13 +29,13 @@ The audit is backed by the following implementation commits, in addition to the 
 - `94d4d8e` and `04293ec` — evidence-case v1 and its lifecycle hardening; and
 - `1642852` — long-form `consult` clarification without conflating it with same-model case work.
 
-The current offline suite passes **103 unit tests and 67 ported integration tests**. One bubblewrap confinement test is skipped on machines without bubblewrap; it is not treated as a passing sandbox observation.
+The current offline suite passes **109 unit tests and 68 ported integration tests**; two bubblewrap confinement checks are skipped on this machine because `bwrap` is unavailable. A skip is not treated as a passing sandbox observation.
 
 ### 1.1 What is deliberately not claimed as complete
 
 The remaining safety/evidence gap matters more than another prompt rewrite:
 
-1. **Case v2 is a design contract, not runtime behavior.** Current cases do not enforce structured artifacts, do not conduct a post-blind cross-examination, cannot execute a test/trace/reproduction as a witness, have no disposable scratch space, and have no benchmark-backed `consult` escalation rule.
+1. **C2–C4 and E1 remain design contracts, not runtime behavior.** C1 now enforces versioned provenance capsules and structured case artifacts, but cases do not yet conduct a post-blind cross-examination, cannot execute a test/trace/reproduction as a witness, have no disposable scratch space, and have no benchmark-backed `consult` escalation rule.
 
 Sandboxed normal change commands now use a per-focus disposable source stage. Its candidate diff is validated against the current approved move, source digest, targets, operation/surface limits, and checkpoint path before promotion; direct mode remains explicitly user-selected detection-only execution. This stage is not case scratch and supplies no case authority.
 
@@ -113,7 +113,7 @@ The goal is to turn the existing “compare the final checkpoint diff” detecti
 
 ### S2 — Implement sandboxed command staging and promotion
 
-**Status:** completed 2026-11-17.
+**Status:** completed 2026-11-16.
 
 `src/stage.mjs` creates an OS-private, random disposable work root for each sandboxed change focus. `src/tools/shell.mjs` routes its commands only to that stage; `src/windows.mjs` mounts the stage at `/work`, gives it a fresh home, hides the live brain/git paths, and makes any dependency overlay read-only. `src/tools/task.mjs` closes all stage-owned windows, records the bounded candidate manifest and receipts, rechecks the live approved move and source manifest, validates targets/operation/surface/file rules, then promotes the complete candidate or records a closure gap before checkpointing. The task report retains the staging receipt; direct mode remains clearly detection-only. Dead-process stages are cleaned on the next session start.
 
@@ -129,24 +129,17 @@ The existing `case` tool is the compatibility anchor. Do not create `deliberate`
 
 ### C1 — Versioned capsule and structured artifacts
 
-**Status:** proposed implementation slice. No scratch and no cross-examination yet.
+**Status:** completed 2026-11-16. No scratch or cross-examination is included.
 
-Add a v2 case schema whose frozen capsule contains only the material needed to test one narrow crux:
+`src/case.mjs` now writes version-2 records while continuing to load and render version-1 records without migration. A v2 frozen capsule carries the question and claim, resolution criteria, constraints, non-goals, bounded role-tagged sources (`primary`, `derived`, or `claim`), each source's capture status, origin, locator, SHA-256, capture time, and freshness, plus its initial evidence ledger. Source metadata, source text, and the complete frozen capsule have policy-owned storage bounds. The append-only case ledger can then retain observations, claims, source gaps, and immutable phase-local read/search/list receipts without changing the frozen capsule bytes.
 
-- question/claim, resolution criteria, constraints, and non-goals;
-- frozen source entries with role (`primary`, `derived`, or `claim`), capture status, origin/provenance, locator, digest, capture time, and freshness at capture;
-- an evidence ledger that distinguishes observations, claims requiring checks, and source gaps; and
-- policy-owned capsule, phase, artifact, and storage budgets.
+A v2 phase must return a schema-validated artifact rather than promote its free-form `report`. It has candidate, observations, assumptions, citations, falsifiers, proposed witness, closure gaps, and uncertainty; its deterministic readable rendering and structured data share a digest. Direct observations must cite a frozen non-claim source or a receipt from that exact phase. A retained receipt includes bounded tool input/output, their SHA-256 digests, and its own digest; a receipt cited by an artifact is rendered to the main synthesis. Frozen claim sources and prior phase artifacts can only be cited as claims under review. Capsule/source, ledger, receipt, artifact, and field-count/text bounds are policy-owned. The compatibility phase sequence is deliberately unchanged until C2.
 
-Require schema-validated phase artifacts rather than clipped free-form reports. They need equivalent fields for candidate, observations, assumptions, citations, falsifiers, proposed witness, closure gaps, and uncertainty. A direct observation cites either a frozen source or an immutable phase-local tool receipt. A prior report or phase artifact can be cited as a claim under review, never silently promoted to primary evidence.
-
-The new schema stores a readable rendering plus structured data and its digest. Display clipping never makes the stored record invalid. Newly inspected source receipts append to the case ledger without mutating the frozen capsule.
-
-**Exit evidence:** v1 files render unchanged; v2 rejects malformed resolution criteria, uncited direct observations, missing mandatory fields, oversized capsule/artifact input, and source-role confusion; a resume sees the same frozen inputs and completed artifacts.
+**Verified exit evidence:** unit tests cover malformed criteria, oversized source content/metadata and artifacts, acyclic derived provenance, missing required artifact fields, uncited direct observations, source-role confusion in both ledger and artifact, the blind citation boundary, receipt append versus capsule immutability, receipt input/output integrity, resume-visible frozen inputs/artifacts, report-only return refusal, and byte-stable/read-write-compatible v1 rendering. An integration fixture proves a real case `read` appends an immutable receipt outside the frozen capsule, leaves the shared atlas unchanged, returns the receipt id to the same phase, and accepts a subsequent direct observation that cites it. `npm test` passed with 109 unit tests and 68 integration tests; two unavailable-`bwrap` checks skipped.
 
 ### C2 — Blind pass, controlled cross-examination, and durable transition
 
-**Status:** depends on C1.
+**Status:** next implementation slice; depends on completed C1.
 
 Replace the v1 fixed middle with an explicit information-flow state machine:
 
@@ -254,4 +247,4 @@ These items remain visible so that they are not accidentally reintroduced as “
 
 ## Next slice
 
-S1–S2 are complete. Continue with C1's versioned case capsule and structured artifacts, preserving readable v1 records and without adding scratch execution or cross-examination ahead of their own slices.
+S1–S2 and C1 are complete. Continue with C2's blind pass and controlled cross-examination state machine, preserving v1 inspection and C1 capsule/artifact immutability. Do not add a witness docket, scratch execution, or synthesis authority ahead of C3/C4.

@@ -36,7 +36,11 @@ function phaseBrief(caseFile, phase, participant = []) {
 		for (const entry of previous) {
 			const artifact = entry.artifact;
 			if (artifact === undefined) lines.push(`  ${entry.name}: no returned artifact.`);
-			else lines.push(`  ${entry.name} · ${artifact.done === true ? "returned done" : entry.status} · sha256 ${artifact.digest}${artifact.clipped ? " · clipped by the case storage bound" : ""}\n${artifact.text.split("\n").map((line) => `    ${line}`).join("\n")}`);
+			else {
+				const artifactText = typeof artifact.rendering === "string" ? artifact.rendering : String(artifact.text ?? "");
+				const state = artifact.kind === "failure" ? "no structured return" : artifact.done === true ? "returned done" : artifact.done === false ? "returned not done" : entry.status;
+				lines.push(`  ${entry.name} · ${state} · sha256 ${artifact.digest}${artifact.clipped ? " · clipped by the v1 storage bound" : ""}\n${artifactText.split("\n").map((line) => `    ${line}`).join("\n")}`);
+			}
 		}
 	}
 	if (participant.length > 0) {
@@ -44,7 +48,11 @@ function phaseBrief(caseFile, phase, participant = []) {
 		for (const message of participant) lines.push(`  [${message.id}] ${message.text}`);
 		lines.push("  These are direction from the user, recorded with this case. They do not enlarge the frozen evidence capsule or grant project-write authority.");
 	}
-	lines.push("", "Return artifact", "I call `return` with done true only if I completed this phase's stated artifact. My report says what I observed, what I inferred, and what remains uncertain. I do not state a final supported/refuted/unresolved conclusion: that belongs only to the main context after all artifacts return.");
+	if (caseFile.version === 2) {
+		lines.push("", "Structured return artifact", "I call `return` with a short `report`, `done`, and the required `artifact` object. Its fields are candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty. A direct observation cites a frozen source id or an immutable receipt id from my own read/search/list result; a prior phase artifact is only a claim under review, never primary evidence. I use empty arrays where a category has none, name any closure gap inside artifact.closure_gaps, and return done false when it has one. The durable artifact is the schema-validated object and deterministic rendering, not my free-form report.");
+	} else {
+		lines.push("", "Return artifact", "I call `return` with done true only if I completed this phase's stated artifact. My report says what I observed, what I inferred, and what remains uncertain. I do not state a final supported/refuted/unresolved conclusion: that belongs only to the main context after all artifacts return.");
+	}
 	return lines.join("\n");
 }
 
@@ -210,7 +218,7 @@ export function caseTool({ root, brainDir, config, active }) {
 					: interrupted === undefined ? phaseFailure(phase, settled) : `The ${phase.name} phase was interrupted before it returned an artifact: ${String(interrupted?.message ?? interrupted).slice(0, POLICY.limits.case.failureChars)}.`;
 				finishCasePhase(brainDir, caseId, phase.id, stopped
 					? { stopped: true, failure }
-					: returned === undefined ? { failure } : { returned: true, report: returned.report, done: returned.done, summary: returned.summary }, { at: api.now() });
+					: returned === undefined ? { failure } : { returned: true, report: returned.report, done: returned.done, summary: returned.summary, artifact: returned.artifact }, { at: api.now() });
 			}
 		} finally {
 			// A phase cannot alter the shared brain or shelf, so ending its local context only removes isolated state.
@@ -257,8 +265,12 @@ export function caseTool({ root, brainDir, config, active }) {
 		parameters: obj({
 			action: str({ enum: ["start", "resume", "synthesize"], description: "start a bounded evidence case, resume a durable running case, or record the main context's synthesis." }),
 			question: opt(str({ maxLength: POLICY.limits.case.questionChars, description: "On start: one narrow refutable question. The same frozen capsule feeds every phase." })),
+			claim: opt(str({ maxLength: POLICY.limits.case.questionChars, description: "On start: the exact claim to test. Omit only when the question itself is the claim." })),
 			context: opt(str({ maxLength: POLICY.limits.case.contextChars, description: "On start: compact facts, constraints, and source locations that the phases may not guess. It is frozen with the case." })),
-			shelf: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { maxItems: POLICY.limits.case.evidenceItems, description: "On start: selected main-shelf placement IDs to freeze into the evidence capsule. Omit for none." })),
+			criteria: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.ledgerTextChars }), { minItems: 1, maxItems: POLICY.limits.case.criteria, description: "On start: concrete resolution criteria. Omit only to use the policy-owned evidence-bound default." })),
+			constraints: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.ledgerTextChars }), { maxItems: POLICY.limits.case.constraints, description: "On start: constraints that narrow interpretation without granting authority." })),
+			non_goals: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.case.ledgerTextChars }), { maxItems: POLICY.limits.case.constraints, description: "On start: explicit non-goals for the frozen capsule." })),
+			shelf: opt(arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { maxItems: POLICY.limits.case.evidenceItems, description: "On start: selected main-shelf placement IDs to freeze into the evidence capsule as primary sources. Omit for none." })),
 			id: opt(str({ pattern: `^${CASE_ID_PATTERN}$`, description: "On resume or synthesize: the durable case id, such as c1." })),
 			outcome: opt(str({ enum: ["supported", "refuted", "unresolved"], description: "On synthesize: the main context's evidence-weighted conclusion." })),
 			report: opt(str({ maxLength: POLICY.limits.case.synthesisChars, description: "On synthesize: why the phase artifacts and concrete witness support that conclusion; agreement is not a vote." })),
@@ -285,7 +297,7 @@ export function caseTool({ root, brainDir, config, active }) {
 					const remembered = await api.memo("case", callContext);
 					if (typeof remembered === "string") id = remembered;
 					else {
-						const created = createCase(brainDir, { question, context: args.context, evidence: handed.evidence, at: api.now() });
+						const created = createCase(brainDir, { question, claim: args.claim, context: args.context, criteria: args.criteria, constraints: args.constraints, nonGoals: args.non_goals, evidence: handed.evidence, at: api.now() });
 						id = await api.memo("case", created.id, callContext);
 					}
 				} else if (args.action === "resume") {

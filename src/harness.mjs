@@ -31,7 +31,7 @@ import { shellTool } from "./tools/shell.mjs";
 import { consultTool } from "./tools/consult.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { caseTool } from "./tools/case.mjs";
-import { noteCaseMessage } from "./case.mjs";
+import { appendCaseReceipt, noteCaseMessage } from "./case.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
@@ -245,6 +245,36 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		if (call.name === "task" && Array.isArray(details.changes) && details.changes.length > 0) return [{ kind: "checkpoint", paths: details.changes.map((change) => change?.path).filter((path) => typeof path === "string") }];
 		return [];
 	};
+	// A v2 case phase may use read/search/list. Their successful bounded outputs become immutable,
+	// phase-local receipts in the case ledger so a direct observation can name actual evidence.
+	const CASE_SOURCE_TOOLS = new Set(["read", "search", "list"]);
+	const caseReceiptText = (result) => (result?.output ?? []).flatMap((part) => part?.type === "text" ? [String(part.text ?? "")] : []).join("\n");
+	const recordCaseReceipt = (run, call, result, at) => {
+		if (typeof run?.caseId !== "string" || typeof run?.phase !== "string" || result?.isError === true || !CASE_SOURCE_TOOLS.has(call.name)) return undefined;
+		try {
+			return appendCaseReceipt(brainDir, run.caseId, run.phase, { tool: call.name, arguments: call.arguments ?? {}, output: caseReceiptText(result), at });
+		} catch {
+			// A malformed or manually edited case must not turn an already completed source read into a failed tool call.
+			return undefined;
+		}
+	};
+	const withCaseReceipt = (result, receipt) => {
+		if (receipt === undefined) return result;
+		const note = receipt.kind === "receipt"
+			? `Case evidence receipt ${receipt.id} is durable for this phase (sha256 ${receipt.digest}). Cite ${receipt.id} as kind receipt for a direct observation.`
+			: `Case evidence ledger ${receipt.id} records a source gap: ${receipt.text}`;
+		return { ...result, output: [...(result.output ?? []), { type: "text", text: note }], details: { ...(result.details ?? {}), ...(receipt.kind === "receipt" ? { caseReceipt: receipt.id } : { caseLedger: receipt.id }) } };
+	};
+	// Receipt capture belongs inside the source tool result, before Durable persists it and the read-tail
+	// projection moves file content. An after-tool hook is too late for that projection.
+	const caseSourceTool = (tool) => ({
+		...tool,
+		execute: async (args, api, callContext) => {
+			const result = await tool.execute(args, api, callContext);
+			const receipt = recordCaseReceipt(loadContext(brainDir).tasks[api.conversationId], { name: tool.name, arguments: args }, result, api.now());
+			return withCaseReceipt(result, receipt);
+		},
+	});
 	const atlasFactsInRound = new Map();
 	const publishAtlasFacts = (call, result, api) => {
 		const facts = atlasFacts(call, result);
@@ -323,10 +353,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
 		forMain(caseTool({ root, brainDir, config, active })),
 		returnTool({ root, brainDir, config }),
-		readTool({ root, brainDir }),
+		caseSourceTool(readTool({ root, brainDir })),
 		shelfTool({ root, brainDir, config }),
 		bookTool({ root, brainDir, config, engine, gate }),
-		...lookTools(root),
+		...lookTools(root).map(caseSourceTool),
 		...changeTools({ root, brainDir, gate }),
 		shellTool({ root, config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
 		consultTool({ root, brainDir, config }),
@@ -401,9 +431,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (call.parent !== undefined) return undefined;
 					const looped = loopCheck(call, result, api);
 					const out = looped ?? result;
-					// loopCheck has decremented this call; publishing now makes the final result of a reply commit the
-					// whole factual batch as one epoch rather than one epoch per independently completed call.
-					publishAtlasFacts(call, out, api);
+					// Keep this synchronous with loopCheck: sibling calls in one reply share one mapping epoch. A case
+					// phase may observe project files, but never changes the shared atlas as a side effect of observing them.
+					const casePhase = api.conversationId !== ROOT_CONVERSATION_ID && typeof loadContext(brainDir).tasks[api.conversationId]?.caseId === "string";
+					if (!casePhase) publishAtlasFacts(call, out, api);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
 						const id = api.conversationId;
