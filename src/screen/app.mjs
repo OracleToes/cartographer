@@ -1438,7 +1438,9 @@ export async function runScreen(session, options, runTerminal) {
 			const question = session.asks?.pending();
 			const typed = prompt.getText();
 			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
-			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to write";
+			let hint = "Esc or i to write";
+			if (question !== undefined) hint = "the agent waits for your answer: Esc, then type it";
+			if (state.pending !== "") hint = `${state.pending}…`;
 			return [[" COMMAND MODE ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
 		prompt() {
@@ -1447,10 +1449,17 @@ export async function runScreen(session, options, runTerminal) {
 			// Keep the terminal core's safety marks at the place someone acts, but give the words a stable human role
 			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
 			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
-			const role = session.activeTask?.() !== undefined && core.busy() ? "Task" : "You";
-			return { text: `${marks === "" ? "" : `${marks} `}${role} › `, style: marks === "" ? (role === "Task" ? "tool bold" : "user bold") : "warn bold" };
+			const task = session.activeTask?.() !== undefined && core.busy();
+			const role = task ? "Task" : "You";
+			if (marks !== "") return { text: `${marks} ${role} › `, style: "warn bold" };
+			if (task) return { text: "Task › ", style: "tool bold" };
+			return { text: "You › ", style: "user bold" };
 		},
-		placeholder: () => (session.asks?.pending() !== undefined ? "Write the answer" : core.busy() ? "Message the agent while it works · Esc for commands" : "Message Cartographer, or /help · Esc for commands"),
+		placeholder: () => {
+			if (session.asks?.pending() !== undefined) return "Write the answer";
+			if (core.busy()) return "Message the agent while it works · Esc for commands";
+			return "Message Cartographer, or /help · Esc for commands";
+		},
 	};
 	const chatBody = new ChatBody(ui);
 	const scrollbar = { scrollbar: "auto", scrollbarTrackStyle: (text) => `${sgr("faint")}${text}\x1b[39m`, scrollbarThumbStyle: (text) => `${sgr("muted")}${text}\x1b[39m` };

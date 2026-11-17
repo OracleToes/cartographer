@@ -28,6 +28,44 @@ export const AIRY_ROWS = POLICY.limits.screen.airyRows;
 
 
 const widthOf = (text) => visibleWidth(text);
+const BLOCK_RAILS = {
+	bgUser: ["▎", "user"],
+	bgTool: ["│", "tool"],
+	bgNote: ["┊", "note"],
+};
+const EMPTY_RAIL = [" ", ""];
+const TAB_BRAND = " Cartographer ";
+const VIEW_PREFIX = " views ";
+const COMPACT_VIEW_NAMES = {
+	"Current shared brain": "Brain",
+	"Last step": "Last",
+	"This session": "Session",
+	"git HEAD": "HEAD",
+	"Latest sent": "Latest",
+	"Main sent": "Main",
+	"Raw payload": "Raw",
+	"Next preview": "Preview",
+	"Current accounting": "Accounting",
+};
+const ROOMY_VIEW_NAV = { compact: false, separator: " · ", switchHint: "  [ ] switch" };
+const COMPACT_VIEW_NAV = { compact: true, separator: "·", switchHint: " [ ]" };
+const tabLabels = (tabs, compact = false) =>
+	tabs.map((tab, index) => (compact ? ` ${index + 1} ` : ` ${index + 1} ${tab.name} `));
+const labelsWidth = (labels) => labels.reduce((sum, label) => sum + widthOf(label), 0);
+const compactViewName = (view) => COMPACT_VIEW_NAMES[view.name] ?? view.name;
+const viewLabel = (view, compact) => ` ${compact ? compactViewName(view) : view.name} `;
+const viewNavigationWidth = (views, layout) =>
+	widthOf(VIEW_PREFIX) +
+	widthOf(layout.switchHint) +
+	views.reduce(
+		(sum, view, index) => sum + widthOf(viewLabel(view, layout.compact)) + (index === 0 ? 0 : widthOf(layout.separator)),
+		0,
+	);
+function viewNavigation(views, inner) {
+	if (viewNavigationWidth(views, ROOMY_VIEW_NAV) <= inner) return ROOMY_VIEW_NAV;
+	if (viewNavigationWidth(views, COMPACT_VIEW_NAV) <= inner) return COMPACT_VIEW_NAV;
+	return undefined;
+}
 const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 /** The code-unit offset where the grapheme before `at` starts: edits never cut a sign in two. */
 const beforeAt = (text, at) => {
@@ -104,14 +142,10 @@ export function contentRow(line, width, chosen = false) {
 	if (line.styled !== undefined) return `${edge(width)}${paintStyled(line.styled, line.cells, inner, chosen ? "bgSel" : "")}${edge(width)}`;
 	// A block gets one quiet, consistent rail. It groups a multi-line message without making every line compete for
 	// attention: your words have a blue edge, tool work a teal one, and private notes a violet one.
-	const rail = line.pad
-		? ({
-				bgUser: ["▎", "user"],
-				bgTool: ["│", "tool"],
-				bgNote: ["┊", "note"],
-			}[line.bg] ?? [" ", ""])
-		: undefined;
-	return `${edge(width)}${paint([...(rail === undefined ? [] : [rail]), ...line.spans], inner, chosen ? "bgSel" : (line.bg ?? ""))}${edge(width)}`;
+	const rail = line.pad ? (BLOCK_RAILS[line.bg] ?? EMPTY_RAIL) : undefined;
+	const spans = rail === undefined ? line.spans : [rail, ...line.spans];
+	const background = chosen ? "bgSel" : (line.bg ?? "");
+	return `${edge(width)}${paint(spans, inner, background)}${edge(width)}`;
 }
 /** A line that pi-tui will take: never wider than it was asked for, whatever went into it. */
 const safe = (line, width) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line);
@@ -139,20 +173,20 @@ export class TabBar {
 		return guarded(width, () => {
 			const { ui } = this;
 			const inner = width - 2 * marginOf(width);
-			const full = ui.tabs.map((tab, index) => ` ${index + 1} ${tab.name} `);
-			const compact = ui.tabs.map((_tab, index) => ` ${index + 1} `);
-			const brand = " Cartographer ";
-			const total = (labels) => labels.reduce((sum, label) => sum + widthOf(label), 0);
+			const full = tabLabels(ui.tabs);
+			const compact = tabLabels(ui.tabs, true);
+			const fullWidth = labelsWidth(full);
+			const brandWidth = widthOf(TAB_BRAND);
 			// The product name is useful orientation when there is room. On smaller terminals, preserve the tab names;
 			// if those do not fit either, the numbered tabs stay whole rather than being cut halfway through a name.
-			const showBrand = widthOf(brand) + 1 + total(full) <= inner;
-			const labels = total(full) + (showBrand ? widthOf(brand) + 1 : 0) <= inner ? full : compact;
+			const showBrand = brandWidth + 1 + fullWidth <= inner;
+			const labels = fullWidth <= inner ? full : compact;
 			const spans = [];
 			this.spans = [];
 			let x = 0;
 			if (showBrand) {
-				spans.push([brand, "carto bold"]);
-				x += widthOf(brand);
+				spans.push([TAB_BRAND, "carto bold"]);
+				x += brandWidth;
 				spans.push([" ", ""]);
 				x++;
 			}
@@ -188,64 +222,37 @@ export class ViewBar {
 			const inner = width - 2 * marginOf(width);
 			if (views.length === 0) return [barRow([], width, "bgPanel")];
 			const active = views.find((view) => view.id === ui.view()) ?? views[0];
-			const prefix = " views ";
-			const roomySeparator = " · ";
-			const compactSeparator = "·";
-			const roomySwitchHint = "  [ ] switch";
-			const compactSwitchHint = " [ ]";
-			const labelOf = (view) => ` ${view.name} `;
-			// Names remain descriptive in the roomy layout. A compact vocabulary keeps every sibling visible at the
-			// common 80-column width, instead of turning the secondary navigation into a clipped sentence.
-			const compactName = (view) =>
-				({
-					"Current shared brain": "Brain",
-					"Last step": "Last",
-					"This session": "Session",
-					"git HEAD": "HEAD",
-					"Latest sent": "Latest",
-					"Main sent": "Main",
-					"Raw payload": "Raw",
-					"Next preview": "Preview",
-					"Current accounting": "Accounting",
-				}[view.name] ?? view.name);
-			const compactLabelOf = (view) => ` ${compactName(view)} `;
-			const navWidth = (makeLabel, separator) => views.reduce((sum, view, index) => sum + widthOf(makeLabel(view)) + (index === 0 ? 0 : widthOf(separator)), 0);
+			const layout = viewNavigation(views, inner);
 			const file = ui.fileHint();
 			const fileHint = file === undefined ? "" : ` · ${file}`;
-			const allFit = widthOf(prefix) + navWidth(labelOf, roomySeparator) + widthOf(roomySwitchHint) <= inner;
-			const compactFit = widthOf(prefix) + navWidth(compactLabelOf, compactSeparator) + widthOf(compactSwitchHint) <= inner;
-			const spans = [[prefix, "faint"]];
+			const spans = [[VIEW_PREFIX, "faint"]];
 			this.spans = [];
-			let x = widthOf(prefix);
-			if (allFit || compactFit) {
-				const compact = !allFit;
-				const makeLabel = compact ? compactLabelOf : labelOf;
-				const separator = compact ? compactSeparator : roomySeparator;
-				const switchHint = compact ? compactSwitchHint : roomySwitchHint;
+			let x = widthOf(VIEW_PREFIX);
+			if (layout !== undefined) {
 				for (const [index, view] of views.entries()) {
 					if (index > 0) {
-						spans.push([separator, "faint"]);
-						x += widthOf(separator);
+						spans.push([layout.separator, "faint"]);
+						x += widthOf(layout.separator);
 					}
-					const label = makeLabel(view);
+					const label = viewLabel(view, layout.compact);
 					const cells = widthOf(label);
 					this.spans.push({ id: view.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
 					spans.push([label, view.id === active.id ? "user bold under" : "muted"]);
 					x += cells;
 				}
-				spans.push([switchHint, "faint"]);
-				x += widthOf(switchHint);
+				spans.push([layout.switchHint, "faint"]);
+				x += widthOf(layout.switchHint);
 				// The file goes in only whole; a hint cut in half says where e goes nowhere.
 				if (fileHint !== "" && x + widthOf(fileHint) <= inner) spans.push([fileHint, "faint"]);
 			} else {
 				// At a narrow width, one clear current view beats a ragged, half-visible row of alternatives. The
 				// persistent [ ] cue keeps the complete view switcher discoverable without pretending hidden labels fit.
-				const room = Math.max(1, inner - x - widthOf(compactSwitchHint) - 2);
-				const label = ` ${cut(compactName(active), room)} `;
+				const room = Math.max(1, inner - x - widthOf(COMPACT_VIEW_NAV.switchHint) - 2);
+				const label = ` ${cut(compactViewName(active), room)} `;
 				const cells = widthOf(label);
 				this.spans.push({ id: active.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
 				spans.push([label, "user bold under"]);
-				spans.push([compactSwitchHint, "faint"]);
+				spans.push([COMPACT_VIEW_NAV.switchHint, "faint"]);
 			}
 			return [barRow(spans, width, "bgPanel")];
 		});

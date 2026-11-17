@@ -73,6 +73,11 @@ const callsOf = (message) => (Array.isArray(message?.content) ? message.content.
 const inTalk = (item) => item?.type === "user" || (item?.type === "agent" && item.delivery !== "failed");
 /** The visible identity cue is deliberately an admitted Durable entry, never the visible saying or a local row number. */
 const sourceLabel = (source) => source?.kind === "durable-message" ? ` · Durable ${source.entryId}/${source.position}` : " · source pending";
+const privateLabel = (kind) => {
+	if (kind === "reasoning") return "Private reasoning · provider response · replay: provider-bound";
+	if (kind === "note") return "Agent note · provider response · replay: active-context dependent";
+	return kind;
+};
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?/, "").trim();
 /** The argument of a call that is worth watching while it is written: the longest text in it. */
 function bodyOf(call) {
@@ -607,8 +612,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					// Private material is its own quiet block, rather than borrowing the tools' cyan. Its rail and faint
 					// violet surface make it easy to keep separate from both speech and work without elevating its weight.
 					const ref = { item: item.key, kind: item.type, bg: "bgNote" };
-					const label = item.type === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : "Agent note · provider response · replay: active-context dependent";
-					if (projection === "work") add([[`Main · ${label}`, "faint"]], ref);
+					if (projection === "work") add([[`Main · ${privateLabel(item.type)}`, "faint"]], ref);
 					for (const piece of wrap(item.text, cols - 2)) add([[piece, "note italic"]], ref);
 				} else if (item.type === "console") {
 					if (projection === "work") add([["Harness · notice", "faint"]], { item: item.key, kind: "console" });
@@ -675,12 +679,15 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			for (const depth of [...live.keys()].sort((a, b) => a - b)) {
 				const current = live.get(depth);
 				const { message } = current;
-				const indent = depth > 0 ? "  │ " : "";
+				const focused = depth > 0;
+				const indent = focused ? "  │ " : "";
+				const source = focused ? "Focus" : "Main";
+				const noteLead = focused ? `${indent}┊ ` : "";
 				const calls = callsOf(message);
 				if (projection !== "work") {
 					for (const call of calls.filter((entry) => entry.name === "chat" && typeof entry.arguments?.text === "string" && entry.arguments.text.trim() !== "")) {
-						if (depth === 0 && before !== "agent") blank();
-						if (projection === "talk") add([[`Agent speech${depth > 0 ? " · focus" : ""} · sending · chat call ${call.id}`, "warn"]], { kind: "live-speech" });
+						if (!focused && before !== "agent") blank();
+						if (projection === "talk") add([[`Agent speech${focused ? " · focus" : ""} · sending · chat call ${call.id}`, "warn"]], { kind: "live-speech" });
 						said(call.arguments.text.trim(), { kind: "live-speech" });
 						before = "agent";
 					}
@@ -688,7 +695,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				if (projection === "talk") continue;
 				// A main reply's private material should look like its completed counterpart from the first token. A focus
 				// stays inside the teal work block that owns it.
-				const block = { bg: depth > 0 ? "bgTool" : "bgNote" };
+				const block = { bg: focused ? "bgTool" : "bgNote" };
 				const privateResponse = (kind, text) => {
 					if (text.trim() === "" || !thinking) return;
 					const room = inner - width(indent) - 2;
@@ -698,13 +705,13 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					const omitted = preview?.omitted ?? 0;
 					const expandable = current.open || omitted > 0;
 					const ref = expandable ? { item: `live:${depth}`, kind: "live", liveDepth: depth, ...block } : { kind: "live", ...block };
-					const label = kind === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : kind === "note" ? "Agent note · provider response · replay: active-context dependent" : kind;
-					const noteLead = depth > 0 ? `${indent}┊ ` : "";
-					if (depth === 0 && before !== kind) blank();
+					const label = privateLabel(kind);
+					if (!focused && before !== kind) blank();
 					if (expandable) {
 						const lines = current.open ? `${full.length} ${full.length === 1 ? "line" : "lines"} · Enter folds` : `${omitted} earlier ${omitted === 1 ? "line" : "lines"} · Enter opens all`;
-						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${projection === "work" ? `${depth > 0 ? "Focus" : "Main"} · ` : ""}${label} · ${lines}`, "faint"]], ref);
-					} else if (projection === "work") add([[noteLead, "faint"], [`${depth > 0 ? "Focus" : "Main"} · ${label}`, "faint"]], ref);
+						const scope = projection === "work" ? `${source} · ` : "";
+						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${scope}${label} · ${lines}`, "faint"]], ref);
+					} else if (projection === "work") add([[noteLead, "faint"], [`${source} · ${label}`, "faint"]], ref);
 					for (const piece of pieces) add([[noteLead, "faint"], [piece, "note italic"]], ref);
 					before = kind;
 				};
@@ -714,13 +721,13 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					privateResponse("note", textOf(message));
 				}
 				if (!thinking && projection === "all" && noteOf(message).trim() !== "" && calls.length === 0) {
-					if (depth === 0 && before !== "note") blank();
-					add([[depth > 0 ? `${indent}┊ ` : "", "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
+					if (!focused && before !== "note") blank();
+					add([[noteLead, "faint"], ["thinking… (Ctrl-T shows it)", "faint"]], { kind: "live", ...block });
 					before = "note";
 				}
 				for (const call of calls.filter((entry) => entry.name !== "chat")) {
 					const label = describeCall(call, describeRef).replace(/\n/g, " ");
-					const shown = projection === "work" ? `${depth > 0 ? "Focus" : "Main"} · call · ${label} · sending` : label;
+					const shown = projection === "work" ? `${source} · call · ${label} · sending` : label;
 					add([[`${indent}✎ `, "warn"], [cut(shown, inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
 					const body = bodyOf(call);
 					if (body !== "") {
