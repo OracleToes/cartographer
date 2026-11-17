@@ -1,8 +1,8 @@
-// Talk and Work are two projections of the same local event feed.
+// Conversation and Work are two subtabs of the same local Chat event feed.
 //
-// Talk holds only the user's submitted speech and an agent `chat` call while it is sending or after its result says
+// Conversation holds only the user's submitted speech and an agent `chat` call while it is sending or after its result says
 // it was delivered. Work holds private reasoning, ordinary agent notes, calls/results, failures, harness notices,
-// and request blocks. A failed `chat` call leaves Talk and stands in Work as a failed speech attempt. Work keeps the
+// and request blocks. A failed `chat` call leaves Conversation and stands in Work as a failed speech attempt. Work keeps the
 // old useful grouping: a run is one line, "▸ 20 calls · 1m 12s"; opening it shows its calls and results, or leads
 // to the tab where that work lives (a write to Diff, a command to Shells, the plan to Carto).
 //
@@ -69,7 +69,7 @@ const thinkingOf = (message) => (message?.content ?? []).flatMap((part) => (part
 /** What the live note shows and copies: the model's reasoning followed by its ordinary text. */
 const noteOf = (message) => [thinkingOf(message), textOf(message)].filter((part) => part.trim() !== "").join("\n");
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
-/** A Talk item is direct two-party speech. Failed delivery is private work, not a statement that reached the user. */
+/** A Conversation item is direct two-party speech. Failed delivery is private work, not a statement that reached the user. */
 const inTalk = (item) => item?.type === "user" || (item?.type === "agent" && item.delivery !== "failed");
 /** The visible identity cue is deliberately an admitted Durable entry, never the visible saying or a local row number. */
 const sourceLabel = (source) => source?.kind === "durable-message" ? ` · Durable ${source.entryId}/${source.position}` : " · source pending";
@@ -433,7 +433,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		touch();
 		return true;
 	},
-	/** A source removed from future kept talk is gone from this local Talk projection too. */
+	/** A source removed from future kept talk is gone from this local Conversation projection too. */
 	forget(key) {
 		const at = items.findIndex((entry) => entry.key === key);
 		if (at < 0) return false;
@@ -455,7 +455,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		 * The tab as lines of `cols` cells. Each line says what it belongs to, so that a selection or a click can
 		 * act on it: { spans, item, row?, kind }.
 		 */
-		// `all` keeps the old mixed projection for direct callers during the migration; the screen always names Talk or Work.
+		// `all` keeps the old mixed projection for direct callers during the migration; the screen always names Conversation or Work.
 		lines(cols, projection = "all") {
 			const out = [];
 			// Where the lines being made go: the lines of one item while it is made, else the tab's.

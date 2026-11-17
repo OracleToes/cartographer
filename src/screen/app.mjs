@@ -1,11 +1,10 @@
 // The full screen: tabs, a status strip that is always there, and a place to type.
 //
-//   1 Talk     what reached the user or is being sent (src/screen/chat.mjs)
-//   2 Work     the private shared-brain activity, not user-directed speech
-//   3 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
-//   4 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
-//   5 Shells   the shell windows, live
-//   6 Model    sent provider payloads, next-request preview, and current accounting
+//   1 Chat     Conversation is user-directed exchange; Work is private shared-brain activity (src/screen/chat.mjs)
+//   2 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
+//   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
+//   4 Shells   the shell windows, live
+//   5 Model    sent provider payloads, next-request preview, and current accounting
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -51,8 +50,7 @@ import { accountingView, atlasView, contextView, diffView, editorCommand, handsV
 import { USER_NAME } from "../user.mjs";
 
 export const TABS = [
-	{ id: "chat", name: "Talk" },
-	{ id: "work", name: "Work" },
+	{ id: "chat", name: "Chat" },
 	{ id: "carto", name: "Carto" },
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
@@ -60,6 +58,10 @@ export const TABS = [
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
 export const VIEWS = {
+	chat: [
+		{ id: "conversation", name: "Conversation" },
+		{ id: "work", name: "Work" },
+	],
 	carto: [
 		{ id: "atlas", name: "Atlas" },
 		{ id: "ledger", name: "Ledger" },
@@ -85,7 +87,7 @@ export const VIEWS = {
 		{ id: "parts", name: "Current accounting" },
 	],
 };
-/** Every view of every tab but Talk and Work, by the name it is kept under. */
+/** Every list-backed view; Chat's Conversation and Work share the chat projection instead. */
 const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
@@ -109,7 +111,8 @@ const COMMANDS = [
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
+	["case", "bounded evidence cases; /case c1 shows one, /case stop c1 ends one", ["stop"]],
+	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
@@ -155,16 +158,16 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 6           go to a tab (Talk is direct speech; Work is private shared-brain activity)",
-	"  [ and ]          the previous and the next view inside Carto, Diff and Model (H and L do the same)",
+	"  1 to 5           go to a tab (Chat holds Conversation and private Work)",
+	"  [ and ]          the previous and the next view inside Chat, Carto, Diff and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
 	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk it rewords a stable source for a future kept talk; private work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Talk, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -300,7 +303,7 @@ export async function runScreen(session, options, runTerminal) {
 
 	const state = {
 		tab: "chat",
-		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
+		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "window" },
 		shell: undefined, // the shell window whose output the Output view shows
 		deleteArm: undefined, // a report or Talk source marked for its second d
 		mode: "type",
@@ -454,7 +457,8 @@ export async function runScreen(session, options, runTerminal) {
 		else if (busy) {
 			const doing = chat.doing();
 			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
-			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
+			const activeCase = session.activeCase?.();
+			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (activeCase !== undefined ? `case ${activeCase.id}` : session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
 			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
 			if (reading) {
 				const { fresh, done, ms } = state.prefill;
@@ -478,6 +482,8 @@ export async function runScreen(session, options, runTerminal) {
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
 		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
+		const evidenceCase = session.activeCase?.();
+		if (evidenceCase !== undefined) second.push([` · case ${evidenceCase.id}${evidenceCase.phase ? `/${evidenceCase.phase}` : ""}`, "warn"]);
 		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (windows.length > 0) {
 			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
@@ -493,7 +499,8 @@ export async function runScreen(session, options, runTerminal) {
 
 	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
 	const LEGEND = {
-		chat: "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
+		"chat.conversation": "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
+		"chat.work": "j k move · Enter open · y copy",
 		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
 		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
 		"carto.plan": "t done/review · n new · v archive · d delete · e edit",
@@ -510,11 +517,10 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": "Enter open · y copy",
 		"context.preview": "Enter open · y copy",
 		"context.parts": "Enter open · + all · y copy",
-		work: "j k move · Enter open · y copy",
 	};
 	const legend = () => {
 		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
-		const id = state.tab === "chat" ? "chat" : state.tab === "work" ? "work" : viewId();
+		const id = viewId();
 		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
 	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
@@ -615,9 +621,9 @@ export async function runScreen(session, options, runTerminal) {
 		chat.seal();
 		draw();
 	};
-	const tabName = () => ((state.tab === "chat" || state.tab === "work") ? `the ${TABS.find((tab) => tab.id === state.tab).name} tab` : `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`);
+	const tabName = () => `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`;
 	const copyTab = () => {
-		if (state.tab === "chat" || state.tab === "work") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), state.tab, tabName(), "txt");
+		if (state.tab === "chat") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), `chat-${state.view.chat}`, tabName(), "txt");
 		return copy(pageOf().list.text(), viewId().replace(".", "-"), tabName(), "txt");
 	};
 	const copyCommand = (argument) => {
@@ -629,7 +635,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 
 	// ─── Tabs, views and what scrolls ───────────────────────────────────────
-	const chatTab = () => state.tab === "chat" || state.tab === "work";
+	const chatTab = () => state.tab === "chat";
 	const scrollOf = () => (chatTab() ? chatScroll : pageOf().scroll);
 	const setTab = (id) => {
 		if (!TABS.some((tab) => tab.id === id)) return;
@@ -673,8 +679,9 @@ export async function runScreen(session, options, runTerminal) {
 		const text = given.trim();
 		if (text === "") return;
 		prompt.addToHistory(text);
-		// New user speech belongs in Talk, even when private Work was open.
+		// New user speech belongs in Chat's Conversation view, even when private Work was open.
 		if (state.tab !== "chat") setTab("chat");
+		if (state.view.chat !== "conversation") setView("conversation");
 		chatScroll.scrollToEnd();
 		const [name, argument] = text.slice(1).trim().split(/\s+/);
 		if (text.startsWith("/") && !text.includes("\n")) {
@@ -725,11 +732,11 @@ export async function runScreen(session, options, runTerminal) {
 		writeFileSync(file, `${text}\n`);
 		return file;
 	};
-	/** e in Talk changes only a row that names the source it changes. Work is private and read-only. */
+	/** e in Conversation changes only a row that names the source it changes. Work is private and read-only. */
 	const editChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (state.tab === "work") return flash("private work cannot be edited");
+		if (chatProjection() === "work") return flash("private work cannot be edited");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
 		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
@@ -746,7 +753,7 @@ export async function runScreen(session, options, runTerminal) {
 	const removeChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (state.tab === "work") return flash("private work cannot be removed from future kept talk");
+		if (chatProjection() === "work") return flash("private work cannot be removed from future kept talk");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
 		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
@@ -806,7 +813,7 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			case "chat-you":
 			case "chat-agent":
-				return flash("this is a frozen sent-request row. Open Talk to change a current kept source; sent requests stay as sent.");
+				return flash("this is a frozen sent-request row. Open Chat's Conversation view to change a current kept source; sent requests stay as sent.");
 			case "reply":
 				return flash("the reply is being written; e on it works once it is done");
 			case "result":
@@ -1133,8 +1140,8 @@ export async function runScreen(session, options, runTerminal) {
 		change();
 		reveal(chatScroll, selectedRow() + chatBody.leadNow());
 	};
-	/** The shared chat model shown in the projection selected by the top-level Talk or Work tab. */
-	const chatProjection = () => (state.tab === "work" ? "work" : "talk");
+	/** The shared chat model shown in Chat's Conversation or Work subtab. */
+	const chatProjection = () => (state.view.chat === "work" ? "work" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
 		if (all.length === 0) return;
@@ -1286,7 +1293,7 @@ export async function runScreen(session, options, runTerminal) {
 			return;
 		}
 		if (key === "/") return void terminal.press?.(SEARCH_KEY);
-		if (/^[1-6]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
+		if (/^[1-5]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
 		if (key === "?") return void showKeys();
 		if (key === "]" || key === "L") return void stepView(1);
 		if (key === "[" || key === "H") return void stepView(-1);
@@ -1450,13 +1457,17 @@ export async function runScreen(session, options, runTerminal) {
 			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
 			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
 			const task = session.activeTask?.() !== undefined && core.busy();
-			const role = task ? "Task" : "You";
+			const evidenceCase = session.activeCase?.();
+			const role = task ? "Task" : evidenceCase !== undefined && core.busy() ? `Case ${evidenceCase.id}` : "You";
 			if (marks !== "") return { text: `${marks} ${role} › `, style: "warn bold" };
 			if (task) return { text: "Task › ", style: "tool bold" };
+			if (evidenceCase !== undefined && core.busy()) return { text: `Case ${evidenceCase.id} › `, style: "tool bold" };
 			return { text: "You › ", style: "user bold" };
 		},
 		placeholder: () => {
 			if (session.asks?.pending() !== undefined) return "Write the answer";
+			const evidenceCase = session.activeCase?.();
+			if (evidenceCase !== undefined && core.busy()) return `Message evidence case ${evidenceCase.id}; it records the phase route · Esc for commands`;
 			if (core.busy()) return "Message the agent while it works · Esc for commands";
 			return "Message Cartographer, or /help · Esc for commands";
 		},
@@ -1520,7 +1531,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pasted = createPasteWatch();
 	const watchInput = (chunk) => pasted.read(chunk);
 	/** The keys the commands mode takes that the editor has no use for with Alt held. */
-	const AFTER_ESCAPE = new Set([..."123456jkgGhloeYriazR+-[]HL?/: "]);
+	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazR+-[]HL?/: "]);
 	tui.addInputListener((data) => {
 		if (state.closed || isKeyRelease(data)) return undefined;
 		// A sheet lies over the screen: the keys are its own.

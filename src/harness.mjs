@@ -30,6 +30,8 @@ import { lookTools } from "./tools/look.mjs";
 import { shellTool } from "./tools/shell.mjs";
 import { consultTool } from "./tools/consult.mjs";
 import { taskTool } from "./tools/task.mjs";
+import { caseTool } from "./tools/case.mjs";
+import { noteCaseMessage } from "./case.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
@@ -45,7 +47,7 @@ const types = (call) => call.name === "shell" && (call.arguments?.action === und
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
 // The book tool guards its own books inside the tool (a task may use its context operations);
 // the rest of the main agent's tools are wrapped here.
-const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
+const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, case: REFUSALS.taskStartsCase, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
 const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
@@ -64,6 +66,8 @@ export function runFromBrief(stored) {
 		...(Number.isInteger(stored.revision) ? { revision: stored.revision } : {}),
 		...(Array.isArray(stored.targets) ? { targets: stored.targets } : {}),
 		...(Number.isInteger(stored.turns) ? { turns: stored.turns } : {}),
+		...(typeof stored.caseId === "string" ? { caseId: stored.caseId } : {}),
+		...(typeof stored.phase === "string" ? { phase: stored.phase } : {}),
 	};
 }
 
@@ -71,7 +75,7 @@ export function runFromBrief(stored) {
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
  * network. The brief entry at the start of the conversation says it (src/tools/task.mjs); `runs` remembers the
  * answer for this run of the program.
- * @returns {Promise<{ mode: "look" | "change", network?: boolean, move?: string, revision?: number, targets?: string[], turns?: number }>}
+ * @returns {Promise<{ mode: "look" | "change", network?: boolean, move?: string, revision?: number, targets?: string[], turns?: number, caseId?: string, phase?: string }>}
  */
 async function runOf(runs, api, context) {
 	const known = runs.get(api.conversationId);
@@ -83,7 +87,7 @@ async function runOf(runs, api, context) {
 		for (const entry of result.items) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
-			if (entry.kind === "carto.brief") {
+			if (entry.kind === "carto.brief" || entry.kind === "carto.case-phase") {
 				run = runFromBrief(entry.data);
 				break search;
 			}
@@ -219,12 +223,16 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const returning = new Set();
 	// What ended a conversation's stretch from here and not by its own doing: { why: "limit" | "same-note", ... }.
 	const ends = new Map();
-	// The task that runs now, and what the user typed while it runs: `said` is still to be told to the task,
-	// `heard` is all of it, for the task's result (src/tools/task.mjs).
-	const active = { id: undefined, said: [], heard: [] };
+	// The focused work that runs now, and what the user typed while it runs. A task holds one local report;
+	// a case holds a durable participation queue across several local phases. `said` reaches the current focus at
+	// its next result, `heard` is the task's report trail, and a case's `deliver` marks its own provenance file.
+	const active = { id: undefined, said: [], heard: [], kind: undefined, caseId: undefined, phase: undefined, deliver: undefined };
 	const takeSaid = () => {
-		const lines = active.said.splice(0).map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
-		return lines.length === 0 ? undefined : [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
+		const entries = active.said.splice(0);
+		if (entries.length === 0) return undefined;
+		try { active.deliver?.(entries); } catch { /* A case file that was hand-broken must not make a task tool result fail. */ }
+		const lines = entries.map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
+		return [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });
 	// Tools report plain, successful facts; the atlas alone maps a path to an existing node or keeps an unmapped
@@ -309,6 +317,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		chatTool({ brainDir }),
 		askTool({ brainDir, asks }),
 		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
+		forMain(caseTool({ root, brainDir, config, active })),
 		returnTool({ root, brainDir, config }),
 		readTool({ root, brainDir }),
 		shelfTool({ root, brainDir, config }),
@@ -356,10 +365,23 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					}
 					// A task that reaches for a tool of the main agent is told so and goes on. It ends with `return`.
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
+					const run = await runOf(runs, api, hookContext);
+					// A case phase is a bounded same-model evidence context, not another user-facing agent and not a route
+					// to the external storyteller. Participation arrives through the durable case queue instead of ask.
+					if (run.caseId !== undefined && ["chat", "ask", "consult"].includes(call.name)) {
+						return { block: "A bounded evidence phase stays inside its frozen same-model case: it does not chat, ask, or consult. The user can write into the case queue, and I return one private artifact to the main context." };
+					}
+					// Separate phase contexts must not use the shared books or shelf as a side channel into a later phase.
+					// Their only durable handoff is the recorded case artifact; `return` may not promote a shelf item.
+					if (run.caseId !== undefined && ["book", "shelf"].includes(call.name)) {
+						return { block: "A bounded evidence phase keeps its work in its case artifact: it does not edit the shared brain or shelf. Read project sources directly and return the observation to the main context." };
+					}
+					if (run.caseId !== undefined && call.name === "return" && String(call.arguments?.shelf ?? "").trim() !== "") {
+						return { block: "A bounded evidence phase cannot hand a shelf item onward. Put the source, observation, and uncertainty in this case artifact; the main context decides what to keep." };
+					}
 					// Writing is for a task that carries out a live approved change move revision, and for no one else.
 					// So is running a command. The answer is kept in `runs`, where the shell tool finds it.
 					if (CHANGE.has(call.name) || types(call)) {
-						const run = await runOf(runs, api, hookContext);
 						if (run.mode !== POLICY.enums.planMode.change || typeof run.move !== "string" || !Number.isInteger(run.revision)) {
 							return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
 						}
@@ -590,14 +612,16 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		/** The conversation of the task that runs now, or undefined. */
-		activeTask: () => active.id,
+		/** The conversation of the ordinary task that runs now, or undefined. A case phase is deliberately separate. */
+		activeTask: () => active.kind === "task" ? active.id : undefined,
+		/** The active bounded evidence case, including a phase only while one owns a local focus. */
+		activeCase: () => active.kind === "case" && typeof active.caseId === "string" ? { id: active.caseId, phase: active.phase } : undefined,
 		/**
 		 * What the user typed while a task runs: the task reads it with its next result, and it is kept as talk.
 		 * @returns {boolean} whether a task was there to tell
 		 */
 		tellTask(text) {
-			if (active.id === undefined) return false;
+			if (active.kind !== "task" || active.id === undefined) return false;
 			const entry = { text: String(text).trim(), at: Date.now() };
 			if (entry.text === "") return false;
 			active.said.push(entry);
@@ -605,6 +629,35 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			noteChat(brainDir, "user", entry.at, entry.text, { seen: false });
 			return true;
 		},
+		/** A participant message for an active case. It reaches the active phase's next result, or queues for the
+		 * next phase while the coordinator is between contexts; both routes are recorded in the case itself. */
+		tellCase(text) {
+			if (active.kind !== "case" || typeof active.caseId !== "string") return false;
+			const at = Date.now();
+			const said = String(text).trim();
+			if (said === "") return false;
+			let recorded;
+			try {
+				recorded = noteCaseMessage(brainDir, active.caseId, said, { at, phase: active.phase });
+			} catch (error) {
+				return { kind: "case", id: active.caseId, accepted: false, reason: error.message };
+			}
+			if (recorded.accepted !== true) return { kind: "case", id: active.caseId, accepted: false, reason: recorded.reason };
+			const entry = { text: said, at, caseMessageId: recorded.entry.id };
+			if (recorded.entry.route === "active") {
+				active.said.push(entry);
+				active.heard.push(entry);
+			}
+			noteChat(brainDir, "user", at, said, { seen: false });
+			return { kind: "case", id: active.caseId, phase: recorded.entry.phase, queued: recorded.entry.route === "queued", accepted: true };
+		},
+		/** The terminal has one routing door while private work runs. */
+		tellWork(text) {
+			const caseResult = this.tellCase(text);
+			if (caseResult !== false) return caseResult;
+			return this.tellTask(text) ? { kind: "task" } : false;
+		},
+
 	};
 }
 

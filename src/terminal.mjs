@@ -25,6 +25,7 @@ import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, 
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
+import { caseStatusLine, listCases, loadCase, renderCase, stopCase } from "./case.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -81,6 +82,12 @@ export function describeCall(call, describeRef) {
 	switch (call.name) {
 		case "task":
 			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, POLICY.limits.terminal.callSummary.taskBrief)}`;
+		case "case":
+			return args.action === "synthesize"
+				? `case ${oneLine(args.id, POLICY.limits.terminal.callSummary.taskBrief)}  synthesize ${args.outcome ?? ""}`.trim()
+				: args.action === "resume"
+					? `case ${oneLine(args.id, POLICY.limits.terminal.callSummary.taskBrief)}  resume`.trim()
+					: `case  ${oneLine(args.question, POLICY.limits.terminal.callSummary.taskBrief)}`;
 		case "shell": {
 			// A command typed into a window, or one of the window actions; run is the default and needs no name of its own.
 			if (args.action !== undefined && args.action !== POLICY.enums.shellAction.run) {
@@ -706,7 +713,7 @@ export async function runTerminal(session, options) {
 			// An unreadable stretch: show what the watch happens to hold rather than nothing.
 		}
 		if (entries.length === 0) return;
-		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.sibling");
+		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.sibling");
 		const at = found < 0 ? 0 : found;
 		const own = depth === 0 ? entries : entries.slice(at);
 		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
@@ -777,7 +784,7 @@ export async function runTerminal(session, options) {
 		// The main agent's history is not replayed. A task is shown from its brief on.
 		let newest = watch.value.entries.at(-1)?.id ?? 0;
 		if (depth > 0) {
-			const briefs = watch.value.entries.filter((entry) => entry.kind === "carto.brief" || entry.kind === "carto.sibling");
+			const briefs = watch.value.entries.filter((entry) => entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.sibling");
 			newest = briefs.at(-1)?.id ?? newest;
 		}
 		const handle = async (value) => {
@@ -1176,6 +1183,7 @@ export async function runTerminal(session, options) {
 					[
 						"  /thinking  show or hide what the agent thinks and notes for itself (/thinking on, /thinking off; Ctrl-T does the same)",
 						"  /report   the last task's report in full; /report t12 shows a kept one",
+						"  /case     active and recent bounded evidence cases; /case c1 shows its durable phase and participant provenance; /case stop c1 stops it and interrupts an active phase",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
 						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
@@ -1230,6 +1238,40 @@ export async function runTerminal(session, options) {
 					const kept = loadReport(options.brainDir, argument);
 					line(kept ?? `  There is no report ${argument}. /context lists the kept ones.`);
 				} else line(lastReport === undefined ? "  No task has reported in this run of carto." : lastReport);
+				return true;
+			}
+			case "case": {
+				if (argument === "stop") {
+					const id = parts[1] ?? session.activeCase?.()?.id;
+					if (id === undefined) {
+						line("  /case stop c1 ends one running case. /case lists its ids.");
+						return true;
+					}
+					try {
+						const stoppedCase = stopCase(options.brainDir, id, { why: `${USER_NAME} stopped it` });
+						line(`${bold("●")} case  ${id} stopped${stoppedCase.stopReason ? `: ${stoppedCase.stopReason}` : ""}`);
+						if (session.activeCase?.()?.id === id && busy) {
+							streamFreeze.abandon();
+							await main.abort(context);
+							line(dim("  the active phase was interrupted; its durable case stays stopped with what was recorded before it"));
+						}
+					} catch (error) {
+						line(`! ${error.message}`);
+					}
+					return true;
+				}
+				if (argument !== undefined) {
+					const loaded = loadCase(options.brainDir, argument);
+					line(loaded.case === undefined ? `! ${loaded.error}` : renderCase(loaded.case));
+					return true;
+				}
+				const cases = listCases(options.brainDir);
+				if (cases.length === 0) line("  No evidence case stands yet. The agent starts one with `case` only for a narrow refutable question; /case c1 shows a durable one.");
+				else {
+					line(`  ${bold("Evidence cases")}`);
+					for (const entry of cases) line(entry.error === undefined ? `    ${caseStatusLine(entry)}` : `    ${entry.id} · unreadable: ${entry.error}`);
+					line(dim("  /case c1 shows the capsule, phase artifacts and participant provenance; /case stop c1 stops a running one."));
+				}
 				return true;
 			}
 			case "context": {
@@ -1724,6 +1766,8 @@ export async function runTerminal(session, options) {
 				const size = last?.usage ? (last.usage.input ?? 0) + (last.usage.cacheRead ?? 0) + (last.usage.output ?? 0) : 0;
 				const on = await session.model?.();
 				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${on?.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
+				const activeCase = session.activeCase?.();
+				if (activeCase !== undefined) line(`  evidence case ${activeCase.id}${activeCase.phase ? ` · ${activeCase.phase} phase` : " · between phases"} · your lines route there and /case shows its durable trail`);
 				if (options.runner !== undefined) line(`  ${sandboxLine(options.runner)}`);
 				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === POLICY.enums.windowStates.busy).length} busy · /shells shows them`);
@@ -2110,11 +2154,17 @@ export async function runTerminal(session, options) {
 				}
 				const wasBusy = busy;
 				userSpoke();
-				// A task runs: the line is for it, and it reads it with its next result.
-				if (wasBusy && session.tellTask?.(text)) {
-					// A call that only waits for a window returns, so that the task reads this sooner.
+				// Private work owns its input while it runs. A task reads the next result; a case records an exact
+				// phase route or queues the line for the phase that follows, rather than dropping it between foci.
+				const routed = wasBusy
+					? (session.tellWork?.(text) ?? (session.tellTask?.(text) ? { kind: "task" } : false))
+					: false;
+				if (routed !== false && routed !== undefined) {
 					windows?.nudge();
-					line(dim("  (sent to the running task: it reads it at its next step, and the main agent is told with the report)"));
+					if (routed.kind === "case") {
+						if (routed.accepted === false) line(dim(`  (the active case did not take this line: ${routed.reason})`));
+						else line(dim(`  (recorded for evidence case ${routed.id}${routed.queued ? "; queued for its next phase" : `; sent to its ${routed.phase ?? "active"} phase's next step`})`));
+					} else line(dim("  (sent to the running task: it reads it at its next step, and the main agent is told with the report)"));
 					return;
 				}
 				if (wasBusy) {

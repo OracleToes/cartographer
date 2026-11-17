@@ -54,7 +54,7 @@ function atlasRecord(root, brainDir, before) {
 
 /** Capture explicitly selected main-shelf evidence before the move starts. The capture, not a later live shelf,
  * is what the focus and a replay receive. */
-function selectedEvidence(root, brainDir, selected) {
+export function selectedEvidence(root, brainDir, selected) {
 	if (selected === undefined) return { evidence: [] };
 	if (!Array.isArray(selected) || selected.length === 0) return { evidence: [] };
 	const ids = selected.map((id) => String(id).trim());
@@ -330,15 +330,23 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 
 			const handle = await api.conversation(child, callContext);
 			// While the task runs, what the user types is for it (src/harness.mjs).
+			active.kind = "task";
+			active.caseId = undefined;
+			active.phase = undefined;
 			active.id = child;
 			active.said = [];
 			active.heard = [];
+			delete active.deliver;
 			let settled;
 			try {
 				const submission = await handle.submit({ type: "continue", requestId: `task:${api.taskId}` }, callContext);
 				settled = await submission.wait(callContext);
 			} finally {
 				active.id = undefined;
+				active.kind = undefined;
+				active.caseId = undefined;
+				active.phase = undefined;
+				delete active.deliver;
 			}
 			const heard = active.heard.splice(0);
 			const unread = active.said.splice(0);
