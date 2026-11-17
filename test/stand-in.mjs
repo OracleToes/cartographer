@@ -203,10 +203,33 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith(TASK_HEADER))) continue;
 		// The block that stands for a task's collapsed steps is not a message to obey.
 		if (message.role === "user" && /steps up to here \(\d+ repl/.test(raw)) continue;
+		if (message.role === "user" && text.startsWith("Controlled cross-examination packet")) {
+			const scripted = Array.isArray(forcedCaseSteps?.["falsify-cross-exam"] ?? forcedCaseSteps?.cross) ? (forcedCaseSteps?.["falsify-cross-exam"] ?? forcedCaseSteps?.cross).map((step) => String(step).trim()).filter((step) => step !== "") : [];
+			const turns = later.filter((entry) => entry.role === "assistant").length;
+			if (turns < scripted.length) {
+				const calls = scripted[turns].split(" +++ ").map(lookCall).filter((call) => call !== undefined);
+				if (calls.length > 0) return { calls };
+			}
+			const receiptId = /Case evidence receipt (r\d+) is durable/.exec(later.map(rawOf).join("\n"))?.[1];
+			const resolved = receiptId !== undefined;
+			const artifact = {
+				candidate: "CASE falsify-cross-exam ARTIFACT",
+				observations: receiptId === undefined ? [] : [{ kind: "direct", text: `The cross-examination received immutable source receipt ${receiptId}.`, citations: [receiptId] }],
+				assumptions: [],
+				citations: [{ ref: "phase:construct", kind: "claim" }, ...(receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }])],
+				falsifiers: [],
+				proposed_witness: "No additional witness is proposed in the stand-in fixture.",
+				closure_gaps: resolved ? [] : ["The fixture has no independent source check for the constructor candidate."],
+				uncertainty: resolved ? [] : ["The constructor candidate was not independently discriminated in this fixture."],
+				cross_examination: [{ claim: "construct:candidate", disposition: resolved ? "failed-challenge" : "unresolved", text: resolved ? `The cited receipt ${receiptId} supplies the fixture's controlled check.` : "No independent frozen source or phase-local receipt discriminates the constructor candidate.", citations: [receiptId ?? "phase:construct"] }],
+			};
+			return { calls: [{ name: "return", args: { report: "CASE falsify-cross-exam ARTIFACT", done: resolved, artifact } }] };
+		}
 		if (message.role === "tool" && text.startsWith(TASK_HEADER) && text.includes("\nCase phase\n")) {
-			const phaseName = /\bin the (construction|blind falsification|concrete witness) phase\b/.exec(text)?.[1] ?? "case";
-			const phase = { construction: "construct", "blind falsification": "falsify", "concrete witness": "witness" }[phaseName] ?? "case";
-			const scripted = Array.isArray(forcedCaseSteps?.[phase]) ? forcedCaseSteps[phase].map((step) => String(step).trim()).filter((step) => step !== "") : [];
+			const phaseName = /\bin the (construction|blind falsification|controlled cross-examination|concrete witness) phase\b/.exec(text)?.[1] ?? "case";
+			const phase = { construction: "construct", "blind falsification": "falsify-blind", "controlled cross-examination": "falsify-cross-exam", "concrete witness": "witness" }[phaseName] ?? "case";
+			const legacy = phase === "falsify-blind" ? "falsify" : phase === "falsify-cross-exam" ? "cross" : phase;
+			const scripted = Array.isArray(forcedCaseSteps?.[phase] ?? forcedCaseSteps?.[legacy]) ? (forcedCaseSteps?.[phase] ?? forcedCaseSteps?.[legacy]).map((step) => String(step).trim()).filter((step) => step !== "") : [];
 			const turns = later.filter((entry) => entry.role === "assistant").length;
 			if (turns < scripted.length) {
 				const calls = scripted[turns].split(" +++ ").map(lookCall).filter((call) => call !== undefined);
@@ -214,17 +237,19 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 			}
 			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
 			const receiptId = /Case evidence receipt (r\d+) is durable/.exec(later.map(rawOf).join("\n"))?.[1];
+			const cross = phase === "falsify-cross-exam";
 			const artifact = {
 				candidate: `CASE ${phase} ARTIFACT`,
 				observations: receiptId === undefined ? [] : [{ kind: "direct", text: `The phase received immutable source receipt ${receiptId}.`, citations: [receiptId] }],
 				assumptions: [],
-				citations: receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }],
+				citations: cross ? [{ ref: "phase:construct", kind: "claim" }] : receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }],
 				falsifiers: [],
 				proposed_witness: "No additional witness is proposed in the stand-in fixture.",
-				closure_gaps: [],
-				uncertainty: [],
+				closure_gaps: cross ? ["The fixture has no independent source check for the constructor candidate."] : [],
+				uncertainty: cross ? ["The constructor candidate was not independently discriminated in this fixture."] : [],
+				...(cross ? { cross_examination: [{ claim: "construct:candidate", disposition: "unresolved", text: "No independent frozen source or phase-local receipt discriminates the constructor candidate.", citations: ["phase:construct"] }] } : {}),
 			};
-			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: true, artifact } }] };
+			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: !cross, artifact } }] };
 		}
 		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
 			const contractAt = text.indexOf("Move contract:\n");

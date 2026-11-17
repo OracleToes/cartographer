@@ -851,29 +851,37 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 		const file = join(root, ".brain", "cases", "c1.json");
 		assert.equal(existsSync(file), true, "the case has its own durable evidence file");
 		const evidence = JSON.parse(readFileSync(file, "utf8"));
-		assert.equal(evidence.status, "ready", "the phase runner stops before the main context's synthesis");
-		assert.deepEqual(evidence.phases.map((phase) => [phase.id, phase.status]), [["construct", "complete"], ["falsify", "complete"], ["witness", "complete"]]);
+		assert.equal(evidence.status, "running", "C2 pauses at the main-owned witness-specification boundary rather than synthesizing from phase count");
+		assert.equal(evidence.flow.state, "awaiting-witness-specification");
+		assert.deepEqual(evidence.phases.map((phase) => [phase.id, phase.status]), [["construct", "complete"], ["falsify-blind", "complete"], ["falsify-cross-exam", "complete"], ["witness", "queued"]]);
 		assert.match(evidence.capsule.digest, /^[a-f0-9]{64}$/, "the capsule is frozen and digested");
 		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
-		assert.equal(phases.length, 5, "the constructor gets bounded retries for its refused shared-brain and shell-window side channels, then each phase returns once");
-		const phaseText = (name) => phases.filter((request) => request.messages.map(rawText).join("\n").includes(`in the ${name} phase`));
-		const construct = phaseText("construction");
-		const falsify = phaseText("blind falsification");
-		const witness = phaseText("concrete witness");
+		assert.equal(phases.length, 5, "the constructor gets bounded retries for refused side channels, followed by blind and controlled cross-examination requests");
+		const text = (request) => request.messages.map(rawText).join("\n");
+		const construct = phases.filter((request) => text(request).includes("in the construction phase"));
+		const blind = phases.filter((request) => text(request).includes("in the blind falsification phase") && !text(request).includes("Controlled cross-examination packet"));
+		const cross = phases.filter((request) => text(request).includes("Controlled cross-examination packet"));
 		assert.equal(construct.length, 3, "construction is the only phase that made the deliberately refused side-channel calls");
-		assert.equal(falsify.length, 1);
-		assert.equal(witness.length, 1);
+		assert.equal(blind.length, 1);
+		assert.equal(cross.length, 1, "the sealed blind context receives exactly one recorded constructor packet");
 		const constructorResult = construct.at(-1).messages.filter((message) => message.role === "tool").map(rawText).join("\n");
 		assert.match(constructorResult, /does not edit the shared brain or shelf/, "a phase cannot mutate shared brain state as an evidence side channel");
 		assert.match(constructorResult, /does not use shell windows/, "a phase cannot read or control an ambient shell window as an evidence side channel");
-		assert.doesNotMatch(falsify[0].messages.map(rawText).join("\n"), /CASE construct ARTIFACT/, "blind falsification does not receive construction prose");
-		const witnessText = witness[0].messages.map(rawText).join("\n");
-		assert.match(witnessText, /CASE construct ARTIFACT/, "the concrete check can inspect earlier artifacts deliberately");
-		assert.match(witnessText, /CASE falsify ARTIFACT/);
+		const blindText = text(blind[0]);
+		const constructArtifact = evidence.phases.find((phase) => phase.id === "construct").artifact;
+		assert.doesNotMatch(blindText, /CASE construct ARTIFACT/, "the blind request excludes constructor prose byte-for-byte");
+		assert.doesNotMatch(blindText, new RegExp(constructArtifact.digest), "the blind request excludes the constructor digest as well as its prose");
+		const crossText = text(cross[0]);
+		const blindArtifact = evidence.phases.find((phase) => phase.id === "falsify-blind").artifact;
+		assert.match(crossText, /Recorded constructor packet/, "the constructor packet is only visible after the blind phase");
+		assert.match(crossText, new RegExp(constructArtifact.digest), "the cross packet identifies the recorded constructor artifact");
+		assert.match(crossText, new RegExp(blindArtifact.digest), "the cross packet identifies the durable blind seal that preceded it");
+		assert.equal(evidence.flow.blind.digest, blindArtifact.digest);
+		assert.equal(evidence.flow.crossPacket.delivery.conversationId, evidence.phases.find((phase) => phase.id === "falsify-blind").conversationId, "cross-examination reuses the blind falsifier context rather than opening a constructor debate context");
 		const { ledger } = loadLedger(join(root, ".brain"));
 		assert.equal(ledger.items.some((entry) => entry.text === "phase side channel"), false, "the blocked phase attempt did not promote its note");
 		assert.equal(Object.values(loadContext(join(root, ".brain")).tasks).some((task) => task.caseId === "c1"), false, "each temporary case-phase context is cleaned from the ordinary task store after its artifact is recorded");
-		assert.equal(evidence.synthesis, undefined, "phase execution ends with evidence retained for the main context, not an automatic vote or synthesis");
+		assert.equal(evidence.synthesis, undefined, "phase execution ends with retained evidence and no automatic vote or synthesis");
 	} finally {
 		await server.close();
 	}
@@ -882,7 +890,7 @@ test("case: bounded same-model phases keep blind evidence flow, artifacts, and s
 test("case v2: source reads append immutable phase receipts outside the frozen capsule", async () => {
 	const root = makeProject("evidence-case-receipt", { git: false });
 	configure(root, { initiate: false });
-	const server = await startStandIn({ tokenDelayMs: 0, caseSteps: { construct: ["read: src/main.js"] } });
+	const server = await startStandIn({ tokenDelayMs: 0, caseSteps: { construct: ["read: src/main.js"], cross: ["read: src/math.js"] } });
 	try {
 		const result = await carto(root, server, ["-p", "case: Does src/main.js import add? || then think"]);
 		ok(result, "recording a case source receipt");
@@ -890,18 +898,25 @@ test("case v2: source reads append immutable phase receipts outside the frozen c
 		assert.equal(evidence.version, 2);
 		assert.deepEqual(evidence.capsule.ledger, [], "the frozen capsule keeps only its initial ledger; phase inspection does not mutate it");
 		const receipts = evidence.ledger.filter((entry) => entry.kind === "receipt");
-		assert.equal(receipts.length, 1, "the successful case read has one immutable receipt");
-		assert.deepEqual([receipts[0].phase, receipts[0].tool], ["construct", "read"]);
-		assert.match(receipts[0].digest, /^[a-f0-9]{64}$/);
-		assert.match(receipts[0].inputDigest, /^[a-f0-9]{64}$/);
-		assert.match(receipts[0].outputDigest, /^[a-f0-9]{64}$/);
-		assert.deepEqual(receipts[0].input, { path: "src/main.js" }, "the receipt retains the exact bounded source-tool input it digests");
-		assert.match(receipts[0].output, /src\/main\.js/, "the receipt retains the bounded source-tool output it digests");
-		assert.deepEqual(evidence.phases[0].artifact.data.citations, [{ ref: receipts[0].id, kind: "receipt" }], "the phase's subsequent structured return actually cites the receipt it was shown");
-		assert.deepEqual(evidence.phases[0].artifact.data.observations[0].citations, [receipts[0].id], "the citation is attached to a direct observation rather than only named in prose");
+		assert.equal(receipts.length, 2, "the construction and controlled cross-examination reads each retain a phase-local immutable receipt");
+		const constructReceipt = receipts.find((entry) => entry.phase === "construct");
+		const crossReceipt = receipts.find((entry) => entry.phase === "falsify-cross-exam");
+		assert.ok(constructReceipt);
+		assert.ok(crossReceipt);
+		assert.deepEqual([constructReceipt.phase, constructReceipt.tool], ["construct", "read"]);
+		assert.match(constructReceipt.digest, /^[a-f0-9]{64}$/);
+		assert.match(constructReceipt.inputDigest, /^[a-f0-9]{64}$/);
+		assert.match(constructReceipt.outputDigest, /^[a-f0-9]{64}$/);
+		assert.deepEqual(constructReceipt.input, { path: "src/main.js" }, "the receipt retains the exact bounded source-tool input it digests");
+		assert.match(constructReceipt.output, /src\/main\.js/, "the receipt retains the bounded source-tool output it digests");
+		assert.deepEqual(evidence.phases[0].artifact.data.citations, [{ ref: constructReceipt.id, kind: "receipt" }], "the phase's subsequent structured return actually cites the receipt it was shown");
+		assert.deepEqual(evidence.phases[0].artifact.data.observations[0].citations, [constructReceipt.id], "the citation is attached to a direct observation rather than only named in prose");
+		const crossArtifact = evidence.phases.find((phase) => phase.id === "falsify-cross-exam").artifact.data;
+		assert.deepEqual(crossArtifact.crossExamination[0].citations, [crossReceipt.id], "the controlled classification names its own phase-local receipt rather than treating the constructor as primary evidence");
+		assert.equal(crossArtifact.crossExamination[0].disposition, "failed-challenge");
 		assert.equal(existsSync(join(root, ".brain", "carto-atlas.json")), false, "a case source read does not mutate the shared atlas as an implicit evidence side channel");
 		const constructRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase"));
-		assert.match(constructRequests.at(-1).messages.map(rawText).join("\n"), new RegExp(`Case evidence receipt ${receipts[0].id} is durable`), "the same phase receives the receipt id it must cite on return");
+		assert.match(constructRequests.at(-1).messages.map(rawText).join("\n"), new RegExp(`Case evidence receipt ${constructReceipt.id} is durable`), "the same phase receives the receipt id it must cite on return");
 	} finally {
 		await server.close();
 	}
@@ -930,7 +945,7 @@ test("case: /case stop interrupts a held phase and leaves a stopped durable trai
 		has(result.screen, "Status: stopped.", "/case inspects the stopped durable record");
 		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
 		assert.equal(evidence.status, "stopped");
-		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped"], "the stop prevents later phases from starting");
+		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped", "stopped"], "the stop prevents later phases from starting");
 		assert.match(evidence.phases[0].artifact.failure, /interrupted/i, "the active phase records the interrupted outcome rather than a successful return");
 		assert.deepEqual(evidence.messages, [{
 			id: "u1",
@@ -962,7 +977,7 @@ test("case: the fixed phase runtime stops a held phase before later phases can s
 		ok(result, "timing out a held evidence phase");
 		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
 		assert.equal(evidence.status, "stopped");
-		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped"], "the timeout stops the active phase and bars later phases");
+		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped", "stopped"], "the timeout stops the active phase and bars later phases");
 		assert.match(evidence.stopReason, /construction exceeded its 120 second runtime limit/);
 		assert.match(evidence.phases[0].artifact.failure, /exceeded its 120 second runtime limit/i, "the timed-out phase receives a durable timeout artifact rather than a return");
 		assert.equal(server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n"))).length, 1, "the runtime limiter aborts before any second phase starts");
@@ -983,13 +998,14 @@ test("case: a fresh session resumes durable unfinished phases without rerunning 
 		const result = await carto(root, server, ["-p", "case resume: c1 || then think"]);
 		ok(result, "resuming a durable evidence case");
 		const evidence = JSON.parse(readFileSync(join(brainDir, "cases", "c1.json"), "utf8"));
-		assert.equal(evidence.status, "ready");
-		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["complete", "complete", "complete"]);
+		assert.equal(evidence.status, "running");
+		assert.equal(evidence.flow.state, "awaiting-witness-specification");
+		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["complete", "complete", "complete", "queued"]);
 		assert.equal(evidence.phases[0].artifact.data.candidate, "construction artifact survives the restart", "resume keeps the already durable structured construction artifact byte-for-byte");
 		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
 		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase")).length, 0, "a completed phase is not replayed after restart");
-		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the blind falsification phase")).length, 1);
-		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the concrete witness phase")).length, 1);
+		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the blind falsification phase") && !request.messages.map(rawText).join("\n").includes("Controlled cross-examination packet")).length, 1);
+		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("Controlled cross-examination packet")).length, 1, "resume appends exactly one cross packet after the recorded blind pass");
 		assert.equal(Object.values(loadContext(brainDir).tasks).some((task) => task.caseId === "c1"), false, "resumed phase contexts are cleaned when their artifacts return");
 	} finally {
 		await server.close();

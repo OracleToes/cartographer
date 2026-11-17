@@ -10,13 +10,23 @@ import { stamp } from "./time.mjs";
 export const CASE_VERSION = 2;
 export const CASE_ID_PATTERN = "c\\d+";
 export const CASE_ID = new RegExp(`^${CASE_ID_PATTERN}$`);
+// Version-one records and C1's already-written v2 records retain this original three-phase layout.
+// New v2 records carry `flow.version: 2`, which separates the blind and cross-examination passes.
 export const CASE_PHASES = Object.freeze([
 	{ id: "construct", name: "construction", objective: "Construct the narrowest account the frozen evidence supports. State assumptions, observations and the exact claim separately; do not call it confirmed." },
 	{ id: "falsify", name: "blind falsification", objective: "Search the frozen evidence and project for a counterexample, missing condition, or alternate explanation. The construction artifact is intentionally not visible here." },
 	{ id: "witness", name: "concrete witness", objective: "Make one concrete check against the project or frozen evidence. Distinguish what was observed from what it implies; it may support neither earlier artifact." },
 ]);
+export const CASE_FLOW_VERSION = 2;
+export const CASE_FLOW_PHASES = Object.freeze([
+	{ id: "construct", name: "construction", objective: "Construct the narrowest account the frozen evidence supports. State assumptions, observations and the exact claim separately; do not call it confirmed." },
+	{ id: "falsify-blind", name: "blind falsification", objective: "Search the frozen evidence and project for a counterexample, missing condition, or alternate explanation. The construction artifact, its digest, summary, and citations are intentionally not visible in this blind pass." },
+	{ id: "falsify-cross-exam", name: "controlled cross-examination", objective: "After the blind pass is sealed, examine the recorded constructor packet in this same context. Classify every material constructor claim as a confirmed flaw, failed challenge, or exact unresolved point with citations; this is not a rhetorical debate." },
+	{ id: "witness", name: "concrete witness", objective: "Make one concrete check against the project or frozen evidence only after the main context supplies a witness specification. Distinguish what was observed from what it implies; it may support neither earlier artifact." },
+]);
 
 const CASE_STATUSES = new Set(["running", "ready", "synthesized", "stopped"]);
+const FLOW_STATES = new Set(["construct", "falsify-blind", "falsify-cross-exam", "awaiting-witness-specification", "witness", "ready-for-synthesis"]);
 const PHASE_STATUSES = new Set(["queued", "active", "complete", "ended", "stopped"]);
 const MESSAGE_ROUTES = new Set(["active", "queued"]);
 const SOURCE_ROLES = new Set(["primary", "derived", "claim"]);
@@ -24,6 +34,7 @@ const FRESHNESS = new Set(["current", "changed", "stale", "unknown", "captured"]
 const LEDGER_KINDS = new Set(["observation", "claim", "source-gap", "receipt"]);
 const ARTIFACT_CITATION_KINDS = new Set(["source", "receipt", "claim"]);
 const OBSERVATION_KINDS = new Set(["direct", "inference"]);
+const CROSS_DISPOSITIONS = new Set(["confirmed-flaw", "failed-challenge", "unresolved"]);
 const RECEIPT_TOOLS = new Set(["read", "search", "list"]);
 const HEX = /^[a-f0-9]{64}$/;
 const SOURCE_ID = /^[a-z][a-z0-9_-]{0,63}$/;
@@ -85,7 +96,11 @@ const nextCaseId = (dir) => {
 	return `c${highest + 1}`;
 };
 
-const phaseTemplate = () => CASE_PHASES.map(({ id, name, objective }) => ({ id, name, objective, status: "queued" }));
+const phaseTemplate = (definitions = CASE_PHASES) => definitions.map(({ id, name, objective }) => ({ id, name, objective, status: "queued" }));
+export const hasCaseFlow = (caseFile) => caseFile?.version === CASE_VERSION && caseFile?.flow?.version === CASE_FLOW_VERSION;
+const usesCaseFlow = hasCaseFlow;
+const phaseDefinitions = (caseFile) => usesCaseFlow(caseFile) ? CASE_FLOW_PHASES : CASE_PHASES;
+const isCrossExamination = (phase) => phase?.id === "falsify-cross-exam";
 const messageLimit = () => POLICY.limits.case.messages;
 const messageChars = () => POLICY.limits.case.messageChars;
 const caseLimits = () => POLICY.limits.case;
@@ -110,11 +125,13 @@ function boundedStrings(value, name, { maxItems, maxChars, allowEmpty = true } =
 	return out;
 }
 
-function phaseTemplateCheck(caseFile) {
-	need(Array.isArray(caseFile.phases) && caseFile.phases.length === CASE_PHASES.length, "it has no complete phase list");
-	for (const expected of CASE_PHASES) {
+function phaseTemplateCheck(caseFile, definitions = phaseDefinitions(caseFile)) {
+	need(Array.isArray(caseFile.phases) && caseFile.phases.length === definitions.length, "it has no complete phase list");
+	for (const expected of definitions) {
 		const phase = caseFile.phases.find((entry) => entry?.id === expected.id);
 		need(phase !== undefined && PHASE_STATUSES.has(phase.status), `phase ${expected.id} is invalid`);
+		need(phase.name === undefined || phase.name === expected.name, `phase ${expected.id} has a non-canonical name`);
+		need(phase.objective === undefined || phase.objective === expected.objective, `phase ${expected.id} has a non-canonical objective`);
 		phase.name ??= expected.name;
 		phase.objective ??= expected.objective;
 	}
@@ -137,13 +154,13 @@ function baseCheck(caseFile) {
 	need(typeof caseFile.question === "string" && caseFile.question.trim() !== "", "it has no question");
 	need(CASE_STATUSES.has(caseFile.status), `its status ${JSON.stringify(caseFile.status)} is invalid`);
 	need(plain(caseFile.capsule), "it has no evidence capsule");
-	phaseTemplateCheck(caseFile);
 	messageCheck(caseFile);
 }
 
 /** v1 stays exactly a free-form historical format; do not migrate or rewrite it on read. */
 function normalizeV1(caseFile) {
 	baseCheck(caseFile);
+	phaseTemplateCheck(caseFile, CASE_PHASES);
 	return caseFile;
 }
 
@@ -263,7 +280,7 @@ function normalizeInitialLedger(raw, sources, at) {
 	return raw.map((entry, index) => normalizeLedgerEntry(entry, { index, sources, at, initial: true }));
 }
 
-function normalizeLedgerEntry(raw, { index = 0, sources = [], at = Date.now(), initial = false } = {}) {
+function normalizeLedgerEntry(raw, { index = 0, sources = [], phases = CASE_PHASES, at = Date.now(), initial = false } = {}) {
 	need(plain(raw), "An evidence ledger entry is invalid.");
 	const id = compact(raw.id ?? `l${index + 1}`);
 	const kind = String(raw.kind);
@@ -273,7 +290,7 @@ function normalizeLedgerEntry(raw, { index = 0, sources = [], at = Date.now(), i
 	const recordedAt = raw.at ?? raw.capturedAt ?? at;
 	need(finite(recordedAt), `Evidence ledger entry ${id} has an invalid time.`);
 	if (kind === "receipt") {
-		need(typeof raw.phase === "string" && CASE_PHASES.some((phase) => phase.id === raw.phase), `Receipt ${id} has an invalid phase.`);
+		need(typeof raw.phase === "string" && phases.some((phase) => phase.id === raw.phase), `Receipt ${id} has an invalid phase.`);
 		const tool = compact(raw.tool);
 		need(RECEIPT_TOOLS.has(tool), `Receipt ${id} has an unsupported source tool.`);
 		const input = jsonCopy(raw.input, `Receipt ${id} input`, caseLimits().sourceMetadataChars);
@@ -312,9 +329,10 @@ function receiptOutputChars(ledger) {
 	return ledger.reduce((total, entry) => total + (entry.kind === "receipt" ? entry.output.length : 0), 0);
 }
 
-function artifactData(raw) {
+function artifactData(raw, phase) {
 	need(plain(raw), "A case phase must return a structured artifact object.");
-	const required = ["candidate", "observations", "assumptions", "citations", "falsifiers", "proposed_witness", "closure_gaps", "uncertainty"];
+	const cross = isCrossExamination(phase);
+	const required = ["candidate", "observations", "assumptions", "citations", "falsifiers", "proposed_witness", "closure_gaps", "uncertainty", ...(cross ? ["cross_examination"] : [])];
 	for (const name of required) need(Object.hasOwn(raw, name), `The structured artifact is missing required field ${name}.`);
 	for (const name of Object.keys(raw)) need(required.includes(name), `The structured artifact has unsupported field ${name}.`);
 	const candidate = compact(raw.candidate);
@@ -348,7 +366,25 @@ function artifactData(raw) {
 		const refs = boundedStrings(observation.citations, `Artifact observation ${index + 1}.citations`, { maxItems: caseLimits().citations, maxChars: 64, allowEmpty: kind !== "direct" });
 		return { kind, text: observed, citations: refs };
 	});
-	const data = { candidate, observations, assumptions, citations, falsifiers, proposedWitness, closureGaps, uncertainty };
+	if (cross) need(Array.isArray(raw.cross_examination), "The cross-examination challenges are invalid.");
+	const crossExamination = cross
+		? raw.cross_examination.map((challenge, index) => {
+			need(plain(challenge), `Cross-examination challenge ${index + 1} is invalid.`);
+			const expected = ["claim", "disposition", "text", "citations"];
+			for (const name of expected) need(Object.hasOwn(challenge, name), `Cross-examination challenge ${index + 1} is missing ${name}.`);
+			for (const name of Object.keys(challenge)) need(expected.includes(name), `Cross-examination challenge ${index + 1} has unsupported field ${name}.`);
+			const claim = compact(challenge.claim);
+			need(claim !== "" && claim.length <= 64, `Cross-examination challenge ${index + 1} has invalid claim id.`);
+			const disposition = String(challenge.disposition);
+			need(CROSS_DISPOSITIONS.has(disposition), `Cross-examination challenge ${index + 1} has invalid disposition.`);
+			const text = compact(challenge.text);
+			need(text !== "" && text.length <= caseLimits().artifactTextChars, `Cross-examination challenge ${index + 1} has invalid text.`);
+			const refs = boundedStrings(challenge.citations, `Cross-examination challenge ${index + 1}.citations`, { maxItems: caseLimits().citations, maxChars: 64, allowEmpty: false });
+			return { claim, disposition, text, citations: refs };
+		})
+		: undefined;
+	if (crossExamination !== undefined) need(crossExamination.length <= caseLimits().crossChallenges, `The cross-examination has more than ${caseLimits().crossChallenges} challenges.`);
+	const data = { candidate, observations, assumptions, citations, falsifiers, proposedWitness, closureGaps, uncertainty, ...(crossExamination === undefined ? {} : { crossExamination }) };
 	need(JSON.stringify(data).length <= caseLimits().artifactChars, `The structured artifact exceeds the ${caseLimits().artifactChars.toLocaleString("en-US")} character storage bound.`);
 	return data;
 }
@@ -362,6 +398,11 @@ function artifactRendering(data) {
 	if (data.citations.length === 0) lines.push("  (none)");
 	else for (const citation of data.citations) lines.push(`  ${citation.ref} · ${citation.kind}`);
 	lines.push("", ...list("Falsifiers", data.falsifiers), "", "Proposed witness", `  ${data.proposedWitness}`, "", ...list("Closure gaps", data.closureGaps), "", ...list("Uncertainty", data.uncertainty));
+	if (data.crossExamination !== undefined) {
+		lines.push("", "Controlled cross-examination");
+		if (data.crossExamination.length === 0) lines.push("  (no material constructor claim was available to challenge)");
+		else for (const challenge of data.crossExamination) lines.push(`  ${challenge.claim} · ${challenge.disposition} · ${challenge.text} · cites ${challenge.citations.join(", ")}`);
+	}
 	return lines.join("\n");
 }
 
@@ -379,14 +420,15 @@ function validateArtifactCitations(caseFile, phase, data) {
 			need(receipt.phase === phase.id, `Artifact receipt ${citation.ref} belongs to ${receipt.phase}, not this ${phase.id} phase.`);
 		} else {
 			const claimSource = caseFile.capsule.sources.find((entry) => entry.id === citation.ref && entry.role === "claim");
-			const phaseMatch = /^phase:(construct|falsify|witness)$/.exec(citation.ref)?.[1];
+			const phaseMatch = /^phase:([a-z][a-z0-9-]*)$/.exec(citation.ref)?.[1];
 			if (claimSource !== undefined) continue;
 			need(phaseMatch !== undefined, `Claim citation ${citation.ref} is neither a frozen claim source nor a prior phase artifact.`);
 			const prior = caseFile.phases.find((entry) => entry.id === phaseMatch);
 			need(prior?.status === "complete", `Claim citation ${citation.ref} has no completed prior artifact.`);
 			need(prior.id !== phase.id, `A phase cannot cite its own artifact as a prior claim.`);
-			need(CASE_PHASES.findIndex((entry) => entry.id === prior.id) < CASE_PHASES.findIndex((entry) => entry.id === phase.id), `Claim citation ${citation.ref} is not a prior phase artifact.`);
-			need(!(phase.id === "falsify" && prior.id === "construct"), "Blind falsification cannot cite the hidden construction artifact.");
+			const definitions = phaseDefinitions(caseFile);
+			need(definitions.findIndex((entry) => entry.id === prior.id) < definitions.findIndex((entry) => entry.id === phase.id), `Claim citation ${citation.ref} is not a prior phase artifact.`);
+			need(!((phase.id === "falsify" || phase.id === "falsify-blind") && prior.id === "construct"), "Blind falsification cannot cite the hidden construction artifact.");
 		}
 	}
 	for (const observation of data.observations) {
@@ -396,12 +438,30 @@ function validateArtifactCitations(caseFile, phase, data) {
 			if (observation.kind === "direct") need(citation.kind === "source" || citation.kind === "receipt", `Direct observation ${JSON.stringify(observation.text)} must cite a frozen source or immutable phase-local receipt, not ${citation.kind}.`);
 		}
 	}
+	if (isCrossExamination(phase)) {
+		need(usesCaseFlow(caseFile), "Controlled cross-examination belongs only to the explicit case flow.");
+		const expected = materialConstructorClaims(caseFile);
+		const challenges = data.crossExamination ?? [];
+		need(challenges.length === expected.length, "The controlled cross-examination must classify every material constructor claim exactly once.");
+		need(new Set(challenges.map((challenge) => challenge.claim)).size === challenges.length, "The controlled cross-examination repeats a material constructor claim.");
+		const expectedIds = new Set(expected.map((claim) => claim.id));
+		for (const challenge of challenges) {
+			need(expectedIds.has(challenge.claim), `Cross-examination challenge ${challenge.claim} is not a recorded material constructor claim.`);
+			for (const ref of challenge.citations) {
+				const citation = citations.get(ref);
+				need(citation !== undefined, `Cross-examination challenge ${challenge.claim} cites ${ref}, but that ref is absent from artifact citations.`);
+				if (challenge.disposition !== "unresolved") need(citation.kind === "source" || citation.kind === "receipt", `Cross-examination challenge ${challenge.claim} needs direct cited evidence for ${challenge.disposition}.`);
+			}
+		}
+		if (challenges.some((challenge) => challenge.disposition === "unresolved")) need(data.closureGaps.length > 0, "An unresolved controlled cross-examination classification needs an exact closure gap.");
+		if (expected.length > 0) need(citations.get("phase:construct")?.kind === "claim", "A controlled cross-examination must cite the recorded constructor artifact as a claim under review.");
+	}
 }
 
 function freezeArtifact(caseFile, phase, raw, { done, at } = {}) {
 	need(typeof done === "boolean", "A structured case artifact needs the return done boolean.");
 	need(finite(at), "A structured case artifact needs a finite capture time.");
-	const data = artifactData(raw);
+	const data = artifactData(raw, phase);
 	validateArtifactCitations(caseFile, phase, data);
 	need(!(done && data.closureGaps.length > 0), "A structured artifact with closure_gaps must return done: false.");
 	const rendering = artifactRendering(data);
@@ -441,7 +501,8 @@ function checkStoredArtifact(caseFile, phase) {
 		proposed_witness: artifact.data.proposedWitness,
 		closure_gaps: artifact.data.closureGaps,
 		uncertainty: artifact.data.uncertainty,
-	});
+		...(isCrossExamination(phase) ? { cross_examination: artifact.data.crossExamination } : {}),
+	}, phase);
 	need(sameJson(data, artifact.data), `Phase ${phase.id} structured artifact data is non-canonical.`);
 	validateArtifactCitations(caseFile, phase, data);
 	need(!(artifact.done && data.closureGaps.length > 0), `Phase ${phase.id} marks closure gaps complete.`);
@@ -449,9 +510,140 @@ function checkStoredArtifact(caseFile, phase) {
 	need(artifact.digest === digest({ phase: phase.id, done: artifact.done, data, rendering: artifact.rendering }), `Phase ${phase.id} artifact digest does not match.`);
 }
 
+/** Material constructor claims are deliberately narrow: the candidate and any explicitly inferential observations,
+ * never a direct source observation promoted merely because another pass repeats it. */
+function materialConstructorClaims(caseFile) {
+	const construct = caseFile.phases?.find((phase) => phase.id === "construct");
+	if (construct?.artifact?.kind !== "structured") return [];
+	const claims = [{ id: "construct:candidate", text: construct.artifact.data.candidate }];
+	for (const [index, observation] of construct.artifact.data.observations.entries()) {
+		if (observation.kind === "inference") claims.push({ id: `construct:inference:${index + 1}`, text: observation.text });
+	}
+	return claims;
+}
+
+/** The exact user-visible packet the harness appends to the same falsifier context after blind storage. */
+export function renderCrossExaminationPacket(caseFile) {
+	need(usesCaseFlow(caseFile), "A controlled cross-examination packet belongs only to the explicit case flow.");
+	const construct = phaseOf(caseFile, "construct");
+	const blind = phaseOf(caseFile, "falsify-blind");
+	need(construct.artifact !== undefined && blind.artifact !== undefined, "The controlled cross-examination needs recorded constructor and blind artifacts.");
+	const claims = materialConstructorClaims(caseFile);
+	const artifact = construct.artifact;
+	const lines = [
+		"Controlled cross-examination packet",
+		"",
+		"Blind pass durable seal",
+		`  falsify-blind · sha256 ${blind.artifact.digest}`,
+		"  The blind artifact was durably stored before this packet was appended. Continue in this same falsifier context; do not turn this into a constructor rebuttal loop.",
+		"",
+		"Recorded constructor packet",
+		`  construct · ${artifact.kind === "structured" ? (artifact.done ? "returned done" : "returned not done") : "no structured return"} · sha256 ${artifact.digest}`,
+		...artifact.rendering.split("\n").map((line) => `    ${line}`),
+		"",
+		"Material constructor claims to classify exactly once",
+		...(claims.length === 0 ? ["  (none: the constructor returned no structured material claim)"] : claims.map((claim) => `  ${claim.id} · see the recorded constructor packet above`)),
+		"",
+		"Controlled return requirement",
+		"  I call `return` with the ordinary structured artifact fields and `cross_examination`. It has one entry for each listed material claim, with claim, disposition (`confirmed-flaw`, `failed-challenge`, or `unresolved`), exact text, and citations. I cite `phase:construct` as a claim under review, never as primary evidence. A confirmed flaw or failed challenge needs a frozen source or my own phase-local receipt; an unresolved point names a closure gap and returns done false.",
+	];
+	const text = lines.join("\n");
+	need(text.length <= caseLimits().crossPacketChars, `The controlled cross-examination packet exceeds the ${caseLimits().crossPacketChars.toLocaleString("en-US")} character storage bound.`);
+	return text;
+}
+
+function packetMeta(caseFile, at) {
+	const construct = phaseOf(caseFile, "construct");
+	const blind = phaseOf(caseFile, "falsify-blind");
+	need(construct.artifact !== undefined && blind.artifact !== undefined, "The controlled cross-examination needs recorded constructor and blind artifacts.");
+	const claims = materialConstructorClaims(caseFile);
+	const text = renderCrossExaminationPacket(caseFile);
+	return {
+		version: 1,
+		constructDigest: construct.artifact.digest,
+		blindDigest: blind.artifact.digest,
+		claims,
+		textDigest: digest(text),
+		preparedAt: at,
+	};
+}
+
+function flowShape(caseFile) {
+	if (caseFile.flow === undefined) return undefined;
+	need(plain(caseFile.flow) && caseFile.flow.version === CASE_FLOW_VERSION, "its case flow version is invalid");
+	need(FLOW_STATES.has(caseFile.flow.state), "its case flow state is invalid");
+	const allowed = new Set(["version", "state", "blind", "crossPacket"]);
+	for (const key of Object.keys(caseFile.flow)) need(allowed.has(key), `its case flow has unsupported field ${key}`);
+	return caseFile.flow;
+}
+
+const terminalPhase = (phase) => ["complete", "ended", "stopped"].includes(phase?.status);
+
+function checkPacketMeta(caseFile, packet) {
+	need(plain(packet), "its controlled cross-examination packet is invalid");
+	const allowed = new Set(["version", "constructDigest", "blindDigest", "claims", "textDigest", "preparedAt", "delivery"]);
+	for (const key of Object.keys(packet)) need(allowed.has(key), `its controlled cross-examination packet has unsupported field ${key}`);
+	need(packet.version === 1 && typeof packet.constructDigest === "string" && HEX.test(packet.constructDigest) && typeof packet.blindDigest === "string" && HEX.test(packet.blindDigest) && typeof packet.textDigest === "string" && HEX.test(packet.textDigest) && finite(packet.preparedAt), "its controlled cross-examination packet metadata is invalid");
+	const construct = phaseOf(caseFile, "construct");
+	const blind = phaseOf(caseFile, "falsify-blind");
+	need(construct.artifact?.digest === packet.constructDigest, "its controlled cross-examination packet no longer matches the constructor artifact");
+	need(blind.artifact?.digest === packet.blindDigest, "its controlled cross-examination packet no longer matches the blind artifact");
+	const claims = materialConstructorClaims(caseFile);
+	need(sameJson(packet.claims, claims), "its controlled cross-examination material claims are non-canonical");
+	need(packet.textDigest === digest(renderCrossExaminationPacket(caseFile)), "its controlled cross-examination packet digest does not match");
+	if (packet.delivery === undefined) return;
+	need(plain(packet.delivery), "its controlled cross-examination packet delivery is invalid");
+	need(Object.keys(packet.delivery).every((key) => ["at", "conversationId", "entryId"].includes(key)), "its controlled cross-examination packet delivery has unsupported fields");
+	need(finite(packet.delivery.at) && typeof packet.delivery.conversationId === "string" && packet.delivery.conversationId !== "" && typeof packet.delivery.entryId === "string" && packet.delivery.entryId !== "", "its controlled cross-examination packet delivery is invalid");
+	need(blind.conversationId === packet.delivery.conversationId, "its controlled cross-examination packet was not delivered to the blind falsifier context");
+}
+
+function checkCaseFlow(caseFile) {
+	const flow = flowShape(caseFile);
+	if (flow === undefined) return undefined;
+	const construct = phaseOf(caseFile, "construct");
+	const blind = phaseOf(caseFile, "falsify-blind");
+	const cross = phaseOf(caseFile, "falsify-cross-exam");
+	const witness = phaseOf(caseFile, "witness");
+	if (caseFile.status === "stopped") return flow;
+	if (flow.state === "construct") {
+		need(["queued", "active"].includes(construct.status) && blind.status === "queued" && cross.status === "queued" && witness.status === "queued", "its construct flow transition is invalid");
+		need(flow.blind === undefined && flow.crossPacket === undefined, "its construct flow has future-pass data");
+		return flow;
+	}
+	need(terminalPhase(construct), "its case flow advanced before construction ended");
+	if (flow.state === "falsify-blind") {
+		need(["queued", "active"].includes(blind.status) && cross.status === "queued" && witness.status === "queued", "its blind falsification flow transition is invalid");
+		need(flow.blind === undefined && flow.crossPacket === undefined, "its blind falsification flow has cross-examination data before sealing");
+		return flow;
+	}
+	need(terminalPhase(blind), "its case flow advanced before blind falsification ended");
+	need(plain(flow.blind) && Object.keys(flow.blind).every((key) => ["phase", "digest", "sealedAt"].includes(key)) && flow.blind.phase === "falsify-blind" && flow.blind.digest === blind.artifact?.digest && typeof flow.blind.digest === "string" && HEX.test(flow.blind.digest) && finite(flow.blind.sealedAt), "its blind falsification seal is invalid");
+	checkPacketMeta(caseFile, flow.crossPacket);
+	if (flow.state === "falsify-cross-exam") {
+		need(["queued", "active"].includes(cross.status) && witness.status === "queued", "its controlled cross-examination flow transition is invalid");
+		if (cross.status !== "queued") need(flow.crossPacket.delivery !== undefined && cross.conversationId === flow.crossPacket.delivery.conversationId, "its controlled cross-examination began before packet delivery");
+		return flow;
+	}
+	need(terminalPhase(cross), "its case flow advanced before controlled cross-examination ended");
+	need(flow.crossPacket.delivery !== undefined && cross.conversationId === flow.crossPacket.delivery.conversationId, "its controlled cross-examination has no durable packet delivery");
+	if (flow.state === "awaiting-witness-specification") {
+		need(witness.status === "queued", "its case awaits a witness specification with a started witness");
+		return flow;
+	}
+	if (flow.state === "witness") {
+		need(["queued", "active"].includes(witness.status), "its witness flow transition is invalid");
+		return flow;
+	}
+	need(flow.state === "ready-for-synthesis" && terminalPhase(witness), "its ready-for-synthesis flow transition is invalid");
+	return flow;
+}
+
 function normalizeV2(caseFile) {
 	baseCheck(caseFile);
 	need(caseFile.version === CASE_VERSION, `its version ${JSON.stringify(caseFile.version)} is not supported`);
+	const flow = flowShape(caseFile);
+	phaseTemplateCheck(caseFile, flow === undefined ? CASE_PHASES : CASE_FLOW_PHASES);
 	need(typeof caseFile.claim === "string" && compact(caseFile.claim) !== "", "it has no frozen claim");
 	need(finite(caseFile.createdAt) && finite(caseFile.updatedAt), "it has invalid case times");
 	const capsule = caseFile.capsule;
@@ -473,7 +665,7 @@ function normalizeV2(caseFile) {
 	need(jsonChars(capsule, "The frozen capsule") <= caseLimits().capsuleChars, `its frozen capsule exceeds the ${caseLimits().capsuleChars.toLocaleString("en-US")} character storage bound.`);
 	need(finite(capsule.capturedAt) && typeof capsule.digest === "string" && capsule.digest === digest(digestInput), "its frozen capsule digest does not match");
 	need(Array.isArray(caseFile.ledger) && caseFile.ledger.length <= caseLimits().ledgerEntries, "its case evidence ledger is invalid");
-	const ledger = caseFile.ledger.map((entry, index) => normalizeLedgerEntry(entry, { index, sources, at: caseFile.createdAt }));
+	const ledger = caseFile.ledger.map((entry, index) => normalizeLedgerEntry(entry, { index, sources, phases: phaseDefinitions(caseFile), at: caseFile.createdAt }));
 	need(new Set(ledger.map((entry) => entry.id)).size === ledger.length, "its case evidence ledger repeats an id.");
 	need(sameJson(ledger, caseFile.ledger), "its case evidence ledger is non-canonical");
 	need(ledger.length >= initialLedger.length && sameJson(ledger.slice(0, initialLedger.length), initialLedger), "its appended evidence ledger changed the frozen capsule ledger.");
@@ -482,6 +674,7 @@ function normalizeV2(caseFile) {
 	need(receiptOutputChars(ledger) <= caseLimits().receiptTotalChars, `its retained receipt output exceeds the ${caseLimits().receiptTotalChars.toLocaleString("en-US")} character storage bound.`);
 	need(Number.isInteger(caseFile.nextLedger) && caseFile.nextLedger === nextLedgerNumber(ledger), "its next evidence ledger id is invalid.");
 	for (const phase of caseFile.phases) checkStoredArtifact(caseFile, phase);
+	checkCaseFlow(caseFile);
 	return caseFile;
 }
 
@@ -602,7 +795,8 @@ export function createCase(brainDir, { question, claim, context = "", evidence =
 			capsule,
 			ledger: copy(initialLedger),
 			nextLedger: nextLedgerNumber(initialLedger),
-			phases: phaseTemplate(),
+			flow: { version: CASE_FLOW_VERSION, state: "construct" },
+			phases: phaseTemplate(CASE_FLOW_PHASES),
 			messages: [],
 			nextMessage: 1,
 		};
@@ -628,6 +822,16 @@ export function beginCasePhase(brainDir, id, phaseId, { conversationId, at = Dat
 		if (caseFile.status !== "running") throw new CaseError(`Case ${id} is ${caseFile.status}, not running.`);
 		const phase = phaseOf(caseFile, phaseId);
 		if (phase.status !== "queued") throw new CaseError(`Case ${id}'s ${phase.name} phase is already ${phase.status}.`);
+		if (usesCaseFlow(caseFile)) {
+			const wanted = { construct: "construct", "falsify-blind": "falsify-blind", "falsify-cross-exam": "falsify-cross-exam", witness: "witness" }[caseFile.flow.state];
+			if (wanted === undefined) throw new CaseError(`Case ${id} is ${caseFile.flow.state}; its next authority belongs to the main context, not a phase.`);
+			if (phase.id !== wanted) throw new CaseError(`Case ${id}'s flow is ${caseFile.flow.state}; it cannot start ${phase.id}.`);
+			if (phase.id === "falsify-cross-exam") {
+				const delivery = caseFile.flow.crossPacket?.delivery;
+				if (delivery === undefined) throw new CaseError(`Case ${id}'s controlled cross-examination packet is not durably delivered yet.`);
+				if (conversationId === undefined || String(conversationId) !== delivery.conversationId) throw new CaseError(`Case ${id}'s controlled cross-examination must reuse its blind falsifier context.`);
+			}
+		}
 		for (const message of caseFile.messages) {
 			if (message.route === "queued" && message.delivery === undefined) {
 				message.route = "active";
@@ -729,6 +933,45 @@ export function validateCaseArtifact(caseFile, phaseId, artifact, { done } = {})
 	return freezeArtifact(caseFile, phase, artifact, { done, at: 0 }).data;
 }
 
+function advanceCaseFlow(caseFile, phase, at) {
+	if (!usesCaseFlow(caseFile) || caseFile.status === "stopped" || phase.status === "stopped") return;
+	if (phase.id === "construct") {
+		caseFile.flow.state = "falsify-blind";
+		return;
+	}
+	if (phase.id === "falsify-blind") {
+		need(phase.artifact !== undefined, "A sealed blind phase needs an artifact record.");
+		caseFile.flow.state = "falsify-cross-exam";
+		caseFile.flow.blind = { phase: "falsify-blind", digest: phase.artifact.digest, sealedAt: at };
+		caseFile.flow.crossPacket = packetMeta(caseFile, at);
+		return;
+	}
+	if (phase.id === "falsify-cross-exam") {
+		caseFile.flow.state = "awaiting-witness-specification";
+		return;
+	}
+	if (phase.id === "witness") caseFile.flow.state = "ready-for-synthesis";
+}
+
+/** Mark the recorded constructor packet as appended to the sealed blind context. The caller must already have a
+ * Durable entry receipt; this separate file write is replay-safe by packet digest and entry id. */
+export function markCrossExaminationPacketDelivered(brainDir, id, { conversationId, entryId, packetDigest, at = Date.now() } = {}) {
+	return updateCase(brainDir, id, (caseFile) => {
+		need(usesCaseFlow(caseFile) && caseFile.flow.state === "falsify-cross-exam", `Case ${id} is not awaiting controlled cross-examination packet delivery.`);
+		const packet = caseFile.flow.crossPacket;
+		need(packet !== undefined && packet.textDigest === packetDigest, `Case ${id}'s controlled cross-examination packet digest does not match.`);
+		need(typeof conversationId === "string" && conversationId !== "" && typeof entryId === "string" && entryId !== "" && finite(at), "The controlled cross-examination delivery receipt is invalid.");
+		if (packet.delivery !== undefined) {
+			need(packet.delivery.conversationId === conversationId && packet.delivery.entryId === entryId, `Case ${id}'s controlled cross-examination packet already has another delivery receipt.`);
+			return copy(packet.delivery);
+		}
+		const blind = phaseOf(caseFile, "falsify-blind");
+		need(blind.conversationId === conversationId, `Case ${id}'s controlled cross-examination packet must go to its blind falsifier context.`);
+		packet.delivery = { at, conversationId, entryId };
+		return copy(packet.delivery);
+	});
+}
+
 /** A phase ended. Messages that had not reached its request stay queued for the next available phase. */
 export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now() } = {}) {
 	return updateCase(brainDir, id, (caseFile) => {
@@ -754,6 +997,7 @@ export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now()
 				...(typeof result?.failure === "string" && result.failure.trim() !== "" ? { failure: compact(result.failure) } : {}),
 			};
 		}
+		advanceCaseFlow(caseFile, phase, at);
 		const next = caseFile.phases.find((entry) => entry.status === "queued");
 		for (const message of caseFile.messages) {
 			if (message.phase !== phase.id || message.delivery !== undefined) continue;
@@ -770,6 +1014,7 @@ export function finishCasePhase(brainDir, id, phaseId, result, { at = Date.now()
 export function readyCase(brainDir, id, { at = Date.now() } = {}) {
 	return updateCase(brainDir, id, (caseFile) => {
 		if (caseFile.status !== "running") throw new CaseError(`Case ${id} is ${caseFile.status}, not running.`);
+		if (usesCaseFlow(caseFile) && caseFile.flow.state !== "ready-for-synthesis") throw new CaseError(`Case ${id} is ${caseFile.flow.state}; the main context has not yet recorded a witness specification or documented closure gap.`);
 		if (caseFile.phases.some((phase) => phase.status === "active" || phase.status === "queued")) throw new CaseError(`Case ${id} still has an unfinished phase.`);
 		caseFile.status = "ready";
 		caseFile.readyAt = at;
@@ -888,12 +1133,9 @@ export function renderCaseForSynthesis(caseFile) {
 		renderCapsule(caseFile),
 		"",
 		"Phase artifacts",
-		phaseArtifact(caseFile, "construct"),
-		"",
-		phaseArtifact(caseFile, "falsify"),
-		"",
-		phaseArtifact(caseFile, "witness"),
 	];
+	for (const phase of phaseDefinitions(caseFile)) lines.push(phaseArtifact(caseFile, phase.id), "");
+	if (lines.at(-1) === "") lines.pop();
 	if (caseFile.version === CASE_VERSION) {
 		const added = caseFile.ledger.slice(caseFile.capsule.ledger.length);
 		const cited = citedReceiptIds(caseFile);
@@ -909,7 +1151,8 @@ export function caseStatusLine(caseFile) {
 	const active = caseFile.phases?.find((phase) => phase.status === "active");
 	const waiting = caseFile.messages?.filter((message) => message.delivery === undefined).length ?? 0;
 	const synthesis = caseFile.synthesis?.outcome;
-	return `${caseFile.id} · ${caseFile.status}${active === undefined ? "" : ` · ${active.name}`}${waiting > 0 ? ` · ${waiting} participant ${waiting === 1 ? "message" : "messages"} queued` : ""}${synthesis === undefined ? "" : ` · ${synthesis}`}`;
+	const flow = usesCaseFlow(caseFile) ? ` · ${caseFile.flow.state}` : "";
+	return `${caseFile.id} · ${caseFile.status}${flow}${active === undefined ? "" : ` · ${active.name}`}${waiting > 0 ? ` · ${waiting} participant ${waiting === 1 ? "message" : "messages"} queued` : ""}${synthesis === undefined ? "" : ` · ${synthesis}`}`;
 }
 
 function renderCaseV1(caseFile) {
@@ -932,7 +1175,13 @@ function renderCaseV1(caseFile) {
 /** A complete terminal inspection of one case without exposing a hidden scratch surface. */
 export function renderCase(caseFile) {
 	if (caseFile.version !== CASE_VERSION) return renderCaseV1(caseFile);
-	const lines = [`Case ${caseFile.id}`, `Version: ${caseFile.version}.`, `Status: ${caseFile.status}.`, `Question: ${caseFile.question}`, `Claim: ${caseFile.claim}`, `Created: ${stamp(caseFile.createdAt)}.`, "", "Capsule sources"];
+	const lines = [`Case ${caseFile.id}`, `Version: ${caseFile.version}.`, `Status: ${caseFile.status}.`, `Question: ${caseFile.question}`, `Claim: ${caseFile.claim}`, `Created: ${stamp(caseFile.createdAt)}.`];
+	if (usesCaseFlow(caseFile)) {
+		lines.push("", `Information flow: ${caseFile.flow.state}.`);
+		if (caseFile.flow.blind !== undefined) lines.push(`Blind pass seal: falsify-blind · sha256 ${caseFile.flow.blind.digest} · ${caseFile.flow.crossPacket?.delivery === undefined ? "constructor packet not yet delivered" : `constructor packet delivered to ${caseFile.flow.crossPacket.delivery.conversationId} as ${caseFile.flow.crossPacket.delivery.entryId}`}.`);
+		if (caseFile.flow.state === "awaiting-witness-specification") lines.push("The blind and controlled cross-examination artifacts are retained. The main context must next record one witness specification or a documented closure gap; no witness or synthesis has run.");
+	}
+	lines.push("", "Capsule sources");
 	for (const source of caseFile.capsule.sources) lines.push(`  ${source.id}: ${source.role} · ${source.capture.status} · ${source.capture.freshness} at capture · ${sourceLocator(source)} · sha256 ${source.capture.digest ?? "unavailable"}`);
 	if (caseFile.capsule.sources.length === 0) lines.push("  (none)");
 	lines.push("", "Phases");

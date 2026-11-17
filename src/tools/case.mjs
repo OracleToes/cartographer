@@ -1,11 +1,11 @@
-// The `case` tool: one bounded same-model evidence case. It starts three separate,
-// read-only focus contexts over one frozen capsule, then returns the artifacts to the
-// main context for its own explicit conclusion. The phases are not agents, votes, or
-// independent corroboration; the separation is only controlled visibility and objective.
+// The `case` tool: one bounded same-model evidence case. Historical cases retain three
+// separate read-only focus contexts; C2 cases isolate construction and blind falsification,
+// then resume that blind context once for a controlled constructor packet. No phase is an
+// agent, vote, or independent corroborator; separation is only controlled visibility and objective.
 import { configure, defineTool } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { POLICY } from "../config.mjs";
-import { CASE_ID_PATTERN, CASE_PHASES, CaseError, beginCasePhase, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, phaseOf, readyCase, renderCapsule, renderCase, renderCaseForSynthesis, stopCase, synthesizeCase } from "../case.mjs";
+import { CASE_ID_PATTERN, CASE_PHASES, CASE_FLOW_PHASES, CaseError, beginCasePhase, createCase, finishCasePhase, hasCaseFlow, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, phaseOf, readyCase, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, stopCase, synthesizeCase } from "../case.mjs";
 import { endTaskContext, loadContext, taskState, updateContext } from "../context.mjs";
 import { SIBLING_AFTER, SIBLING_BEFORE, TASK_HEADER, describe } from "../prompt.mjs";
 import { selectedEvidence } from "./task.mjs";
@@ -27,11 +27,11 @@ function phaseBrief(caseFile, phase, participant = []) {
 		"",
 		renderCapsule(caseFile),
 	];
-	if (phase.id === "falsify") {
-		lines.push("", "Visibility boundary", "The construction artifact is deliberately absent. I do not reconstruct or assume it; I seek counterexamples, missing conditions, and alternatives from the capsule and project sources alone.");
+	if (phase.id === "falsify" || phase.id === "falsify-blind") {
+		lines.push("", "Visibility boundary", "The construction artifact, its digest, summary, and citations are deliberately absent. I do not reconstruct or assume them; I seek counterexamples, missing conditions, and alternatives from the capsule and project sources alone.");
 	}
 	if (phase.id === "witness") {
-		const previous = caseFile.phases.filter((entry) => entry.id === "construct" || entry.id === "falsify");
+		const previous = caseFile.phases.filter((entry) => entry.id !== "witness");
 		lines.push("", "Earlier artifacts to check, not to trust");
 		for (const entry of previous) {
 			const artifact = entry.artifact;
@@ -49,7 +49,7 @@ function phaseBrief(caseFile, phase, participant = []) {
 		lines.push("  These are direction from the user, recorded with this case. They do not enlarge the frozen evidence capsule or grant project-write authority.");
 	}
 	if (caseFile.version === 2) {
-		lines.push("", "Structured return artifact", "I call `return` with a short `report`, `done`, and the required `artifact` object. Its fields are candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty. A direct observation cites a frozen source id or an immutable receipt id from my own read/search/list result; a prior phase artifact is only a claim under review, never primary evidence. I use empty arrays where a category has none, name any closure gap inside artifact.closure_gaps, and return done false when it has one. The durable artifact is the schema-validated object and deterministic rendering, not my free-form report.");
+		lines.push("", "Structured return artifact", `I call \`return\` with a short \`report\`, \`done\`, and the required \`artifact\` object. Its fields are candidate, observations, assumptions, citations, falsifiers, proposed_witness, closure_gaps, and uncertainty${phase.id === "falsify-cross-exam" ? ", and cross_examination" : ""}. A direct observation cites a frozen source id or an immutable receipt id from my own read/search/list result; a prior phase artifact is only a claim under review, never primary evidence. I use empty arrays where a category has none, name any closure gap inside artifact.closure_gaps, and return done false when it has one. The durable artifact is the schema-validated object and deterministic rendering, not my free-form report.`);
 	} else {
 		lines.push("", "Return artifact", "I call `return` with done true only if I completed this phase's stated artifact. My report says what I observed, what I inferred, and what remains uncertain. I do not state a final supported/refuted/unresolved conclusion: that belongs only to the main context after all artifacts return.");
 	}
@@ -62,7 +62,7 @@ async function phaseConversation(api, callContext, caseId, phaseId) {
 		const owned = await tx.scanConversations({ ownerTaskId: api.taskId }, POLICY.limits.case.phaseLookup);
 		for (const conversation of owned.items) {
 			const entries = await tx.scanEntries({ conversationId: conversation.id, order: "ascending", minEntryId: conversation.parent?.at }, POLICY.limits.taskHistory.contextEntries);
-			const found = entries.items.find((entry) => entry.conversationId === conversation.id && entry.kind === "carto.case-phase" && entry.data?.caseId === caseId && entry.data?.phase === phaseId);
+			const found = entries.items.find((entry) => entry.conversationId === conversation.id && (entry.kind === "carto.case-phase" || entry.kind === "carto.case-cross-exam") && entry.data?.caseId === caseId && entry.data?.phase === phaseId);
 			if (found !== undefined) return conversation.id;
 		}
 		return undefined;
@@ -85,7 +85,9 @@ async function forkPhase(api, callContext, caseFile, phase, participant) {
 		);
 		if (at === undefined) throw new Error("case: the entry of this call was not found");
 		const fork = await tx.forkConversation(api.conversationId, at.id, { ownership: { kind: "task", taskId: api.taskId } });
-		await configure(tx, fork.id, { maxTurns: POLICY.limits.case.phaseTurns + 2 });
+		// A C2 cross-examination deliberately continues the blind falsifier's same context, so Durable's ceiling
+		// covers both bounded passes while the harness resets and enforces each pass's own phase budget.
+		await configure(tx, fork.id, { maxTurns: (phase.id === "falsify-blind" ? POLICY.limits.case.phaseTurns * 2 : POLICY.limits.case.phaseTurns) + 2 });
 		let briefGiven = false;
 		for (const call of calls) {
 			const mine = call.id === api.callId;
@@ -104,6 +106,40 @@ async function forkPhase(api, callContext, caseFile, phase, participant) {
 		return fork.id;
 	}, callContext);
 }
+
+/** Append the constructor packet only after the blind artifact has reached the durable case file. The entry has its
+ * own Durable identity, and the case-file delivery receipt is written afterwards so a restart can find it rather than
+ * replaying the blind pass or creating a second packet. */
+async function appendCrossPacket(brainDir, caseFile, api, callContext) {
+	if (!hasCaseFlow(caseFile) || caseFile.flow.state !== "falsify-cross-exam") throw new CaseError(`Case ${caseFile.id} is not awaiting controlled cross-examination.`);
+	const blind = phaseOf(caseFile, "falsify-blind");
+	const conversationId = blind.conversationId;
+	if (typeof conversationId !== "string" || conversationId === "") throw new CaseError(`Case ${caseFile.id}'s blind falsification has no reusable focus context.`);
+	const packet = caseFile.flow.crossPacket;
+	if (packet?.delivery !== undefined) return packet.delivery;
+	const text = renderCrossExaminationPacket(caseFile);
+	const packetDigest = packet?.textDigest;
+	if (typeof packetDigest !== "string") throw new CaseError(`Case ${caseFile.id}'s controlled cross-examination packet is missing.`);
+	const delivered = await api.commit(async (tx) => {
+		// Case JSON deliberately stores a printable durable id. Resolve it back to Durable's branded runtime id before
+		// calling Tx.appendEntry; passing the printable string would select its typed-entry overload.
+		const owned = await tx.scanConversations({ ownerTaskId: api.taskId }, POLICY.limits.case.phaseLookup);
+		const target = owned.items.find((entry) => String(entry.id) === conversationId);
+		if (target === undefined) throw new CaseError(`Case ${caseFile.id}'s blind falsifier context cannot be found for controlled cross-examination.`);
+		const entries = await tx.scanEntries({ conversationId: target.id, order: "descending" }, POLICY.limits.taskHistory.contextEntries);
+		const existing = entries.items.find((entry) => String(entry.conversationId) === conversationId && entry.kind === "carto.case-cross-exam" && entry.data?.caseId === caseFile.id && entry.data?.packetDigest === packetDigest);
+		if (existing !== undefined) return { entryId: String(existing.id), at: finiteTimestamp(existing.model?.[0]?.timestamp, api.now()) };
+		const entry = await tx.appendEntry(target.id, {
+			kind: "carto.case-cross-exam",
+			model: [{ role: "user", content: text, timestamp: api.now() }],
+			data: { mode: POLICY.enums.planMode.look, turns: POLICY.limits.case.phaseTurns, caseId: caseFile.id, phase: "falsify-cross-exam", packetDigest },
+		});
+		return { entryId: String(entry.id), at: api.now() };
+	}, callContext);
+	return markCrossExaminationPacketDelivered(brainDir, caseFile.id, { conversationId, entryId: delivered.entryId, packetDigest, at: delivered.at });
+}
+
+const finiteTimestamp = (value, fallback) => Number.isFinite(value) ? value : fallback;
 
 const phaseFailure = (phase, settled) => {
 	const detail = settled?.detail ? ` (${String(settled.detail).slice(0, POLICY.limits.case.failureChars)})` : "";
@@ -138,9 +174,15 @@ export function caseTool({ root, brainDir, config, active }) {
 		let initial = [];
 		if (phase.status === "queued") {
 			// Messages queued while one phase ended are part of this phase's initial capsule; anything arriving after
-			// this point goes through the next tool result, the same timing contract as a task message.
+			// this point goes through the next tool result, the same timing contract as a task message. The controlled
+			// cross-examination is the sole exception: it deliberately resumes the sealed blind falsifier context.
 			initial = caseFile.messages.filter((message) => message.route === "queued" && message.delivery === undefined);
-			child = (await phaseConversation(api, callContext, caseId, phase.id)) ?? (await forkPhase(api, callContext, caseFile, phase, initial));
+			if (hasCaseFlow(caseFile) && phase.id === "falsify-cross-exam") {
+				const deliveredTo = caseFile.flow.crossPacket?.delivery?.conversationId;
+				if (typeof deliveredTo !== "string" || deliveredTo === "") throw new CaseError(`Case ${caseId}'s controlled cross-examination packet has not reached the blind falsifier context.`);
+				child = await phaseConversation(api, callContext, caseId, phase.id);
+				if (child === undefined) throw new CaseError(`Case ${caseId}'s durable cross-examination packet context cannot be reopened.`);
+			} else child = (await phaseConversation(api, callContext, caseId, phase.id)) ?? (await forkPhase(api, callContext, caseFile, phase, initial));
 			const begun = beginCasePhase(brainDir, caseId, phase.id, { conversationId: child, at: api.now() });
 			const initialIds = new Set(initial.map((message) => message.id));
 			const present = begun.messages.filter((message) => initialIds.has(message.id));
@@ -157,6 +199,7 @@ export function caseTool({ root, brainDir, config, active }) {
 			initial = caseFile.messages.filter((message) => message.phase === phase.id && message.delivery === undefined);
 		}
 		if (child === undefined) child = phase.conversationId;
+		if (hasCaseFlow(caseFile) && phase.id === "falsify-cross-exam" && typeof child === "string") child = (await phaseConversation(api, callContext, caseId, phase.id)) ?? child;
 		if (child === undefined) throw new CaseError(`Case ${caseId}'s ${phase.name} phase has no focus context.`);
 
 		// State used by the ordinary read-only task guard and state block. No move token is present, so both direct
@@ -240,18 +283,40 @@ export function caseTool({ root, brainDir, config, active }) {
 		active.said = [];
 		active.heard = [];
 		try {
-			for (const wanted of CASE_PHASES) {
+			let first = loadCase(brainDir, id);
+			if (first.case === undefined) throw new CaseError(first.error);
+			if (hasCaseFlow(first.case)) {
+				// C2 stops at the durable main-owned witness boundary. The constructor and blind pass may run, then the
+				// packet is appended only after the sealed blind artifact before the same falsifier context continues.
+				for (;;) {
+					const loaded = loadCase(brainDir, id);
+					if (loaded.case === undefined) throw new CaseError(loaded.error);
+					if (loaded.case.status !== "running") break;
+					const state = loaded.case.flow.state;
+					if (state === "awaiting-witness-specification" || state === "witness" || state === "ready-for-synthesis") break;
+					const wanted = CASE_FLOW_PHASES.find((entry) => entry.id === state);
+					if (wanted === undefined) throw new CaseError(`Case ${id} has unsupported flow state ${state}.`);
+					if (state === "falsify-cross-exam") await appendCrossPacket(brainDir, loaded.case, api, callContext);
+					const refreshed = loadCase(brainDir, id);
+					if (refreshed.case === undefined) throw new CaseError(refreshed.error);
+					const phase = phaseOf(refreshed.case, wanted.id);
+					if (["complete", "ended", "stopped"].includes(phase.status)) throw new CaseError(`Case ${id}'s ${phase.name} is terminal but its flow remains ${state}.`);
+					await runPhase(id, phase.id, api, callContext);
+				}
+			} else {
+				for (const wanted of CASE_PHASES) {
+					const loaded = loadCase(brainDir, id);
+					if (loaded.case === undefined) throw new CaseError(loaded.error);
+					if (loaded.case.status !== "running") break;
+					const phase = phaseOf(loaded.case, wanted.id);
+					if (phase.status === "complete" || phase.status === "ended" || phase.status === "stopped") continue;
+					await runPhase(id, phase.id, api, callContext);
+				}
 				const loaded = loadCase(brainDir, id);
 				if (loaded.case === undefined) throw new CaseError(loaded.error);
-				if (loaded.case.status !== "running") break;
-				const phase = phaseOf(loaded.case, wanted.id);
-				if (phase.status === "complete" || phase.status === "ended" || phase.status === "stopped") continue;
-				await runPhase(id, phase.id, api, callContext);
+				if (loaded.case.status === "running" && loaded.case.phases.every((phase) => phase.status !== "queued" && phase.status !== "active")) readyCase(brainDir, id, { at: api.now() });
 			}
 			let loaded = loadCase(brainDir, id);
-			if (loaded.case === undefined) throw new CaseError(loaded.error);
-			if (loaded.case.status === "running" && loaded.case.phases.every((phase) => phase.status !== "queued" && phase.status !== "active")) readyCase(brainDir, id, { at: api.now() });
-			loaded = loadCase(brainDir, id);
 			if (loaded.case === undefined) throw new CaseError(loaded.error);
 			return loaded.case;
 		} finally {

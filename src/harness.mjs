@@ -88,7 +88,7 @@ async function runOf(runs, api, context) {
 		for (const entry of result.items) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
-			if (entry.kind === "carto.brief" || entry.kind === "carto.case-phase") {
+			if (entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.case-cross-exam") {
 				run = runFromBrief(entry.data);
 				break search;
 			}
@@ -480,8 +480,20 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				beforeRequest: async ({ messages }, api) => {
 					const main = api.conversationId === ROOT_CONVERSATION_ID;
 					// Cache the durable move contract before its first reply: a focus that writes only notes
-					// still receives its move-specific reply ceiling.
-					if (!main) await runOf(runs, api, context);
+					// still receives its move-specific reply ceiling. C2 deliberately reuses the blind falsifier
+					// conversation for cross-examination, so its separate phase budget must not inherit blind replies.
+					if (!main) {
+						const live = loadContext(brainDir).tasks[api.conversationId];
+						if (live?.caseId !== undefined && live.phase === "falsify-cross-exam" && runs.get(api.conversationId)?.phase !== "falsify-cross-exam") {
+							runs.delete(api.conversationId);
+							steps.delete(api.conversationId);
+							failures.delete(api.conversationId);
+							lastNote.delete(api.conversationId);
+							returning.delete(api.conversationId);
+							ends?.delete(api.conversationId);
+						}
+						await runOf(runs, api, context);
+					}
 					rounds.set(api.conversationId, (rounds.get(api.conversationId) ?? 0) + 1);
 					const turn = turnOf(messages);
 					// One more reply in this stretch: a turn of the main agent (a collapse in the middle of it does not

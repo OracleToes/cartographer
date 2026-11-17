@@ -131,9 +131,9 @@ export const POLICY = freezeTree({
 		taskDisplay: { listedNodes: 20, staleNodes: 12 },
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
 		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8, handoffChars: 1200, evidenceItems: 8, evidenceChars: 32_000 },
-		// A case is a fixed three-phase, read-only same-model evidence exercise. These are policy bounds rather
-		// than another control panel: its capsule, artifacts, participation record and focus turns stay finite.
-		case: { questionChars: 1200, contextChars: 12_000, evidenceItems: 6, evidenceChars: 24_000, capsuleChars: 40_000, capsuleSources: 12, sourceMetadataChars: 1200, criteria: 8, constraints: 12, ledgerEntries: 24, ledgerTextChars: 1200, sourceTextChars: 8_000, artifactChars: 8_000, artifactItems: 16, artifactTextChars: 1200, citations: 24, citationChars: 80, receipts: 24, receiptChars: 8_000, receiptTotalChars: 12_000, synthesisChars: 6_000, residualChars: 1200, messages: 32, messageChars: 2000, phaseTurns: 3, phaseRuntimeMs: 120_000, phaseLookup: 16, failureChars: 300 },
+		// A case is a bounded, read-only same-model evidence exercise. These are policy bounds rather than another
+		// control panel: its capsule, artifacts, controlled cross packet, participation record and focus turns stay finite.
+		case: { questionChars: 1200, contextChars: 12_000, evidenceItems: 6, evidenceChars: 24_000, capsuleChars: 40_000, capsuleSources: 12, sourceMetadataChars: 1200, criteria: 8, constraints: 12, ledgerEntries: 24, ledgerTextChars: 1200, sourceTextChars: 8_000, artifactChars: 8_000, artifactItems: 16, artifactTextChars: 1200, citations: 24, citationChars: 80, crossPacketChars: 12_000, crossChallenges: 16, receipts: 24, receiptChars: 8_000, receiptTotalChars: 12_000, synthesisChars: 6_000, residualChars: 1200, messages: 32, messageChars: 2000, phaseTurns: 3, phaseRuntimeMs: 120_000, phaseLookup: 16, failureChars: 300 },
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
