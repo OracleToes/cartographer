@@ -5,10 +5,11 @@
 // what is open decides which items there are. An item names the file it comes from and the line, so that `e` can
 // open it there.
 //
-// The Model tab is the one that is not read from a file. Its sent pane shows the frozen provider payload captured
-// immediately before dispatch: the system prompt, tools, then messages, with Cartographer's additions as parts of
-// their own. Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto;
-// a sent snapshot is never rebuilt from it.
+// The Model tab is the one that is not read from a file. Its sent panes show the frozen provider payload captured
+// immediately before dispatch in semantic reading order: the system prompt, tools, then messages, with Cartographer's
+// additions as parts of their own. The raw serialized payload has its own audit view; it is not another context part.
+// Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto; a sent
+// snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -604,7 +605,7 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 		header.push(row);
 	}
 	if (sent.collapsedSince) header.push([["! A collapse happened after this request was sent. This snapshot stays as sent; a later request starts from the new kept block.", "warn"]]);
-	header.push([], [["Frozen payload parts, in provider reading order. The raw provider JSON opens as its own row.", "faint"]]);
+	header.push([], [["Frozen payload parts, in provider reading order. Raw provider JSON is a separate audit view, not another context part.", "faint"]]);
 
 	// A frozen payload is read-only. Its copies are useful historical evidence, not edit handles for current prompt,
 	// tool, brain, or talk sources.
@@ -621,14 +622,6 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 			...extra,
 		};
 	};
-	if (typeof sent.payloadJson === "string") {
-		items.push({
-			key: "payload",
-			head: [["■ ", "catSystem"], [short(estimate(sent.payloadJson)).padStart(5), "muted"], ["  Provider payload JSON", ""], [sent.payloadHash === undefined ? "  frozen body" : `  frozen · ${sent.payloadHash}`, "faint"]],
-			body: sent.payloadJson,
-			copy: sent.payloadJson,
-		});
-	}
 	for (const part of parts) {
 		// A collapse snapshot is a normal frozen payload part. Opening it shows exactly its own bytes; current
 		// ledger, shelf, report, and talk data never unfold underneath it.
@@ -663,6 +656,39 @@ export function contextView(sent, { windowSize, cols, writing, isOpen }) {
 		for (const part of since) items.push(one(part));
 	}
 	return { header, items, parts, since };
+}
+
+/**
+ * The exact serialized provider body captured at dispatch. It is an audit artifact for copying or wire-level
+ * comparison, deliberately separate from the semantic sent-context view so it cannot look like a second prompt.
+ */
+export function rawPayloadView(sent) {
+	const title = "Raw provider payload · audit copy";
+	if (sent === undefined) {
+		return {
+			header: [[[title, "bold"]], [["No provider request has been sent in this run, so there is no frozen raw JSON to inspect.", "muted"]]],
+			items: [note("  Nothing has been sent to a provider in this run of carto yet.")],
+		};
+	}
+	const who = sent.task ? "focus" : "main agent";
+	const request = sent.requestId ?? `request ${sent.count}`;
+	const header = [
+		[[title, "bold"], [`  ·  ${who} · ${request}`, ""]],
+		[[`Frozen at dispatch${sent.payloadHash === undefined ? "" : ` · payload ${sent.payloadHash}`}. It serializes the same sent request shown in Latest sent or Main sent.`, "muted"]],
+		[["This is an audit copy, not another model-context part; it is not included in either sent view's input-token bar.", "faint"]],
+	];
+	if (typeof sent.payloadJson !== "string") {
+		return { header, items: [note("  This sent request has no retained raw provider JSON.", "warn")] };
+	}
+	return {
+		header,
+		items: [{
+			key: "payload",
+			head: [["■ ", "catSystem"], ["  Provider payload JSON", ""], [`  ${short(sent.payloadJson.length)} chars · audit only`, "faint"]],
+			body: sent.payloadJson,
+			copy: sent.payloadJson,
+		}],
+	};
 }
 
 /** The current request plan is not a provider payload yet. It keeps source facts alongside the exact fragments the

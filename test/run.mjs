@@ -2164,7 +2164,7 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 });
 
 test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
-	const { contextBar, contextView } = await import("../src/screen/views.mjs");
+	const { contextBar, contextView, rawPayloadView } = await import("../src/screen/views.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
 		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
@@ -2180,9 +2180,13 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	const sent = { task: false, requestId: "main:7", payload, payloadJson, payloadHash: "a1b2c3d4e5f60708", model: { provider: "local", api: "openai-completions", id: "qwen" }, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, usage: { input: 6000, cacheRead: 100, output: 500 }, used: 6100, collapsedSince: false };
 	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
-	assert.deepEqual(titles, ["Provider payload JSON", "System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the frozen payload stays in provider order, then the explicit not-sent response boundary");
-	assert.deepEqual(view.items.slice(1, 3).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
-	assert.equal(view.items[0].body, payloadJson, "the raw frozen provider body is available without reconstructing it");
+	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the semantic sent request stays in provider order, then the explicit not-sent response boundary");
+	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
+	assert.equal(view.items.some((item) => item.key === "payload"), false, "the serialized audit copy is not rendered as a first context part");
+	const raw = rawPayloadView(sent);
+	assert.equal(raw.items[0].body, payloadJson, "the raw frozen provider body remains available without reconstructing it");
+	assert.match(raw.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /not another model-context part/, "the raw view makes clear that its duplicate JSON is not a second prompt");
+	has(rawPayloadView({ ...sent, payloadJson: undefined }).items[0].head[0][0], "This sent request has no retained raw provider JSON", "the audit view does not manufacture a serialized body from the semantic snapshot");
 	assert.equal(view.items.every((item) => item.editKind === undefined), true, "sent payload and since-send response rows have no edit route");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
@@ -2218,6 +2222,7 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("Response, as it is being written"), writing.body], [true, "Half a tho"], "and unfinished response material is explicitly not sent");
 	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
 	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
+	has(rawPayloadView(undefined).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "and the audit view does not invent raw JSON before a request exists");
 });
 
 test("screen: the Next preview is explicit that its request plan was not sent", async () => {
@@ -2249,6 +2254,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 	]);
 	assert.deepEqual(TABS.map((tab) => tab.name), ["Talk", "Work", "Carto", "Diff", "Shells", "Model"], "the top-level tabs name speech, private work, live brain, and provider inspection separately");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
+	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
 	const current = handsView({ root: scratch, brainDir: join(scratch, "empty-current-brain") });
 	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");

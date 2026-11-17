@@ -113,9 +113,10 @@ A Talk row is changed only after Cartographer has an admitted Durable source for
 
 **Soft-forget active message** is a different action: `book target=message action=edit` creates a Durable omission marker for one stable message entry. Later active-context construction omits it; the raw transcript and earlier sent requests remain. It is not a Talk edit or a brain-record deletion.
 
-Model has four distinct views:
+Model has five distinct views:
 
-- **Latest sent** follows the newest frozen provider payload from any conversation. **Main sent** stays on the newest main-agent payload. Both are read-only snapshots retained for this run. They show the provider body and a reading order; response material below the sent boundary is labelled **Since request — not sent**.
+- **Latest sent** follows the newest frozen provider payload from any conversation. **Main sent** stays on the newest main-agent payload. Both are read-only snapshots retained for this run. They show the provider body in semantic reading order; response material below the sent boundary is labelled **Since request — not sent**.
+- **Raw payload** is the latest request's frozen serialized JSON, retained for audit or copying. It repeats the semantic sent-request rows by design; it is not a second context segment and does not count in the sent views' input-token bars.
 - **Next preview** is a pure current calculation. It is explicitly **not sent**, consumes no wakes, and can change when state, windows, a read batch, a collapse, or a new message changes.
 - **Current accounting** is fresh context accounting, not a sent payload and not a promise of a next request.
 

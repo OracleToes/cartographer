@@ -47,7 +47,7 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
+import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, rawPayloadView, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
 export const TABS = [
@@ -80,12 +80,13 @@ export const VIEWS = {
 	context: [
 		{ id: "window", name: "Latest sent" },
 		{ id: "main", name: "Main sent" },
+		{ id: "raw", name: "Raw payload" },
 		{ id: "preview", name: "Next preview" },
 		{ id: "parts", name: "Current accounting" },
 	],
 };
 /** Every view of every tab but Talk and Work, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.preview", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -506,6 +507,7 @@ export async function runScreen(session, options, runTerminal) {
 		"shells.out": "Enter back",
 		"context.window": "Enter open · y copy",
 		"context.main": "Enter open · y copy",
+		"context.raw": "Enter open · y copy",
 		"context.preview": "Enter open · y copy",
 		"context.parts": "Enter open · + all · y copy",
 		work: "j k move · Enter open · y copy",
@@ -542,6 +544,7 @@ export async function runScreen(session, options, runTerminal) {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
 			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
 		}
+		if (id === "context.raw") return rawPayloadView(session.engine?.window("newest"));
 		if (id === "context.preview") return previewView(pageOf(id).preview);
 		if (id === "context.parts") return accountingView(pageOf(id).text ?? "  …");
 		return { header: [], items: [] };

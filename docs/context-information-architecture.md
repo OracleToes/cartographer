@@ -75,9 +75,10 @@ So Chat is useful as an activity feed, but it is neither “the conversation in 
 
 The Context tab contains several temporal objects under one heading.
 
-- **Window** parses the last provider payload of whichever conversation sent most recently. **Main agent** parses the last main-agent payload instead. The selector is useful, but the scope can change silently when a focus sends a request.
-- `contextView()` shows that payload's system message, tools, and messages in request order. It then appends a divider and the current reply/results as “what the next one will hold as well.” The material above the divider is sent history; the material below it is not yet sent and is not a guaranteed future request.
-- **Parts** runs `/context` again. It is a fresh current accounting, not an inspection of the selected sent request.
+- **Latest sent** parses the last provider payload of whichever conversation sent most recently. **Main sent** parses the last main-agent payload instead. The selector is useful, but the scope can change silently when a focus sends a request.
+- `contextView()` shows that payload's system message, tools, and messages in semantic request order. It then appends a divider and the current reply/results as “what the next one will hold as well.” The material above the divider is sent history; the material below it is not yet sent and is not a guaranteed future request.
+- **Raw payload** is a separate latest-request audit view. Its serialized JSON necessarily repeats the semantic sent-request rows, but it is not another context segment and is not counted in the semantic sent-input bar.
+- **Current accounting** runs `/context` again. It is a fresh current accounting, not an inspection of the selected sent request.
 - **Hands** reads the current context store, shelf, and reports. It is a current shared-brain editor, not a part of the selected request.
 
 Even the Window's sent portion is a semantic rendering, not a byte-for-byte payload viewer. `partsOfMessage()` finds injected blocks by text patterns, trims them, reparses call JSON for display, and infers categories from role and text prefixes. It does not show request options outside messages/tools, and it cannot retain provenance that the provider body did not carry.
