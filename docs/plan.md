@@ -97,24 +97,22 @@ Retain `docs/design.md` as intent, create this single current plan, and retire t
 
 ### S1 — Specify the normal writable-command staging contract
 
-**Status:** proposed decision slice; no runtime behavior changes.
+**Status:** accepted 2026-11-16; this is the contract S2 implements. No runtime behavior changed in S1.
 
 The goal is to turn the existing “compare the final checkpoint diff” detection into a pre-application gate for sandboxed command moves. This is not case scratch and must not be disguised as one.
 
-Decide and document the exact contract before implementation:
+1. **One stage per change focus.** On a sandbox-capable change focus, Cartographer makes one random, case-unrelated stage root under an OS-private runtime parent, never inside the project or `.brain`. It contains a bounded materialized project copy (`work`), a fresh home/cache, and a fresh temporary directory. The source copy excludes `.git` and `.brain`; neither becomes a writable alternate path.
+2. **The command's only writable project-shaped path is `work`.** The command starts in that path. The live project remains reachable, if at all, only through bubblewrap's read-only system view; stage home and temporary paths are private to that move. Network remains exactly the approved move capability. Existing output/time limits remain in force; S2 adds fixed file-count and storage limits before a stage can be used.
+3. **The stage is a candidate, not a mutation.** Cartographer snapshots the source manifest before the first command. At task end it first closes every stage-owned window, then computes a bounded candidate manifest/diff from `work`. A candidate carries source/stage digests, commands, output/exit receipts, and cleanup result. It is not a project change merely because a command exited zero.
+4. **Promotion is the existing authority path.** The harness validates every candidate path against the live current move, original source digest, target list, changed-surface allowance, file-operation ceiling, text/binary policy, and checkpoint precondition before it touches the live tree. It validates the whole candidate before writing; an apply failure rolls back the already-applied paths or reports a rollback failure as fatal. A successful promotion is what the task's normal after-checkpoint records.
+5. **Refusal is safe and durable.** An oversized, stale, out-of-target, malformed, or resource-exceeded stage is discarded without applying a partial diff and becomes a precise closure gap/command record. Normal completion, stop, timeout, restart recovery, and failed promotion remove only the stage root Cartographer created.
+6. **Direct mode remains honest.** User-selected `--no-bwrap` / direct command moves retain their current detection-only behavior and explicit warning. They never receive a false “staged” claim. Main-context read-only commands continue to require bubblewrap.
 
-- A sandboxed command move receives a per-move workspace outside the live project and `.brain`.
-- It sees a controlled source input, never a writable live project mount. `.git` and `.brain` remain unavailable or read-only according to the normal change-runner contract; neither becomes a writable alternate path.
-- Network remains exactly the approved move capability. Process, output, time, storage, and cleanup bounds are enforced rather than advisory.
-- The runner returns a bounded candidate diff and command receipt with input revision/digests, command, exit status, stdout/stderr, and resource result.
-- Only the ordinary approved move path may apply a candidate diff to the live project. Before application it validates declared targets, the same changed-surface ceiling used by direct file tools, checkpoint preconditions, and file identity rules.
-- A direct/no-bubblewrap session remains visibly detection-only or refuses staged command execution. It must not claim preventative confinement it cannot provide.
-
-**Exit evidence:** a reviewed mount/application contract plus negative tests designed before the runner: no live-project write, no brain/git bypass, no undeclared network, and no diff application outside the ordinary move gate.
+**Exit evidence:** negative tests are designed before the runner: no live-project write, no brain/git bypass, no undeclared network, no diff application outside the ordinary move gate, and no leftover stage directory after normal, stopped, timed-out, or refused work.
 
 ### S2 — Implement sandboxed command staging and promotion
 
-**Status:** blocked on S1’s accepted contract.
+**Status:** accepted implementation slice; follows S1 exactly.
 
 Implement the smallest route that makes normal command moves truthful:
 
