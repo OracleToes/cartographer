@@ -1771,7 +1771,7 @@ export async function runTerminal(session, options) {
 			case "model": {
 				// The list comes from the server each time: llama-swap serves what is loaded now.
 				let served = session.servedModels ?? [config.model];
-				// The listing's context_length/context_window (or legacy meta.n_ctx) is total server capacity; Cartographer reserves reply room from it on a switch.
+				// The listing's context_length/context_window (or legacy meta.n_ctx) is the full context limit used after a switch.
 				let entries = [];
 				try {
 					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
@@ -1818,10 +1818,10 @@ export async function runTerminal(session, options) {
 				const was = options.contextWindow;
 				options.contextWindow = effective.usableContextWindow;
 				const context = effective.serverContextWindow !== undefined
-					? ` · usable context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; ${count(effective.replyReserve)} reserved for replies; settings cap ${count(effective.configuredContextWindow)})`
-					: effective.usableContextWindow !== was ? ` · usable context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · usable context ${count(effective.usableContextWindow)} tokens`;
+					? ` · context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; settings cap ${count(effective.configuredContextWindow)})`
+					: effective.usableContextWindow !== was ? ` · context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · context ${count(effective.usableContextWindow)} tokens`;
 				line(`${bold("●")} model  ${current} → ${wanted}${context}${busy ? " · the answer being written finishes on the old one" : ""}`);
-				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.reservedContextDivisor)
+				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.chatWindowDivisor)
 					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective.usableContextWindow)}. It stays as set; chatWindow in the settings is the setting to lower.`));
 				return true;
 			}

@@ -217,26 +217,23 @@ test("harness: a cached inspect brief restores its look contract", () => {
 	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
 });
 
-test("context window: a reported capacity reserves configured reply room without raising the setting cap", () => {
-	assert.deepEqual(contextWindowLimits(100_000, 32_768, 75_000), {
+test("context window: a reported capacity is the whole active context without a reply reserve", () => {
+	assert.deepEqual(contextWindowLimits(100_000, 75_000), {
 		configuredContextWindow: 100_000,
-		usableContextWindow: 42_232,
+		usableContextWindow: 75_000,
 		serverContextWindow: 75_000,
-		replyReserve: 32_768,
 	});
-	assert.deepEqual(contextWindowLimits(40_000, 32_768, 75_000), {
+	assert.deepEqual(contextWindowLimits(40_000, 75_000), {
 		configuredContextWindow: 40_000,
 		usableContextWindow: 40_000,
 		serverContextWindow: 75_000,
-		replyReserve: 32_768,
 	}, "metadata never raises the configured cap");
-	assert.deepEqual(contextWindowLimits(100_000, 32_768, 8_192), {
+	assert.deepEqual(contextWindowLimits(100_000, 8_192), {
 		configuredContextWindow: 100_000,
-		usableContextWindow: 4_096,
+		usableContextWindow: 8_192,
 		serverContextWindow: 8_192,
-		replyReserve: 4_096,
-	}, "a small server keeps the existing half-context split instead of losing all input room");
-	assert.deepEqual(contextWindowLimits(100_000, 32_768, undefined), {
+	}, "a small server exposes its full advertised window to the collapse engine");
+	assert.deepEqual(contextWindowLimits(100_000, undefined), {
 		configuredContextWindow: 100_000,
 		usableContextWindow: 100_000,
 	}, "without server metadata, the configured cap remains in force");

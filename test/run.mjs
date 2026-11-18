@@ -229,15 +229,15 @@ test("launch: Cartographer refuses a model route that accepts but ignores native
 	}
 });
 
-test("launch: a lone llama-server leaves the configured reply reserve below a reported 75k capacity", async () => {
+test("launch: a lone llama-server exposes its reported 75k capacity as the context limit", async () => {
 	const root = makeProject("lone-server", { git: false });
 	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 75_000 } }] });
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "anything", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a name the lone server does not list");
-		has(result.stdout, "usable context 42232 tokens (server capacity 75000; 32768 reserved for replies; settings cap 100000)", "the 75k capacity is distinct from Cartographer's usable context");
-		has(result.stdout, "of 42k tokens", "the usable context is shown everywhere else");
-		assert.equal(server.requests[0].max_tokens, 32768, "the provider retains total server capacity when sizing the reply");
+		has(result.stdout, "context 75000 tokens (server capacity 75000; settings cap 100000)", "the full 75k capacity replaces the default 100k context cap");
+		has(result.stdout, "of 75k tokens", "the full reported context is shown everywhere else");
+		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains configured independently of the context plan");
 	} finally {
 		await server.close();
 	}
@@ -257,15 +257,15 @@ test("launch: llama-swap's context_length is refreshed after the proof warms a m
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a lazily described llama-swap model");
-		has(result.stdout, "usable context 32000 tokens (server capacity 64000; 32000 reserved for replies; settings cap 100000)", "the warmed top-level context_length lowers the default 100k cap");
-		has(result.stdout, "of 32k tokens", "the usable input budget is shown after the refresh");
-		assert.equal(server.requests[0].max_tokens, 32768, "the provider still knows the total server capacity for reply sizing");
+		has(result.stdout, "context 64000 tokens (server capacity 64000; settings cap 100000)", "the warmed top-level context_length lowers the default 100k cap without a reply reserve");
+		has(result.stdout, "of 64k tokens", "the full advertised input context is shown after the refresh");
+		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains independent of the full context plan");
 	} finally {
 		await server.close();
 	}
 });
 
-test("model: a 75k switch keeps reply room in the provider while every displayed context budget becomes usable", async () => {
+test("model: a 75k switch uses the full reported context after lazy capability discovery", async () => {
 	const root = makeProject("model-context-window", { git: false });
 	configure(root, { initiate: false });
 	const server = await startStandIn({
@@ -278,10 +278,10 @@ test("model: a 75k switch keeps reply room in the provider while every displayed
 	try {
 		const result = await carto(root, server, [], { input: "/model Qwen3.8\nsay: after the switch || sleep\n/quit\n" });
 		ok(result, "switching to the reported model");
-		has(result.stdout, "model  stand-in → Qwen3.8 · usable context 42k tokens (server capacity 75k; 33k reserved for replies; settings cap 100k)", "the switch distinguishes server capacity from Cartographer's usable context");
+		has(result.stdout, "model  stand-in → Qwen3.8 · context 75k tokens (server capacity 75k; settings cap 100k)", "the switch exposes the full discovered server capacity");
 		const request = server.requests.find((entry) => entry.model === "Qwen3.8");
 		assert.ok(request, "the next request uses the switched model");
-		assert.equal(request.max_tokens, 32768, "the provider sizes the reply against the 75k server capacity, not the smaller input budget");
+		assert.equal(request.max_tokens, 32768, "the reply ceiling stays independent of the full context limit");
 		assert.ok(server.nativeRequests.some((entry) => entry.model === "Qwen3.8" && /outside-the-allowed-native-grammar-set/.test(entry.messages.map(rawText).join("\n"))), "the switch proves native grammar before adopting the new model");
 	} finally {
 		await server.close();

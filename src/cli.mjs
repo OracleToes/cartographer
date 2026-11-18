@@ -132,7 +132,7 @@ export async function main(argv) {
 		checkProject(project.root, { allowHome: flags.here === true });
 		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
 		const config = loadConfig({ brainDir: brainPath, flags });
-		// What the settings asked for; /model re-applies this cap and reserves its reply room for the new model.
+		// What the settings asked for; /model re-applies this cap to the newly selected model.
 		const configuredContextWindow = config.contextWindow;
 		let served = await checkServer(config);
 		try {
@@ -146,10 +146,10 @@ export async function main(argv) {
 		// Refresh the listing after the required proof so its lazy capability metadata can lower our initial budget.
 		// The route was just proven above, so a transient second listing failure must not erase the first listing.
 		try { served = (await checkServer(config)) ?? served; } catch { /* Retain the validated pre-proof listing. */ }
-		const contextLimits = contextWindowLimits(configuredContextWindow, config.maxTokens, served?.context);
+		const contextLimits = contextWindowLimits(configuredContextWindow, served?.context);
 		let contextNote = "";
 		if (contextLimits.usableContextWindow !== configuredContextWindow) {
-			contextNote = ` · usable context ${contextLimits.usableContextWindow} tokens (server capacity ${contextLimits.serverContextWindow}; ${contextLimits.replyReserve} reserved for replies; settings cap ${configuredContextWindow})`;
+			contextNote = ` · context ${contextLimits.usableContextWindow} tokens (server capacity ${contextLimits.serverContextWindow}; settings cap ${configuredContextWindow})`;
 			config.contextWindow = contextLimits.usableContextWindow;
 		}
 		const interactive = flags.message === undefined && process.stdin.isTTY === true;

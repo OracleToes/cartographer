@@ -130,13 +130,13 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// `openSession` is also used directly by integrations/tests, not only through cli.mjs. Keep the grammar
 	// requirement at this boundary as well; the CLI's earlier check shares the per-process capability cache.
 	await requireNativeGrammarCapability({ server: config.server, modelId: config.model });
-	// What the settings asked for, whatever the server said at the start. /model re-applies this cap and the same
-	// output reserve per model. `config.contextWindow` is the usable input budget all Cartographer features share.
+	// What the settings asked for, whatever the server said at the start. /model re-applies this cap per model;
+	// `config.contextWindow` is the full active context budget the rest of Cartographer shares.
 	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
 	// Direct callers of openSession do not go through cli.mjs's post-proof refresh. Re-read this model here too,
 	// so a lazy llama-swap context_length cannot leave an integration at the 100k default.
 	const refreshedInitialContextWindow = await listedContextWindow(config.server, config.model);
-	const initialLimits = contextWindowLimits(windowCeiling, config.maxTokens, refreshedInitialContextWindow ?? servedContextWindow);
+	const initialLimits = contextWindowLimits(windowCeiling, refreshedInitialContextWindow ?? servedContextWindow);
 	config.contextWindow = initialLimits.usableContextWindow;
 	const model = {
 		id: config.model,
@@ -148,8 +148,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		// pi-ai needs the total server capacity here, not the smaller input budget above, so its request sizing can
-		// fit maxTokens inside the model's real context. Without metadata, the configured cap is all it can know.
+		// pi-ai receives the full advertised capacity, matching Cartographer's context plan. It dynamically lowers
+		// an individual response ceiling only when the actual prompt is near that real server limit.
 		contextWindow: initialLimits.serverContextWindow ?? initialLimits.usableContextWindow,
 		maxTokens: config.maxTokens,
 		compat: {
@@ -167,9 +167,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// an older model must still start (the conversation keeps the model it began with until /model changes
 	// it), and /model can switch to any of the others without a restart.
 	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
-	// One record per served model, kept by reference: a record's contextWindow is the server's total capacity that
-	// pi-ai sizes the reply from, and /model updates the record it switches to (per request, not at conversation
-	// creation). A model that was never switched to starts at the configured cap because no capacity is known yet.
+	// One record per served model, kept by reference: a record's contextWindow is the full active context limit, and
+	// /model updates the record it switches to (per request, not at conversation creation). A model that was never
+	// switched to starts at the configured cap because no capacity is known yet.
 	const providerModels = known.map((id) => (id === config.model ? model : { ...model, id, name: id, contextWindow: windowCeiling }));
 	const provider = createProvider({
 		id: PROVIDER,
@@ -607,8 +607,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
 		 * @param {number} [limits.contextWindow]  its advertised total request capacity, when the listing already has one
 		 * @returns {false | ReturnType<typeof contextWindowLimits>} false when the name is not served; otherwise the
-		 *   model's usable input window and reported capacity. The usable window is what the engine, state block,
-		 *   shelf's soft cap (half of it), and display use; pi-ai keeps the total server capacity for reply sizing.
+		 *   model's active context window and reported capacity. The active window is what the engine, state block,
+		 *   shelf's soft cap (half of it), display, and provider context sizing use.
 		 */
 		setModel: async (modelId, ctx = context, limits = {}) => {
 			if (!known.includes(modelId)) return false;
@@ -616,7 +616,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			// The proof may be what caused llama-swap to start this model and publish its real context_length.
 			// Prefer that fresh value over the listing read before the switch, which can be absent or stale.
 			const refreshedContextWindow = await listedContextWindow(config.server, modelId);
-			const effective = contextWindowLimits(windowCeiling, config.maxTokens, refreshedContextWindow ?? limits?.contextWindow);
+			const effective = contextWindowLimits(windowCeiling, refreshedContextWindow ?? limits?.contextWindow);
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
 			config.contextWindow = effective.usableContextWindow;
 			const target = providerModels.find((entry) => entry.id === modelId);

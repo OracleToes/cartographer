@@ -35,11 +35,11 @@ export const DEFAULTS = freezeTree({
 	model: undefined,
 	// Which name the agent calls you by, in its notes, prompts and messages. Nothing set: the OS user who launched carto.
 	user: undefined,
-	// Cap on the context Cartographer keeps for a request. When a server reports its total capacity (-c), Cartographer
-	// lowers this as needed to leave room for one reply (maxTokens).
+	// Cap on the context Cartographer keeps for a request. When a server reports a smaller total capacity (-c), that
+	// capacity is the active context window; Cartographer does not carve out a fixed reply reserve from it.
 	contextWindow: 100000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
-	// how long a file one `write` call can hold; a reported server capacity holds this much back for the reply.
+	// how long a file one `write` call can hold. The provider reduces this only when an actual near-full request needs it.
 	maxTokens: 32768,
 	// Tool rounds one run may take before it stops and says so. A focus is a small execution move;
 	// the configured ceiling can never exceed the fixed move ceiling below.
@@ -278,7 +278,7 @@ export const POLICY = freezeTree({
 		nonEmptyArrayMinItems: 1,
 		planIdMinLength: 2,
 		minimumTokenSetting: 500,
-		reservedContextDivisor: 2,
+		chatWindowDivisor: 2,
 		collapsePercent: { min: 30, max: 95 },
 		windowTailMax: 40,
 		nonNegativeMin: 0,
@@ -299,21 +299,18 @@ export function modelContextWindow(entry) {
 }
 
 /**
- * Divide a model server's total context capacity between Cartographer's input and one reply.
- * A listing's `context_length`/`context_window` or legacy `meta.n_ctx` covers both. The configured window is an
- * input cap only: server metadata can lower it, never raise it. A reply reserves its configured ceiling, unless
- * that would take more than half of a small server; the existing half-context rule leaves a useful input side.
- * Without usable server metadata, the configured cap remains all Cartographer knows.
+ * Apply a server's total request capacity directly to Cartographer's context plan. A listing's
+ * `context_length`/`context_window` or legacy `meta.n_ctx` covers prompt and reply together, but Cartographer
+ * intentionally does not reserve a fixed reply allotment: its collapse engine works against the whole advertised
+ * window. The provider still reduces an individual reply ceiling when the actual prompt leaves too little room.
  */
-export function contextWindowLimits(configuredContextWindow, maxTokens, serverContextWindow) {
+export function contextWindowLimits(configuredContextWindow, serverContextWindow) {
 	const limits = { configuredContextWindow, usableContextWindow: configuredContextWindow };
 	if (!Number.isInteger(serverContextWindow) || serverContextWindow <= 0) return limits;
-	const replyReserve = Math.min(maxTokens, Math.floor(serverContextWindow / POLICY.validation.reservedContextDivisor));
 	return {
 		...limits,
 		serverContextWindow,
-		replyReserve,
-		usableContextWindow: Math.min(configuredContextWindow, serverContextWindow - replyReserve),
+		usableContextWindow: Math.min(configuredContextWindow, serverContextWindow),
 	};
 }
 
@@ -395,7 +392,7 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	for (const key of ["chatWindow", "collapseTokens"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.minimumTokenSetting) throw new ConfigError(`config: ${key} must be a whole number of tokens, ${POLICY.validation.minimumTokenSetting} or more`);
 	}
-	if (config.chatWindow > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
+	if (config.chatWindow > config.contextWindow / POLICY.validation.chatWindowDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
 	for (const key of ["screen", "repeatCut", "prefill", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
