@@ -1,13 +1,12 @@
 // `carto`, run from a project folder.
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, contextWindowLimits, CORE_DIR, loadConfig, modelContextWindow, POLICY } from "./config.mjs";
+import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 import { forkCatalogNamespace } from "./catalog.mjs";
 import { LegacyCutoverError, migrateLegacyProducts } from "./legacy-cutover.mjs";
 import { traceFile } from "./trace.mjs";
-import { requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const HELP = `carto: Cartographer, run from a project folder.
 
@@ -59,32 +58,6 @@ function parse(argv) {
 	return flags;
 }
 
-/**
- * Ask the server which models it has, so a wrong address or name fails here with a plain message.
- * @returns {Promise<{ context?: number, models?: string[] } | undefined>} the selected model's reported capacity and every served name
- */
-async function checkServer(config) {
-	let response;
-	try {
-		response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
-	} catch (error) {
-		throw new ConfigError(`The model server at ${config.server} does not answer (${error.cause?.code ?? error.message}). Is it running?`);
-	}
-	if (!response.ok) return undefined; // Not every server lists its models; the first request will tell.
-	const body = await response.json().catch(() => undefined);
-	const listed = (body?.data ?? []).filter((entry) => typeof entry?.id === "string");
-	const match = listed.find((entry) => entry.id === config.model);
-	// A llama-server run on its own lists its one model by file name and answers to any name.
-	const lone = listed.length === 1 && listed[0].owned_by === "llamacpp" ? listed[0] : undefined;
-	if (listed.length > 0 && match === undefined && lone === undefined) {
-		throw new ConfigError(`The model server has no model named "${config.model}". It has: ${listed.map((entry) => entry.id).join(", ")}.`);
-	}
-	const context = modelContextWindow(match ?? lone);
-	// Every model the server serves, for /model and for resuming a session whose stored model is another one.
-	const models = listed.map((entry) => entry.id);
-	return { context, models: models.length > 0 ? models : undefined };
-}
-
 /** Ask one question on the terminal. Ctrl-C and Ctrl-D count as "no". */
 function confirm(question) {
 	return new Promise((done) => {
@@ -130,28 +103,10 @@ export async function main(argv) {
 			return;
 		}
 		checkProject(project.root, { allowHome: flags.here === true });
-		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
+		// Opening Cartographer is local. The terminal and project brain remain available while its model server is
+		// stopped or unreachable; the first model turn validates the route and fails closed if native GBNF is absent.
 		const config = loadConfig({ brainDir: brainPath, flags });
-		// What the settings asked for; /model re-applies this cap to the newly selected model.
 		const configuredContextWindow = config.contextWindow;
-		let served = await checkServer(config);
-		try {
-			// Native GBNF is a Cartographer platform requirement, not a best-effort consult feature. Prove the
-			// exact configured route before creating a brain or opening any model work.
-			await requireNativeGrammarCapability({ server: config.server, modelId: config.model });
-		} catch (error) {
-			throw new ConfigError(`The selected model route cannot run Cartographer: ${error.message ?? error}`);
-		}
-		// llama-swap can discover context_length only once this first model request has warmed the selected model.
-		// Refresh the listing after the required proof so its lazy capability metadata can lower our initial budget.
-		// The route was just proven above, so a transient second listing failure must not erase the first listing.
-		try { served = (await checkServer(config)) ?? served; } catch { /* Retain the validated pre-proof listing. */ }
-		const contextLimits = contextWindowLimits(configuredContextWindow, served?.context);
-		let contextNote = "";
-		if (contextLimits.usableContextWindow !== configuredContextWindow) {
-			contextNote = ` · context ${contextLimits.usableContextWindow} tokens (server capacity ${contextLimits.serverContextWindow}; settings cap ${configuredContextWindow})`;
-			config.contextWindow = contextLimits.usableContextWindow;
-		}
 		const interactive = flags.message === undefined && process.stdin.isTTY === true;
 		// A brain in the wrong folder is easy to make and annoying to notice later, so the first time is confirmed.
 		if (isNew && interactive) {
@@ -182,7 +137,7 @@ export async function main(argv) {
 		const trace = traceFile({ root: project.root, brainDir: brainPath });
 		say(`Cartographer · ${project.root}`);
 		if (migrated) say(`the brain was renamed from .atlas to .brain, as it is called now`);
-		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
+		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}`);
 		if (legacyCutover.migrated) say(`C5 legacy archive ${legacyCutover.archive} · ${legacyCutover.inventory.storyteller} storyteller transcript(s), ${legacyCutover.inventory.cases} Case record(s), and ${legacyCutover.inventory.shelfPlacements} shelf snapshot(s) retired`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
 		const { YOLO_LINE } = await import("./plan.mjs");
@@ -212,7 +167,7 @@ export async function main(argv) {
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, servedContextWindow: served?.context, trace, configuredContextWindow });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, trace, configuredContextWindow });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
@@ -222,7 +177,6 @@ export async function main(argv) {
 			config,
 			root: project.root,
 			brainDir,
-			servedModels: served?.models,
 			runner,
 			gate,
 			initiation,

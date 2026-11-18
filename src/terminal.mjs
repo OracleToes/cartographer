@@ -252,6 +252,35 @@ export async function runTerminal(session, options) {
 		out.write(text);
 		midLine = !text.endsWith("\n");
 	};
+	// A server is optional while Cartographer opens: local commands remain available, and a later model turn retries
+	// this gate. Keep one clear failure on screen rather than making an unavailable endpoint look like a hung UI.
+	let lastModelError;
+	const applyModelLimits = (limits) => {
+		if (Number.isInteger(limits?.usableContextWindow) && limits.usableContextWindow > 0) options.contextWindow = limits.usableContextWindow;
+	};
+	const showModelError = (error) => {
+		const message = String(error?.message ?? error);
+		if (message === "" || message === lastModelError) return;
+		lastModelError = message;
+		// Chat output can scroll in the full-screen view. Keep this recoverable gate failure in that view's persistent
+		// status strip as well, so a stopped server is never mistaken for an idle or hung Cartographer session.
+		ui?.modelError?.(message);
+		line(`! ${message}`);
+	};
+	const ensureModelReady = async () => {
+		if (typeof session.ensureModelReady !== "function") return true;
+		if (session.isModelReady?.() !== true) line(dim("  connecting to the model server and checking native GBNF; a stopped model may start now"));
+		try {
+			const limits = await session.ensureModelReady();
+			applyModelLimits(limits);
+			lastModelError = undefined;
+			ui?.modelReady?.();
+			return true;
+		} catch (error) {
+			showModelError(error);
+			return false;
+		}
+	};
 	/** The agent's own text: dim, each line behind the gutter. */
 	const streamNotes = (text) => {
 		if (text === "") return;
@@ -908,7 +937,9 @@ export async function runTerminal(session, options) {
 		// In the line-by-line terminal the marker is said here; in the full screen it is said by the
 		// conversation's front-block entry, so that it is said after everything before it is wiped.
 		if (ui === undefined) collapsedLine();
-		if (config.readAhead !== false && !final) {
+		// Read-ahead is optional performance work, never a reason to wake or require a model while Cartographer is
+		// opening offline. Once the first actual model turn has proven its route, it resumes its usual behavior.
+		if (config.readAhead !== false && !final && (typeof session.isModelReady !== "function" || session.isModelReady())) {
 			const ahead = engine.readAhead(text, info.at);
 			if (ahead !== undefined) {
 				readingAhead = ahead;
@@ -967,7 +998,18 @@ export async function runTerminal(session, options) {
 	});
 	session.on?.((event) => {
 		enqueue(async () => {
-			if (stopped || event.main !== true) return;
+			if (stopped) return;
+			if (event.type === "model-ready") {
+				applyModelLimits(event.limits);
+				lastModelError = undefined;
+				ui?.modelReady?.();
+				return;
+			}
+			if (event.type === "model-error") {
+				showModelError(event.error);
+				return;
+			}
+			if (event.main !== true) return;
 			// Said after the reply it is about, which comes in a moment later.
 			if (event.type === "limit") afterReply.push(() => line(`! The agent made ${event.replies} replies in this turn without calling \`sleep\`, so Cartographer ended the turn. Say "continue" to let it go on.`));
 			else if (event.type === "same-note") afterReply.push(() => line(`! Cartographer ended the turn: the agent wrote ${event.empty ? `nothing and called nothing, ${event.times} times in a row` : `the same note ${event.times} times in a row and called nothing`}.`));
@@ -1050,6 +1092,9 @@ export async function runTerminal(session, options) {
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
 		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
+		// This runs after the terminal has opened. A cold llama-swap route may now load, but an absent server leaves
+		// the local Cartographer session open and the user's message is not admitted into an unserviceable run.
+		if (!(await ensureModelReady())) return undefined;
 		busy = true;
 		try {
 			// While the agent is working, a message joins the current run after its current tool round.
@@ -1234,6 +1279,7 @@ export async function runTerminal(session, options) {
 						return true;
 					}
 					try {
+						if (!(await ensureModelReady())) return true;
 						const current = await session.model?.();
 						const modelId = current?.modelId ?? config.model;
 						const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path: args[1] });
@@ -1774,12 +1820,12 @@ export async function runTerminal(session, options) {
 				// The listing's context_length/context_window (or legacy meta.n_ctx) is the full context limit used after a switch.
 				let entries = [];
 				try {
-					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
-					const body = await response.json().catch(() => undefined);
-					const listed = (body?.data ?? []).filter((entry) => typeof entry?.id === "string");
+					const status = await session.checkServer?.();
+					const listed = status?.listing?.entries ?? [];
 					if (listed.length > 0) { entries = listed; served = listed.map((entry) => entry.id); }
-				} catch {
-					// The server did not answer: the names from the start are shown.
+					applyModelLimits(status?.limits);
+				} catch (error) {
+					showModelError(error);
 				}
 				const on = await session.model?.();
 				const current = on?.modelId ?? config.model;
@@ -1789,7 +1835,7 @@ export async function runTerminal(session, options) {
 						const ctx = modelContextWindow(entries.find((entry) => entry.id === id));
 						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${ctx === undefined ? "" : dim(`  · server capacity ${count(ctx)} tokens`)}`);
 					});
-					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer leaves room for replies below each reported server capacity."));
+					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer uses each reported capacity as its full context limit."));
 					return true;
 				}
 				const byNumber = /^\d+$/.test(argument) ? served[Number(argument) - 1] : undefined;
@@ -2205,6 +2251,18 @@ export async function runTerminal(session, options) {
 			});
 		});
 		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue; Ctrl-T hides and shows its thinking."));
+		// Check connectivity only after the terminal exists. This does not load a model; an unavailable server becomes a
+		// recoverable on-screen status instead of preventing Cartographer from opening.
+		if (typeof session.checkServer === "function") {
+			void session.checkServer().then(
+				(status) => enqueue(async () => {
+					if (!stopped && !closing) applyModelLimits(status?.limits);
+				}),
+				(error) => enqueue(async () => {
+					if (!stopped && !closing) showModelError(error);
+				}),
+			);
+		}
 		// A context left large by the last session is collapsed before the first message has to carry it. Then,
 		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.
 		enqueue(async () => {

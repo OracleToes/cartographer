@@ -314,6 +314,9 @@ export async function runScreen(session, options, runTerminal) {
 		rate: undefined,
 		prefill: undefined,
 		lastPrefill: undefined,
+		// Terminal core failures that must remain visible even when the chat has scrolled: an offline model server
+		// is recoverable, but it is not an idle Cartographer session.
+		modelError: undefined,
 		closed: false,
 	};
 	const draw = () => {
@@ -381,6 +384,17 @@ export async function runScreen(session, options, runTerminal) {
 		notice(text) {
 			syncThinking();
 			flash(text);
+		},
+		/** A required model-route gate failed. Keep it in the strip as well as the Chat notice. */
+		modelError(message) {
+			state.modelError = String(message);
+			draw();
+		},
+		/** A successful first-turn proof clears the stale unavailable-route status. */
+		modelReady() {
+			if (state.modelError === undefined) return;
+			state.modelError = undefined;
+			draw();
 		},
 	};
 	for (const line of options.intro ?? []) chat.print(`${line}\n`, { keep: true });
@@ -473,9 +487,11 @@ export async function runScreen(session, options, runTerminal) {
 
 		const second = [];
 		const size = core.contextSize();
-		// /model re-fits the window while running; options.config is the shared object that follows it.
+		// /model re-fits the window while running; options.config is the shared object that follows it. A route
+		// error takes precedence over ordinary accounting: the visible status must say why Cartographer is resting.
 		const windowSize = options.config?.contextWindow ?? options.contextWindow;
-		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
+		if (state.modelError !== undefined) second.push([`! ${cut(state.modelError, POLICY.limits.screen.consoleErrorChars)}`, "warn"]);
+		else second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
 		const { plan, ledger, waits, requests } = readBrain();
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);

@@ -2150,6 +2150,36 @@ test("native grammar is Cartographer's hard host-decision boundary, not an OpenA
 	assert.match(refused.error, /outside the grammar/i);
 });
 
+test("harness: a direct Durable submission cannot bypass the deferred native grammar gate", async (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ prefill: false }));
+	const server = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
+	let session;
+	t.after(async () => {
+		await session?.harness.close(session.context);
+		await server.close();
+	});
+	const config = loadConfig({
+		brainDir,
+		flags: { url: server.url, model: "stand-in" },
+		env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" },
+	});
+	session = await openSession({ root, brainDir, config, runner: createRunner() });
+	assert.equal(server.nativeRequests.length, 0, "opening a local Durable session does not preflight the server");
+	assert.equal(server.requests.length, 0);
+
+	// This deliberately calls Durable directly, without terminal.submit()/ensureModelReady(). The provider wrapper
+	// remains the non-bypassable last gate for resumed work and other integration entry points.
+	const submission = await session.main.submit({ type: "input", content: "say: this ordinary request must not be sent || sleep" }, session.context);
+	const outcome = await submission.wait(session.context);
+	await session.harness.waitForIdle(session.context);
+	assert.equal(outcome.status, "unanswered");
+	assert.equal(outcome.reason, "model_error");
+	assert.match(outcome.detail, /requires llama\.cpp native GBNF grammar enforcement/i);
+	assert.equal(server.nativeRequests.length, 1, "the direct path sends only the mandatory native proof");
+	assert.equal(server.requests.length, 0, "an ignored native grammar still receives no ordinary provider request");
+});
+
 test("conference C1-C4: an independent same-model child preserves the handoff prefix, reaches a bounded return, and lets the root rest", async (t) => {
 	const { root, brainDir } = fresh(t);
 	writeFileSync(join(root, "source.txt"), "first captured line\nsecond captured line\n");
@@ -2274,7 +2304,10 @@ test("conference recovery resumes a pending native selector and commits its labe
 	const joined = planned.messages.map((message) => message.content).join("\n");
 	assert.match(joined, /Native GBNF selected atlas/, "recovery recreates the labelled host handoff before the selected participant request");
 	assert.match(joined, /You are Atlas \(atlas\)/, "the recovered request uses the selected participant's private tail");
-	const selector = server.nativeRequests.at(-1);
+	assert.equal(server.nativeRequests.length, 2, "cold recovery first proves native enforcement, then makes its bounded selector decision");
+	const [capability, selector] = server.nativeRequests;
+	assert.equal(capability.tools, undefined);
+	assert.match(capability.grammar, /"cartographer"/);
 	assert.equal(selector.tools, undefined);
 	assert.match(selector.grammar, /"atlas"/);
 	assert.doesNotMatch(selector.grammar, /"cartographer"/);

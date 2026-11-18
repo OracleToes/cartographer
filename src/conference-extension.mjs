@@ -27,7 +27,7 @@ import {
 	completeConference,
 	restrictParticipantPayload,
 } from "./conference.mjs";
-import { chooseNativeGrammar } from "./native-grammar.mjs";
+import { chooseNativeGrammar, requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const text = (value, details = {}) => ({ output: [{ type: "text", text: value }], details });
 const fail = (value, details = {}) => ({ isError: true, output: [{ type: "text", text: value }], details });
@@ -45,6 +45,10 @@ async function selectNativeParticipant({ brainDir, server, conference, at, signa
 	const messages = selectorMessages(conference, eligible);
 	const grammar = enumGrammar(eligible);
 	recordRequestPlan(brainDir, conference.id, "native-selector", messages, grammar, at);
+	// A resumed conference can arrive here before Durable issues its next participant provider request. Re-prove
+	// the captured endpoint/model first, so recovery cannot make a finite host decision on a route that has not
+	// passed this process's required native-GRAMMAR gate.
+	await requireNativeGrammarCapability({ server, modelId: conference.model?.modelId });
 	const selected = await chooseNativeGrammar({
 		server,
 		modelId: conference.model?.modelId,

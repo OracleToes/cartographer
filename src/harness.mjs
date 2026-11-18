@@ -40,28 +40,86 @@ import { traceFile, watchTrace } from "./trace.mjs";
 import { createStreamFreeze } from "./stream.mjs";
 import { loadAtlas, observeAtlas, saveAtlas } from "./atlas.mjs";
 import { USER_NAME, USER_HEAD } from "./user.mjs";
-import { requireNativeGrammarCapability } from "./native-grammar.mjs";
+import { NativeGrammarError, requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit", "rm"]);
 
+/** A model-server transport failure is recoverable at the terminal: Cartographer itself stays usable offline. */
+export class ModelServerUnavailableError extends Error {
+	constructor(server, detail) {
+		super(`Could not connect to the model server at ${server}${detail ? ` (${detail})` : ""}. Cartographer is still open; start or repair the server, then send a message to retry.`);
+		this.name = "ModelServerUnavailableError";
+		this.server = server;
+	}
+}
+
+/** A server that did answer /models must not silently accept a misspelled configured route. */
+export class ModelRouteError extends Error {
+	constructor(modelId, models) {
+		super(`The model server has no model named "${modelId}". It has: ${models.join(", ")}.`);
+		this.name = "ModelRouteError";
+	}
+}
+
+const connectionDetail = (error) => {
+	const code = error?.cause?.code;
+	if (typeof code === "string" && code !== "") return code;
+	if (error?.name === "TimeoutError") return "timed out";
+	const message = typeof error?.message === "string" ? error.message : String(error ?? "");
+	return message === "" ? undefined : message;
+};
+
 /**
- * Read a just-loaded model's advertised request capacity without making a model request of our own. llama-swap
- * fills context_length lazily after its first routed request, so callers use this after the native capability proof.
- * A listing outage is non-fatal here: the proof already established that the selected route itself is usable.
+ * Read a model listing without ever waking a model. An unavailable endpoint is a distinct, recoverable terminal
+ * state; a 404/non-listing endpoint remains compatible with the first native request deciding its route.
  */
-async function listedContextWindow(server, modelId) {
+async function listedModels(server) {
+	let response;
 	try {
-		const response = await fetch(`${server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
-		if (!response.ok) return undefined;
-		const body = await response.json();
-		const listed = Array.isArray(body?.data) ? body.data.filter((entry) => typeof entry?.id === "string") : [];
-		const exact = listed.find((entry) => entry.id === modelId);
-		// A bare llama-server reports its filename but accepts the configured route name.
-		const lone = listed.length === 1 && listed[0].owned_by === "llamacpp" ? listed[0] : undefined;
-		return modelContextWindow(exact ?? lone);
-	} catch {
-		return undefined;
+		response = await fetch(`${server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
+	} catch (error) {
+		throw new ModelServerUnavailableError(server, connectionDetail(error));
+	}
+	if (!response.ok) return undefined;
+	const body = await response.json().catch(() => undefined);
+	const entries = Array.isArray(body?.data) ? body.data.filter((entry) => typeof entry?.id === "string") : [];
+	return { entries, models: entries.map((entry) => entry.id) };
+}
+
+const listedModel = (listing, modelId) => {
+	if (listing === undefined) return undefined;
+	const exact = listing.entries.find((entry) => entry.id === modelId);
+	// A bare llama-server reports its filename but accepts the configured route name.
+	const lone = listing.entries.length === 1 && listing.entries[0].owned_by === "llamacpp" ? listing.entries[0] : undefined;
+	return exact ?? lone;
+};
+
+const unavailableFromNativeGrammar = (server, error) => {
+	if (!(error instanceof NativeGrammarError)) return undefined;
+	const record = error.record;
+	if (record?.transport !== undefined) return new ModelServerUnavailableError(server, connectionDetail(record.transport));
+	if (Number.isInteger(record?.response?.status) && record.response.status >= 500) return new ModelServerUnavailableError(server, `HTTP ${record.response.status}`);
+	return undefined;
+};
+
+/**
+ * Put native-GRAMMAR verification directly in front of provider transport as a last line of defense. Terminal
+ * requests normally await the same gate earlier so their context capacity can be refreshed before payload sizing;
+ * this guard keeps direct Harness users and resumed work fail-closed too.
+ */
+function guardProviderModelRequests(provider, ensureModel) {
+	for (const name of ["stream", "streamSimple"]) {
+		const inner = provider[name]?.bind(provider);
+		if (inner === undefined) continue;
+		provider[name] = (model, request, options = {}) =>
+			inner(model, request, {
+				...options,
+				onPayload: async (payload, currentModel) => {
+					await ensureModel(currentModel?.id ?? model?.id);
+					return await options.onPayload?.(payload, currentModel);
+				},
+			});
 	}
 }
 
@@ -127,16 +185,11 @@ async function runOf(runs, api, context) {
  */
 export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, servedContextWindow, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
-	// `openSession` is also used directly by integrations/tests, not only through cli.mjs. Keep the grammar
-	// requirement at this boundary as well; the CLI's earlier check shares the per-process capability cache.
-	await requireNativeGrammarCapability({ server: config.server, modelId: config.model });
-	// What the settings asked for, whatever the server said at the start. /model re-applies this cap per model;
-	// `config.contextWindow` is the full active context budget the rest of Cartographer shares.
+	// Opening a project is deliberately local: a stopped or unavailable model server must not keep Cartographer's
+	// terminal, ledger, plan, atlas, or shell controls from opening. The required native-GRAMMAR proof happens just
+	// before model work (and is also guarded at provider transport below), never as an eager launch request.
 	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
-	// Direct callers of openSession do not go through cli.mjs's post-proof refresh. Re-read this model here too,
-	// so a lazy llama-swap context_length cannot leave an integration at the 100k default.
-	const refreshedInitialContextWindow = await listedContextWindow(config.server, config.model);
-	const initialLimits = contextWindowLimits(windowCeiling, refreshedInitialContextWindow ?? servedContextWindow);
+	const initialLimits = contextWindowLimits(windowCeiling, servedContextWindow);
 	config.contextWindow = initialLimits.usableContextWindow;
 	const model = {
 		id: config.model,
@@ -163,19 +216,32 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		},
 	};
 	const models = createModels();
-	// The provider knows every model the server serves, not only the configured one: a session stored under
-	// an older model must still start (the conversation keeps the model it began with until /model changes
-	// it), and /model can switch to any of the others without a restart.
-	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
-	// One record per served model, kept by reference: a record's contextWindow is the full active context limit, and
-	// /model updates the record it switches to (per request, not at conversation creation). A model that was never
-	// switched to starts at the configured cap because no capacity is known yet.
-	const providerModels = known.map((id) => (id === config.model ? model : { ...model, id, name: id, contextWindow: windowCeiling }));
+	// Model listings may arrive only after the terminal has opened, or only after llama-swap has started one model.
+	// Keep this mutable backing array: pi-ai's provider reads it whenever it resolves a model, so /model can learn
+	// routes without requiring a launch-time connection.
+	const known = [config.model];
+	const providerModels = [model];
+	const addKnownModels = (ids) => {
+		for (const id of ids ?? []) {
+			if (typeof id !== "string" || id === "" || known.includes(id)) continue;
+			known.push(id);
+			providerModels.push({ ...model, id, name: id, contextWindow: windowCeiling });
+		}
+	};
+	addKnownModels(servedModels);
+	const modelRecord = (id) => {
+		let found = providerModels.find((entry) => entry.id === id);
+		if (found !== undefined) return found;
+		addKnownModels([id]);
+		return providerModels.find((entry) => entry.id === id);
+	};
 	const provider = createProvider({
 		id: PROVIDER,
 		name: "local model server",
 		baseUrl: config.server,
 		auth: { apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "local" } }) } },
+		// createProvider asks this backing list whenever Models resolves a route. Keep it mutable so a late /models
+		// listing can make a discovered route selectable without requiring a launch-time connection.
 		models: providerModels,
 		api: openAICompletionsApi(),
 	});
@@ -191,9 +257,82 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			}
 		}
 	};
+	// A listing is a light health check, not a model request. Share one in-flight read between the opening screen,
+	// the first model turn, and /model so an offline endpoint produces one quick, intelligible failure instead of
+	// several concurrent connection attempts.
+	let listingFlight;
+	let activeModelId = config.model;
+	const readyModels = new Map();
+	const readyValues = new Map();
+	const readListing = async () => {
+		if (listingFlight !== undefined) return await listingFlight;
+		const pending = listedModels(config.server);
+		listingFlight = pending;
+		try {
+			const listing = await pending;
+			if (listing !== undefined) addKnownModels(listing.models);
+			return listing;
+		} finally {
+			if (listingFlight === pending) listingFlight = undefined;
+		}
+	};
+	const applyCapacity = (modelId, serverContextWindow) => {
+		// A transient listing failure after a successful proof must not inflate a previously discovered lower limit.
+		const remembered = readyValues.get(modelId)?.serverContextWindow;
+		const effective = contextWindowLimits(windowCeiling, serverContextWindow ?? remembered);
+		const target = modelRecord(modelId);
+		if (target !== undefined) target.contextWindow = effective.serverContextWindow ?? effective.usableContextWindow;
+		if (modelId === activeModelId) config.contextWindow = effective.usableContextWindow;
+		return effective;
+	};
+	const inspectServer = async (modelId = activeModelId) => {
+		const listing = await readListing();
+		const entry = listedModel(listing, modelId);
+		return { listing, entry, limits: applyCapacity(modelId, modelContextWindow(entry)) };
+	};
+	const ensureModelReady = async (modelId = activeModelId, fallbackContextWindow) => {
+		const knownReady = readyModels.get(modelId);
+		if (knownReady !== undefined) return await knownReady;
+		const pending = (async () => {
+			const before = await inspectServer(modelId);
+			if (before.listing?.entries.length > 0 && before.entry === undefined) throw new ModelRouteError(modelId, before.listing.models);
+			try {
+				await requireNativeGrammarCapability({ server: config.server, modelId });
+			} catch (error) {
+				throw unavailableFromNativeGrammar(config.server, error) ?? error;
+			}
+			// llama-swap can publish context_length only after the native proof has routed and loaded this model.
+			// A second-listing outage is non-fatal: the proof just established that the route itself is usable.
+			let after = before;
+			try { after = await inspectServer(modelId); } catch { /* Retain pre-proof metadata when only /models is transiently unavailable. */ }
+			const capacity = modelContextWindow(after.entry) ?? modelContextWindow(before.entry) ?? fallbackContextWindow;
+			const limits = applyCapacity(modelId, capacity);
+			readyValues.set(modelId, limits);
+			if (modelId === activeModelId) notify({ type: "model-ready", modelId, limits });
+			return limits;
+		})();
+		readyModels.set(modelId, pending);
+		try {
+			return await pending;
+		} catch (error) {
+			readyModels.delete(modelId);
+			readyValues.delete(modelId);
+			throw error;
+		}
+	};
+	// No provider stream is allowed to reach the model before the native capability proof, including resumed Durable
+	// work and integrations that call a conversation directly instead of going through the terminal's friendly gate.
+	guardProviderModelRequests(provider, async (modelId) => {
+		try {
+			return await ensureModelReady(modelId);
+		} catch (error) {
+			notify({ type: "model-error", modelId, error });
+			throw error;
+		}
+	});
 	if (config.prefill !== false) watchPrefill(provider, notify);
-	// CARTO_TRACE: one JSON line per model call, appended as it is answered. After the prefill watcher,
-	// whose fetch is then the one the trace records around. The health check in cli.mjs is not traced.
+	// CARTO_TRACE: one JSON line per provider model call, appended as it is answered. After the prefill watcher,
+	// whose fetch is then the one the trace records around. The /models health listing is deliberately not traced.
 	const tracePath = trace ?? traceFile({ root, brainDir });
 	if (tracePath !== undefined) watchTrace(provider, tracePath);
 	// The resume behind Ctrl-V: the response body of every model call goes through this gate, outside the other
@@ -586,7 +725,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// The settings say which model this session is on. A conversation keeps the model it began with, so a change
 	// in the settings would otherwise never take hold (the stored one won, or, if the server had dropped it, the
 	// run stopped with no_model). At the start, then, the conversation is set to the configured model; /model
-	// switches it for the rest of the run, and every model the server serves is registered so any of them resolves.
+	// switches it for the rest of the run, and late /models listings register additional routes as they arrive.
 	const held = (await main.agent(context)).model;
 	if (held === undefined || (held.provider === PROVIDER && held.modelId !== config.model)) {
 		await main.configure({ model: { provider: PROVIDER, modelId: config.model } }, context);
@@ -606,25 +745,28 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		 * Switch the model of the main conversation, and so of every task forked after.
 		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
 		 * @param {number} [limits.contextWindow]  its advertised total request capacity, when the listing already has one
-		 * @returns {false | ReturnType<typeof contextWindowLimits>} false when the name is not served; otherwise the
-		 *   model's active context window and reported capacity. The active window is what the engine, state block,
-		 *   shelf's soft cap (half of it), display, and provider context sizing use.
+		 * @returns {Promise<ReturnType<typeof contextWindowLimits>>} the model's active context window and reported
+		 *   capacity. A listing that explicitly lacks the name rejects with ModelRouteError. The active window is what
+		 *   the engine, state block, shelf's soft cap (half of it), display, and provider context sizing use.
 		 */
 		setModel: async (modelId, ctx = context, limits = {}) => {
-			if (!known.includes(modelId)) return false;
-			await requireNativeGrammarCapability({ server: config.server, modelId });
-			// The proof may be what caused llama-swap to start this model and publish its real context_length.
-			// Prefer that fresh value over the listing read before the switch, which can be absent or stale.
-			const refreshedContextWindow = await listedContextWindow(config.server, modelId);
-			const effective = contextWindowLimits(windowCeiling, refreshedContextWindow ?? limits?.contextWindow);
+			// A selected route is proven before it is adopted. If Cartographer opened while offline, this is also the
+			// first time a freshly listed model becomes part of the provider registry.
+			const effective = await ensureModelReady(modelId, limits?.contextWindow);
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
+			activeModelId = modelId;
 			config.contextWindow = effective.usableContextWindow;
-			const target = providerModels.find((entry) => entry.id === modelId);
-			if (target) target.contextWindow = effective.serverContextWindow ?? effective.usableContextWindow;
+			notify({ type: "model-ready", modelId, limits: effective });
 			return effective;
 		},
-		/** The model names the server was serving when the session opened. */
-		servedModels: [...known],
+		/** A non-blocking model-listing check for the terminal's offline status line; it never starts a model. */
+		checkServer: async () => await inspectServer(activeModelId),
+		/** Prove the active route immediately before model work. Any unavailable or grammar-invalid route rejects closed. */
+		ensureModelReady: async () => await ensureModelReady(activeModelId),
+		/** Whether this process has already proven the active route and refreshed its post-load capacity. */
+		isModelReady: () => readyValues.has(activeModelId),
+		/** The model names known so far. A getter keeps /model current after a late listing arrives. */
+		get servedModels() { return [...known]; },
 		windows,
 		wakes,
 		engine,

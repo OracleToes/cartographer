@@ -149,8 +149,9 @@ let python;
 async function cartoOnTerminal(cwd, server, args, steps) {
 	python ??= (await run("python3", ["-c", "import pty"])).code === 0;
 	if (!python) return undefined;
+	const serverUrl = typeof server === "string" ? server : server.url;
 	// The line-by-line terminal, unless the test is about the full screen.
-	const command = [process.execPath, CARTO, "--url", server.url, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
+	const command = [process.execPath, CARTO, "--url", serverUrl, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
 	const result = await run("python3", ["-c", PTY, JSON.stringify(steps), ...command], { cwd, timeoutMs: 70_000 });
 	// Colour codes and carriage returns are the terminal's business, not the test's.
 	return { ...result, screen: result.stdout.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "") };
@@ -204,26 +205,57 @@ test("launch: the command works through a symlink, as install.sh sets it up", as
 	has(result.stdout, `core     ${CORE}`, "the core folder is the real one, not the symlink's");
 });
 
-test("launch: a model name the server does not have is reported with the names it has", async () => {
+test("launch: a model name the server does not have is reported when model work is first requested", async () => {
 	const root = makeProject("wrong-model");
 	const server = await startStandIn({ models: ["ByteShape", "other"] });
 	try {
-		const result = await run(CARTO, ["--url", server.url, "--model", "Byteshape"], { cwd: root });
+		const result = await run(CARTO, ["--url", server.url, "--model", "Byteshape", "-p", "say: hi || sleep"], { cwd: root });
 		assert.equal(result.code, 1, `expected exit 1:\n${result.all}`);
-		has(result.stderr, 'has no model named "Byteshape". It has: ByteShape, other.', "message");
+		has(result.stdout, 'has no model named "Byteshape". It has: ByteShape, other.', "message");
+		assert.equal(server.requests.length, 0, "an invalid listed route never receives an ordinary agent request");
 	} finally {
 		await server.close();
 	}
 });
 
-test("launch: Cartographer refuses a model route that accepts but ignores native grammar", async () => {
+test("launch: Cartographer opens without a server and keeps local commands available", async () => {
+	const root = makeProject("offline-open", { git: false });
+	const result = await run(CARTO, ["--url", "http://127.0.0.1:1/v1", "--model", "offline"], { cwd: root, input: "/model\n/status\n/quit\n" });
+	ok(result, "an offline Cartographer session");
+	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the unavailable server is an on-screen recoverable error");
+	has(result.stdout, "model offline · idle", "local status remains usable without a model connection");
+	assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session opens before a server is reachable");
+});
+
+test("launch: an offline interactive terminal renders before it reports the server error", async () => {
+	const root = makeProject("offline-interactive", { git: false });
+	configure(root, { initiate: false });
+	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", [], [["Set one up in", ""], ["Type a message.", ""], ["Could not connect to the model server", "/quit"]]);
+	if (result === undefined) return "python3 is needed for the pseudo-terminal launch check";
+	ok(result, "an offline interactive Cartographer session");
+	has(result.screen, "Type a message.", "the terminal is usable before the health check completes");
+	has(result.screen, "Could not connect to the model server at http://127.0.0.1:1/v1", "the failed health check is shown in the open terminal");
+	assert.ok(result.screen.indexOf("Type a message.") < result.screen.indexOf("Could not connect to the model server"), "the terminal renders before its unavailable-server error");
+});
+
+test("launch: the full-screen terminal keeps an offline server error visible", async () => {
+	const root = makeProject("offline-screen", { git: false });
+	configure(root, { initiate: false });
+	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [["Set one up in", ""], ["Could not connect to the model server", "\x03", false], [0.1, "\x03", false]]);
+	if (result === undefined) return "python3 is needed for the full-screen terminal check";
+	ok(result, "an offline full-screen Cartographer session");
+	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the full-screen status strip says the server is unavailable");
+});
+
+test("launch: a grammar-ignoring route is refused before its first agent request", async () => {
 	const root = makeProject("native-grammar-required", { git: false });
 	const server = await startStandIn({ ignoreNativeGrammar: true });
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: should never run || sleep"], { cwd: root });
-		assert.equal(result.code, 1, `a grammar-ignoring endpoint must be rejected before session work:\n${result.all}`);
-		has(result.stderr, "requires llama.cpp native GBNF grammar enforcement", "the failure names Cartographer's platform requirement");
-		assert.equal(existsSync(join(root, ".brain", "session.sqlite")), false, "the refusal happens before a project brain/session is created");
+		assert.equal(result.code, 1, `a grammar-ignoring endpoint must be rejected before agent work:\n${result.all}`);
+		has(result.stdout, "requires llama.cpp native GBNF grammar enforcement", "the failure names Cartographer's platform requirement");
+		assert.equal(server.requests.length, 0, "the normal agent request never reaches a grammar-ignoring route");
+		assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session can open before the deferred route check");
 	} finally {
 		await server.close();
 	}
@@ -235,8 +267,8 @@ test("launch: a lone llama-server exposes its reported 75k capacity as the conte
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "anything", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a name the lone server does not list");
-		has(result.stdout, "context 75000 tokens (server capacity 75000; settings cap 100000)", "the full 75k capacity replaces the default 100k context cap");
-		has(result.stdout, "of 75k tokens", "the full reported context is shown everywhere else");
+		has(result.stdout, "of 75k tokens", "the full reported context is shown after the first model turn");
+		hasNot(result.stdout, "reserved for replies", "no fixed reply reserve is displayed");
 		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains configured independently of the context plan");
 	} finally {
 		await server.close();
@@ -257,8 +289,8 @@ test("launch: llama-swap's context_length is refreshed after the proof warms a m
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a lazily described llama-swap model");
-		has(result.stdout, "context 64000 tokens (server capacity 64000; settings cap 100000)", "the warmed top-level context_length lowers the default 100k cap without a reply reserve");
-		has(result.stdout, "of 64k tokens", "the full advertised input context is shown after the refresh");
+		has(result.stdout, "of 64k tokens", "the full advertised input context is shown after the deferred proof refresh");
+		hasNot(result.stdout, "of 32k tokens", "the model capacity is never halved for a static reply reserve");
 		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains independent of the full context plan");
 	} finally {
 		await server.close();

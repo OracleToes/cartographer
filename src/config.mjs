@@ -183,8 +183,8 @@ export const POLICY = freezeTree({
 		escapeSequenceMs: 40,
 		reaperPollMs: 400,
 		modelCheckMs: 5000,
-		// Native GBNF is Cartographer's required control-plane boundary. The first request may need to wake a large
-		// local model, unlike /models, so the same bound covers startup proof and host-owned choices.
+		// Native GBNF is Cartographer's required control-plane boundary. The first model turn may need to wake a large
+		// local model, unlike /models, so the same bound covers lazy route proof and host-owned choices.
 		nativeGrammar: { timeoutMs: 60_000 },
 		gracefulExitMs: 50,
 		terminal: {
