@@ -7,7 +7,7 @@
 // and each function carries the operation out and returns the line to show.
 import { POLICY } from "./config.mjs";
 import { applyContextRowAction, ContextRowError, foldReports, loadContext, recallReport, unshelveForUser } from "./context.mjs";
-import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "./atlas.mjs";
+import { applyAtlasOp, AtlasError, findNode, loadAtlas, saveAtlas } from "./atlas.mjs";
 import { applyOp, LedgerError, loadLedger, prune, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
 import { pin } from "./top.mjs";
@@ -171,6 +171,47 @@ export function unshelveRow(brainDir, id) {
 	return unshelveForUser(brainDir, id);
 }
 
+/** Set the user's explicit atlas lens by node id/name or project path. @returns the line to show */
+export function focusAtlas(brainDir, root, target, reason) {
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The atlas cannot be read: ${error}`;
+	try {
+		const node = findNode(atlas, target);
+		const result = applyAtlasOp(atlas, node === undefined
+			? { action: POLICY.enums.atlasActions.focus, path: target, reason }
+			: { action: POLICY.enums.atlasActions.focus, name: node.id, reason }, {
+				root,
+				now: new Date().toISOString(),
+				by: POLICY.enums.atlasAuthors.user,
+				main: false,
+			});
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error_) {
+		if (error_ instanceof AtlasError) return `! ${error_.message}`;
+		throw error_;
+	}
+}
+
+/** Clear the user's explicit atlas lens. @returns the line to show */
+export function unfocusAtlas(brainDir, root) {
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The atlas cannot be read: ${error}`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.unfocus }, {
+			root,
+			now: new Date().toISOString(),
+			by: POLICY.enums.atlasAuthors.user,
+			main: false,
+		});
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error_) {
+		if (error_ instanceof AtlasError) return `! ${error_.message}`;
+		throw error_;
+	}
+}
+
 /**
  * The operations over several ids at once, for the commands: each id goes to its book, and the lines come back
  * together. Unknown ids are said in their own lines, so one mistake does not hide the rest.
@@ -185,10 +226,10 @@ export const dropRows = (brainDir, ids) => rows(brainDir, ids, dropRow);
 
 /**
  * Mark a row of a view settled, with the same operations the agent uses: a ledger entry is closed (with the
- * outcome line the agent would give), a reported plan move is accepted or a plan envelope is closed, a node of the graph is confirmed (the node's own
- * "still true"). @returns the line to show
+ * outcome line the agent would give), a reported plan move is accepted with a user-written evidence review or a
+ * plan envelope is closed, and a node of the graph is confirmed (the node's own "still true"). @returns the line to show
  */
-export function settleRow(brainDir, id, root) {
+export function settleRow(brainDir, id, root, review) {
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
 	const now = new Date().toISOString();
@@ -210,7 +251,16 @@ export function settleRow(brainDir, id, root) {
 		if (found.what === "plan envelope" || found.what === "plan move") {
 			const { plan, error } = loadPlan(brainDir);
 			if (plan === undefined) return `! The plan cannot be read: ${error}`;
-			const result = applyPlanOp(plan, { action: POLICY.enums.actions.done, id }, now);
+			const move = found.what === "plan move" ? plan.moves.find((entry) => entry.id === id) : undefined;
+			const acceptedReview = typeof review === "string" ? review.replace(/\s+/g, " ").trim() : "";
+			if (move?.status === POLICY.enums.moveStatus.reported && acceptedReview === "") {
+				return `! ${id} needs an acceptance review: say how its reported proof witnesses “${move.doneWhen}”. Use /done ${id} -- YOUR REVIEW, or plan acceptMove with review.`;
+			}
+			const result = applyPlanOp(plan, {
+				action: POLICY.enums.actions.done,
+				id,
+				...(move !== undefined && acceptedReview !== "" ? { review: acceptedReview } : {}),
+			}, now);
 			savePlan(brainDir, plan);
 			return result.line;
 		}
@@ -277,6 +327,29 @@ export function applyAdd(brainDir, book, text, root) {
 	} catch (error) {
 		if (error instanceof LedgerError || error instanceof PlanError || error instanceof AtlasError) return `! ${error.message}`;
 		throw error;
+	}
+}
+
+/** Add one child move under an envelope through the same plan operation the agent uses. @returns the line to show */
+export function addMove(brainDir, { parent, text, doneWhen, targets, proof, capabilities, budget }) {
+	const { plan, error } = loadPlan(brainDir);
+	if (plan === undefined) return `! The plan cannot be read: ${error}`;
+	try {
+		const result = applyPlanOp(plan, {
+			action: "addMove",
+			parent,
+			text,
+			done_when: doneWhen,
+			...(targets !== undefined ? { targets } : {}),
+			...(proof !== undefined ? { proof } : {}),
+			...(capabilities !== undefined ? { capabilities } : {}),
+			...(budget !== undefined ? { budget } : {}),
+		}, new Date().toISOString());
+		savePlan(brainDir, plan);
+		return result.line;
+	} catch (error_) {
+		if (error_ instanceof PlanError) return `! ${error_.message}`;
+		throw error_;
 	}
 }
 

@@ -2,11 +2,11 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.brain/`, which holds the agent's memory of that project.
 
-Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with Talk, Work, Carto, Diff, Shells, and Model tabs. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, and Model. Model includes the current route's native-GBNF readiness as well as provider-request inspection. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
-Needs Node 22.19 or newer, git (for the checkpoints around change tasks), bubblewrap (the `bwrap` command) and `script` from util-linux, which every Linux has (both for running commands; without them everything else still works), and your model server (llama.cpp behind llama-swap, or any OpenAI-compatible server).
+Needs Node 22.19 or newer, git (for the checkpoints around change tasks), bubblewrap (the `bwrap` command) and `script` from util-linux, which every Linux has (both for running commands; without them everything else still works), and a llama.cpp-compatible `/v1` model server—normally llama.cpp behind llama-swap—that enforces native GBNF `grammar`. A merely OpenAI-compatible server is not a supported Cartographer runtime.
 
 ```sh
 # Put this folder at ~/cartographer, then:
@@ -44,49 +44,55 @@ Enter or `y` sets up the brain and starts a session. Anything else leaves the fo
 On a terminal `carto` takes the whole screen. `carto --plain` gives the line-by-line terminal described further down instead, and so does `"screen": false` in the settings; with `-p` or piped input it is always the plain one.
 
 ```
- 1 Talk  2 Work  3 Carto  4 Diff  5 Shells  6 Model                 Esc: commands · F1: keys
+ Cartographer   1 Chat  2 Carto  3 Diff  4 Shells  5 Model
+ Conversation · Work · Consult
 
 ▎› add a seed option to the roller
 
 The roller takes --seed now. Two tests cover it; both pass.
 
-▸ 14 calls · t3 · 1m 12s
+│▸ 14 calls · t3 · 1m 12s
 ◂ report t3  1,204 characters  (/report shows it)
 
 ⠹ task m3 · edit src/roll.py · 38s · 31 tok/s
 ctx ▮▮▮▯▯▯▯▯ 41k/100k · 1 goal · plan 2/5 · approved · 1 window, 1 busy · 2 wakes
-→ task ›  type to speak to the agent while it works · Esc for commands
+Esc: commands · Ctrl-O: $EDITOR · ? all keys
+Task ›  Message the agent while it works · Esc for commands
 ```
 
 (An illustration of the layout, not a recorded run.)
 
+The screen is deliberately static: the filled top tab is the primary location, the quieter second row names its current subview, and selected rows remain the strongest content surface. Chat keeps the existing material in three projections: Conversation for user-directed exchange, Work for ordinary private focus activity, and Consult for a separate conference-local audit. Message and work blocks use a one-cell role rail plus a faint fill rather than a bright card per line. The activity strip steps down from immediate work to shared state to its key reminder, and the input names who is speaking (**You**, **Task**, or **Answer**) rather than relying on a bare prompt glyph. On narrower terminals labels compact as whole words and margins shrink before content does. These are hierarchy and alignment cues, not animations; labels and glyphs still carry the meaning when colour is unavailable.
+
 | Tab | What it shows |
 |---|---|
-| **1 Talk** | Two-party speech only: your submitted messages, delivered `chat` speech, and genuine questions and answers. Agent speech says whether it is sending, delivered, or failed. A failed delivery is not presented as something the agent said. |
-| **2 Work** | Private reasoning, ordinary agent notes, calls, results, task activity, and Cartographer notices. Runs still fold; Ctrl-T hides private reasoning and notes without turning them into Talk. |
-| **3 Carto** | The live shared brain: Atlas, Ledger, Plan, Requests, Tree, and **Current shared brain**. Shelf and report material lives here, not in Model. |
-| **4 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
-| **5 Shells** | The shell windows, live. Open a window for its newest lines or its terminal-emulator output. |
-| **6 Model** | **Latest sent**, **Main sent**, **Next preview**, and **Current accounting**. It separates frozen provider requests from an unsent calculation and live accounting. |
+| **1 Chat · Conversation** | Two-party speech only: your submitted messages, delivered `chat` speech, and genuine questions and answers. Agent speech says whether it is sending, delivered, or failed. A failed delivery is not presented as something the agent said. |
+| **1 Chat · Work** | Private reasoning, ordinary agent notes, calls, results, task activity, and Cartographer notices. Runs still fold; Ctrl-T hides private reasoning and notes without putting them into Conversation. |
+| **1 Chat · Consult** | A separate, read-only `co<N>` conference timeline. It labels Cartographer, Atlas, Ledger, Plan, Assessment, Context, host debate routing, and host final-report decisions; it distinguishes reasoning, chat/prose, local tool calls, and local tool results. The audit remains advisory and never enters parent Conversation, Work, context, or project authority. |
+| **2 Carto** | The live shared brain: Atlas, Ledger, Plan, Requests, Tree, and **Current shared brain**. Shelf and report material lives here, not in Model. |
+| **3 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
+| **4 Shells** | The shell windows, live, plus **Wakes**. Open a window for its newest lines or its terminal-emulator output; Wakes lists the main agent's scheduled time, file, and window triggers. |
+| **5 Model** | **Routes**, **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. Routes shows discovered model names, the active route's native-GBNF readiness, and an explicit connect/select control; the other views separate frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
 
-Tabs 3 to 6 are lists of items that fold. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it. Carto is read again while it shows; Diff, Shells, and Model refresh more often.
+Carto through Model are lists of items that fold. Chat's Conversation and Work use the ordinary local event feed; Consult reads only its private conference audit and live child activity. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it. Carto is read again while it shows; Diff, Shells, and Model refresh more often.
 
 **Two modes.** As in vi, and **Esc** goes from one to the other. The place to type, at the bottom, shows which you are in.
 
 - **Typing** (how carto starts): every key is text for the agent. Enter sends. Alt-Enter, Shift-Enter or Ctrl-J breaks the line, and so does a backslash before Enter. Pasted text keeps its lines and is never sent by itself; a paste of more than ten lines shows as `[paste #1 +40 lines]` and is sent in full, and a tab in pasted text becomes four spaces. A slash at the start of a line lists the commands with what they do, and Tab completes a command, a command's own word (`/copy session`, `/kill` and a window's name), or a path in the project.
-- **Commands**: every key is a command, and nothing is typed. The mode does not depend on the tab: you can type with the plan in view, and move through Talk or Work with the keys.
+- **Commands**: every key is a command, and nothing is typed. The mode does not depend on the tab: you can type with the plan in view, and move through Chat's Conversation, Work, or Consult subtab with the keys.
 
 Pasting always goes to typing, whatever the mode was. A terminal that does not mark what it pastes sends the lines as if they were typed; several lines arriving at once are taken as pasted for that reason, and stay together.
 
 | In commands mode | |
 |---|---|
-| `1` to `6` | Go to a tab. |
-| `[` and `]` | Previous and next view inside Carto, Diff, Shells, and Model (`H` and `L` do the same). |
+| `1` to `5` | Go to a tab. |
+| `[` and `]` | Previous and next view inside Chat, Carto, Diff, Shells, and Model (`H` and `L` do the same). |
 | `j`, `k` | Move down and up. `g` and `G` go to the first and last row. |
-| Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Shells, Enter opens a window's output and goes back from it. |
+| Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Chat Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Consult, it opens an attributed audit block or folds a conference. In Shells, Enter opens a window's output and goes back from it; in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another listed route. |
 | `+` and `-` | Open everything or fold everything (`zR` and `zM` do the same). |
-| `e` | In Talk, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work is private and read-only. Model rows are read-only historical or preview material. |
-| `d` | In Talk, press twice to **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. |
+| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. |
+| `d` | In Chat Conversation, press twice to **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. Work and Consult are private and cannot be removed from future kept talk. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. In Shells → Wakes, it opens confirmation before removing the selected wake. |
+| `u` | In Diff, confirm **Undo last checkpoint change**. Active shell changes are checkpointed first, so the dialog may name a shell window. Recovery restores that checkpoint's changed files; a move's revision returns to unapproved review. A cut-off task warns that recovery returns the project to its earlier checkpoint. |
 | `f`, `v`, `x`, `t`, `n` | On the relevant Carto row: fold a report, archive a brain record out of what the agent reads, unshelve a file, settle a record, or create a new entry. `a` shelves from Current shared brain or approves in Requests. |
 | `y`, `Y` | Copy the selected row or the whole tab. |
 | `r` | Read the tab again. |
@@ -98,32 +104,34 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 |---|---|
 | Tab, Shift-Tab | Next and previous tab. While typing, Tab completes once there is text. |
 | PgUp, PgDn, wheel | Scroll. Ctrl-Home and Ctrl-End go to the top and end. |
-| Ctrl-T | Show or hide private reasoning and notes in Work. Nothing is added to the conversation. |
+| Ctrl-T | Show or hide private reasoning and notes in Work and Consult. Nothing is added to the conversation. |
 | Ctrl-C | Copy selected mouse text. With nothing selected: stop the agent; with the agent at rest, leave. |
 | Ctrl-L | Draw the screen again. |
 | F1 | Show the keys. |
 
-**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off.
+**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. A quieter third row keeps the relevant key reminder beside the input.
 
-#### Talk, Work, and Model
+#### Chat, Work, Consult, and Model
 
-Talk is the steering wheel: it deliberately excludes reasoning, ordinary assistant text, tool work, and harness notices. Work is the private trace of those things. Talk and Work are local screen projections; a collapse or the screen's item limit can remove rows from view without erasing the Durable transcript.
+Conversation is the steering wheel: it deliberately excludes reasoning, ordinary assistant text, tool work, and harness notices. Work is the private trace of ordinary agent/focus activity. Consult is a distinct, read-only projection of only the local `co<N>` conference audit plus its live child state: each contribution is visibly attributed to a consult member, while host debate-routing and final-report decisions, reasoning, chat/prose, calls, and results have separate blocks. It remains advisory—neither parent history nor project authority—and is never rendered in ordinary Work. A collapse or the screen's item limit can remove ordinary local rows from view without erasing the Durable transcript; a conference's durable audit remains consult-local.
 
-A Talk row is changed only after Cartographer has an admitted Durable source for it. Equal visible words are never used to choose a row. **Reword future kept talk** and **Remove from future kept talk** affect the mutable source that a later collapse may copy. They do not rewrite the append-only transcript, the active request already being built, or frozen sent payloads. If a row has not acquired a stable source yet, the screen leaves it unchanged.
+A Conversation row is changed only after Cartographer has an admitted Durable source for it. Equal visible words are never used to choose a row. **Reword future kept talk** and **Remove from future kept talk** affect the mutable source that a later collapse may copy. They do not rewrite the append-only transcript, the active request already being built, or frozen sent payloads. If a row has not acquired a stable source yet, the screen leaves it unchanged.
 
-**Soft-forget active message** is a different action: `book target=message action=edit` creates a Durable omission marker for one stable message entry. Later active-context construction omits it; the raw transcript and earlier sent requests remain. It is not a Talk edit or a brain-record deletion.
+**Soft-forget active message** is a different action: `book target=message action=edit` creates a Durable omission marker for one stable message entry. Later active-context construction omits it; the raw transcript and earlier sent requests remain. It is not a Conversation edit or a brain-record deletion.
 
-Model has four distinct views:
+Model has six distinct views:
 
-- **Latest sent** follows the newest frozen provider payload from any conversation. **Main sent** stays on the newest main-agent payload. Both are read-only snapshots retained for this run. They show the provider body and a reading order; response material below the sent boundary is labelled **Since request — not sent**.
+- **Routes** is the settled model-route and transport projection. It keeps discovered names visible when a route-list refresh fails, distinguishes discovery from successful native-GBNF validation, and uses Enter to connect the active route or select and validate another listed route. It never treats a successful `/models` response alone as readiness.
+- **Latest sent** follows the newest frozen provider payload from any conversation. **Main sent** stays on the newest main-agent payload. Both are read-only snapshots retained for this run. They show the provider body in semantic reading order; response material below the sent boundary is labelled **Since request — not sent**.
+- **Raw payload** is the latest request's frozen serialized JSON, retained for audit or copying. It repeats the semantic sent-request rows by design; it is not a second context segment and does not count in the sent views' input-token bars.
 - **Next preview** is a pure current calculation. It is explicitly **not sent**, consumes no wakes, and can change when state, windows, a read batch, a collapse, or a new message changes.
 - **Current accounting** is fresh context accounting, not a sent payload and not a promise of a next request.
 
 A sent request is the payload Cartographer passed to the provider, not proof of a server's hidden chat-template prompt. A sent row has no edit or delete action. Current ledger, shelf, report, and context-store records remain in Carto's **Current shared brain**; they are never unfolded as though they were part of an old frozen request.
 
-**Copying.** Drag over text to select it, and it is copied when you let go. `/copy` copies the last delivered agent speech, `/copy session` exports the local session projection, `/copy report` exports the last task report, and `/copy tab` exports the tab that shows. The files go under `.brain/export/`.
+**Copying.** Drag over text to select it, and it is copied when you let go. `/copy` copies the last delivered agent speech, `/copy session` exports the local session projection, `/copy report` exports the last task report, and `/copy tab` exports the tab that shows. In Consult, copying a conference exports only that private conference timeline; copying a member block exports its persona-attributed block. The files go under `.brain/export/`.
 
-**What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. Otherwise the main agent reads it after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
+**What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. A consultation conference is isolated and does not receive interactive user input; its caller receives only its bounded final receipt. Otherwise the main agent reads your line after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
 
 What the full screen does not do yet: it does not retain an unbounded request audit or prove a provider's hidden prompt. Enable `CARTO_TRACE` for an optional wire observation.
 
@@ -187,7 +195,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `plan  2 move revisions wait for you` | Those move revisions are requests; approve with `/approve m1 m2` or snapshot an envelope with `/approve p2`; name a network move or its envelope explicitly |
 | `requests  4 requests wait for you` | `/requests` lists them: move revisions and questions of taste |
 | `approval: OFF (yolo) · …` and the prompt `[yolo] ›` | You have switched approval off: declared change moves run without `/approve` |
-| `● model  model-a → model-b · usable context 42k tokens (server capacity 75k; 33k reserved for replies; settings cap 100k)` | You switched the model with `/model`: the conversation goes on where it was, a task forked after runs on the new one, and Cartographer keeps reply room inside the reported server capacity |
+| `● model  model-a → model-b · context 75k tokens (server capacity 75k; settings cap 100k)` | You switched the model with `/model`: the conversation goes on where it was, a task forked after runs on the new one, and Cartographer uses the full reported context capacity |
 | `context … · … read for this answer` | How full the context is, and how many tokens the server had to read rather than reuse for the last answer |
 
 | Command | |
@@ -200,9 +208,9 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/recall ID …` | Bring a kept report back into view in full |
 | `/archive ID …`, `/unarchive ID …` | Take a row out of what the agent reads for good, or bring it back: a report's record line, a ledger entry, a plan envelope or move, a node of the graph. The row stays on disk either way |
 | `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a reported move is accepted after review, an envelope closes after its children, a node is confirmed |
-| `/delete ID …` | Remove a report for good: its record line and its file. Nothing recalls it again |
+| `/delete ID … --yes` | Remove a report for good: its record line and its file. Nothing recalls it again; Cartographer requires the explicit `--yes` acknowledgement |
 | `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
-| `/model`, `/model NAME` | The models the server serves, each with its reported server capacity where available, and which is on; a name or a number from the list switches. A task forked after runs on it too, and Cartographer states the smaller usable context after reserving reply room |
+| `/model`, `/model NAME` | The models the server serves, each with its reported server capacity where available, and which is on; a name or a number from the list switches. A task forked after runs on it too, and Cartographer states the active context limit |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, its authorization envelopes and move revisions, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
@@ -249,7 +257,7 @@ When the agent sends the same call, with the same arguments, three times and it 
 
 A reply that repeats one character or one line without end is not caught yet; that needs the live stream and comes with the interface work.
 
-You can type while the agent works. The message reaches the main agent after its current step, which means after a running task has reported.
+You can type while the agent works. A task receives the line with its next result, and the main agent is told about it with the task's report; otherwise the main agent receives it after its current step.
 
 If you leave, or the program is killed, while the agent is working, the work is not lost: the next `carto` in that project continues it.
 
@@ -263,34 +271,21 @@ carto --here                             # use the current folder as the project
 carto --url URL --model NAME             # another server or model for this run
 ```
 
-The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on. A server's `meta.n_ctx` is its total capacity for the prompt and reply together, not a prompt budget. When it reports one, Cartographer reserves `maxTokens` for the reply and uses the smaller of the settings' `contextWindow` cap and what remains; on a smaller server it reserves no more than half, so an input budget remains. The collapse threshold, shelf's soft cap (half of it), state block and display use that usable context. The provider keeps the total server capacity too, so each request's reply is sized inside it. `/model` lists reported server capacities and, after a switch, states the usable context, reply reserve and settings cap. It warns when `chatWindow` is more than half of the usable window and never raises that window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
+The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. Cartographer opens its local brain and terminal without requiring a live model connection. After the terminal is visible it makes a light `/models` health check, which does not start a model; if the server is unavailable it says so (and keeps it in the full-screen status strip) while leaving the local commands, ledger, plan, atlas and shell controls usable. Sending a message retries the connection. Immediately before the first model turn—and whenever `/model` adopts another route—Cartographer proves native GBNF enforcement; an unreachable or non-enforcing route is refused before an ordinary agent or host-control request can run, never downgraded. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every listed model becomes known to the session as it is discovered. llama-swap's top-level `context_length` (or its `context_window` mirror; legacy llama.cpp listings use `meta.n_ctx`) is the total capacity for the prompt and reply together. Cartographer refreshes that listing after the first proof request because llama-swap can discover it only once a model is loaded. When it reports one, Cartographer uses the smaller of the settings' `contextWindow` cap and that full reported capacity—there is no fixed reply reserve. The collapse threshold, shelf's soft cap (half of it), state block and display use that active context. The provider dynamically reduces an individual reply ceiling only if the actual prompt is near the server limit. `/model` lists reported server capacities and, after a switch, states the active context and settings cap. It warns when `chatWindow` is more than half of the active window and never raises that window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
 
-### The storyteller (Mythos-nano)
+### Same-model consultation conferences
 
-Cartographer can hand one hard, verifiable sub-problem — a kernel, an invariant, a proof — to **the storyteller** ([Mythos-nano](https://huggingface.co/squ11z1/Mythos-nano), a 3B long-reasoning model), on the same endpoint llama-swap already serves. The name is the epistemic posture: μῦθος is story, and a story is not a record. It is not a second mind in the project — it cannot see the project, it can do nothing in it, and nothing it says carries weight until a test or a proof bears it out. The agent uses it the way it uses a long calculation: for problems where the answer can be refuted.
+`consult` opens one bounded, isolated conference on the caller's **current resolved model**. It takes a concrete question, optional supplied context, optional captured project files, and a required consult-local opening persona. It does not switch models and has no external consultation model setting.
 
-**What it costs you.** llama-swap serves one model at a time, so a consult puts the storyteller in place of the agent's own model. The agent is unloaded while the story is told (deliberate on a card that holds one at a time) and reloads with the agent's next request. A call takes as long as a long story takes — minutes, not seconds — which is why it is one call per problem, with the whole problem in it.
+A host-owned llama.cpp-native GBNF selector controls both debate continuation and conclusion. Its raw no-tools request receives only the bounded consultation question, completed labelled contributions, and eligible roster—not an active persona packet, live project access, or a Durable tool surface. Before the host has recorded at least two completed contributions from two distinct participants, its grammar permits only `continue:<participant>` values. Once that host gate is met and Cartographer is eligible, the grammar also permits `report:cartographer`; the native decision alone chooses whether to continue or authorize Cartographer's final advisory. Debate participants receive immutable captured inputs and only `consult_source`; the authorized Cartographer report additionally receives `consult_return`. Participants have no project, shell, network, shared-brain, plan, approval, user-decision, or nested-task authority. A missing, malformed, ignored, or failed native decision ends the conference without fabricating a conclusion. The conference result is advisory: the agent must verify factual and technical claims against current sources, tests, or proof before relying on them.
 
-**What comes back.** The story — the question, the answer, and every round after that — is kept whole in the brain under a short `thread` marker the receipt prints (`st1`, `st2`, …; markers minted before 2026-11-16 keep their `st-YYYYMMDD-HHMMSS-xxxx` form and stay valid), and is shelved for whoever asked — main agent or focus. The agent never sees a path, only the thread. Over the shelf's view budget it is kept unseen and the state block says so; either way the story stands. The agent verifies it against a test or a proof and applies it itself, with the same gate as any other change. Asking on with the same `thread` — the storyteller sees the original question and every answer since — continues the story for as long as the work needs; the agent stops when nothing refutable remains. Its say is a proposal, never a verdict: the model was not trained on tool-calling or agent work, it is strong on algorithms and math and weak anywhere a test cannot refute it, and it is abliterated (no refusals) — all the more reason nothing rides on its confidence.
+A completed conference has an immutable private audit record. The Work view reveals that audit only when deliberately expanded or copied; it is not a continuing conversation. The former `thread` follow-up field is removed and is explicitly refused. On a brain that contains retired material, C5 preserves original storyteller and Case bytes under `.brain/legacy/raw/`, writes readable static exports under `.brain/legacy/exports/`, and converts old storyteller shelf placements to immutable snapshots. An active, resumable, unreadable, or malformed legacy Case blocks startup: use the pre-C5 release to explicitly stop unfinished work, then rerun C5 to archive it. C5 never loads or resumes archived material.
 
-**To see the conversation.** While it tells its story, the call stands in Work like any other private work, folded into the run of calls — and the row grows with the tail of the draft as it is written, the way a reply grows. Open the run (Enter), then open the consult call: the whole story stands there — every round: the context that was sent (shown up to half of `chatDetailChars`, the question in full), what came back (read from the story in the brain, never from the session), and the thread it stands under — never a path. A failed round still stands in the story it broke; a failed call says why it failed instead of showing an answer that never came. `y` on the call copies the whole story — context, question and answer, round by round; `+` and `-` open and fold every run at once.
+#### Native grammar is required
 
-**To set it up**, add a section to your llama-swap config next to ByteShape's (names match `consultModel`):
+Cartographer proves native grammar enforcement immediately before its first model turn and whenever `/model` selects another model. The terminal itself can open while the server is stopped; its light background listing check reports an unavailable server without starting a model, and the next model turn retries. The forced-literal proof asks for an incompatible answer while allowing only `cartographer`; an endpoint that returns anything else is refused before ordinary agent or host-control work. There is no OpenAI custom-tool adapter, prompt-only routing fallback, or generic-server mode. The former `consultGrammar` compatibility setting is refused; remove it rather than trying to select an adapter.
 
-```yaml
-  Mythos-nano:
-    cmd: >
-      /home/momo/git/llama.cpp/build/bin/llama-server
-      --port ${PORT}
-      -m /home/momo/AI/t2t_models/Mythos/mythos-nano-Q8_0.gguf
-      -c 65536 -fa on -ngl 99 --cache-type-k q8_0 --cache-type-v q4_0
-      --jinja --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --no-mmproj
-      --context-shift --keep 2048 --cache-reuse 6000
-```
-
-`-c 65536` covers the 40960-token answer ceiling plus ~24k of question and context — the length the model was trained at (its base trained at 64K; the advertised 128K is beyond that and unverified). The model for the `consult` call comes from `consultModel`; `""` switches the tool off. `consultTimeoutSeconds` bounds the wait; at 40960 tokens, generation alone can take a long while, so it defaults to 1800 seconds.
-
-`consult` is offered to the main agent and to foci alike. Nothing about the change gate, the checkpoints, the confinement or the sandbox changes: the answer is text, the agent applies it through the ordinary paths. The context you hand it leaves nowhere — it goes to your own local endpoint, same as every other request.
+`/consult probe [PATH]` is the inspectable version of that evidence. It sends two tiny synthetic, non-streaming requests to the **current selected model**: a forced-literal GBNF enforcement check and a finite-roster routing check. Both requests deliberately have no tools, no project files, no chat transcript, and no conference capture. Without `PATH`, Cartographer writes the raw request/response JSON log under `.brain/export/` (ignored by git). Give one new project-relative `.json` filename, for example `/consult probe llama-cpp-selector-probe.json`, to write a log you can inspect or commit. A passing diagnostic proves enforced finite output on that endpoint/model route; it does not claim calibrated or semantically correct routing.
 
 ### Which folder is the project
 
@@ -311,24 +306,24 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | Tool | Who | What |
 |---|---|---|
 | `task` | orchestrating context | Enter one bounded focus context. A change focus names exactly one declared move revision and runs only when that revision is live |
-| `book` | orchestrating and focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. It tends reports, ledger, plan, atlas, assessment, Durable conversations/messages/tool calls/results, prompts, tools, exact local schemas, and authorized project-file changes; plan edits remain orchestrator-only |
+| `book` | orchestrating and ordinary focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. It tends reports, ledger, plan, atlas, assessment, Durable conversations/messages/tool calls/results, prompts, tools, exact local schemas, and authorized project-file changes; plan edits remain orchestrator-only |
 | `read` | orchestrating and focused contexts | Inspect one project file by path or file ID. Successful calls from one reply are one transient batch; a later successful batch replaces it |
-| `shelf` | orchestrating and focused contexts | Add, remove or list explicit working-memory placements that survive later read batches and collapse |
+| `shelf` | orchestrating and ordinary focused contexts | Add, remove or list explicit working-memory placements that survive later read batches and collapse |
 | `search` | orchestrating and focused contexts | A regular expression over project files; returns `path:line: text` |
 | `list` | orchestrating and focused contexts | Project files as a tree with sizes |
 | `shell` | declared change move | Type a command into a shell window under its move capability and budget; returns what it printed and its exit status, or that it is still running |
 | `window` | orchestrating and focused contexts | Read a window, wait for its command, stop it, close it. Sending input requires the same live move that opened the window |
 | `wake` | orchestrating context | Set or remove a wake: after a time, when a file changes, when a shell window prints something |
 | `sleep` | orchestrating context | End the turn and rest until something wakes Cartographer |
-| `chat` | orchestrating and focused contexts | Say something to you. Does not wait |
-| `ask` | orchestrating and focused contexts | Put a question to you, with optional choices, and wait for the answer |
-| `return` | focused context | End this focus and hand over its report and any shelf items; shared-book updates already persist |
+| `chat` | orchestrating and ordinary focused contexts | Say something to you. Does not wait |
+| `ask` | orchestrating and ordinary focused contexts | Put a question to you, with optional choices, and wait for the answer |
+| `return` | focused context | End an ordinary focus with its report and optional shelf handoff |
 
 Project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches only from a focus carrying a live declared move revision and retains its targets, capability, budget, approval, sandbox, network, and root protections; `file remove` deletes a project file the same way (a checkpoint records the deletion, so `/undo` brings it back). A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. `book target=message action=edit` soft-forgets one stable active message: later active-context construction omits it, while the raw Durable transcript and earlier sent requests remain unchanged. Top-level `read` is model-callable; the `write`, `rm`, and `edit` executors behind authorized `book` file operations are internal primitives.
 
 **References.** New `book` calls pass `{ id, namespace?, kind?, version? }` — the ID alone is enough; the namespace and kind are inferred and the live version is used unless one is pinned. Paths are locators, not identities. File versions are SHA-256 digests and exact bytes are kept under `.brain/catalog/versions/`; retained non-file versions are under `.brain/catalog/entities/`. Durable-owned transcript/task IDs remain their native IDs. App-managed catalog file IDs and shelf placement IDs count up within the brain — `f1`, `f2`, … and `sh1`, `sh2`, … — because they only ever need to be unique per project directory; ids written before 2026-11-15 (`f-`/`sh-<uuid>`) stay valid. An explicit `carto --fork-brain` rotates the namespace, transactionally rebinds saved internal references, and records its source namespace; backups/restores keep their namespace. Tool schemas are static and flat in every request; there is no provider-side schema expansion to verify.
 
-The same tool set is registered in every request, for the orchestrating context and each focus, so a fork keeps the provider prompt prefix stable. Project-file mutations run only in a focus carrying one live declared change move; when already in that focus, the checked operation runs inline. Brain-scoped book operations run directly, but only the orchestrating context changes plans or controls session wakes/sleep. `shell` starts commands only from a focus carrying a live declared change move. A focus return records whether shared atlas, ledger, or assessment updates occurred; this is not a user-approval bypass.
+The same tool declarations are registered in every request, for the orchestrating context and each focus, so a fork keeps the provider prompt prefix stable. The authority hook still distinguishes them: project-file mutations run only in an ordinary focus carrying one live declared change move; when already in that focus, the checked operation runs inline. Brain-scoped book operations run directly there, but only the orchestrating context changes plans or controls session wakes/sleep. `shell` starts commands only from an ordinary focus carrying a live declared change move. An ordinary focus return records whether shared atlas, ledger, or assessment updates occurred; this is not a user-approval bypass.
 
 ### How a task goes
 
@@ -505,23 +500,27 @@ What this does not do yet:
 
 ### The sandbox
 
-Every window is a [bubblewrap](https://github.com/containers/bubblewrap) sandbox of its own, unless you switch the sandbox off (below). Inside it, a command sees the machine like this:
+Every command window is a [bubblewrap](https://github.com/containers/bubblewrap) sandbox unless you switch the sandbox off (below). A **normal change-move command** is not pointed at the live project: Cartographer first makes one private, disposable source copy for that focus, then runs its stage windows there. The live project is never writable from those windows. It sees the machine like this:
 
 | | |
 |---|---|
-| The project folder | Writable |
-| `.brain/` and `.git/` in it | Read-only. `git status`, `diff` and `log` work; committing, resetting and stashing do not, so your repository stays yours |
+| Stage work tree | The only writable project-shaped path. It is a bounded copy outside the project and `.brain/`; its candidate diff is not a project change yet |
+| Live project | At most visible through bubblewrap's read-only system view; never rebound writable |
+| `.brain/` and `.git/` of the live project | Blocked in a command stage; neither is an alternate source or write route |
+| Dependencies | A present `node_modules/` may be overlaid read-only for command resolution; it is not a candidate path |
 | The system (`/usr`, `/etc`, …) | Read-only |
-| Your home folder | Not there. In its place is a home of the sandbox's own, `<project>/.brain/home/`, which keeps what tools store there (package caches, settings) and is the same in every window |
-| Toolchains in your home folder | Read-only: every `PATH` entry that lies in your home folder, and these folders when they exist: `.nvm` `.volta` `.bun` `.deno` `.rustup` `.pyenv` `.rbenv` `.asdf` `.sdkman` `.juliaup` `.ghcup` `.dotnet` `.local/lib` `.local/share/{mise,uv,pnpm,fnm}` |
+| Your home folder | Not there. A normal window gets `<project>/.brain/home/`; a command stage gets a fresh private home that is destroyed with the stage |
+| Toolchains in your home folder | Read-only in ordinary windows: every `PATH` entry that lies in your home folder, and these folders when they exist: `.nvm` `.volta` `.bun` `.deno` `.rustup` `.pyenv` `.rbenv` `.asdf` `.sdkman` `.juliaup` `.ghcup` `.dotnet` `.local/lib` `.local/share/{mise,uv,pnpm,fnm}` |
 | `/tmp`, `/var/tmp` | The window's own: empty when it opens, gone when it closes |
 | `/run`, `/mnt`, `/media` | Empty: no sockets of your session, no other drives |
-| The network | Off, unless the window was opened by a move whose declared capability grants it |
+| The network | Off, unless the staged move's declared capability grants it |
 | Processes | Only the window's own. They end when the window is closed, and when Cartographer exits or is killed. What a command leaves in the background stays until then, as in any terminal |
 | The environment | A short fixed list (`PATH`, `HOME`, `LANG`, …). No variable of your shell is passed on |
 | Input | A terminal. A program can ask, and a change task can answer with `window` send. Programs that notice a terminal behave as they do for you: `ls` prints in columns. Colours and pagers are switched off |
 
-If a program that works in your terminal is "not found" in the sandbox, it probably lives in a part of your home folder that is not in the list above. Name its folder in the `shellRead` setting.
+At the focus boundary Cartographer closes every stage window, scans a bounded manifest-backed candidate, and checks its source digest, exact approved move revision, target list, file-operation and changed-surface limits before it writes any live path. It validates the whole candidate first and restores earlier paths if an apply fails. A stale, malformed, oversized, or out-of-target stage is discarded; a cleanup failure blocks the move; either is a durable closure gap. Direct mode below is deliberately different: it keeps detection-only final-checkpoint scope review.
+
+If a program that works in your terminal is "not found" in an ordinary sandbox window, it probably lives in a part of your home folder that is not in the list above. Name its folder in the `shellRead` setting. A command stage deliberately has no extra host read folders: its source input is the frozen stage copy and its read-only dependency overlay.
 
 **A read-only window.** The main agent runs its own commands (the tests, the lints, `git status`) in a window that is read-only like any other read: the project folder and the brain are mounted read-only there too, and the network is unreachable, whatever envelope text says. The window exists only while the sandbox is on. The window is shown with `read-only` in the windows block. A command that must write or reach the network cannot run in one; it needs a declared change move. Reading, waiting, stopping and closing work the same in it.
 
@@ -539,11 +538,9 @@ The network is decided when a window opens and stays with the window. A move wit
 
 **Output.** No command is stopped for taking long; it is left running, as described above. A call returns the first 40 lines and the last 160 of what was printed (at most 2,000 and 8,000 characters), with a line in between that says how many were left out. Colour codes are removed and a progress bar is reduced to its last state.
 
-**What undo covers.** What commands do to files is in the checkpoints like any other change: the record after the task lists it, `/diff` shows it, `/undo` takes it back. The exception is files that git ignores, such as build output, installed dependencies, an `.env` file or a local database. They are not in the checkpoints, so if a command deletes or overwrites one, `/undo` cannot bring it back. The same goes for a folder that is a git repository of its own. The agent is told this in the tool's description.
+**What undo covers.** A promoted staged candidate contains only regular, non-ignored project files that passed the ordinary move gate. Its successful promotion is then in the checkpoints like any other change: the record after the task lists it, `/diff` shows it, and `/undo` takes it back. A staged command cannot promote build output, installed dependencies, an `.env` file, a nested repository, `.git`, or `.brain`; those paths are refused rather than quietly escaping the checkpoint. The broader exception still applies in direct mode, where a command can alter ignored or outside-project files before the final checkpoint detects only project-surface consequences.
 
-When a command creates more than 40 files, the record names folders instead of files (`folder   .venv/ 931 files: 931 new`), so that it does not fill the agent's context.
-
-**After a kill.** A window that was open when Cartographer was killed ends with it, and so does what ran there. At the next start the command is not run again; the task is told that it was interrupted and may have run in part, and goes on from there, in a window opened anew. The agent's windows block says which windows are gone and what they were running.
+**After a kill.** A window that was open when Cartographer was killed ends with it, and so does what ran there. A dead process's disposable command stage is removed on the next start; no staged candidate is applied during recovery and no command is run again. The resumed task records the missing/stopped stage as a closure gap and needs a deliberate successor move if the work still matters. The agent's windows block says which windows are gone and what they were running.
 
 **Switching the sandbox off.** When the work has to reach beyond the project folder, you can let commands run without the sandbox:
 
@@ -630,7 +627,7 @@ The system prompt and tool descriptions are source code in `src/prompt.mjs`. The
 
 Besides the tool descriptions, the prompt tells the agent how to work when nobody is talking to it. In substance:
 
-- **The dyad.** You work beside the agent at a shared screen. Talk is the steering wheel: interrupt any time, and answer while it works; your messages may drop or redirect the work, and your edits to the brain are taken as they are.
+- **The dyad.** You work beside the agent at a shared screen. Chat Conversation is the steering wheel: interrupt any time, and answer while it works; your messages may drop or redirect the work, and your edits to the brain are taken as they are.
 - **Two modes.** With approval required (the default), each change move revision is a request you answer in your own time; looking, recording, testing and proposing never wait for it. With approval off (`/yolo`), the agent still gets one declared move at a time, with the same targets, budgets, checkpoints, evidence review and sandbox. Approval off is trust, never wider authority. The state block says which mode you are in.
 - **The standing duty.** At the start of a session, and after every wake with nothing owed to you, the agent's turn is its own: map the project, record it in the assessment and the atlas, form hypotheses and test them (with the commands it may run), work what stands approved, and keep the map honest. Your silence is "not authorized yet", never "do not look".
 - **Sleep, with evidence.** `sleep` is a conclusion the agent reaches after checking a written list — nothing waiting from you, no open wake, no approved move ready, no question owed to you, no untested hypothesis, no unmapped ground in view, no found weakness unplanned. If anything remains, that is the next work, not a reason to sleep.
@@ -788,7 +785,7 @@ Calls of the stretch before the collapse (the minute, the call, its outcome; the
 
 A collapse that would free next to nothing is not made, however full the context is. That case means the shelf, the talk and the fixed part fill the window by themselves; lower `chatWindow`.
 
-**The question (opt-in, off by default).** With `"handoffQuestion": true`, before a collapse that the agent did not ask for itself, Cartographer asks it whether something in view is written down nowhere and will be needed. With the default `false` the collapse carries the last reply mechanically — the block quotes the calls of the last reply and what each returned, never asks — and nothing of that one request is spent on the question. The request is the last one again with the question added at its end, so the server has read all of it but the question; the reply is limited by a schema to `{"handoff": true}` or `{"handoff": false}`, with thinking switched off for that one request. `false` costs the reading of the last reply and of the question, a second or two as a rule, and the collapse follows at once. `true` gives the agent one turn to write down what it needs, in the ledger, the graph, the assessment or on the shelf, and then the collapse follows. If the server cannot answer such a request, the screen says so with the server's words and the collapse is made without the question.
+**The question (opt-in, off by default).** With `"handoffQuestion": true`, before a collapse that the agent did not ask for itself, Cartographer asks it whether something in view is written down nowhere and will be needed. With the default `false` the collapse carries the last reply mechanically — the block quotes the calls of the last reply and what each returned, never asks — and nothing of that one request is spent on the question. The control request is a separate no-tools native-GBNF completion that permits exactly `{"handoff":true}` or `{"handoff":false}`, with thinking switched off. `false` collapses at once; `true` gives the agent one turn to write down what it needs in the ledger, graph, assessment, or shelf. A malformed, unsupported, or unconstrained answer is not retried without grammar: the screen records the failure and the collapse is made mechanically.
 
 **The read-ahead.** A new context has to be read by the server once, and at about 740 tokens a second a block of 15,000 tokens takes 20 seconds. After a collapse at rest Cartographer therefore sends the new start of the context at once, asking for one token of answer, so that it is read while you are away. When you type before it is done, it is stopped and your message goes first. `readAhead: false` switches it off. A collapse in the middle of a turn needs none: the agent's next request reads the new context.
 
@@ -796,7 +793,7 @@ A collapse that would free next to nothing is not made, however full the context
 
 One `read` call inspects one project file. Up to eight `read` calls made by the same agent reply are admitted as one transient batch and divide about 8,192 output tokens before they run. Their successful raw-line results stand together at the very end of the next request; a failed read stays inline and does not displace the preceding successful batch. A later successful batch removes the prior batch from active view. This is not a context collapse and writes nothing to the brain: the Durable transcript still holds every tool result, while the request simply carries the current batch at its tail. The agent reads every file it needs to compare in the same reply. Before that happens, it deliberately preserves source material it needs afterward on `shelf` or records lasting conclusions in the ledger, atlas or assessment.
 
-`shelf` is the explicit durable working set. `shelf` with `action:"add"` takes a project `path` or `id` (and optional `range:"1-80"`), a report, storyteller thread, pinned record, or an existing placement to refresh; `action:"remove"` takes it off, and `action:"list"` shows placements. An add returns a one-line receipt and the snapshot appears immediately in the state block, then survives collapse. A focus has its own shelf; `handOn: true` passes a placement to the main shelf when that focus returns. There is no shelf question or automatic promotion from `read`.
+`shelf` is the explicit durable working set. `shelf` with `action:"add"` takes a project `path` or `id` (and optional `range:"1-80"`), a report, pinned record, or an existing placement to refresh; `action:"remove"` takes it off, and `action:"list"` shows placements. An add returns a one-line receipt and the snapshot appears immediately in the state block, then survives collapse. A focus has its own shelf; `handOn: true` passes a placement to the main shelf when that focus returns. There is no shelf question or automatic promotion from `read`. Migrated legacy consultation snapshots may be removed but cannot be refreshed or resumed.
 
 The shelf holds whatever the agent or you add; nothing refuses. Half the window (the shelf's soft cap) is its intended share, and as it fills the state block says so, in the agent's own words and as a share of shelf space, so the agent makes room itself (fold or unshelve) before it has to. When a shelved file changes, the state block names it with a line delta; read it or re-add its placement to refresh the snapshot. `/context` shows what is on the shelf, what is currently rendered, and what was taken off.
 
@@ -836,9 +833,9 @@ A focus has its own collapsible working conversation, but it is the same agent a
 
 ### What has been tried, and what has not
 
-Tried here, against the scripted stand-in: every path above. Tried against a real llama.cpp server (build b12322) with a 0.6B Qwen model: that a request with a reply schema and tools together is accepted, that with thinking switched off the answer is the one JSON object in 7 tokens, that the question reuses what the server had read, and that a request for one token returns with the prompt read.
+Tried here, against the scripted stand-in: every path above. A committed live llama-swap log in `live_logs/llama-cpp-selector-probe.json` records a forced-literal native-GBNF pass and a finite-route pass for the Swift1.5 route.
 
-**The question and the tools.** The question before a collapse names the shape of its answer, and it carries the tools, because the server has read them as part of the prompt. With the Qwen 3.8 chat template on llama.cpp build 11913, that combination is refused: `failed to parse grammar`, for a schema and for plain `json_object` alike, with any one tool. With `tool_choice` set to `none` the same request is accepted and the prompt is not read again (measured: 707 of 708 tokens from the cache). So every question is sent that way. If a server still refuses the shape, the question is asked once more without it and from then on without it, and you are told once.
+**The question and tools.** A native host-control request deliberately omits tool declarations. This avoids the chat-template ambiguity of trying to constrain an answer that could instead be a tool call, keeps the decision surface small, and ensures the grammar is the actual boundary. Cartographer never retries such a decision without grammar.
 
 ### Reading the prompt
 
@@ -849,7 +846,7 @@ Tried: against the scripted stand-in end to end, and the server's side against l
 Not tried, because it needs your machine:
 
 - **Whether Qwen 27B answers the question sensibly.** The small model shows only that the mechanism works. If your model says `true` every time, each collapse costs a turn; if it says `false` when something was about to be lost, you will see the agent rediscover things. The `◆ asked before collapsing` line shows every answer.
-- **Which slot the extra requests land in.** Your server has four slots. The question and the read-ahead begin with the same text as the conversation, and llama.cpp picks the slot whose content is most alike, so they should land in the conversation's slot; the read-ahead shares only the prompt and the tools with it. If the read-ahead goes to another slot, the next answer reads the context a second time, and the `read for this answer` figure after it shows that: it should be a few hundred tokens, not thousands. With `-np 1` the server has one slot and this cannot happen.
+- **Which slot the extra requests land in.** Your server has four slots. The read-ahead shares the conversation's ordinary prompt structure, so llama.cpp should place it near that conversation; if it goes to another slot, the next answer can read the context a second time, visible in the `read for this answer` figure. The native-GBNF handoff question deliberately uses a separate no-tools control payload, so Cartographer does not depend on it sharing the participant/request cache. With `-np 1` there is one slot and this distinction cannot arise.
 - **llama-swap.** A request while another is running should queue or go to a free slot; the read-ahead is stopped when you type for that reason.
 
 ## The brain folder
@@ -893,12 +890,8 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `server` | none | Address of the server, ending in `/v1` |
 | `model` | none | Model name as the server knows it |
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
-| `contextWindow` | 100000 | Cap on Cartographer's usable input/context budget. A reported server capacity may lower it to leave reply room, never raise it |
-| `maxTokens` | 32768 | Longest single reply, thinking included; this much is reserved from a reported server capacity where it fits |
-| `consultModel` | `"Mythos-nano"` | Model name as llama-swap serves the consult model (the optional hard-problem solver, see [The storyteller](#the-storyteller-mythos-nano)). `""` switches it off. `CARTO_CONSULT_MODEL` overrides both settings files |
-| `consultMaxTokens` | 40960 | Longest answer a `consult` call may write — the model card's ceiling for hard problems |
-| `consultTemperature` | 0.6 | Sampling temperature for `consult` calls — the model card's recommendation for single-shot reasoning |
-| `consultTimeoutSeconds` | 1800 | How long a `consult` call may wait before giving up. Generation at the ceiling can alone take that long |
+| `contextWindow` | 100000 | Cap on Cartographer's full active context budget. A reported server capacity may lower it, never raise it; no fixed reply room is removed |
+| `maxTokens` | 32768 | Longest single reply, thinking included. It is dynamically lowered only when an actual near-full request needs room to fit |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Planning and accepting one move take several orchestration replies |
 | `taskTurns` | 6 | Fallback reply ceiling for a focus without a stored move contract; new declared moves carry their own hard 1–8 reply budget (6 by default) |
 | `askMinutes` | 0 | Minutes an `ask` waits for your answer before the agent is told there was none. 0: without limit |
@@ -938,12 +931,11 @@ One JSON line per call to the model: the request exactly as it went on the wire 
 
 ## What is not here yet
 
-In build order:
+Not built or deliberately deferred:
 
 1. **Plugins** under `.brain/plugins/`: the agent testing the project by extending its own harness.
-2. **Heat and focus for the graph**, so that a large graph shows the part in use.
 
-And smaller things, named where they belong above: the full screen does not replay earlier sessions; the reading of the prompt is not shown for the read-ahead after a collapse; and nothing is ever pruned from the brain — the transcript, the catalog and the index memo grow without bound on a long goal, and no lifecycle exists yet (design.md parks it pending an explicit decision).
+And smaller things, named where they belong above: the full screen does not replay earlier sessions; the reading of the prompt is not shown for the read-ahead after a collapse; and nothing is ever pruned from the brain — the transcript, the catalog and the index memo grow without bound on a long goal, and no lifecycle exists yet (`docs/design.md` parks it pending an explicit decision).
 
 ## Tests
 
@@ -975,7 +967,8 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/ledger.mjs` | The ledger: its file, its operations, how it is printed |
 | `src/plan.mjs` | Authorization envelopes and executable moves: file operations, exact-revision approval, acceptance, closure and undo |
 | `src/checkpoints.mjs` | Checkpoints in `.brain/checkpoints.git`: record, compare, undo |
-| `src/sandbox.mjs` | The bubblewrap sandbox: what a window sees, and bounding a command's output |
+| `src/sandbox.mjs` | The bubblewrap sandbox: what a window sees, disposable-stage mounts, and command-output bounds |
+| `src/stage.mjs` | Private normal-command source stages: materialization, candidate manifests, promotion, rollback, and cleanup |
 | `src/windows.mjs` | The shell windows: opening one, typing into it, waiting, reading, stopping, closing, and announcing what happens in them |
 | `src/reaper.mjs` | Ends a window's processes when the sandbox is off, also when `carto` itself was killed |
 | `src/wake.mjs` | The note that wakes the agent, and which turns such notes started are left out of a request |
@@ -985,6 +978,7 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/assessment.mjs` | The assessment and its file |
 | `src/top.mjs` | The copy of the assessment and the graph at the front of the context, and when it is replaced |
 | `src/context.mjs` | What a collapse keeps and how it is written: the task lines, the salient-notes section, the talk, the shelf, the block; a task's steps and their marks |
+| `src/legacy-cutover.mjs` | One-way C5 archival migration: exact legacy bytes, digests, readable static exports, shelf snapshots, and stopped-Case safety checks |
 | `src/engine.mjs` | When the context is collapsed, the question before it, the read-ahead after it |
 | `src/time.mjs` | How times, durations and ages are written |
 | `src/request.mjs` | What is added to a request as it is sent: the copy at the front, the times, the state block, the windows block |
@@ -1005,7 +999,7 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/screen/app.mjs` | The full screen: pi-tui's terminal and layout, the tabs, the two modes and their keys, the strip |
 | `src/screen/parts.mjs` | The parts of the screen as pi-tui components: the row of tabs, the bodies of the tabs, the strip, the place to type, the sheet of keys |
 | `src/screen/keys.mjs` | Keys by name for the commands mode; text that was pasted without being marked as pasted |
-| `src/screen/chat.mjs` | Talk and Work: folded calls, live response material, and the local speech/work projections |
+| `src/screen/chat.mjs` | Chat Conversation and Work plus the isolated Consult audit: folded calls, live response material, local speech/work projections, and persona-attributed conference activity |
 | `src/screen/list.mjs` | A list of items that fold, with one selected: what Carto, Diff, Shells, and Model use |
 | `src/screen/views.mjs` | What those tabs hold: the brain's files as items with their place in the file, the changes by file, the shell windows, and the request the agent was sent, part by part |
 | `src/screen/text.mjs` | Text in cells: width, wrapping, styled lines; and telling a repeating reply from ordinary text |

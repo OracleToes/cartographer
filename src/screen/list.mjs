@@ -3,7 +3,7 @@
 // A tab is a few lines at its top that are only read (a summary, the bar of the context), then items. An item is
 // one line, and it may hold more: a body of text that shows when the item is opened, or, for a folder, the items
 // below it. One item is selected; the keys move the selection, open and fold, and act on what is selected (open
-// it in the editor, copy it). Nothing here knows what the items are: src/screen/views.mjs builds them, and is
+// it in the editor, copy it). Nothing here knows what the items are: the feature renderers build them, and are
 // asked again whenever what is open changes, because for a folder that decides which items there are. Nor does
 // it scroll: it gives all its rows, and the screen shows the ones in view (src/screen/parts.mjs).
 //
@@ -18,6 +18,7 @@
 //   copy      what `y` copies; a function is called when it is needed. Default: the head and the body
 //   plain     true: a line that is only read, never selected (a heading)
 import { POLICY } from "../config.mjs";
+import { createSelection } from "./selection.mjs";
 import { cut, fit, lineText, width, wrap } from "./text.mjs";
 
 /** The most rows one opened body shows before it says how many more there are; opening everything lifts this. */
@@ -30,7 +31,7 @@ export function createList() {
 	const closed = new Set();
 	let items = [];
 	let header = [];
-	let selected;
+	const selection = createSelection();
 	let built = { cols: 0, lines: [], version: -1 };
 	let version = 0;
 	const touch = () => {
@@ -49,34 +50,30 @@ export function createList() {
 		set(next) {
 			items = next.items ?? [];
 			header = next.header ?? [];
-			const list = choosable();
-			if (selected === undefined || !list.some((item) => item.key === selected)) selected = list[0]?.key;
+			selection.reconcile(choosable());
 			touch();
 		},
-		selected: () => items.find((item) => item.key === selected),
+		selected: () => selection.selected(choosable()),
 		select(key) {
-			if (items.some((item) => item.key === key && item.plain !== true)) selected = key;
+			selection.select(choosable(), key);
 			touch();
 		},
 		/** Move the selection by so many items. */
 		move(by) {
-			const list = choosable();
-			if (list.length === 0) return false;
-			const at = list.findIndex((item) => item.key === selected);
-			selected = list[Math.max(0, Math.min(list.length - 1, (at === -1 ? 0 : at) + by))].key;
+			if (!selection.move(choosable(), by)) return false;
 			touch();
 			return true;
 		},
 		first() {
-			selected = choosable()[0]?.key;
+			selection.first(choosable());
 			touch();
 		},
 		last() {
-			selected = choosable().at(-1)?.key;
+			selection.last(choosable());
 			touch();
 		},
 		/** Open or fold one item; `to` forces one of the two. Returns whether the item can be opened at all. */
-		toggle(key = selected, to = undefined) {
+		toggle(key = selection.key(), to = undefined) {
 			const item = items.find((entry) => entry.key === key);
 			if (item === undefined || (item.body === undefined && item.folder !== true)) return false;
 			const want = to ?? !isOpen(key);
@@ -152,7 +149,7 @@ export function createList() {
 		},
 		/** The row on which the selected item's own line stands, counted from 0; -1 when nothing is selected. */
 		selectedRow(cols) {
-			return api.lines(cols).findIndex((line) => line.key === selected && line.head);
+			return api.lines(cols).findIndex((line) => line.key === selection.key() && line.head);
 		},
 		/** The item a row belongs to. */
 		keyAtRow(cols, row) {
@@ -166,11 +163,10 @@ export function createList() {
 		 */
 		selectVisible(cols, top, rows) {
 			const lines = api.lines(cols);
-			const at = lines.findIndex((line) => line.key === selected && line.head);
+			const at = lines.findIndex((line) => line.key === selection.key() && line.head);
 			if (at >= top && at < top + rows) return false;
 			const here = lines.slice(top, top + rows).find((line) => line.key !== undefined && items.some((item) => item.key === line.key && item.plain !== true));
-			if (here === undefined || here.key === selected) return false;
-			selected = here.key;
+			if (here === undefined || here.key === selection.key() || !selection.select(choosable(), here.key)) return false;
 			touch();
 			return true;
 		},
