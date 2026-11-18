@@ -385,9 +385,18 @@ test("application: context top refresh has typed validation, persistence, and un
 	assert.equal(current.ok, true);
 	if (!current.ok) throw new Error(current.error.message);
 	assert.equal(current.data.changed, false, "an unchanged top does not rewrite what the provider already knows");
+	noteChat(brainDir, "user", Date.parse(NOW), "Clear this only from the kept context.");
+	updateContext(brainDir, (store) => { store.shelf.push({ type: "file", path: "shelf.txt", id: "sh1", snapshot: "== shelf.txt ==" }); });
+	const cleared = await app.execute(CONTEXT_ACTION.clearKept);
+	assert.equal(cleared.ok, true);
+	assert.equal(loadContext(brainDir).chat.length, 0, "clearing a fresh context removes the mutable kept talk");
+	assert.equal(loadContext(brainDir).shelf.length, 0, "clearing a fresh context removes its shelf placements");
 	const capability = app.capabilities.list().find((entry) => entry.id === CONTEXT_ACTION.pinTop);
 	assert.deepEqual(capability?.availability, { enabled: true });
 	assert.equal(capability?.intent, "mutate");
+	const clearCapability = app.capabilities.list().find((entry) => entry.id === CONTEXT_ACTION.clearKept);
+	assert.deepEqual(clearCapability?.availability, { enabled: true });
+	assert.equal(clearCapability?.intent, "mutate");
 
 	const unavailable = createContextApplication({ brainDir: join(brainDir, "bad"), now: () => Date.parse(NOW) });
 	mkdirSync(join(brainDir, "bad"), { recursive: true });

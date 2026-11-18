@@ -1,7 +1,9 @@
 // Typed actions over the durable context projections that sit outside a provider request.
 //
-// The top-of-context copy is deliberately refreshed only at explicit safe moments. This facade keeps that
-// lifecycle operation behind the same UI result and capability boundary as the Workspace and Talk actions.
+// The top-of-context copy is deliberately refreshed only at explicit safe moments, and a fresh context clears
+// only the mutable kept projection. This facade keeps those lifecycle operations behind the same UI result and
+// capability boundary as the Workspace and Talk actions.
+import { clearFront } from "../context.mjs";
 import { pin } from "../top.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
@@ -9,15 +11,17 @@ import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./resul
 
 export const CONTEXT_ACTION = Object.freeze({
 	pinTop: "context.pin-top",
+	clearKept: "context.clear-kept",
 });
 
 export const CONTEXT_CAPABILITY_DEFINITIONS = Object.freeze([
 	{ id: CONTEXT_ACTION.pinTop, label: "Refresh context top", category: "runtime", intent: UI_ACTION_INTENT.mutate },
+	{ id: CONTEXT_ACTION.clearKept, label: "Clear kept context", category: "runtime", intent: UI_ACTION_INTENT.mutate },
 ]);
 
 export const CONTEXT_CAPABILITIES = createCapabilityRegistry(CONTEXT_CAPABILITY_DEFINITIONS);
 
-const DEFAULT_OPERATIONS = Object.freeze({ pin });
+const DEFAULT_OPERATIONS = Object.freeze({ clearFront, pin });
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const metadata = (options, now) => ({
@@ -66,9 +70,19 @@ export function createContextApplication({ brainDir, operations = DEFAULT_OPERAT
 			message: availability?.reason ?? "This action is unavailable right now.",
 			retryable: false,
 		}), { meta });
-		const checked = action === CONTEXT_ACTION.pinTop ? pinTopInput(input, meta) : undefined;
+		const checked = action === CONTEXT_ACTION.pinTop
+			? pinTopInput(input, meta)
+			: action === CONTEXT_ACTION.clearKept ? { value: {} } : undefined;
 		if (checked?.result !== undefined) return checked.result;
 		try {
+			if (action === CONTEXT_ACTION.clearKept) {
+				operations.clearFront(brainDir);
+				const line = "Kept talk, report rows, shelf placements, and the collapse marker were cleared for a fresh context.";
+				return uiSuccess({ action, target: "kept", line }, {
+					meta,
+					notices: [{ level: "success", message: line }],
+				});
+			}
 			const result = operations.pin(brainDir, { reason: checked.value.reason, now: now() });
 			if (result.error !== undefined) return uiFailure(uiError({
 				code: UI_ERROR_CODE.actionRefused,

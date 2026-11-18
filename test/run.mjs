@@ -234,7 +234,7 @@ test("terminal: workspace actions share typed outcomes and deletion needs --yes"
 	assert.match(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep this only while the command is tested." }), root), /n1 added/);
 	const server = await startStandIn();
 	try {
-		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/quit\n" });
+		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
 		ok(result, "terminal workspace actions");
 		has(result.stdout, "n1 archived", "archive reaches the shared workspace action");
 		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
@@ -245,6 +245,7 @@ test("terminal: workspace actions share typed outcomes and deletion needs --yes"
 		has(result.stdout, "Focus is README.md: trace startup.", "focus reaches the shared workspace action");
 		has(result.stdout, "The explicit atlas focus is cleared", "unfocus reaches the shared workspace action");
 		has(result.stdout, "The copy at the top of the context is already current.", "pin reaches the typed context action");
+		has(result.stdout, "fresh context; earlier messages are no longer in view", "new clears the kept projection through the typed context action");
 		assert.equal(loadLedger(brainDir).ledger.items.length, 0, "only the acknowledged delete mutates the durable ledger");
 		assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the unfocus action persisted the cleared atlas lens");
 		assert.equal(server.requests.length, 0, "local workspace commands do not need an agent request");

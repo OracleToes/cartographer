@@ -23,7 +23,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { bindTalkSource, clearFront, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
+import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "./application/context.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
 import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
@@ -1835,7 +1835,8 @@ export async function runTerminal(session, options) {
 				engine?.forget();
 				await main.reset(undefined, context);
 				// Nothing is carried over: not the talk, not the record of tasks, not the shelf. Reports stay on disk.
-				clearFront(options.brainDir);
+				const cleared = await contextAction(CONTEXT_ACTION.clearKept);
+				if (!cleared.ok) line(`! ${cleared.error.message}`);
 				// Everything is read again anyway: the moment to bring the top of the context up to date.
 				const refreshed = await contextAction(CONTEXT_ACTION.pinTop, { reason: "a fresh context" });
 				if (!refreshed.ok) line(`! ${refreshed.error.message}`);
