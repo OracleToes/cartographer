@@ -39,7 +39,7 @@ import { startStandIn } from "./stand-in.mjs";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
 import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, bindTalkSource, dressMain, KEPT_AS, recordSoftForgetPending, removeTalkSource, reviseTalkSource } from "../src/context.mjs";
-import { approveRequests, approvalWords, listRequests } from "../src/requests.mjs";
+import { approveRequests, approvalWordTargets, approvalWords, isApprovalWords, listRequests } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { readTool } from "../src/tools/read.mjs";
@@ -1627,6 +1627,23 @@ test("assessment: the book tool writes it whole, and /assessment reads the file"
 });
 
 // ─── The plan: approval in the user's own words ─────────────────────────────
+
+test("approval word targets are a pure current-plan projection for the typed request action", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten the local check.", done_when: "The local check is tighter." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/check.mjs", done_when: "The check covers the path.", targets: ["src/check.mjs"], proof: "Focused test output." }, NOW);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Check the published schema.", done_when: "The schema response is checked.", network: true }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p2", text: "Run the schema check", done_when: "The command reports the schema version.", targets: ["src/schema.mjs"], proof: "Command output.", capabilities: { network: true } }, NOW);
+	assert.equal(isApprovalWords("i yes"), true);
+	assert.equal(isApprovalWords("yes but not p1"), false);
+	assert.deepEqual(approvalWordTargets(plan, "i yes"), ["m1"], "a bare affirmative chooses the one current non-network move");
+	assert.deepEqual(approvalWordTargets(plan, "approved the plan"), ["m1"], "a scoped affirmative still excludes network work");
+	assert.deepEqual(approvalWordTargets(plan, "approved p2"), ["m2"], "a named envelope resolves its current child move before dispatch");
+	assert.equal(approvalWordTargets(plan, "approved m99"), undefined, "stale names do not create a no-op application mutation");
+	assert.equal(approvalWordTargets(plan, "maybe"), undefined);
+	assert.equal(plan.moves.every((move) => move.approvedRevision === undefined), true, "target resolution is pure and never writes the plan");
+});
 
 test("approval words: i yes approves the one waiting move revision, while a named move may deliberately allow network", (t) => {
 	const { brainDir } = fresh(t);

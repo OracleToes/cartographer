@@ -38,7 +38,7 @@ import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableMoves, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
-import { approvalWords } from "./requests.mjs";
+import { approvalWordTargets, isApprovalWords } from "./requests.mjs";
 import { splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { splitTop } from "./top.mjs";
@@ -2197,15 +2197,23 @@ export async function runTerminal(session, options) {
 					asks.answer(text);
 					return;
 				}
-				// Their words carry an exact current move approval; a bare yes never sweeps a batch (the gate reads it, not the agent).
-				if (gate.yolo !== true) {
-					const approved = approvalWords(options.brainDir, text);
-					if (approved !== undefined) {
-						// An item marked network is never approved by bare words — say so when that is what is left.
-							const named = /[pm]\d+/i.test(text);
-						let held = [];
-							if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((move) => move.capabilities?.network === true).map((move) => move.id); } catch { held = []; }
-							line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+				// Their words carry an exact current move approval; a bare yes never sweeps a batch. The query resolves
+				// the current target IDs, while the request action—not this terminal handler—makes the durable decision.
+				if (gate.yolo !== true && isApprovalWords(text)) {
+					const projection = await queries.plan();
+					if (projection.ok) {
+						const targets = approvalWordTargets(projection.data.plan, text);
+						if (targets !== undefined) {
+							const approval = await requestAction(REQUEST_ACTION.approve, { ids: targets });
+							if (!approval.ok) line(`! ${approval.error.message}`);
+							else if (approval.data.approved.length > 0) {
+								// A named target may deliberately include a network move. Unnamed words never do, so the
+								// pre-action projection truthfully names the network work that still waits.
+								const named = /[pm]\d+/i.test(text);
+								const held = named ? [] : waitingItems(projection.data.plan).filter((move) => move.capabilities?.network === true).map((move) => move.id);
+								line(`${bold("●")} approved from your words: ${approval.data.approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+							}
+						}
 					}
 				}
 				const wasBusy = busy;

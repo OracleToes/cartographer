@@ -255,6 +255,26 @@ test("terminal: workspace actions share typed outcomes and deletion needs --yes"
 	}
 });
 
+test("terminal: approval words resolve a projection and persist through the request action", async () => {
+	const root = makeProject("terminal-spoken-approval", { git: false });
+	configure(root, { initiate: false });
+	const { brainDir } = setUpBrain(root);
+	const { plan } = loadPlan(brainDir);
+	const at = "2026-11-18T00:00:00.000Z";
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten the approval boundary.", done_when: "The boundary is exercised." }, at);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/terminal.mjs", done_when: "The terminal delegates the decision.", targets: ["src/terminal.mjs"], proof: "The focused terminal test passes." }, at);
+	savePlan(brainDir, plan);
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, [], { input: "yes\n/quit\n" });
+		ok(result, "terminal spoken approval");
+		has(result.stdout, "approved from your words: m1", "the terminal retains its approval acknowledgement");
+		assert.equal(loadPlan(brainDir).plan.moves[0].approvedRevision, 1, "the typed request action persisted the current move revision");
+	} finally {
+		await server.close();
+	}
+});
+
 test("terminal: wake controls preserve their typed display and removal path", async () => {
 	const root = makeProject("terminal-runtime-wakes", { git: false });
 	configure(root, { initiate: false });
