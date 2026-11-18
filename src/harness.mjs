@@ -733,14 +733,36 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// Existing Durable roots predate the extension selection field. Pin them on every open so a stored root cannot
 	// accidentally retain the conference profile; only independent conference children receive it.
 	await main.configure({ extensions: [core] }, context);
+	const currentModel = async () => (await main.agent(context)).model;
+	const selectModel = async (modelId, ctx = context, limits = {}) => {
+		// A selected route is proven before it is adopted. If Cartographer opened while offline, this is also the
+		// first time a freshly listed model becomes part of the provider registry.
+		const effective = await ensureModelReady(modelId, limits?.contextWindow);
+		await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
+		activeModelId = modelId;
+		config.contextWindow = effective.usableContextWindow;
+		notify({ type: "model-ready", modelId, limits: effective });
+		return effective;
+	};
+	/** The presentation/application port for model state. It keeps terminal and Screen out of the session's transport helpers. */
+	const modelManager = Object.freeze({
+		current: currentModel,
+		inspect: async () => await inspectServer(activeModelId),
+		ensure: async () => await ensureModelReady(activeModelId),
+		ready: () => readyValues.has(activeModelId),
+		known: () => [...known],
+		select: async (modelId, limits = {}) => await selectModel(modelId, context, limits),
+	});
 	return {
 		harness,
 		main,
 		context,
 		/** The gate the model's response body passes through; /pause holds it mid-stream and lets it go on. */
 		streamFreeze,
-		/** The model the main conversation is on, as { provider, modelId }. */
-		model: async () => (await main.agent(context)).model,
+		/** The presentation/application port for model state and controls. */
+		models: modelManager,
+		/** Compatibility aliases for integrations that have not adopted `models` yet. */
+		model: currentModel,
 		/**
 		 * Switch the model of the main conversation, and so of every task forked after.
 		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
@@ -749,24 +771,15 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		 *   capacity. A listing that explicitly lacks the name rejects with ModelRouteError. The active window is what
 		 *   the engine, state block, shelf's soft cap (half of it), display, and provider context sizing use.
 		 */
-		setModel: async (modelId, ctx = context, limits = {}) => {
-			// A selected route is proven before it is adopted. If Cartographer opened while offline, this is also the
-			// first time a freshly listed model becomes part of the provider registry.
-			const effective = await ensureModelReady(modelId, limits?.contextWindow);
-			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
-			activeModelId = modelId;
-			config.contextWindow = effective.usableContextWindow;
-			notify({ type: "model-ready", modelId, limits: effective });
-			return effective;
-		},
+		setModel: selectModel,
 		/** A non-blocking model-listing check for the terminal's offline status line; it never starts a model. */
-		checkServer: async () => await inspectServer(activeModelId),
+		checkServer: modelManager.inspect,
 		/** Prove the active route immediately before model work. Any unavailable or grammar-invalid route rejects closed. */
-		ensureModelReady: async () => await ensureModelReady(activeModelId),
+		ensureModelReady: modelManager.ensure,
 		/** Whether this process has already proven the active route and refreshed its post-load capacity. */
-		isModelReady: () => readyValues.has(activeModelId),
+		isModelReady: modelManager.ready,
 		/** The model names known so far. A getter keeps /model current after a late listing arrives. */
-		get servedModels() { return [...known]; },
+		get servedModels() { return modelManager.known(); },
 		windows,
 		wakes,
 		engine,

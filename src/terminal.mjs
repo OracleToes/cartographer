@@ -16,7 +16,7 @@
 // It is also where the user authorizes the plan (/approve) and takes a change task
 // back (/undo): the two things only the user can do. And it is what wakes the agent
 // when something happens in a shell window while the agent is not working.
-import { modelContextWindow, POLICY } from "./config.mjs";
+import { POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
@@ -100,6 +100,16 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
+	// Modern sessions expose one model-management port. Keep an adapter only for narrow test/integration sessions that
+	// still provide the former aliases; all terminal behavior below reaches it through the application boundary.
+	const modelManager = session.models ?? Object.freeze({
+		current: typeof session.model === "function" ? session.model.bind(session) : undefined,
+		inspect: typeof session.checkServer === "function" ? session.checkServer.bind(session) : undefined,
+		ensure: typeof session.ensureModelReady === "function" ? session.ensureModelReady.bind(session) : undefined,
+		ready: typeof session.isModelReady === "function" ? session.isModelReady.bind(session) : undefined,
+		known: () => Array.isArray(session.servedModels) ? session.servedModels : [config.model].filter((id) => typeof id === "string" && id !== ""),
+		select: typeof session.setModel === "function" ? async (modelId, limits = {}) => await session.setModel(modelId, context, limits) : undefined,
+	});
 	const application = options.application ?? createApplication({
 		brainDir: options.brainDir,
 		root: options.root,
@@ -110,7 +120,8 @@ export async function runTerminal(session, options) {
 			engine,
 			windows,
 			wakes,
-			model: session.model,
+			model: modelManager.current,
+			models: modelManager,
 			preview: session.preview,
 			runner: options.runner,
 			contextWindow: () => options.contextWindow,
@@ -195,19 +206,24 @@ export async function runTerminal(session, options) {
 		ui?.modelError?.(message);
 		line(`! ${message}`);
 	};
+	// Preserve the old read-ahead rule for transitional sessions without an explicit readiness probe while using the
+	// model port whenever one is available.
+	let modelRouteReady = typeof modelManager.ready === "function" ? modelManager.ready() === true : true;
 	const ensureModelReady = async () => {
-		if (typeof session.ensureModelReady !== "function") return true;
-		if (session.isModelReady?.() !== true) line(dim("  connecting to the model server and checking native GBNF; a stopped model may start now"));
-		try {
-			const limits = await session.ensureModelReady();
-			applyModelLimits(limits);
-			lastModelError = undefined;
-			ui?.modelReady?.();
-			return true;
-		} catch (error) {
-			showModelError(error);
+		const availability = application.capabilities.availability(RUNTIME_ACTION.ensureModel);
+		// Compatibility sessions that have no model manager let their own submit implementation decide readiness.
+		if (availability?.enabled !== true) return true;
+		if (!modelRouteReady) line(dim("  connecting to the model server and checking native GBNF; a stopped model may start now"));
+		const result = await runtimeAction(RUNTIME_ACTION.ensureModel);
+		if (!result.ok) {
+			showModelError(result.error);
 			return false;
 		}
+		applyModelLimits(result.data.limits);
+		modelRouteReady = true;
+		lastModelError = undefined;
+		ui?.modelReady?.();
+		return true;
 	};
 	/** The agent's own text: dim, each line behind the gutter. */
 	const streamNotes = (text) => {
@@ -940,7 +956,7 @@ export async function runTerminal(session, options) {
 		if (ui === undefined) collapsedLine();
 		// Read-ahead is optional performance work, never a reason to wake or require a model while Cartographer is
 		// opening offline. Once the first actual model turn has proven its route, it resumes its usual behavior.
-		if (config.readAhead !== false && !final && (typeof session.isModelReady !== "function" || session.isModelReady())) {
+		if (config.readAhead !== false && !final && modelRouteReady) {
 			const ahead = engine.readAhead(text, info.at);
 			if (ahead !== undefined) {
 				readingAhead = ahead;
@@ -1002,6 +1018,7 @@ export async function runTerminal(session, options) {
 			if (stopped) return;
 			if (event.type === "model-ready") {
 				applyModelLimits(event.limits);
+				modelRouteReady = true;
 				lastModelError = undefined;
 				ui?.modelReady?.();
 				return;
@@ -1285,8 +1302,8 @@ export async function runTerminal(session, options) {
 					}
 					try {
 						if (!(await ensureModelReady())) return true;
-						const current = await session.model?.();
-						const modelId = current?.modelId ?? config.model;
+						const models = await queries.runtime.models();
+						const modelId = models.ok ? models.data.currentId ?? config.model : config.model;
 						const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path: args[1] });
 						line(dim("  Running two synthetic, selector-only llama.cpp GBNF requests. They send no project files, chat, tools, or conference capture."));
 						const record = await runLlamaCppSelectorProbe({ server: config.server, modelId });
@@ -1840,25 +1857,23 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "model": {
-				// The list comes from the server each time: llama-swap serves what is loaded now.
-				let served = session.servedModels ?? [config.model];
-				// The listing's context_length/context_window (or legacy meta.n_ctx) is the full context limit used after a switch.
-				let entries = [];
-				try {
-					const status = await session.checkServer?.();
-					const listed = status?.listing?.entries ?? [];
-					if (listed.length > 0) { entries = listed; served = listed.map((entry) => entry.id); }
-					applyModelLimits(status?.limits);
-				} catch (error) {
-					showModelError(error);
+				// Model discovery belongs to the deferred Runtime facade. An offline server leaves already-known routes
+				// visible and reports its typed issue without reaching session transport helpers from this adapter.
+				const projection = await queries.runtime.models();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
 				}
-				const on = await session.model?.();
-				const current = on?.modelId ?? config.model;
+				const snapshot = projection.data;
+				if (snapshot.issue !== undefined) showModelError(snapshot.issue);
+				applyModelLimits(snapshot.limits);
+				const entries = snapshot.models;
+				const served = entries.map((entry) => entry.id);
+				const current = snapshot.currentId ?? config.model;
 				if (argument === undefined) {
 					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
-					served.forEach((id, index) => {
-						const ctx = modelContextWindow(entries.find((entry) => entry.id === id));
-						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${ctx === undefined ? "" : dim(`  · server capacity ${count(ctx)} tokens`)}`);
+					entries.forEach((entry, index) => {
+						line(`    ${index + 1}  ${entry.id}${entry.id === current ? "  ← on" : ""}${entry.contextWindow === undefined ? "" : dim(`  · server capacity ${count(entry.contextWindow)} tokens`)}`);
 					});
 					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer uses each reported capacity as its full context limit."));
 					return true;
@@ -1873,25 +1888,21 @@ export async function runTerminal(session, options) {
 					line(`  Already on ${wanted}.`);
 					return true;
 				}
-				const reported = modelContextWindow(entries.find((entry) => entry.id === wanted));
-				let effective;
-				try {
-					// `setModel` owns the required native-grammar gate so every programmatic and terminal switch shares it.
-					effective = await session.setModel(wanted, undefined, reported === undefined ? {} : { contextWindow: reported });
-				} catch (error) {
-					line(`  ${wanted} was not selected: ${error.message ?? error}`);
+				const reported = entries.find((entry) => entry.id === wanted)?.contextWindow;
+				// The application action owns the required native-grammar gate so every programmatic and terminal switch shares it.
+				const selected = await runtimeAction(RUNTIME_ACTION.selectModel, { modelId: wanted, ...(reported === undefined ? {} : { contextWindow: reported }) });
+				if (!selected.ok) {
+					line(`  ${wanted} was not selected: ${selected.error.message}`);
 					return true;
 				}
-				if (effective === false) {
-					line(`  ${wanted} is not a model of this session. /model lists what the server serves.`);
-					return true;
-				}
+				const effective = selected.data.limits;
+				modelRouteReady = true;
 				const was = options.contextWindow;
 				options.contextWindow = effective.usableContextWindow;
-				const context = effective.serverContextWindow !== undefined
+				const contextMessage = effective.serverContextWindow !== undefined
 					? ` · context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; settings cap ${count(effective.configuredContextWindow)})`
 					: effective.usableContextWindow !== was ? ` · context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · context ${count(effective.usableContextWindow)} tokens`;
-				line(`${bold("●")} model  ${current} → ${wanted}${context}${busy ? " · the answer being written finishes on the old one" : ""}`);
+				line(`${bold("●")} model  ${current} → ${wanted}${contextMessage}${busy ? " · the answer being written finishes on the old one" : ""}`);
 				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.chatWindowDivisor)
 					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective.usableContextWindow)}. It stays as set; chatWindow in the settings is the setting to lower.`));
 				return true;
@@ -2302,15 +2313,13 @@ export async function runTerminal(session, options) {
 		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue; Ctrl-T hides and shows its thinking."));
 		// Check connectivity only after the terminal exists. This does not load a model; an unavailable server becomes a
 		// recoverable on-screen status instead of preventing Cartographer from opening.
-		if (typeof session.checkServer === "function") {
-			void session.checkServer().then(
-				(status) => enqueue(async () => {
-					if (!stopped && !closing) applyModelLimits(status?.limits);
-				}),
-				(error) => enqueue(async () => {
-					if (!stopped && !closing) showModelError(error);
-				}),
-			);
+		if (application.capabilities.availability(RUNTIME_ACTION.ensureModel).enabled) {
+			void queries.runtime.models().then((projection) => enqueue(async () => {
+				if (stopped || closing) return;
+				if (!projection.ok) return showModelError(projection.error);
+				applyModelLimits(projection.data.limits);
+				if (projection.data.issue !== undefined) showModelError(projection.data.issue);
+			}));
 		}
 		// A context left large by the last session is collapsed before the first message has to carry it. Then,
 		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.

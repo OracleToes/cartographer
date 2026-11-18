@@ -17,7 +17,7 @@ import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
-import { createRuntimeActivityReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
+import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
@@ -53,11 +53,11 @@ import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { createConferenceExtension } from "../src/conference-extension.mjs";
 import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, debateStatus, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantActivity, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, recordToolReceipt, renderConference, restrictParticipantPayload, selectorGrammar, selectorMessages, selectorOptions, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
-import { chooseNativeGrammar, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
+import { chooseNativeGrammar, NativeGrammarError, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
 import { createEngine } from "../src/engine.mjs";
-import { openSession, runFromBrief } from "../src/harness.mjs";
+import { ModelRouteError, ModelServerUnavailableError, openSession, runFromBrief } from "../src/harness.mjs";
 import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
@@ -860,6 +860,47 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(refused.ok, false);
 	if (refused.ok) throw new Error("a shell that cannot accept input must remain a typed refusal");
 	assert.equal(refused.error.code, UI_ERROR_CODE.actionRefused);
+
+	let modelCalls = 0;
+	const modelApp = createRuntimeApplication({ models: {
+		ensure: async () => { modelCalls++; return { usableContextWindow: 4_000 }; },
+		select: async (modelId, limits) => { modelCalls++; return { usableContextWindow: limits.contextWindow, modelId }; },
+	} });
+	const readyPending = modelApp.execute(RUNTIME_ACTION.ensureModel, {}, { requestId: "model-ready" });
+	assert.equal(modelCalls, 0, "model lifecycle controls leave the terminal stack before touching the manager");
+	const ready = await readyPending;
+	assert.equal(ready.ok, true);
+	if (!ready.ok) throw new Error(ready.error.message);
+	assert.equal(ready.meta.requestId, "model-ready");
+	assert.equal(ready.data.limits.usableContextWindow, 4_000);
+	const selected = await modelApp.execute(RUNTIME_ACTION.selectModel, { modelId: "other-model", contextWindow: 8_192 });
+	assert.equal(selected.ok, true);
+	if (!selected.ok) throw new Error(selected.error.message);
+	assert.equal(selected.data.modelId, "other-model");
+	assert.equal(selected.data.limits.usableContextWindow, 8_192);
+	assert.equal(modelCalls, 2);
+	const badModel = await modelApp.execute(RUNTIME_ACTION.selectModel, { modelId: "   " });
+	assert.equal(badModel.ok, false);
+	if (badModel.ok) throw new Error("a blank model route must be refused");
+	assert.equal(badModel.error.field, "modelId");
+	const blockedModels = createRuntimeApplication({ models: {
+		ensure: async () => { throw new ModelServerUnavailableError("http://127.0.0.1:8080", "ECONNREFUSED"); },
+		select: async () => { throw new ModelRouteError("missing-model", ["model-a"]); },
+	} });
+	const offline = await blockedModels.execute(RUNTIME_ACTION.ensureModel);
+	assert.equal(offline.ok, false);
+	if (offline.ok) throw new Error("an offline model route must stay a typed transport outcome");
+	assert.equal(offline.error.code, UI_ERROR_CODE.transportFailed);
+	assert.equal(offline.error.kind, UI_ERROR_KIND.transport);
+	const missingRoute = await blockedModels.execute(RUNTIME_ACTION.selectModel, { modelId: "missing-model" });
+	assert.equal(missingRoute.ok, false);
+	if (missingRoute.ok) throw new Error("a missing model route must stay a typed not-found outcome");
+	assert.equal(missingRoute.error.code, UI_ERROR_CODE.notFound);
+	const grammarModels = createRuntimeApplication({ models: { ensure: async () => { throw new NativeGrammarError("The route ignored GBNF."); } } });
+	const grammar = await grammarModels.execute(RUNTIME_ACTION.ensureModel);
+	assert.equal(grammar.ok, false);
+	if (grammar.ok) throw new Error("a grammar-invalid route must stay a typed native-grammar outcome");
+	assert.equal(grammar.error.code, UI_ERROR_CODE.nativeGrammarRequired);
 });
 
 test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
@@ -911,9 +952,9 @@ test("application: active-context accounting is a deferred typed runtime project
 	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
 });
 
-test("application: runtime view, status, and activity projections defer shell, wake, engine, model, question, task, and preview snapshots", async (t) => {
+test("application: runtime view, status, activity, and model projections defer shell, wake, engine, model, question, task, and preview snapshots", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusWindows: 0, statusWakes: 0, statusModel: 0, activityQuestion: 0, activityTask: 0 };
+	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusWindows: 0, statusWakes: 0, statusModel: 0, activityQuestion: 0, activityTask: 0, modelInspect: 0, modelCurrent: 0 };
 	const sent = {
 		task: false,
 		requestId: "main:1",
@@ -940,6 +981,14 @@ test("application: runtime view, status, and activity projections defer shell, w
 		asks: { pending: () => { reads.activityQuestion++; return { since: Date.parse(NOW), text: "Private prompt text is not a status projection." }; } },
 		activeTask: () => { reads.activityTask++; return "task-7"; },
 	});
+	const modelReader = createRuntimeModelsReader({ models: {
+		known: () => ["known-model"],
+		inspect: async () => {
+			reads.modelInspect++;
+			return { listing: { entries: [{ id: "known-model", context_length: 4_096 }, { id: "other-model", meta: { n_ctx: 8_192 } }] }, limits: { usableContextWindow: 4_000 } };
+		},
+		current: async () => { reads.modelCurrent++; return { modelId: "known-model" }; },
+	} });
 	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
 	const queries = createWorkspaceQueries({
 		brainDir,
@@ -947,6 +996,7 @@ test("application: runtime view, status, and activity projections defer shell, w
 		now: () => Date.parse(NOW),
 		runtimeStatusReader: statusReader,
 		runtimeActivityReader: activityReader,
+		runtimeModelReader: modelReader,
 		runtimeViewReader: {
 			sent: (scope) => { reads.sent++; return scope === "main" ? sent : { ...sent, requestId: "newest:1" }; },
 			shells: ({ tail }) => { reads.shells++; assert.equal(tail, POLICY.limits.screen.windowsListed); return { windows: [window] }; },
@@ -981,6 +1031,15 @@ test("application: runtime view, status, and activity projections defer shell, w
 	assert.equal(activity.meta.requestId, "activity-query");
 	assert.deepEqual(activity.data, { question: { since: Date.parse(NOW) }, taskActive: true });
 	assert.deepEqual([reads.activityQuestion, reads.activityTask], [1, 1]);
+	const pendingModels = queries.runtime.models({ requestId: "models-query" });
+	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [0, 0], "model discovery leaves the terminal render stack before provider inspection");
+	const models = await pendingModels;
+	assert.equal(models.ok, true);
+	if (!models.ok) throw new Error(models.error.message);
+	assert.equal(models.meta.requestId, "models-query");
+	assert.equal(models.data.currentId, "known-model");
+	assert.deepEqual(models.data.models, [{ id: "known-model", contextWindow: 4_096 }, { id: "other-model", contextWindow: 8_192 }]);
+	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [1, 1]);
 	const shells = await queries.runtime.shells();
 	assert.equal(shells.ok, true);
 	if (!shells.ok) throw new Error(shells.error.message);
@@ -999,7 +1058,7 @@ test("application: runtime view, status, and activity projections defer shell, w
 	assert.equal(planned.ok, true);
 	if (!planned.ok) throw new Error(planned.error.message);
 	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusWindows: 1, statusWakes: 1, statusModel: 1, activityQuestion: 1, activityTask: 1 });
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusWindows: 1, statusWakes: 1, statusModel: 1, activityQuestion: 1, activityTask: 1, modelInspect: 1, modelCurrent: 1 });
 	const stoppedWakes = new AbortController();
 	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
 	stoppedWakes.abort();
@@ -1040,6 +1099,27 @@ test("application: runtime view, status, and activity projections defer shell, w
 	if (cancelledActivity.ok) throw new Error("a cancelled activity projection must not inspect live question or task state");
 	assert.equal(cancelledActivity.error.code, UI_ERROR_CODE.cancelled);
 	assert.deepEqual([reads.activityQuestion, reads.activityTask], [1, 1]);
+	const stoppedModels = new AbortController();
+	stoppedModels.abort();
+	const cancelledModels = await queries.runtime.models({ signal: stoppedModels.signal });
+	assert.equal(cancelledModels.ok, false);
+	if (cancelledModels.ok) throw new Error("a cancelled model projection must not inspect provider routes");
+	assert.equal(cancelledModels.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [1, 1]);
+	const offlineModels = createWorkspaceQueries({
+		brainDir,
+		root,
+		runtimeModelReader: createRuntimeModelsReader({ models: {
+			known: () => ["cached-model"],
+			inspect: async () => { throw new Error("server is offline"); },
+			current: async () => ({ modelId: "cached-model" }),
+		} }),
+	});
+	const offlineRoutes = await offlineModels.runtime.models();
+	assert.equal(offlineRoutes.ok, true);
+	if (!offlineRoutes.ok) throw new Error(offlineRoutes.error.message);
+	assert.deepEqual(offlineRoutes.data.models, [{ id: "cached-model" }]);
+	assert.match(offlineRoutes.data.issue?.message ?? "", /offline/);
 });
 
 test("application: assessment projection defers its runtime summary", async (t) => {
@@ -1269,6 +1349,13 @@ test("application: composed facade dispatches actions and publishes cache-invali
 		runtime: {
 			windows: { send: async () => ({ reason: "quiet" }), close: () => ({ name: "main" }), closeAll: () => ["main"] },
 			wakes: { remove: () => [{ id: "w1" }] },
+			models: {
+				known: () => ["model-a", "model-b"],
+				inspect: async () => ({ listing: { entries: [{ id: "model-a", context_length: 4_096 }, { id: "model-b", context_length: 8_192 }] } }),
+				current: async () => ({ modelId: "model-a" }),
+				ensure: async () => ({ usableContextWindow: 4_000 }),
+				select: async (_id, limits) => ({ usableContextWindow: limits.contextWindow }),
+			},
 		},
 	});
 	app.events.subscribe((event) => events.push(event));
@@ -1282,6 +1369,19 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	const sent = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "continue" }, { requestId: "send-1" });
 	assert.equal(sent.ok, true);
 	assert.equal(sent.meta.requestId, "send-1");
+	const routes = await app.queries.runtime.models({ requestId: "routes-1" });
+	assert.equal(routes.ok, true);
+	if (!routes.ok) throw new Error(routes.error.message);
+	assert.equal(routes.meta.requestId, "routes-1");
+	assert.deepEqual(routes.data.models, [{ id: "model-a", contextWindow: 4_096 }, { id: "model-b", contextWindow: 8_192 }]);
+	const routeReady = await app.execute(RUNTIME_ACTION.ensureModel, {}, { requestId: "ready-1" });
+	assert.equal(routeReady.ok, true);
+	if (!routeReady.ok) throw new Error(routeReady.error.message);
+	assert.equal(routeReady.data.limits.usableContextWindow, 4_000);
+	const routeSelected = await app.execute(RUNTIME_ACTION.selectModel, { modelId: "model-b", contextWindow: 8_192 }, { requestId: "select-1" });
+	assert.equal(routeSelected.ok, true);
+	if (!routeSelected.ok) throw new Error(routeSelected.error.message);
+	assert.equal(routeSelected.data.limits.usableContextWindow, 8_192);
 	assert.deepEqual(events.map((event) => [event.type, event.payload.action]), [
 		["action.completed", WORKSPACE_ACTION.archive],
 		["projection.invalidated", WORKSPACE_ACTION.archive],
@@ -1289,12 +1389,18 @@ test("application: composed facade dispatches actions and publishes cache-invali
 		["projection.invalidated", REVIEW_ACTION.undo],
 		["action.completed", RUNTIME_ACTION.sendShell],
 		["projection.invalidated", RUNTIME_ACTION.sendShell],
+		["action.completed", RUNTIME_ACTION.ensureModel],
+		["projection.invalidated", RUNTIME_ACTION.ensureModel],
+		["action.completed", RUNTIME_ACTION.selectModel],
+		["projection.invalidated", RUNTIME_ACTION.selectModel],
 	]);
 	assert.deepEqual(events.at(-1).payload.scopes, ["runtime"]);
 	assert.equal(app.capabilities.get(WORKSPACE_ACTION.archive)?.label, "Archive");
 	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.label, "Undo last checkpoint change");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.sendShell)?.label, "Send shell input");
+	assert.equal(app.capabilities.get(RUNTIME_ACTION.selectModel)?.label, "Select model route");
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
+	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
 	const unknown = await app.execute("workspace.unknown", {});
 	assert.equal(unknown.ok, false);
 	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");

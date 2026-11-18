@@ -1,8 +1,8 @@
 // Typed controls for mutable Runtime managers.
 //
-// Shell windows and wake schedules stay owned by their established domain managers. This adapter gives terminal and
-// future Runtime controls the same deferred, capability-checked result boundary as durable workspace actions; a
-// renderer never needs to mutate a live manager directly.
+// Shell windows, wake schedules, and model routes stay owned by their established domain managers. This adapter
+// gives terminal and future Runtime controls the same deferred, capability-checked result boundary as durable
+// workspace actions; a renderer never needs to mutate a live manager directly.
 import { POLICY } from "../config.mjs";
 import { WakeError } from "../wakes.mjs";
 import { WindowError } from "../windows.mjs";
@@ -16,6 +16,8 @@ export const RUNTIME_ACTION = Object.freeze({
 	closeShell: "runtime.shell.close",
 	closeAllShells: "runtime.shell.close-all",
 	removeWake: "runtime.wake.remove",
+	ensureModel: "runtime.model.ensure",
+	selectModel: "runtime.model.select",
 });
 
 export const RUNTIME_CAPABILITY_DEFINITIONS = Object.freeze([
@@ -49,6 +51,20 @@ export const RUNTIME_CAPABILITY_DEFINITIONS = Object.freeze([
 		intent: UI_ACTION_INTENT.destructive,
 		confirmation: UI_CONFIRMATION.acknowledge,
 		available: ({ wakes }) => typeof wakes?.remove === "function" ? true : { enabled: false, reason: "This session has no wake schedule." },
+	},
+	{
+		id: RUNTIME_ACTION.ensureModel,
+		label: "Connect model route",
+		category: "runtime",
+		intent: UI_ACTION_INTENT.read,
+		available: ({ models }) => typeof models?.ensure === "function" ? true : { enabled: false, reason: "This session has no model-route manager." },
+	},
+	{
+		id: RUNTIME_ACTION.selectModel,
+		label: "Select model route",
+		category: "runtime",
+		intent: UI_ACTION_INTENT.mutate,
+		available: ({ models }) => typeof models?.select === "function" ? true : { enabled: false, reason: "This session has no model-route manager." },
 	},
 ]);
 
@@ -98,6 +114,13 @@ const checkedInput = (action, input, meta) => {
 		if (id === undefined) return { result: invalidInput("Choose a wake before removing it.", meta, "id") };
 		return { value: { id } };
 	}
+	if (action === RUNTIME_ACTION.ensureModel) return { value: {} };
+	if (action === RUNTIME_ACTION.selectModel) {
+		const modelId = nonEmpty(input.modelId);
+		if (modelId === undefined) return { result: invalidInput("Choose a model route before selecting it.", meta, "modelId") };
+		if (input.contextWindow !== undefined && (!Number.isInteger(input.contextWindow) || input.contextWindow <= 0)) return { result: invalidInput("A model context window must be a positive whole number.", meta, "contextWindow") };
+		return { value: { modelId, ...(input.contextWindow === undefined ? {} : { contextWindow: input.contextWindow }) } };
+	}
 	return { result: uiFailure(uiError({
 		code: UI_ERROR_CODE.unknownAction,
 		kind: UI_ERROR_KIND.validation,
@@ -119,17 +142,45 @@ const confirmationFor = (capability, input) => ({
 	strength: capability.confirmation,
 });
 const confirmed = (confirmation, request) => confirmation?.acknowledged === true && confirmation.actionId === request.actionId && confirmation.target === request.target;
+const modelFailure = (error, meta) => {
+	const name = error?.name;
+	if (name === "ModelServerUnavailableError") return uiFailure(uiError({
+		code: UI_ERROR_CODE.transportFailed,
+		kind: UI_ERROR_KIND.transport,
+		message: error.message,
+		retryable: true,
+	}), { meta });
+	if (name === "ModelRouteError") return uiFailure(uiError({
+		code: UI_ERROR_CODE.notFound,
+		kind: UI_ERROR_KIND.notFound,
+		message: error.message,
+		retryable: true,
+	}), { meta });
+	if (name === "NativeGrammarError") return uiFailure(uiError({
+		code: UI_ERROR_CODE.nativeGrammarRequired,
+		kind: UI_ERROR_KIND.nativeGrammar,
+		message: error.message,
+		retryable: true,
+	}), { meta });
+	return uiFailure(uiErrorFrom(error, {
+		code: UI_ERROR_CODE.internal,
+		kind: UI_ERROR_KIND.internal,
+		message: "Cartographer could not complete that model action.",
+		retryable: true,
+	}), { meta });
+};
 
 /**
  * @param {{
  *   windows?: { send?: (name: string, line: string, options?: { waitMs?: number, signal?: AbortSignal }) => Promise<any>, close?: (name: string, options?: { why?: string }) => object, closeAll?: (options?: { why?: string }) => string[] },
  *   wakes?: { remove?: (id: string) => any[] },
+ *   models?: { ensure?: () => Promise<object>, select?: (modelId: string, limits?: { contextWindow?: number }) => Promise<object | false> },
  *   shellSendWaitMs?: number,
  *   now?: () => number,
  * }} options
  */
-export function createRuntimeApplication({ windows, wakes, shellSendWaitMs = POLICY.timing.terminal.shellSendWaitMs, now = () => Date.now() } = {}) {
-	const context = { windows, wakes };
+export function createRuntimeApplication({ windows, wakes, models, shellSendWaitMs = POLICY.timing.terminal.shellSendWaitMs, now = () => Date.now() } = {}) {
+	const context = { windows, wakes, models };
 
 	const execute = async (action, input = {}, options = {}) => {
 		const meta = metadata(options, now);
@@ -157,6 +208,20 @@ export function createRuntimeApplication({ windows, wakes, shellSendWaitMs = POL
 			}), { meta, confirmation: request });
 		}
 		try {
+			if (action === RUNTIME_ACTION.ensureModel) {
+				const limits = await models.ensure();
+				return uiSuccess({ action, limits }, { meta, notices: [{ level: "success", message: "The active model route is ready." }] });
+			}
+			if (action === RUNTIME_ACTION.selectModel) {
+				const limits = await models.select(checked.value.modelId, checked.value.contextWindow === undefined ? {} : { contextWindow: checked.value.contextWindow });
+				if (limits === false) return uiFailure(uiError({
+					code: UI_ERROR_CODE.notFound,
+					kind: UI_ERROR_KIND.notFound,
+					message: `No model route named ${JSON.stringify(checked.value.modelId)} is available in this session.`,
+					retryable: true,
+				}), { meta });
+				return uiSuccess({ action, modelId: checked.value.modelId, limits }, { meta, notices: [{ level: "success", message: `Selected model route ${checked.value.modelId}.` }] });
+			}
 			if (action === RUNTIME_ACTION.sendShell) {
 				const report = await windows.send(checked.value.name, checked.value.line, { waitMs: shellSendWaitMs, signal: options.signal });
 				// Sending has already changed the live shell by the time its quiet-period wait finishes. Report that
@@ -179,6 +244,7 @@ export function createRuntimeApplication({ windows, wakes, shellSendWaitMs = POL
 			const line = removed.length === 1 ? `Removed wake ${removed[0].id}.` : `Removed ${removed.length} wakes.`;
 			return uiSuccess({ action, target: checked.value.id, removed, line }, { meta, notices: [{ level: "success", message: line }] });
 		} catch (error) {
+			if (action === RUNTIME_ACTION.ensureModel || action === RUNTIME_ACTION.selectModel) return modelFailure(error, meta);
 			if (error instanceof WindowError || error instanceof WakeError) {
 				const message = error.message;
 				const missing = /^(?:No wake is set\.|There is no (?:wake|window)\b)/.test(message);

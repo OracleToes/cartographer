@@ -50,6 +50,7 @@ export const RUNTIME_QUERY = Object.freeze({
 	context: "runtime.context",
 	status: "runtime.status",
 	activity: "runtime.activity",
+	models: "runtime.models",
 	shells: "runtime.shells",
 	shellOutput: "runtime.shell-output",
 	wakes: "runtime.wakes",
@@ -142,11 +143,12 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
  *   runtimeStatusReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages?: readonly any[], windows?: any[], wakes?: any[], modelId?: string, nextWakeDue?: number } | undefined>,
  *   runtimeActivityReader?: (options?: { signal?: AbortSignal }) => Promise<{ question?: { since?: number }, taskActive?: boolean } | undefined>,
+ *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], limits?: object, issue?: { message?: string } } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeViewReader, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, runtimeViewReader, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -547,6 +549,38 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
+	/** Model names and advertised windows are a deferred Runtime projection; a transient server check becomes a visible issue over known local routes. */
+	const runtimeModels = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (typeof runtimeModelReader !== "function") return unavailable("model routes", "the running session does not expose model routes", ready.meta);
+		try {
+			const snapshot = await runtimeModelReader({ signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			if (snapshot === undefined || snapshot === null || typeof snapshot !== "object") return unavailable("model routes", "the running session did not provide model routes", ready.meta);
+			const models = (Array.isArray(snapshot.models) ? snapshot.models : []).flatMap((entry) => {
+				const id = nonEmpty(entry?.id);
+				if (id === undefined) return [];
+				const contextWindow = Number.isInteger(entry.contextWindow) && entry.contextWindow > 0 ? entry.contextWindow : undefined;
+				return [{ id, ...(contextWindow === undefined ? {} : { contextWindow }) }];
+			});
+			const currentId = nonEmpty(snapshot.currentId);
+			const issue = nonEmpty(snapshot.issue?.message);
+			return uiSuccess({
+				...(currentId === undefined ? {} : { currentId }),
+				models,
+				...(snapshot.limits !== undefined && typeof snapshot.limits === "object" && snapshot.limits !== null ? { limits: snapshot.limits } : {}),
+				...(issue === undefined ? {} : { issue: { message: issue } }),
+			}, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read model routes.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
 	/** A shell snapshot is always safe to show as an empty collection when this session has no shell manager. */
 	const runtimeShells = async (options = {}) => {
 		const ready = await prepare(options);
@@ -654,6 +688,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		context: runtimeContext,
 		status: runtimeStatus,
 		activity: runtimeActivity,
+		models: runtimeModels,
 		shells: runtimeShells,
 		shellOutput: runtimeShellOutput,
 		wakes: runtimeWakes,

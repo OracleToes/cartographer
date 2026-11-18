@@ -6,7 +6,7 @@ import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplicatio
 import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
-import { createRuntimeActivityReader, createRuntimeContextReader, createRuntimeStatusReader, createRuntimeViewReader } from "./runtime.mjs";
+import { createRuntimeActivityReader, createRuntimeContextReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "./runtime.mjs";
 import { RUNTIME_ACTION, RUNTIME_CAPABILITY_DEFINITIONS, createRuntimeApplication } from "./runtime-actions.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
 import { REVIEW_ACTION, REVIEW_CAPABILITY_DEFINITIONS, createReviewApplication } from "./review.mjs";
@@ -27,6 +27,8 @@ const ACTION_SCOPES = Object.freeze({
 	[RUNTIME_ACTION.closeShell]: ["runtime"],
 	[RUNTIME_ACTION.closeAllShells]: ["runtime"],
 	[RUNTIME_ACTION.removeWake]: ["runtime"],
+	[RUNTIME_ACTION.ensureModel]: ["runtime"],
+	[RUNTIME_ACTION.selectModel]: ["runtime"],
 	[TALK_ACTION.revise]: ["chat", "context"],
 	[TALK_ACTION.forget]: ["chat", "context"],
 	[WORKSPACE_ACTION.archive]: ["workspace", "context"],
@@ -65,7 +67,7 @@ const metadata = (options, now) => ({
  *   runtimeActions?: Parameters<typeof createRuntimeApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
- *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, asks?: any, activeTask?: () => unknown, model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, statusReader?: ReturnType<typeof createRuntimeStatusReader>, activityReader?: ReturnType<typeof createRuntimeActivityReader>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
+ *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, asks?: any, activeTask?: () => unknown, model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, models?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, statusReader?: ReturnType<typeof createRuntimeStatusReader>, activityReader?: ReturnType<typeof createRuntimeActivityReader>, modelReader?: ReturnType<typeof createRuntimeModelsReader>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
 export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, runtimeActions: runtimeActionOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
@@ -75,7 +77,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
 	const review = createReviewApplication({ windows: runtimeOptions.windows, ...reviewOptions, brainDir, root, now });
-	const runtimeActionContext = { windows: runtimeOptions.windows, wakes: runtimeOptions.wakes, ...runtimeActionOptions, now };
+	const runtimeActionContext = { windows: runtimeOptions.windows, wakes: runtimeOptions.wakes, models: runtimeOptions.models, ...runtimeActionOptions, now };
 	const runtimeActions = createRuntimeApplication(runtimeActionContext);
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });
 	const runtimeContextReader = runtimeOptions.reader ?? queryOptions.runtimeContextReader ?? createRuntimeContextReader({
@@ -99,13 +101,14 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		asks: runtimeOptions.asks,
 		activeTask: runtimeOptions.activeTask,
 	});
+	const runtimeModelReader = runtimeOptions.modelReader ?? queryOptions.runtimeModelReader ?? createRuntimeModelsReader({ models: runtimeOptions.models });
 	const runtimeViewReader = runtimeOptions.viewReader ?? queryOptions.runtimeViewReader ?? createRuntimeViewReader({
 		engine: runtimeOptions.engine,
 		windows: runtimeOptions.windows,
 		wakes: runtimeOptions.wakes,
 		preview: runtimeOptions.preview,
 	});
-	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeViewReader });
+	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, runtimeViewReader });
 	const capabilityRegistry = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,
@@ -114,7 +117,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		...RUNTIME_CAPABILITY_DEFINITIONS,
 		...TALK_CAPABILITY_DEFINITIONS,
 	]);
-	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes });
+	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes, models: runtimeActionContext.models });
 	const capabilities = Object.freeze({
 		get: (id) => capabilityRegistry.get(id),
 		availability: (id, context = {}) => capabilityRegistry.availability(id, { ...capabilityContext, ...context }),

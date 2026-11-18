@@ -1,6 +1,7 @@
 // Live runtime projections need the session's conversation and engine, but they still belong behind the application
 // boundary. This adapter gathers that volatile state only after a query has yielded from the UI stack; screen and
 // terminal render the returned data rather than asking one another for formatted command output.
+import { modelContextWindow } from "../config.mjs";
 import { stateBlock } from "../state.mjs";
 
 const positiveInteger = (value) => Number.isInteger(value) && value > 0 ? value : undefined;
@@ -85,6 +86,54 @@ export function createRuntimeActivityReader({ asks, activeTask } = {}) {
 		return {
 			...(pending === undefined ? {} : { question: { ...(finite(pending?.since) === undefined ? {} : { since: pending.since }) } }),
 			taskActive: task !== undefined,
+		};
+	};
+}
+
+const modelName = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+const listedModel = (entry) => {
+	const id = modelName(entry?.id);
+	if (id === undefined) return undefined;
+	const contextWindow = modelContextWindow(entry);
+	return { id, ...(contextWindow === undefined ? {} : { contextWindow }) };
+};
+/**
+ * Build the model route projection used by the terminal's model command and connection status. The deferred result
+ * carries only known route names, active identity, advertised context limits, and a safe listing issue—not provider
+ * payloads or a model request.
+ * @param {{ models?: { current?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, inspect?: () => Promise<{ listing?: { entries?: any[] }, limits?: object } | undefined>, known?: () => string[] } }} options
+ */
+export function createRuntimeModelsReader({ models } = {}) {
+	return async ({ signal } = {}) => {
+		if (signal?.aborted === true || models === undefined) return undefined;
+		const listedKnown = typeof models.known === "function" ? models.known() : [];
+		const known = (Array.isArray(listedKnown) ? listedKnown : []).map(modelName).filter((id) => id !== undefined);
+		let inspected;
+		let issue;
+		try {
+			if (typeof models.inspect === "function") inspected = await models.inspect();
+		} catch (error) {
+			issue = { message: String(error?.message ?? error) };
+		}
+		if (signal?.aborted === true) return undefined;
+		let current;
+		try {
+			current = typeof models.current === "function" ? await models.current() : undefined;
+		} catch (error) {
+			issue ??= { message: String(error?.message ?? error) };
+		}
+		if (signal?.aborted === true) return undefined;
+		const entries = Array.isArray(inspected?.listing?.entries) ? inspected.listing.entries.map(listedModel).filter((entry) => entry !== undefined) : [];
+		const modelsListed = entries.length > 0
+			? entries
+			: [...new Set(known)].map((id) => ({ id }));
+		const currentId = modelName(current?.modelId);
+		if (currentId !== undefined && !modelsListed.some((entry) => entry.id === currentId)) modelsListed.push({ id: currentId });
+		return {
+			...(currentId === undefined ? {} : { currentId }),
+			models: modelsListed,
+			...(inspected?.limits === undefined ? {} : { limits: inspected.limits }),
+			...(issue === undefined ? {} : { issue }),
 		};
 	};
 }
