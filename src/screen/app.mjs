@@ -5,6 +5,7 @@
 //   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   4 Shells   the shell windows, live
 //   5 Model    route readiness, sent provider payloads, next-request preview, and current accounting
+//   6 Settings configuration, assessment, session policy, and native-grammar diagnostics
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -33,6 +34,7 @@ import { createApplication } from "../application/app.mjs";
 import { createChatPresentation } from "../application/chat.mjs";
 import { createReviewPresentation } from "../application/review-presentation.mjs";
 import { createRuntimePresentation } from "../application/runtime-presentation.mjs";
+import { createSettingsPresentation } from "../application/settings-presentation.mjs";
 import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
 import { REVIEW_ACTION } from "../application/review.mjs";
@@ -64,6 +66,7 @@ import { TOKEN } from "./tokens.mjs";
 import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
+import { settingsAssessmentView, settingsOverviewView } from "./settings.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -78,6 +81,7 @@ export const TABS = [
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
 	{ id: "context", name: "Model" },
+	{ id: "settings", name: "Settings" },
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
 export const VIEWS = {
@@ -112,9 +116,13 @@ export const VIEWS = {
 		{ id: "preview", name: "Next preview" },
 		{ id: "parts", name: "Current accounting" },
 	],
+	settings: [
+		{ id: "overview", name: "Safety" },
+		{ id: "assessment", name: "Assessment" },
+	],
 };
 /** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts", "settings.overview", "settings.assessment"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -198,8 +206,8 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
-	"  [ and ]          the previous and the next view inside Chat, Carto, Diff, Shells and Model (H and L do the same)",
+	"  1 to 6           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
+	"  [ and ]          the previous and the next view inside the tab that shows (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
 	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back); in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another route.",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
@@ -317,6 +325,7 @@ export async function runScreen(session, options, runTerminal) {
 	const workspacePresentation = createWorkspacePresentation();
 	const reviewPresentation = createReviewPresentation();
 	const runtimePresentation = createRuntimePresentation();
+	const settingsPresentation = createSettingsPresentation();
 	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
 	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
 	const CONSULT_PROJECTION = "chat.consult";
@@ -689,6 +698,8 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
 		"context.preview": ({ signal }) => queries.runtime.preview({ signal }),
 		"context.parts": ({ signal }) => queries.runtime.context({ signal }),
+		"settings.overview": ({ signal }) => queries.settings.status({ signal }),
+		"settings.assessment": ({ signal }) => queries.runtime.assessment({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
 		"carto.atlas": "Atlas",
@@ -710,6 +721,8 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": "Raw provider payload",
 		"context.preview": "Next request preview",
 		"context.parts": "Current active-context accounting",
+		"settings.overview": "Settings and Safety",
+		"settings.assessment": "Assessment",
 	});
 	let settleProjection = () => {};
 	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
@@ -801,6 +814,8 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView({ sent: data.sent, presentation: runtimePresentation.sent }));
 		if (id === "context.preview") return projectionView(id, (data) => previewView({ preview: data.preview, presentation: runtimePresentation.preview }));
 		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView({ accounting: data, config, presentation: runtimePresentation.accounting }));
+		if (id === "settings.overview") return projectionView(id, (data) => settingsOverviewView({ settings: data, presentation: settingsPresentation.overview }));
+		if (id === "settings.assessment") return projectionView(id, (data) => settingsAssessmentView({ assessment: data, presentation: settingsPresentation.assessment }));
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -1565,7 +1580,7 @@ export async function runScreen(session, options, runTerminal) {
 			return;
 		}
 		if (key === "/") return void terminal.press?.(SEARCH_KEY);
-		if (/^[1-5]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
+		if (/^[1-6]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
 		if (key === "?") return void showKeys();
 		if (key === "]" || key === "L") return void stepView(1);
 		if (key === "[" || key === "H") return void stepView(-1);
@@ -1820,6 +1835,7 @@ export async function runScreen(session, options, runTerminal) {
 		{ id: "navigate.review", label: "Go to Diff and review", category: "navigation", description: "Last-step, session, and git change inspection.", destination: { tab: "diff", view: "last", name: "Diff · Last step" } },
 		{ id: "navigate.shells", label: "Go to Shells", category: "navigation", description: "Open shell windows and their captured output.", destination: { tab: "shells", view: "list", name: "Shells · List" } },
 		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Model-route readiness, sent requests, preview, and current context accounting.", destination: { tab: "context", view: "routes", name: "Model · Routes" } },
+		{ id: "navigate.settings", label: "Go to Settings and Safety", category: "navigation", description: "Configuration, session policy, provider diagnostics, and assessment.", destination: { tab: "settings", view: "overview", name: "Settings · Safety" } },
 		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
 		...paletteCapabilities.map((capability) => {
 			const destination = paletteDestinationFor(capability.id);
