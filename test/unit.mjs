@@ -1094,6 +1094,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	if (!empty.ok) throw new Error(empty.error.message);
 	assert.equal(ledgerReads, 1);
 	assert.deepEqual(empty.data.ledger.items, []);
+	assert.equal(empty.data.file, join(brainDir, "carto-ledger.json"), "the real Ledger query owns its editor target before rendering begins");
 	assert.equal(empty.meta.requestId, "ledger-query");
 	const pendingPlan = queries.plan({ requestId: "plan-query" });
 	assert.equal(planReads, 0, "the plan reader also leaves a terminal lifecycle callback before reading durable state");
