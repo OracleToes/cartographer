@@ -4,6 +4,7 @@
 // this narrow vocabulary, so they never import a domain book merely to describe a Workspace snapshot.
 import { atlasSummary, renderAttention } from "../atlas.mjs";
 import { POLICY } from "../config.mjs";
+import { estimate, recordLine, shelfLabel } from "../context.mjs";
 import { join } from "node:path";
 import { entryLine } from "../ledger.mjs";
 import { authorizationLine, itemLine, movesOf, waiting } from "../plan.mjs";
@@ -36,6 +37,12 @@ const planMoveState = (move) => {
 
 const treeSize = (bytes) => bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`;
 const treeTarget = (root, path, folder = false) => ({ file: join(root, path), ...(folder ? { folder: true } : {}) });
+const shortCount = (value) => {
+	if (!Number.isFinite(value)) return "?";
+	if (value < POLICY.limits.format.countThousands) return String(Math.round(value));
+	if (value < POLICY.limits.format.countTenThousands) return `${(value / POLICY.limits.format.countThousands).toFixed(1)}k`;
+	return `${Math.round(value / POLICY.limits.format.countThousands)}k`;
+};
 
 /** The presentation vocabulary migrated Workspace renderers need. Other views join this adapter as they migrate. */
 export function createWorkspacePresentation() {
@@ -71,6 +78,11 @@ export function createWorkspacePresentation() {
 		tree: Object.freeze({
 			size: treeSize,
 			target: treeTarget,
+		}),
+		hands: Object.freeze({
+			shelfLabel,
+			recordLine,
+			renderedTokens: (text) => shortCount(estimate(text)),
 		}),
 	});
 }

@@ -316,11 +316,12 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			if (store === undefined) return unavailable("shared brain", undefined, ready.meta);
 			const issues = [];
 			const shelf = (store.shelf ?? []).map((item) => {
+				const file = typeof root === "string" && typeof item.path === "string" ? join(root, item.path) : undefined;
 				try {
-					return { item, text: shelfText(root, item, brainDir) };
+					return { item, text: shelfText(root, item, brainDir), ...(file === undefined ? {} : { file }) };
 				} catch (error) {
 					issues.push({ source: `shelf:${item.id ?? item.path ?? "item"}`, message: error instanceof Error ? error.message : String(error) });
-					return { item, text: "(the shelf snapshot cannot be read)" };
+					return { item, text: "(the shelf snapshot cannot be read)", ...(file === undefined ? {} : { file }) };
 				}
 			});
 			const report = (record) => {

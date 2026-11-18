@@ -319,3 +319,78 @@ export function treeView({ tree: provided, presentation } = {}, isOpen = () => f
 	if (items.length === 0) items.push(note("  The project folder is empty."));
 	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root ?? "the project"}`, "bold"], ["  (without what git ignores and the brain folder; ← names the graph's nodes about a file)", "muted"]]], items };
 }
+
+/**
+ * Render the live shared-brain shelf and report projection.
+ * @param {{
+ *   context?: { store?: object, shelf?: { item?: object, text?: string, file?: string }[], standing?: { record?: object, text?: string }[], archived?: { record?: object, text?: string }[] },
+ *   error?: string,
+ *   presentation: { shelfLabel: (item: object) => string, recordLine: (record: object) => string, renderedTokens: (text: string) => string },
+ * }} input
+ */
+export function handsView({ context: provided, error, presentation } = {}) {
+	if (presentation === undefined || typeof presentation.shelfLabel !== "function" || typeof presentation.recordLine !== "function" || typeof presentation.renderedTokens !== "function") throw new TypeError("Current shared brain needs its Workspace presentation adapter.");
+	if (error !== undefined) return { header: [[[`! ${error}`, "warn"]]], items: [note("  Current shared brain will be retried automatically.", "muted")] };
+	if (provided === undefined) return { header: [[["Loading current shared brain…", "muted"]]], items: [] };
+	const store = provided.store ?? provided;
+	const header = [
+		[["Current shared brain", "bold"], ["  ·  live shelf and reports; not part of any sent provider request", "muted"]],
+		[["Your hands on what the agent keeps", "muted"], ["  ·  salient notes live in the Ledger view", "muted"]],
+	];
+	const items = [];
+	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
+	const shelves = provided.shelf ?? [];
+	if (shelves.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `shelf`."));
+	for (const shelf of shelves) {
+		const item = shelf.item ?? shelf;
+		const text = shelf.text ?? "(the shelf snapshot cannot be read)";
+		const label = presentation.shelfLabel(item);
+		items.push({
+			key: `shelf:${label}`,
+			kind: "shelf",
+			head: [[`${label} · ${item.id}  `, ""], [`about ${presentation.renderedTokens(text)} rendered tokens`, "muted"]],
+			body: text,
+			...(shelf.file === undefined ? {} : { path: shelf.file }),
+		});
+	}
+	const standing = provided.standing ?? [];
+	const archived = provided.archived ?? [];
+	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d opens a deletion confirmation"));
+	if (standing.length === 0 && archived.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
+	for (const source of standing) {
+		const record = source.record ?? source;
+		const text = Object.hasOwn(source, "text") ? source.text : undefined;
+		const folded = (store.dropped ?? []).includes(record.id);
+		items.push({
+			key: `report:${record.id}`,
+			kind: "report",
+			archived: false,
+			folded,
+			head: [
+				[`${record.id}  `, folded ? "muted" : "bold"],
+				[folded ? "· folded  " : "· in view  ", folded ? "muted" : "ok"],
+				[presentation.recordLine(record), folded ? "faint" : ""],
+			],
+			body: text ?? "(the report's file is gone)",
+		});
+	}
+	if (archived.length > 0) {
+		items.push(heading("  Archived · the record no longer lists them; recall by id still finds them"));
+		for (const source of archived) {
+			const record = source.record ?? source;
+			const text = Object.hasOwn(source, "text") ? source.text : undefined;
+			items.push({
+				key: `report:${record.id}`,
+				kind: "report",
+				archived: true,
+				head: [
+					[`${record.id}  `, "muted"],
+					["· archived  ", "muted"],
+					[presentation.recordLine(record), "faint"],
+				],
+				body: text ?? "(the report's file is gone)",
+			});
+		}
+	}
+	return { header, items };
+}

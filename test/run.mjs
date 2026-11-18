@@ -2521,10 +2521,12 @@ test("screen: the Next preview is explicit that its request plan was not sent", 
 });
 
 test("screen: Current shared brain lives in Carto, not Model", async () => {
-	const [{ TABS, VIEWS }, { handsView }] = await Promise.all([
+	const [{ TABS, VIEWS }, { handsView }, { createWorkspacePresentation }] = await Promise.all([
 		import("../src/screen/app.mjs"),
-		import("../src/screen/views.mjs"),
+		import("../src/screen/workspace.mjs"),
+		import("../src/application/workspace-presentation.mjs"),
 	]);
+	const workspacePresentation = createWorkspacePresentation();
 	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model"], "the top-level tabs group speech and private activity under Chat before the project and provider views");
 	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }, { id: "consult", name: "Consult" }], "Chat gives isolated consultation activity its own adjacent subtab, rather than hiding it in parent Work");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
@@ -2535,7 +2537,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 	const projected = await createWorkspaceQueries({ root: scratch, brainDir }).context();
 	assert.equal(projected.ok, true);
 	if (!projected.ok) throw new Error(projected.error.message);
-	const current = handsView({ root: scratch, context: projected.data });
+	const current = handsView({ context: projected.data, presentation: workspacePresentation.hands });
 	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");
 	has(header, "Current shared brain", "the live scope is named in the view itself");
 	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");

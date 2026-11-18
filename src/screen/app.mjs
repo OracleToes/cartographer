@@ -56,8 +56,8 @@ import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, S
 import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { TOKEN } from "./tokens.mjs";
-import { accountingProjectionView, contextView, diffView, editorCommand, handsView, previewView, rawPayloadView, shellsOutView, shellsView } from "./views.mjs";
-import { atlasView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
+import { accountingProjectionView, contextView, diffView, editorCommand, previewView, rawPayloadView, shellsOutView, shellsView } from "./views.mjs";
+import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
 const TOOL_SOURCE_DIR = fileURLToPath(new URL("../tools", import.meta.url));
@@ -739,7 +739,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.plan") return projectionView(id, (data) => planView({ file: data.file, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, presentation: workspacePresentation.plan }));
 		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ requests: data.items, presentation: workspacePresentation.requests }));
 		if (id === "carto.tree") return projectionView(id, (data) => treeView({ tree: data, presentation: workspacePresentation.tree }, isOpen));
-		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, context: data }));
+		if (id === "carto.hands") return projectionView(id, (data) => handsView({ context: data, presentation: workspacePresentation.hands }));
 		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ root, review: data }, id.slice(5)));
 		if (id === "shells.list") return projectionView(id, (data) => shellsView(data));
 		if (id === "shells.out") return projectionView(id, (data) => shellsOutView(data));

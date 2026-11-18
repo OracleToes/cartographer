@@ -83,7 +83,7 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
-import { atlasView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
+import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -602,6 +602,39 @@ test("screen: Project tree renders settled workspace projections through its app
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Project tree rows");
 });
 
+test("screen: Current shared brain renders settled workspace projections through its application presentation adapter", () => {
+	const presentation = createWorkspacePresentation().hands;
+	const emptyData = { store: { dropped: [] }, shelf: [], standing: [], archived: [] };
+	const data = {
+		store: { dropped: [] },
+		shelf: [{ item: { id: "sh1", path: "src/main.mjs" }, text: "The shelf snapshot.", file: "/project/src/main.mjs" }],
+		standing: [{ record: { id: "t1", at: 0, mode: "look", brief: "Inspect the entry point.", outcome: "It is identified." }, text: "The report body." }],
+		archived: [],
+	};
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return handsView({ context: projection, presentation });
+	};
+	assert.throws(() => handsView({ context: data }), /presentation adapter/, "Current shared brain cannot fall back to direct context formatting");
+	const loading = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Current shared brain is not asked to invent data while its projection is loading");
+	assert.match(loading.header[0][0][0], /Current shared brain is loading/, "the shared boundary names Current shared brain loading");
+	const failed = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { error: { message: "The shared brain is unavailable." } }, render });
+	assert.equal(rendered, 0, "a Current shared brain query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Current shared brain could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data: emptyData }, render });
+	assert.equal(rendered, 1, "a settled empty projection reaches Current shared brain");
+	assert.ok(empty.items.some((item) => item.head?.[0]?.[0].includes("Nothing is on the shelf")), "Current shared brain owns its successful empty shelf state");
+	const settled = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data }, render });
+	assert.equal(rendered, 2, "a settled shared-brain projection uses its adapter for shelf and report rows");
+	assert.equal(settled.items.find((item) => item.key === "shelf:src/main.mjs")?.path, "/project/src/main.mjs");
+	assert.equal(settled.items.find((item) => item.key === "report:t1")?.body, "The report body.");
+	const stale = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached Current shared brain data remains renderable while its replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Current shared brain rows");
+});
+
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
 	let clock = 0;
 	const notices = createNoticeStore({ now: () => clock, limit: 2, ttlMs: 10 });
@@ -1059,6 +1092,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	if (!shared.ok) throw new Error(shared.error.message);
 	assert.equal(contextReads, 1);
 	assert.equal(shared.data.shelf[0].text, "Shelf snapshot.");
+	assert.equal(shared.data.shelf[0].file, join(root, "README.md"), "the shared-brain projection owns a shelf editor target");
 	assert.equal(shared.data.standing[0].text, "The report body.");
 	assert.deepEqual(shared.data.store.last, contextStore.last, "the same deferred context projection keeps the collapse marker metadata");
 	assert.deepEqual(shared.data.store.front, contextStore.front);
@@ -1072,8 +1106,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(missingReport.ok, false);
 	if (missingReport.ok) throw new Error("a missing report must stay an explicit typed outcome");
 	assert.equal(missingReport.error.code, UI_ERROR_CODE.notFound);
-	const { handsView } = await import("../src/screen/views.mjs");
-	const sharedView = handsView({ root, context: shared.data });
+	const sharedView = handsView({ context: shared.data, presentation: createWorkspacePresentation().hands });
 	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
 	const treeViewProjection = treeView({ tree: listed.data, presentation: createWorkspacePresentation().tree }, () => false);
 	assert.match(treeViewProjection.items.find((item) => item.key === "file:tree.txt")?.head[1][0] ?? "", /3 B/);
