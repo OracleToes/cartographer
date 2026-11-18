@@ -40,6 +40,7 @@ import { ConfirmDialog } from "./confirm-dialog.mjs";
 import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
+import { createFocusManager } from "./focus.mjs";
 import { createList } from "./list.mjs";
 import { renderAsyncBoundary } from "./async-boundary.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "./notices.mjs";
@@ -348,6 +349,9 @@ export async function runScreen(session, options, runTerminal) {
 	const draw = () => {
 		if (!state.closed) tui.requestRender();
 	};
+	// Replaced once the composer and command sink exist. Keeping a harmless coordinator here makes early lifecycle
+	// callbacks unable to trip over a temporal focus dependency.
+	let shellFocus = Object.freeze({ focus: () => false, restore: () => false });
 	const notices = createNoticeStore({ ttlMs: POLICY.timing.screen.flashMs });
 	const noticeLevel = (text) => {
 		const message = String(text ?? "").trim();
@@ -898,7 +902,7 @@ export async function runScreen(session, options, runTerminal) {
 	const setMode = (mode) => {
 		state.mode = mode;
 		state.pending = "";
-		tui.setFocus(mode === "type" ? prompt : commands);
+		shellFocus.focus(mode === "type" ? "composer" : "commands");
 		draw();
 	};
 	/** What was typed and sent. */
@@ -935,7 +939,7 @@ export async function runScreen(session, options, runTerminal) {
 		} finally {
 			process.stdin.on("data", watchInput);
 			tui.start();
-			tui.setFocus(state.mode === "type" ? prompt : commands);
+			shellFocus.restore();
 			tui.requestRender(true);
 		}
 	};
@@ -1680,13 +1684,20 @@ export async function runScreen(session, options, runTerminal) {
 			fileSearch ?? null,
 		),
 	);
+	// Modes, overlays, and external-editor handoffs restore one named shell focus rather than each choosing a
+	// component independently. Modal components retain their own internal field/cursor focus while they are open.
+	shellFocus = createFocusManager({
+		initial: "composer",
+		resolve: (region) => region === "composer" ? prompt : region === "commands" ? commands : undefined,
+		apply: (component) => tui.setFocus(component),
+	});
 	// Forms, help, and destructive acknowledgements share one focus-capturing modal owner. pi-tui restores the
 	// normal editor/command focus after a hidden overlay; the explicit fallback also covers a modal that settles
 	// after a terminal resize or action error.
 	const overlays = createOverlayManager({
 		show: (component, overlayOptions) => tui.showOverlay(component, overlayOptions),
 		restoreFocus: () => {
-			if (!state.closed) tui.setFocus(state.mode === "type" ? prompt : commands);
+			if (!state.closed) shellFocus.restore();
 		},
 		redraw: draw,
 	});
@@ -1887,7 +1898,7 @@ export async function runScreen(session, options, runTerminal) {
 	refreshWakeProjection(true);
 	refreshRuntimeActivity(true);
 	terminal.setTitle(`carto · ${basename(root)}`);
-	tui.setFocus(prompt);
+	shellFocus.restore();
 	askColors();
 	// A terminal that tells when its colours change (the desktop went from light to dark) is asked again then.
 	tui.setTerminalColorSchemeNotifications(true);

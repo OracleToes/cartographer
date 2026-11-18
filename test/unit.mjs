@@ -70,6 +70,7 @@ import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
+import { createFocusManager } from "../src/screen/focus.mjs";
 import { createList } from "../src/screen/list.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
@@ -568,6 +569,27 @@ test("screen: shared selection retains identity across projection rebuilds and f
 	assert.equal(list.selected()?.key, "b", "the list consumes the same stable selection model across a projection rebuild");
 	list.set({ items: [{ key: "a", head: [["A only", ""]] }] });
 	assert.equal(list.selected()?.key, "a");
+});
+
+test("screen: shared focus restores the last viable shell region after temporary overlays and handoffs", () => {
+	const targets = { composer: { name: "composer" }, commands: { name: "commands" } };
+	const applied = [];
+	const focus = createFocusManager({
+		initial: "composer",
+		resolve: (region) => targets[region],
+		apply: (target, region) => applied.push([target.name, region]),
+	});
+	assert.equal(focus.active(), "composer");
+	assert.equal(focus.restore(), true);
+	assert.deepEqual(applied.at(-1), ["composer", "composer"]);
+	assert.equal(focus.focus("commands"), true);
+	assert.equal(focus.is("commands"), true);
+	delete targets.commands;
+	assert.equal(focus.restore(), false, "a temporarily unavailable focus target does not overwrite the last known region");
+	assert.equal(focus.active(), "commands");
+	assert.equal(focus.focus("missing"), false);
+	assert.equal(focus.active(), "commands");
+	assert.throws(() => createFocusManager({ initial: "composer", resolve: () => ({}) }), /focus applier/);
 });
 
 test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {
