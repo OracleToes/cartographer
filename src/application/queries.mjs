@@ -27,6 +27,7 @@ export const WORKSPACE_QUERY = Object.freeze({
 	status: "workspace.status",
 	entry: "workspace.entry",
 	context: "workspace.context",
+	report: "workspace.report",
 	tree: "workspace.tree",
 });
 
@@ -38,6 +39,7 @@ export const REVIEW_QUERY = Object.freeze({
 
 export const CONSULT_QUERY = Object.freeze({
 	list: "consult.list",
+	get: "consult.get",
 });
 
 export const RUNTIME_QUERY = Object.freeze({
@@ -301,6 +303,25 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
+	const report = async (id, options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		const target = nonEmpty(id);
+		if (target === undefined) return invalid("Choose a report before reading it.", "id", ready.meta);
+		try {
+			const text = loadReport(brainDir, target);
+			if (text === undefined) return missing(`There is no report ${target}.`, ready.meta);
+			return uiSuccess({ id: target, text, file: join(brainDir, "reports", `${target}.md`) }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: `Cartographer could not read report ${target}.`,
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+
 	const prepareReview = async (options) => {
 		const ready = await prepare(options);
 		if (ready.result !== undefined) return ready;
@@ -353,7 +374,28 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
-	const consult = Object.freeze({ list: consultList });
+	const consultGet = async (id, options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		const target = nonEmpty(id);
+		if (target === undefined) return invalid("Choose a consultation conference before reading it.", "id", ready.meta);
+		try {
+			const entry = consultReaders.listConferences(brainDir).find((candidate) => candidate.id === target);
+			if (entry === undefined) return missing(`No consultation conference ${target} exists.`, ready.meta);
+			if (entry.conference === undefined) return unavailable("consultation conference", entry.error ?? `conference ${target} is unreadable`, ready.meta);
+			// Like `consult.list`, this full record is for an explicitly selected Consult surface only. Callers must not
+			// merge it into a parent conversation/work/context projection.
+			return uiSuccess({ id: target, conference: entry.conference }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read that consultation conference.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const consult = Object.freeze({ list: consultList, get: consultGet });
 
 	const runtimeAssessment = async (options = {}) => {
 		const ready = await prepare(options);
@@ -436,5 +478,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, review, consult, runtime, entry });
+	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, report, review, consult, runtime, entry });
 }

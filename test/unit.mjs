@@ -470,6 +470,15 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(shared.data.shelf[0].text, "Shelf snapshot.");
 	assert.equal(shared.data.standing[0].text, "The report body.");
 	assert.equal(shared.meta.requestId, "context-query");
+	const report = await queries.report("t1", { requestId: "report-query" });
+	assert.equal(report.ok, true);
+	if (!report.ok) throw new Error(report.error.message);
+	assert.equal(report.data.text, "The report body.");
+	assert.equal(report.meta.requestId, "report-query");
+	const missingReport = await queries.report("t404");
+	assert.equal(missingReport.ok, false);
+	if (missingReport.ok) throw new Error("a missing report must stay an explicit typed outcome");
+	assert.equal(missingReport.error.code, UI_ERROR_CODE.notFound);
 	const { handsView, treeView } = await import("../src/screen/views.mjs");
 	const sharedView = handsView({ root, brainDir, context: shared.data, deferred: true });
 	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
@@ -697,13 +706,24 @@ test("application: consult projection defers its isolated audit list", async (t)
 	if (!listed.ok) throw new Error(listed.error.message);
 	assert.deepEqual(listed.data.conferences, [{ id: "co1", conference }]);
 	assert.equal(listed.meta.requestId, "consult-list");
+	const selectedPending = queries.consult.get("co1", { requestId: "consult-get" });
+	assert.equal(reads, 1, "an explicit Consult record also leaves the active render/key stack before its audit reader runs");
+	const selected = await selectedPending;
+	assert.equal(selected.ok, true);
+	if (!selected.ok) throw new Error(selected.error.message);
+	assert.equal(selected.data.conference, conference);
+	assert.equal(selected.meta.requestId, "consult-get");
+	const missing = await queries.consult.get("co404");
+	assert.equal(missing.ok, false);
+	if (missing.ok) throw new Error("a missing Consult record must not masquerade as an empty parent projection");
+	assert.equal(missing.error.code, UI_ERROR_CODE.notFound);
 	const controller = new AbortController();
 	controller.abort();
 	const cancelled = await queries.consult.list({ signal: controller.signal });
 	assert.equal(cancelled.ok, false);
 	if (cancelled.ok) throw new Error("a cancelled Consult projection must not inspect its audit directory");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads, 1);
+	assert.equal(reads, 3);
 	const cache = { loading: true, conferences: [] };
 	const chat = createChat({
 		listConferences: () => cache.conferences,

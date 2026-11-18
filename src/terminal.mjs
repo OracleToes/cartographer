@@ -22,13 +22,13 @@ import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasSummary, attentionSnapshot, attentionSummary, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
-import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
+import { changeRecord, changeSummary, CheckpointError, undo, windowStep } from "./checkpoints.mjs";
+import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
 import { CONTEXT_ACTION } from "./application/context.mjs";
 import { WORKSPACE_ACTION } from "./application/workspace.mjs";
 import { REQUEST_ACTION } from "./application/requests.mjs";
-import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
+import { conferenceStatusLine, findConferenceByChild, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
@@ -1349,8 +1349,8 @@ export async function runTerminal(session, options) {
 			}
 			case "report": {
 				if (argument !== undefined) {
-					const kept = loadReport(options.brainDir, argument);
-					line(kept ?? `  There is no report ${argument}. /context lists the kept ones.`);
+					const result = await queries.report(argument);
+					line(result.ok ? result.data.text : result.error.kind === "not-found" ? `  ${result.error.message} /context lists the kept ones.` : `! ${result.error.message}`);
 				} else line(lastReport === undefined ? "  No task has reported in this run of carto." : lastReport);
 				return true;
 			}
@@ -1383,15 +1383,16 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				if (argument !== undefined) {
-					const loaded = loadConference(options.brainDir, argument);
-					line(loaded.conference === undefined ? `! ${loaded.error}` : renderConference(loaded.conference));
+					const result = await queries.consult.get(argument);
+					line(result.ok ? renderConference(result.data.conference) : `! ${result.error.message}`);
 					return true;
 				}
-				const conferences = listConferences(options.brainDir);
-				if (conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook. /consult probe checks a llama.cpp native GBNF selector without creating a conference.");
+				const result = await queries.consult.list();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else if (result.data.conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook. /consult probe checks a llama.cpp native GBNF selector without creating a conference.");
 				else {
 					line(`  ${bold("Consult conferences")}`);
-					for (const entry of conferences) line(entry.error === undefined ? `    ${conferenceStatusLine(entry.conference)}` : `    ${entry.id} · unreadable: ${entry.error}`);
+					for (const entry of result.data.conferences) line(entry.error === undefined ? `    ${conferenceStatusLine(entry.conference)}` : `    ${entry.id} · unreadable: ${entry.error}`);
 					line(dim("  /consult co1 shows immutable sources, roster snapshots, participant turns, selector grammar events, tool receipts, and the returned or incomplete outcome. /consult probe [PATH] writes a standalone native-grammar diagnostic. /stop cancels an active outer call."));
 				}
 				return true;
@@ -1676,7 +1677,12 @@ export async function runTerminal(session, options) {
 			case "diff": {
 				try {
 					recordWindows();
-					const last = lastChange(options.root, options.brainDir);
+					const projection = await queries.review.last();
+					if (!projection.ok) {
+						line(`! ${projection.error.message}`);
+						return true;
+					}
+					const last = projection.data.last;
 					if (last === undefined) {
 						line("  No change task has run that is still in effect.");
 						return true;
@@ -2082,7 +2088,8 @@ export async function runTerminal(session, options) {
 	// A restarted outer tool normally names its child in a live slot, but a settled/recovered watch can arrive
 	// without that transient slot. Follow any still-running co<N> child directly so Consult continues to show its
 	// live participant stream; this does not attach it to parent context or grant it parent authority.
-	for (const { conference } of listConferences(options.brainDir)) {
+	const consultsAtStart = await queries.consult.list();
+	for (const { conference } of consultsAtStart.ok ? consultsAtStart.data.conferences : []) {
 		const child = conference?.status === "running" ? conference.childConversationId : undefined;
 		if (typeof child !== "string" || child === "" || attached.has(child)) continue;
 		attached.add(child);
