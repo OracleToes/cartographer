@@ -1277,9 +1277,10 @@ export async function runTerminal(session, options) {
 					"  /delete ID … --yes  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
+						"  /wait [SECONDS]  with piped input, wait for shell commands and scheduled wakes; an interactive terminal already wakes itself",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
 						"  /status   where the brain is and how full the context is",
-						"  /quit     leave; unfinished work continues the next time carto starts here",
+						"  /quit, /exit  leave; unfinished work continues the next time carto starts here",
 					].join("\n"),
 				);
 				return true;
