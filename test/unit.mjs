@@ -91,7 +91,7 @@ import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
 import { settingsAssessmentView, settingsOverviewView, settingsSafetyView } from "../src/screen/settings.mjs";
-import { nextWritableSettingsScope, settingsConfigurationView, settingsEditorField, settingsWriteTarget } from "../src/screen/settings-editor.mjs";
+import { SettingsSourcePicker, nextWritableSettingsScope, settingsConfigurationView, settingsEditorField, settingsSources, settingsWriteTarget } from "../src/screen/settings-editor.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -2400,6 +2400,26 @@ test("screen: Configuration renders settled provenance and produces only revisio
 	assert.equal(nextWritableSettingsScope(settings, "install"), "project");
 	const projectReadOnly = { configuration: { ...settings.configuration, layers: settings.configuration.layers.map((source) => source.layer === "project" ? { ...source, writable: false } : source) } };
 	assert.equal(nextWritableSettingsScope(projectReadOnly, "project"), "install", "a source switch is explicit when the safe project target is read-only");
+	const flashes = [];
+	const choices = [];
+	let closed = 0;
+	const picker = new SettingsSourcePicker({
+		sources: settingsSources(projectReadOnly),
+		selected: "project",
+		keyOf: (key) => key,
+		choose: (source) => { choices.push(source.scope); return true; },
+		close: () => { closed++; },
+		flash: (message) => flashes.push(message),
+	});
+	assert.match(JSON.stringify(picker.render(80)), /Choose configuration source/);
+	assert.match(JSON.stringify(picker.render(80)), /project configuration.*read-only/, "the picker shows an unavailable safe-default target instead of silently writing elsewhere");
+	picker.handleInput("enter");
+	assert.match(flashes.at(-1), /read-only/);
+	assert.deepEqual(choices, []);
+	picker.handleInput("down");
+	picker.handleInput("enter");
+	assert.deepEqual(choices, ["install"]);
+	assert.equal(closed, 1);
 });
 
 test("application: Settings provenance and persisted actions share revisions without mutating process overrides", async (t) => {

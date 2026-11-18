@@ -1,6 +1,8 @@
 // Settings Configuration is a projection over the application's saved-source provenance. This module owns only
 // presentation and form-ready values: it never imports a configuration file, environment, command line, or session
 // manager. The Screen supplies a settled Settings snapshot and sends every write through settings.edit/settings.reset.
+import { cut, paint } from "./text.mjs";
+import { TOKEN } from "./tokens.mjs";
 
 export const SETTINGS_SCOPE = Object.freeze({
 	project: "project",
@@ -71,6 +73,73 @@ const riskLine = (row) => row?.risk === "guarded"
 export function settingsSources(settings) {
 	const configuration = settings?.configuration;
 	return [SETTINGS_SCOPE.project, SETTINGS_SCOPE.install].map((scope) => Object.freeze(sourceFor(configuration, scope)));
+}
+
+/**
+ * A small, explicit picker for the two persisted sources. It deliberately presents an unavailable source instead of
+ * silently falling back from project to install; environment and command-line layers never enter this picker.
+ */
+export class SettingsSourcePicker {
+	/** @param {{ sources: { scope: string, label: string, writable?: boolean, path?: string }[], selected?: string, keyOf: (data: string) => string | undefined, choose: (source: object) => boolean, close: () => void, flash: (text: string) => void }} given */
+	constructor(given) {
+		if (given === null || typeof given !== "object" || !Array.isArray(given.sources) || typeof given.keyOf !== "function" || typeof given.choose !== "function" || typeof given.close !== "function" || typeof given.flash !== "function") throw new TypeError("A Settings source picker needs settled sources and overlay callbacks.");
+		this.given = given;
+		this.capturesViewportInput = true;
+		this.sources = given.sources.filter((source) => record(source) && typeof source.scope === "string" && source.scope !== "");
+		this.index = Math.max(0, this.sources.findIndex((source) => source.scope === given.selected));
+	}
+	invalidate() {}
+	get source() {
+		return this.sources[this.index];
+	}
+	move(by) {
+		if (this.sources.length < 2) return;
+		this.index = (this.index + by + this.sources.length) % this.sources.length;
+	}
+	choose() {
+		const source = this.source;
+		if (source === undefined) return void this.given.flash("No saved configuration source is available.");
+		if (source.writable !== true) return void this.given.flash(`The ${source.label} source is read-only.`);
+		let chosen;
+		try { chosen = this.given.choose(source); }
+		catch (error) {
+			this.given.flash(`Could not choose that source: ${error?.message ?? error}`);
+			return;
+		}
+		if (chosen) this.given.close();
+	}
+	handleInput(data) {
+		const key = this.given.keyOf(data);
+		if (key === "escape") return void this.given.close();
+		if (key === "enter") return void this.choose();
+		if (key === "up" || key === "k") return void this.move(-1);
+		if (key === "down" || key === "j") return void this.move(1);
+	}
+	handleMouse() {
+		return { handled: true };
+	}
+	render(width) {
+		const row = (spans, selected = false) => paint([["   ", ""], ...spans], width, selected ? TOKEN.interaction.selected : TOKEN.surface.overlay);
+		const inner = Math.max(10, width - 6);
+		const rows = [
+			paint([], width, TOKEN.surface.overlay),
+			row([[" Choose configuration source", `${TOKEN.text.primary} ${TOKEN.emphasis.strong}`]]),
+			row([[" The selected source is the only file an edit or reset can change.", TOKEN.text.muted]]),
+			paint([], width, TOKEN.surface.overlay),
+		];
+		if (this.sources.length === 0) rows.push(row([[" No saved source is available.", TOKEN.feedback.warning]]));
+		for (const [index, source] of this.sources.entries()) {
+			const selected = index === this.index;
+			const state = source.writable === true ? "writable" : "read-only";
+			const style = source.writable === true ? TOKEN.text.primary : TOKEN.feedback.warning;
+			rows.push(row([[selected ? "› " : "  ", style], [source.label, style], [` · ${state}`, source.writable === true ? TOKEN.text.muted : TOKEN.feedback.warning]], selected));
+			if (typeof source.path === "string" && source.path !== "") rows.push(row([[`    ${cut(source.path, Math.max(8, inner - 6))}`, TOKEN.text.muted]], selected));
+		}
+		rows.push(paint([], width, TOKEN.surface.overlay));
+		rows.push(row([["↑ ↓ or j k choose · Enter select · Esc cancel", TOKEN.text.muted]]));
+		rows.push(paint([], width, TOKEN.surface.overlay));
+		return rows;
+	}
 }
 
 /** Select the next explicitly writable persistence target; defaulting never silently switches project to install. */

@@ -68,7 +68,7 @@ import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
 import { settingsAssessmentView, settingsSafetyView } from "./settings.mjs";
-import { nextWritableSettingsScope, settingsConfigurationView, settingsEditorField, settingsWriteTarget } from "./settings-editor.mjs";
+import { SettingsSourcePicker, settingsConfigurationView, settingsEditorField, settingsSources, settingsWriteTarget } from "./settings-editor.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -946,12 +946,22 @@ export async function runScreen(session, options, runTerminal) {
 	const chooseSettingsSource = () => {
 		const settings = cachedSettings();
 		if (settings === undefined) return flash("Configuration is still loading; refresh Settings before choosing a source.");
-		const next = nextWritableSettingsScope(settings, state.settingsScope);
-		if (next === undefined) return flash("Neither saved configuration source is writable in this session.");
-		state.settingsScope = next;
-		rebuild("settings.configuration");
-		flash(`save target: ${next} configuration`, NOTICE_LEVEL.info);
-		draw();
+		const sources = settingsSources(settings);
+		if (!sources.some((source) => source.writable === true)) return flash("Neither saved configuration source is writable in this session.");
+		openModal(({ close }) => new SettingsSourcePicker({
+			sources,
+			selected: state.settingsScope,
+			keyOf,
+			close,
+			flash,
+			choose: (source) => {
+				state.settingsScope = source.scope;
+				rebuild("settings.configuration");
+				flash(`save target: ${source.scope} configuration`, NOTICE_LEVEL.info);
+				draw();
+				return true;
+			},
+		}), { width: Math.max(30, Math.min(76, terminal.columns - 4)), anchor: "center" });
 	};
 	const requestSettingsEdit = () => {
 		const selected = settingsTarget();
