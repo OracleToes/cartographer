@@ -229,7 +229,8 @@ export function createRuntimeApplication({ windows, wakes, work, models, shellSe
 			}
 			if (action === RUNTIME_ACTION.ensureModel) {
 				const limits = await models.ensure();
-				return uiSuccess({ action, limits }, { meta, notices: [{ level: "success", message: "The active model route is ready." }] });
+				const line = "The active model route is ready.";
+				return uiSuccess({ action, limits, line }, { meta, notices: [{ level: "success", message: line }] });
 			}
 			if (action === RUNTIME_ACTION.selectModel) {
 				const limits = await models.select(checked.value.modelId, checked.value.contextWindow === undefined ? {} : { contextWindow: checked.value.contextWindow });
@@ -239,7 +240,8 @@ export function createRuntimeApplication({ windows, wakes, work, models, shellSe
 					message: `No model route named ${JSON.stringify(checked.value.modelId)} is available in this session.`,
 					retryable: true,
 				}), { meta });
-				return uiSuccess({ action, modelId: checked.value.modelId, limits }, { meta, notices: [{ level: "success", message: `Selected model route ${checked.value.modelId}.` }] });
+				const line = `Selected model route ${checked.value.modelId}.`;
+				return uiSuccess({ action, modelId: checked.value.modelId, limits, line }, { meta, notices: [{ level: "success", message: line }] });
 			}
 			if (action === RUNTIME_ACTION.sendShell) {
 				const report = await windows.send(checked.value.name, checked.value.line, { waitMs: shellSendWaitMs, signal: options.signal });

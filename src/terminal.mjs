@@ -2140,8 +2140,6 @@ export async function runTerminal(session, options) {
 		busy: () => busy,
 		paused: () => paused,
 		thinking: () => thinking,
-		// What the server counted for the newest reply, also in the middle of a turn.
-		contextSize: () => engine?.usedBy(main.id) ?? contextSize,
 		lastReport: () => lastReport,
 	});
 	for (const listener of out.listeners?.("resize") ?? []) {

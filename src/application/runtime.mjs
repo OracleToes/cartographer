@@ -44,14 +44,15 @@ export function createRuntimeContextReader({ main, context, engine, brainDir, ro
  * terminal decides how to describe a resting or working agent, while this reader keeps conversation, shell, wake,
  * and model-manager access out of display code.
  * @param {{
- *   main?: { context?: (context: any) => Promise<{ messages?: readonly any[] }> },
+ *   main?: { id?: string, context?: (context: any) => Promise<{ messages?: readonly any[] }> },
  *   context?: any,
+ *   engine?: { usedBy?: (conversationId: string) => number | undefined },
  *   windows?: { list?: (tail?: number) => any[] },
  *   wakes?: { list?: () => any[], nextDue?: () => number | undefined },
  *   model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined,
  * }} options
  */
-export function createRuntimeStatusReader({ main, context, windows, wakes, model } = {}) {
+export function createRuntimeStatusReader({ main, context, engine, windows, wakes, model } = {}) {
 	return async ({ signal } = {}) => {
 		if (signal?.aborted === true) return undefined;
 		const view = typeof main?.context === "function" ? await main.context(context) : undefined;
@@ -61,8 +62,12 @@ export function createRuntimeStatusReader({ main, context, windows, wakes, model
 		const listedWindows = typeof windows?.list === "function" ? windows.list(0) : [];
 		const listedWakes = typeof wakes?.list === "function" ? wakes.list() : [];
 		const nextWakeDue = typeof wakes?.nextDue === "function" ? finite(wakes.nextDue()) : undefined;
+		// `engine.usedBy` is the same authoritative accounting the terminal formerly handed directly to Screen. Read it
+		// here, after the facade's yield, so even a mid-stream context count reaches the strip as a typed snapshot.
+		const contextSize = typeof engine?.usedBy === "function" && typeof main?.id === "string" ? finite(engine.usedBy(main.id)) : undefined;
 		return {
 			messages: Array.isArray(view?.messages) ? view.messages : [],
+			...(contextSize === undefined ? {} : { contextSize }),
 			windows: Array.isArray(listedWindows) ? listedWindows : [],
 			wakes: Array.isArray(listedWakes) ? listedWakes : [],
 			...(typeof current?.modelId === "string" && current.modelId !== "" ? { modelId: current.modelId } : {}),
@@ -101,13 +106,16 @@ const listedModel = (entry) => {
  * Build the model route projection used by the terminal's model command and connection status. The deferred result
  * carries only known route names, active identity, advertised context limits, and a safe listing issue—not provider
  * payloads or a model request.
- * @param {{ models?: { current?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, inspect?: () => Promise<{ listing?: { entries?: any[] }, limits?: object } | undefined>, known?: () => string[] } }} options
+ * @param {{ models?: { current?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, inspect?: () => Promise<{ listing?: { entries?: any[] }, limits?: object } | undefined>, known?: () => string[], ready?: () => boolean } }} options
  */
 export function createRuntimeModelsReader({ models } = {}) {
 	return async ({ signal } = {}) => {
 		if (signal?.aborted === true || models === undefined) return undefined;
 		const listedKnown = typeof models.known === "function" ? models.known() : [];
 		const known = (Array.isArray(listedKnown) ? listedKnown : []).map(modelName).filter((id) => id !== undefined);
+		// Route discovery only says that a server listed a name. Readiness is a separate session fact set after the
+		// native-GBNF proof succeeds; expose the settled boolean without asking the model manager to do more work.
+		const ready = typeof models.ready === "function" ? models.ready() === true : undefined;
 		let inspected;
 		let issue;
 		try {
@@ -132,6 +140,7 @@ export function createRuntimeModelsReader({ models } = {}) {
 		return {
 			...(currentId === undefined ? {} : { currentId }),
 			models: modelsListed,
+			...(ready === undefined ? {} : { ready }),
 			...(inspected?.limits === undefined ? {} : { limits: inspected.limits }),
 			...(issue === undefined ? {} : { issue }),
 		};

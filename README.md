@@ -2,7 +2,7 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.brain/`, which holds the agent's memory of that project.
 
-Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, and Model. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, and Model. Model includes the current route's native-GBNF readiness as well as provider-request inspection. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
@@ -72,7 +72,7 @@ The screen is deliberately static: the filled top tab is the primary location, t
 | **2 Carto** | The live shared brain: Atlas, Ledger, Plan, Requests, Tree, and **Current shared brain**. Shelf and report material lives here, not in Model. |
 | **3 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
 | **4 Shells** | The shell windows, live, plus **Wakes**. Open a window for its newest lines or its terminal-emulator output; Wakes lists the main agent's scheduled time, file, and window triggers. |
-| **5 Model** | **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. It separates frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
+| **5 Model** | **Routes**, **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. Routes shows discovered model names, the active route's native-GBNF readiness, and an explicit connect/select control; the other views separate frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
 
 Carto through Model are lists of items that fold. Chat's Conversation and Work use the ordinary local event feed; Consult reads only its private conference audit and live child activity. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it. Carto is read again while it shows; Diff, Shells, and Model refresh more often.
 
@@ -88,7 +88,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | `1` to `5` | Go to a tab. |
 | `[` and `]` | Previous and next view inside Chat, Carto, Diff, Shells, and Model (`H` and `L` do the same). |
 | `j`, `k` | Move down and up. `g` and `G` go to the first and last row. |
-| Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Chat Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Consult, it opens an attributed audit block or folds a conference. In Shells, Enter opens a window's output and goes back from it; in Wakes it opens the selected schedule row. |
+| Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Chat Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Consult, it opens an attributed audit block or folds a conference. In Shells, Enter opens a window's output and goes back from it; in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another listed route. |
 | `+` and `-` | Open everything or fold everything (`zR` and `zM` do the same). |
 | `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. |
 | `d` | In Chat Conversation, press twice to **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. Work and Consult are private and cannot be removed from future kept talk. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. In Shells → Wakes, it opens confirmation before removing the selected wake. |
@@ -109,7 +109,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | Ctrl-L | Draw the screen again. |
 | F1 | Show the keys. |
 
-**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A quieter third row keeps the relevant key reminder beside the input.
+**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. A quieter third row keeps the relevant key reminder beside the input.
 
 #### Chat, Work, Consult, and Model
 
@@ -119,8 +119,9 @@ A Conversation row is changed only after Cartographer has an admitted Durable so
 
 **Soft-forget active message** is a different action: `book target=message action=edit` creates a Durable omission marker for one stable message entry. Later active-context construction omits it; the raw transcript and earlier sent requests remain. It is not a Conversation edit or a brain-record deletion.
 
-Model has five distinct views:
+Model has six distinct views:
 
+- **Routes** is the settled model-route and transport projection. It keeps discovered names visible when a route-list refresh fails, distinguishes discovery from successful native-GBNF validation, and uses Enter to connect the active route or select and validate another listed route. It never treats a successful `/models` response alone as readiness.
 - **Latest sent** follows the newest frozen provider payload from any conversation. **Main sent** stays on the newest main-agent payload. Both are read-only snapshots retained for this run. They show the provider body in semantic reading order; response material below the sent boundary is labelled **Since request — not sent**.
 - **Raw payload** is the latest request's frozen serialized JSON, retained for audit or copying. It repeats the semantic sent-request rows by design; it is not a second context segment and does not count in the sent views' input-token bars.
 - **Next preview** is a pure current calculation. It is explicitly **not sent**, consumes no wakes, and can change when state, windows, a read batch, a collapse, or a new message changes.

@@ -321,11 +321,108 @@ const accountingRows = ({ messages = [], sizes = {}, contextWindow } = {}, confi
 	return rows;
 };
 
+const nonEmptyText = (value) => typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+const number = (value) => Number.isFinite(value) ? value : undefined;
+const usageSize = (messages) => {
+	const last = Array.isArray(messages) ? messages.findLast((message) => message?.role === "assistant" && message?.usage !== undefined) : undefined;
+	const usage = last?.usage;
+	if (usage === undefined || usage === null || typeof usage !== "object") return undefined;
+	const values = [usage.input, usage.cacheRead, usage.output].filter((value) => Number.isFinite(value));
+	return values.length === 0 ? undefined : values.reduce((sum, value) => sum + value, 0);
+};
+const issueText = (value) => nonEmptyText(value?.message ?? value);
+const routeLimitText = (limits) => {
+	if (limits === null || typeof limits !== "object") return undefined;
+	const usable = number(limits.usableContextWindow);
+	const server = number(limits.serverContextWindow);
+	const configured = number(limits.configuredContextWindow);
+	if (usable === undefined) return undefined;
+	return `active context ${shortCount(usable)} tokens${server === undefined ? "" : ` · server capacity ${shortCount(server)}`}${configured === undefined ? "" : ` · settings cap ${shortCount(configured)}`}`;
+};
+
+/** The model-route projection's display facts. A discovered route is deliberately not described as ready until the native grammar proof has succeeded. */
+const modelRoutes = (snapshot = {}) => {
+	const currentId = nonEmptyText(snapshot?.currentId);
+	const rows = (Array.isArray(snapshot?.models) ? snapshot.models : [])
+		.flatMap((entry) => {
+			const id = nonEmptyText(entry?.id);
+			if (id === undefined) return [];
+			const contextWindow = number(entry.contextWindow);
+			return [{
+				id,
+				active: id === currentId,
+				contextWindow,
+				capacity: contextWindow === undefined ? "server capacity not advertised" : `server capacity ${shortCount(contextWindow)} tokens`,
+			}];
+		});
+	const issue = issueText(snapshot?.issue);
+	const ready = snapshot?.ready === true;
+	const state = issue !== undefined
+		? {
+			text: ready
+				? `The active route is ready, but the route listing could not be refreshed: ${issue}`
+				: `The route listing could not be refreshed: ${issue}`,
+			style: "warn",
+		}
+		: ready
+			? { text: currentId === undefined ? "The active route passed native GBNF validation." : `${currentId} is ready: native GBNF validation passed.`, style: "ok" }
+			: { text: currentId === undefined ? "No active route has been reported yet." : `${currentId} has not been validated yet. Enter validates it before agent work can start.`, style: "warn" };
+	return {
+		currentId,
+		rows,
+		ready,
+		state,
+		...(routeLimitText(snapshot?.limits) === undefined ? {} : { limits: routeLimitText(snapshot.limits) }),
+	};
+};
+
+/** Compact runtime facts for the persistent strip. Its input is a settled deferred snapshot, never live managers. */
+const status = (snapshot, { routes, statusLoading = false, statusError, routesLoading = false, routesError, reportedError } = {}) => {
+	const windows = (Array.isArray(snapshot?.windows) ? snapshot.windows : []).filter((window) => window?.state !== POLICY.enums.windowStates.gone);
+	const wakes = Array.isArray(snapshot?.wakes) ? snapshot.wakes : [];
+	const routesDescription = modelRoutes(routes);
+	const modelId = routesDescription.currentId ?? nonEmptyText(snapshot?.modelId);
+	const reportedIssue = issueText(reportedError);
+	const routeIssue = reportedIssue ?? issueText(routesError) ?? issueText(routes?.issue);
+	let transport;
+	if (reportedIssue !== undefined) {
+		// Keep the terminal's exact gate error as the prominent strip fact. It must remain fully legible on a narrow
+		// terminal, and adding a route prefix would obscure the server/address the person needs to repair.
+		transport = { text: reportedIssue, style: "warn", primary: true };
+	} else if (routeIssue !== undefined) {
+		transport = { text: `${modelId === undefined ? "model route" : `model ${modelId}`} unavailable · ${routeIssue}`, style: "warn" };
+	} else if (routes?.ready === true) {
+		transport = { text: `${modelId === undefined ? "model route" : `model ${modelId}`} · native GBNF ready${routesLoading ? " · refreshing" : ""}`, style: "ok" };
+	} else if (routes !== undefined) {
+		transport = { text: `${modelId === undefined ? "model route" : `model ${modelId}`} · native GBNF not checked${routesLoading ? " · refreshing" : ""}`, style: "warn" };
+	} else if (routesLoading) {
+		transport = { text: "model route status loading", style: "muted" };
+	} else {
+		transport = { text: `${modelId === undefined ? "model route" : `model ${modelId}`} · route status pending`, style: "muted" };
+	}
+	const statusIssue = issueText(statusError);
+	const diagnostic = statusIssue === undefined
+		? statusLoading ? (snapshot === undefined ? "runtime status loading" : "runtime status refreshing") : undefined
+		: snapshot === undefined ? `runtime status unavailable · ${statusIssue}` : `runtime status could not be refreshed · ${statusIssue}`;
+	return {
+		contextSize: number(snapshot?.contextSize) ?? usageSize(snapshot?.messages),
+		windows: { count: windows.length, busy: windows.filter((window) => window.state === POLICY.enums.windowStates.busy).length },
+		wakes: {
+			count: wakes.length,
+			...(number(snapshot?.nextWakeDue) === undefined ? {} : { next: `next in ${took(snapshot.nextWakeDue)}` }),
+		},
+		transport,
+		...(diagnostic === undefined ? {} : { diagnostic: { text: diagnostic, style: statusIssue === undefined ? "muted" : "warn" } }),
+	};
+};
+
 /** The vocabulary migrated Runtime renderers need. Other Runtime surfaces join this adapter as they migrate. */
 export function createRuntimePresentation() {
 	return Object.freeze({
 		shells: Object.freeze({ shell, shellOutput }),
 		wakes: Object.freeze({ describe: wake }),
+		modelRoutes: Object.freeze({ describe: modelRoutes }),
+		status: Object.freeze({ describe: status }),
 		sent: Object.freeze({ categories, styleOf, short: shortCount, estimate, pretty, firstWords, describe: sentRequest, raw: rawPayload, contextBar }),
 		preview: Object.freeze({ describe: previewDescription }),
 		accounting: Object.freeze({ rows: accountingRows }),

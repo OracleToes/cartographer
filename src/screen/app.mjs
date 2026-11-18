@@ -4,7 +4,7 @@
 //   2 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
 //   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   4 Shells   the shell windows, live
-//   5 Model    sent provider payloads, next-request preview, and current accounting
+//   5 Model    route readiness, sent provider payloads, next-request preview, and current accounting
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -63,7 +63,7 @@ import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs"
 import { TOKEN } from "./tokens.mjs";
 import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
-import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
+import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -105,6 +105,7 @@ export const VIEWS = {
 		{ id: "wakes", name: "Wakes" },
 	],
 	context: [
+		{ id: "routes", name: "Routes" },
 		{ id: "window", name: "Latest sent" },
 		{ id: "main", name: "Main sent" },
 		{ id: "raw", name: "Raw payload" },
@@ -113,7 +114,7 @@ export const VIEWS = {
 	],
 };
 /** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -131,7 +132,7 @@ const paletteDestinationFor = (id) => {
 	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
 	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
 	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
-	if (id.startsWith("runtime.model.")) return { tab: "context", view: "preview", name: "Model · Next preview", hint: "Inspect the route before changing it." };
+	if (id.startsWith("runtime.model.")) return { tab: "context", view: "routes", name: "Model · Routes", hint: "Choose a route, then connect or select it through the Runtime action boundary." };
 	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
 	return undefined;
 };
@@ -200,7 +201,7 @@ export const KEYS_HELP = [
 	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
 	"  [ and ]          the previous and the next view inside Chat, Carto, Diff, Shells and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back); in Wakes it opens the selected schedule row.",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back); in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another route.",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
@@ -263,8 +264,8 @@ const SEARCH_KEY = "\x1b[102;6u";
 export async function runScreen(session, options, runTerminal) {
 	const { root, brainDir, config = {} } = options;
 	const started = Date.now();
-	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
-	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined };
+	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`): ephemeral local activity only. */
+	let core = { busy: () => false, paused: () => false, thinking: () => true };
 	// The file-completion helper is resolved before the terminal starts, never by a render or key handler.
 	const fileSearch = await findExecutable(["fd", "fdfind"]);
 
@@ -345,7 +346,7 @@ export async function runScreen(session, options, runTerminal) {
 
 	const state = {
 		tab: "chat",
-		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "window" },
+		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "routes" },
 		shell: undefined, // the shell window whose output the Output view shows
 		mode: "type",
 		selected: undefined, // a stop of the Conversation, Work, or Consult projection
@@ -459,11 +460,13 @@ export async function runScreen(session, options, runTerminal) {
 			state.modelError = String(message);
 			draw();
 		},
-		/** A successful first-turn proof clears the stale unavailable-route status. */
+		/** A successful first-turn proof clears the stale unavailable-route status and replaces its cached route fact. */
 		modelReady() {
-			if (state.modelError === undefined) return;
+			const hadError = state.modelError !== undefined;
 			state.modelError = undefined;
-			draw();
+			refreshRuntimeModelProjection(true);
+			refreshRuntimeStatusProjection(true);
+			if (hadError) draw();
 		},
 	};
 	for (const line of options.intro ?? []) chat.print(`${line}\n`, { keep: true });
@@ -540,8 +543,7 @@ export async function runScreen(session, options, runTerminal) {
 		chat,
 		activity: currentRuntimeActivity(),
 		brain: readBrain(),
-		windows: projectionFor?.("shells.list").data?.windows,
-		wakes: projectionFor?.("runtime.wakes").data?.wakes,
+		runtime: runtimeStatusForStrip(),
 		notice: notices.latest({ live: true }),
 		legend: legend(),
 		config,
@@ -604,6 +606,7 @@ export async function runScreen(session, options, runTerminal) {
 			"shells.list": ["Enter output", "y copy"],
 			"shells.out": ["Enter back"],
 			"shells.wakes": [{ text: "d remove", capability: RUNTIME_ACTION.removeWake }, "Enter open", "y copy"],
+			"context.routes": [{ text: "Enter connect/select", capabilities: [RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel] }, "y copy"],
 			"context.window": ["Enter open", "y copy"],
 			"context.main": ["Enter open", "y copy"],
 			"context.raw": ["Enter open", "y copy"],
@@ -677,7 +680,8 @@ export async function runScreen(session, options, runTerminal) {
 		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
 		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
 		"shells.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
-		"runtime.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
+		"runtime.status": ({ signal }) => queries.runtime.status({ signal }),
+		"context.routes": ({ signal }) => queries.runtime.models({ signal }),
 		"context.window": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
 		"context.main": ({ signal }) => queries.runtime.sent({ scope: "main", signal }),
 		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
@@ -697,7 +701,8 @@ export async function runScreen(session, options, runTerminal) {
 		"shells.list": "Shell windows",
 		"shells.out": "Shell output",
 		"shells.wakes": "Wake schedule",
-		"runtime.wakes": "Wake schedule",
+		"runtime.status": "Runtime status",
+		"context.routes": "Model routes",
 		"context.window": "Latest sent provider request",
 		"context.main": "Main sent provider request",
 		"context.raw": "Raw provider payload",
@@ -729,12 +734,31 @@ export async function runScreen(session, options, runTerminal) {
 		return query === undefined ? false : projections.refresh(id, query, { force });
 	};
 	const cancelProjection = (id) => projections.cancel(id);
-	let wakesProjectionAt = 0;
-	/** The strip owns one timed Runtime snapshot rather than asking the live wake manager while it renders. */
-	const refreshWakeProjection = (force = false) => {
-		if (!force && Date.now() - wakesProjectionAt < EVERY.shells) return false;
-		wakesProjectionAt = Date.now();
-		return refreshProjection("runtime.wakes", force);
+	const RUNTIME_STATUS_PROJECTION = "runtime.status";
+	const RUNTIME_MODEL_PROJECTION = "context.routes";
+	const runtimeStatusProjection = () => projectionFor(RUNTIME_STATUS_PROJECTION);
+	const runtimeModelProjection = () => projectionFor(RUNTIME_MODEL_PROJECTION);
+	let runtimeStatusAt = 0;
+	/** The persistent strip owns this timed Runtime snapshot rather than asking live conversation/shell/wake managers while it paints. */
+	const refreshRuntimeStatusProjection = (force = false) => {
+		if (!force && Date.now() - runtimeStatusAt < POLICY.timing.screen.stateCacheMs) return false;
+		runtimeStatusAt = Date.now();
+		return refreshProjection(RUNTIME_STATUS_PROJECTION, force);
+	};
+	/** Route discovery can reach a server, so it refreshes on opening, explicit retry, and route lifecycle changes—not every frame. */
+	const refreshRuntimeModelProjection = (force = false) => refreshProjection(RUNTIME_MODEL_PROJECTION, force);
+	/** Status formatting stays in Runtime presentation; this shell component receives only its settled display facts. */
+	const runtimeStatusForStrip = () => {
+		const statusProjection = runtimeStatusProjection();
+		const routesProjection = runtimeModelProjection();
+		return runtimePresentation.status.describe(statusProjection.data, {
+			routes: routesProjection.data,
+			statusLoading: statusProjection.loading === true,
+			statusError: statusProjection.error,
+			routesLoading: routesProjection.loading === true,
+			routesError: routesProjection.error,
+			reportedError: state.modelError,
+		});
 	};
 	const invalidateProjections = () => projections.invalidate();
 	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
@@ -747,7 +771,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (!projectionChanged) return;
 		if (brainChanged) invalidateBrain();
 		invalidateProjections();
-		if (runtimeChanged) refreshWakeProjection(true);
+		if (runtimeChanged) {
+			refreshRuntimeStatusProjection(true);
+			if ([RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel].includes(event.payload.action)) refreshRuntimeModelProjection(true);
+		}
 		refresh(viewId(), true);
 	});
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
@@ -764,6 +791,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.list") return projectionView(id, (data) => shellsView({ ...data, presentation: runtimePresentation.shells }));
 		if (id === "shells.out") return projectionView(id, (data) => shellsOutView({ ...data, presentation: runtimePresentation.shells }));
 		if (id === "shells.wakes") return projectionView(id, (data) => wakesView({ wakes: data.wakes, lines: data.lines, presentation: runtimePresentation.wakes }));
+		if (id === "context.routes") return projectionView(id, (data) => modelRoutesView({ routes: data, presentation: runtimePresentation.modelRoutes }));
 		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
 			const sent = data.sent;
 			return contextView({ sent, windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, presentation: runtimePresentation.sent });
@@ -784,9 +812,9 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	settleProjection = (id) => {
 		if (state.closed) return;
-		if (id === RUNTIME_ACTIVITY_PROJECTION) return void draw();
+		if (id === RUNTIME_ACTIVITY_PROJECTION || id === RUNTIME_STATUS_PROJECTION) return void draw();
 		rebuild(id);
-		if (viewId() === id || id === "runtime.wakes") draw();
+		if (viewId() === id) draw();
 	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
@@ -796,6 +824,9 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const page = pageOf(id);
 		if (page === undefined) return;
+		// Unlike frozen payload/context projections, route discovery reaches the model server. Opening, r, and lifecycle
+		// events own retries; an idle frame must not keep issuing `/models` checks.
+		if (id === RUNTIME_MODEL_PROJECTION && !force) return;
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
 		refreshProjection(id, force);
@@ -817,6 +848,18 @@ export async function runScreen(session, options, runTerminal) {
 		if (!result.ok) refresh(id, true);
 		draw();
 		return result.ok;
+	};
+	/** Choose or validate a settled route row through the typed Runtime model boundary; there is no provider call in this key handler. */
+	const requestModelRoute = (target) => {
+		if (target === undefined || typeof target.modelId !== "string" || target.modelId === "") return flash("choose a model route before connecting");
+		const route = viewId();
+		const action = target.active === true ? RUNTIME_ACTION.ensureModel : RUNTIME_ACTION.selectModel;
+		const input = action === RUNTIME_ACTION.ensureModel
+			? {}
+			: { modelId: target.modelId, ...(Number.isInteger(target.contextWindow) && target.contextWindow > 0 ? { contextWindow: target.contextWindow } : {}) };
+		void application.execute(action, input)
+			.then((result) => presentRuntimeResult(result, route))
+			.catch((error) => flash(`could not prepare that model route: ${error?.message ?? error}`));
 	};
 	const requestWakeRemoval = (wake) => {
 		if (wake === undefined || typeof wake.id !== "string" || wake.id === "") return flash("choose a wake before removing it");
@@ -1484,6 +1527,7 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void runWorkspaceAction(item.archived === true ? WORKSPACE_ACTION.unarchive : WORKSPACE_ACTION.archive, { id: bookId });
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
 			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
+			if (viewId() === "context.routes" && (key === "enter" || key === " " || key === "o")) return void requestModelRoute(item?.target);
 			if (key === "d" && viewId() === "shells.wakes" && rowKey?.startsWith("wake:")) return void requestWakeRemoval({ id: rowKey.slice(5) });
 			// Deleting is for good, so it always opens the same scoped confirmation. A request is not deleted but
 			// forgotten: the agent is told nothing of it, and so forgets it had asked.
@@ -1773,7 +1817,7 @@ export async function runScreen(session, options, runTerminal) {
 		{ id: "navigate.carto", label: "Go to Carto", category: "navigation", description: "Atlas, Ledger, Plan, Requests, Tree, and the shared brain.", destination: { tab: "carto", view: "atlas", name: "Carto" } },
 		{ id: "navigate.review", label: "Go to Diff and review", category: "navigation", description: "Last-step, session, and git change inspection.", destination: { tab: "diff", view: "last", name: "Diff · Last step" } },
 		{ id: "navigate.shells", label: "Go to Shells", category: "navigation", description: "Open shell windows and their captured output.", destination: { tab: "shells", view: "list", name: "Shells · List" } },
-		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Sent requests, preview, and current context accounting.", destination: { tab: "context", view: "parts", name: "Model · Current accounting" } },
+		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Model-route readiness, sent requests, preview, and current context accounting.", destination: { tab: "context", view: "routes", name: "Model · Routes" } },
 		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
 		...paletteCapabilities.map((capability) => {
 			const destination = paletteDestinationFor(capability.id);
@@ -1907,13 +1951,12 @@ export async function runScreen(session, options, runTerminal) {
 		refreshBrain();
 		if (!chatTab()) refresh();
 		else if (state.view.chat === "consult") refresh("chat.consult");
-		// Shell names and activity are also a status/completion source. Keep their deferred snapshot warm without
-		// ever asking the live process manager from rendering or a key handler.
-		if (viewId() !== "shells.list") refresh("shells.list");
+		// The strip owns one compact deferred Runtime status snapshot. It supersedes the old off-screen shell/wake
+		// probes while keeping shell and wake view reads bound to their own visible projections.
+		refreshRuntimeStatusProjection();
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
-		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
-		refreshWakeProjection();
+		if (chatTab() && chatBody.rows !== chatScroll.viewportHeight) draw();
 		refreshRuntimeActivity();
 		const busy = core.busy();
 		if (Date.now() - lastFrame >= (busy ? SPIN_MS : POLICY.timing.screen.idleFrameMs)) {
@@ -1946,7 +1989,8 @@ export async function runScreen(session, options, runTerminal) {
 	process.stdin.on("data", watchInput);
 	tui.start();
 	refreshBrain(true);
-	refreshWakeProjection(true);
+	refreshRuntimeStatusProjection(true);
+	refreshRuntimeModelProjection(true);
 	refreshRuntimeActivity(true);
 	terminal.setTitle(`carto · ${basename(root)}`);
 	shellFocus.restore();

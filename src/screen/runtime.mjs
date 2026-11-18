@@ -67,6 +67,34 @@ export function wakesView({ wakes = [], lines = [], presentation } = {}) {
 	};
 }
 
+/** Model-route discovery and grammar-readiness are settled Runtime facts; selecting a row crosses the typed action boundary in screen composition. */
+export function modelRoutesView({ routes, presentation } = {}) {
+	if (presentation === undefined || typeof presentation.describe !== "function") throw new TypeError("Model routes need their Runtime presentation adapter.");
+	const described = presentation.describe(routes);
+	const header = [
+		[["Model routes", "bold"], [described.currentId === undefined ? "" : `  · active ${described.currentId}`, ""]],
+		[[described.state.text, described.state.style]],
+		...(described.limits === undefined ? [] : [[[described.limits, "muted"]]]),
+		[["A listed route is not ready until Cartographer has checked native GBNF enforcement. Enter validates the active row, or selects and validates another listed route.", "faint"]],
+	];
+	if (described.rows.length === 0) {
+		return {
+			header,
+			items: [note("  No model routes are known yet. Refresh after the model server is available.")],
+		};
+	}
+	const items = described.rows.map((route) => ({
+		key: `model:${route.id}`,
+		head: [[route.id, route.active ? "bold" : ""], [route.active ? "  · active" : "", route.active ? "ok" : "muted"], [route.active && described.ready ? "  · native GBNF ready" : "", route.active && described.ready ? "ok" : "muted"]],
+		body: `${route.capacity}${route.active ? described.ready ? "\nThis route is ready for agent work." : "\nEnter validates this active route before agent work can start." : "\nEnter selects and validates this route."}`,
+		copy: `${route.id}\n${route.capacity}`,
+		// This is only the target from the settled route projection. Screen still invokes the typed model action;
+		// it never reaches a provider/model manager from a key handler.
+		target: { modelId: route.id, ...(route.contextWindow === undefined ? {} : { contextWindow: route.contextWindow }), active: route.active, ready: described.ready },
+	}));
+	return { header, items };
+}
+
 /** The Model tab's frozen-provider-request view. It receives a settled request snapshot and no engine. */
 export function contextView({ sent, windowSize, cols, writing, isOpen, presentation } = {}) {
 	if (presentation === undefined || typeof presentation.describe !== "function" || typeof presentation.styleOf !== "function" || typeof presentation.contextBar !== "function" || typeof presentation.short !== "function" || typeof presentation.estimate !== "function" || typeof presentation.pretty !== "function" || typeof presentation.firstWords !== "function" || !Array.isArray(presentation.categories)) throw new TypeError("Sent provider requests need their Runtime presentation adapter.");

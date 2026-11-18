@@ -10,15 +10,15 @@ import { bar, cut, short, span } from "./text.mjs";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPIN_MS = POLICY.timing.spinnerMs;
-const array = (value) => Array.isArray(value) ? value : [];
 
 /**
- * Build the activity, shared-state, notice, and key-hint rows for the persistent shell. `brain`, `windows`, and
- * `wakes` must already be cached deferred projections; this function never starts a read.
+ * Build the activity, shared-state, notice, and key-hint rows for the persistent shell. `brain` and `runtime` are
+ * already-settled application projections; only the busy/rest transition is UI-local, so this function never starts
+ * a read or asks a live session manager for context, shell, wake, or route state.
  */
-export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, windows = [], wakes = [], notice, legend = "", config = {}, options = {}, now = () => Date.now() } = {}) {
+export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, runtime = {}, notice, legend = "", config = {}, options = {}, now = () => Date.now() } = {}) {
 	if (state === null || typeof state !== "object") throw new TypeError("A status bar needs screen state.");
-	if (core === null || typeof core?.busy !== "function" || typeof core?.contextSize !== "function" || typeof core?.thinking !== "function") throw new TypeError("A status bar needs terminal activity.");
+	if (core === null || typeof core?.busy !== "function" || typeof core?.thinking !== "function") throw new TypeError("A status bar needs terminal activity.");
 	if (chat === null || typeof chat?.doing !== "function") throw new TypeError("A status bar needs chat activity.");
 	if (typeof now !== "function") throw new TypeError("A status bar needs a clock.");
 	const at = now();
@@ -54,23 +54,30 @@ export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, 
 	if (core.paused?.()) first.push([" · paused: held · /pause or Ctrl-V lets it go on", "warn"]);
 
 	const second = [];
-	const size = core.contextSize();
-	// /model re-fits the window while running; options.config is the shared object that follows it. A route error
-	// takes precedence over ordinary accounting: the visible status must say why Cartographer is resting.
+	const size = Number.isFinite(runtime?.contextSize) ? runtime.contextSize : undefined;
+	// /model re-fits the window while running; options.config is the shared object that follows it. Runtime's
+	// deferred status snapshot supplies the measured context and route diagnostic rather than core/manager probes.
 	const windowSize = options.config?.contextWindow ?? options.contextWindow;
-	if (state.modelError !== undefined) second.push([`! ${cut(state.modelError, POLICY.limits.screen.consoleErrorChars)}`, "warn"]);
-	else second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
+	const windowKnown = Number.isFinite(windowSize) && windowSize > 0;
+	const fraction = size === undefined || !windowKnown ? 0 : size / windowSize;
+	const transportText = typeof runtime?.transport?.text === "string" ? runtime.transport.text : undefined;
+	// A failed native-grammar/transport gate takes the whole status row, as the old terminal status did. That keeps
+	// the server address and actual failure visible instead of spending the narrow row on ordinary accounting.
+	if (runtime?.transport?.primary === true && transportText !== undefined && transportText !== "") second.push([`! ${cut(transportText, POLICY.limits.screen.consoleErrorChars)}`, runtime.transport.style ?? "warn"]);
+	else {
+		second.push([`ctx ${bar(fraction)} ${size === undefined ? "?" : short(size)}/${windowKnown ? short(windowSize) : "?"}`, size !== undefined && windowKnown && fraction > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
+		if (transportText !== undefined && transportText !== "") second.push([` · ${cut(transportText, POLICY.limits.screen.consoleErrorChars)}`, runtime.transport.style ?? "muted"]);
+	}
 	const { plan, ledger, waits, requests } = brain;
 	if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 	if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
 	if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
-	const availableWindows = array(windows).filter((win) => win.state !== POLICY.enums.windowStates.gone);
-	if (availableWindows.length > 0) {
-		const running = availableWindows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
-		second.push([` · ${availableWindows.length === 1 ? "1 window" : `${availableWindows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
-	}
-	const scheduledWakes = array(wakes);
-	if (scheduledWakes.length > 0) second.push([` · ${scheduledWakes.length === 1 ? "1 wake" : `${scheduledWakes.length} wakes`}`, "muted"]);
+	const windowCount = Number.isInteger(runtime?.windows?.count) && runtime.windows.count > 0 ? runtime.windows.count : 0;
+	const running = Number.isInteger(runtime?.windows?.busy) && runtime.windows.busy > 0 ? runtime.windows.busy : 0;
+	if (windowCount > 0) second.push([` · ${windowCount === 1 ? "1 window" : `${windowCount} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
+	const wakeCount = Number.isInteger(runtime?.wakes?.count) && runtime.wakes.count > 0 ? runtime.wakes.count : 0;
+	if (wakeCount > 0) second.push([` · ${wakeCount === 1 ? "1 wake" : `${wakeCount} wakes`}${typeof runtime.wakes.next === "string" && runtime.wakes.next !== "" ? `, ${runtime.wakes.next}` : ""}`, "muted"]);
+	if (runtime?.diagnostic !== undefined && typeof runtime.diagnostic.text === "string" && runtime.diagnostic.text !== "") second.push([` · ${cut(runtime.diagnostic.text, POLICY.limits.screen.consoleErrorChars)}`, runtime.diagnostic.style ?? "muted"]);
 	if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 	if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
 	if (!core.thinking()) second.push([" · notes hidden", "muted"]);

@@ -84,7 +84,7 @@ import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
-import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
+import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -764,6 +764,39 @@ test("screen: Runtime wakes render settled projections through their application
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above wake rows");
 });
 
+test("screen: Runtime model routes render settled transport projections and action targets through their application presentation adapter", () => {
+	const presentation = createRuntimePresentation().modelRoutes;
+	const data = {
+		currentId: "model-a",
+		ready: true,
+		models: [{ id: "model-a", contextWindow: 4_096 }, { id: "model-b", contextWindow: 8_192 }],
+		limits: { usableContextWindow: 4_000, serverContextWindow: 4_096, configuredContextWindow: 16_000 },
+	};
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return modelRoutesView({ routes: projection, presentation });
+	};
+	assert.throws(() => modelRoutesView({ routes: data }), /presentation adapter/, "Model routes cannot fall back to direct provider-route formatting");
+	const loading = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Model routes are not asked to invent connection data while their projection is loading");
+	assert.match(loading.header[0][0][0], /Model routes is loading/);
+	const failed = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { error: { message: "The model server is unavailable." } }, render });
+	assert.equal(rendered, 0, "a route-discovery error remains outside the Model renderer");
+	assert.match(failed.items[0].head[0][0], /Model routes could not be loaded/);
+	const empty = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { data: { models: [], ready: false } }, render });
+	assert.equal(rendered, 1, "a successful empty model-route projection reaches Runtime");
+	assert.match(JSON.stringify(empty), /No model routes are known yet/);
+	const settled = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { data }, render });
+	assert.equal(rendered, 2, "Model routes render their settled transport snapshot through the adapter");
+	assert.match(JSON.stringify(settled), /native GBNF validation passed/);
+	assert.equal(settled.items.find((item) => item.key === "model:model-a")?.target?.active, true, "the active row carries only its settled action target");
+	assert.deepEqual(settled.items.find((item) => item.key === "model:model-b")?.target, { modelId: "model-b", contextWindow: 8_192, active: false, ready: true }, "a non-active row supplies the typed select target without a model-manager reference");
+	const stale = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached model routes remain renderable while a deliberate retry is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/);
+});
+
 test("screen: Runtime sent, audit, preview, and accounting views render settled projections through their application presentation adapter", () => {
 	const presentation = createRuntimePresentation();
 	const sent = {
@@ -873,16 +906,22 @@ test("screen: status bar paints settled activity, status, notice, and footer sna
 		busy: () => busy,
 		paused: () => true,
 		thinking: () => true,
-		contextSize: () => 400,
 	};
+	const statusPresentation = createRuntimePresentation().status;
+	const runtime = statusPresentation.describe({
+		messages: [{ role: "assistant", usage: { input: 300, cacheRead: 50, output: 50 } }],
+		windows: [{ state: POLICY.enums.windowStates.busy }, { state: POLICY.enums.windowStates.gone }],
+		wakes: [{ id: "wake-1" }],
+		modelId: "status-model",
+		nextWakeDue: 3_000,
+	}, { routes: { currentId: "status-model", ready: true, models: [{ id: "status-model" }] } });
 	const rows = renderStatusBar({
 		state,
 		core,
 		chat: { doing: () => ({ task: "task-7", what: "writing a patch" }) },
 		activity: { taskActive: true },
 		brain: { plan: "plan 1/2 envelopes", ledger: "1 goal", requests: 2, waits: true },
-		windows: [{ state: POLICY.enums.windowStates.busy }, { state: POLICY.enums.windowStates.gone }],
-		wakes: [{ id: "wake-1" }],
+		runtime,
 		notice: { level: NOTICE_LEVEL.success, message: "Saved durable state." },
 		legend: "j k move · Ctrl-K palette",
 		options: { contextWindow: 1_000, gate: { yolo: true }, runner: { mode: "direct" } },
@@ -895,6 +934,7 @@ test("screen: status bar paints settled activity, status, notice, and footer sna
 	assert.match(text, /ctx .*400\/1\.0k/);
 	assert.match(text, /1 goal.*plan 1\/2 envelopes.*2 requests for you/);
 	assert.match(text, /1 window, 1 busy.*1 wake.*yolo.*no sandbox/);
+	assert.match(text, /model status-model · native GBNF ready/, "the strip consumes the settled model-route readiness fact");
 	assert.match(text, /✓ Saved durable state\./);
 	assert.match(text, /j k move · Ctrl-K palette/);
 	assert.equal(rows.at(-1)[0][1], TOKEN.text.muted, "the footer remains a semantic muted shell row");
@@ -911,6 +951,18 @@ test("screen: status bar paints settled activity, status, notice, and footer sna
 	at = 3_000;
 	const question = renderStatusBar({ state, core, chat: { doing: () => undefined }, activity: { question: {} }, options: { contextWindow: 1_000 }, now: () => at });
 	assert.match(question[0].map(([value]) => value).join(""), /waiting for your answer/, "a pending question takes precedence over generic task activity");
+	const emptyRuntime = statusPresentation.describe({ messages: [], windows: [], wakes: [] }, { routes: { currentId: "status-model", ready: false, models: [] } });
+	assert.deepEqual(emptyRuntime.windows, { count: 0, busy: 0 }, "a successful empty runtime snapshot stays a quiet valid strip state");
+	assert.deepEqual(emptyRuntime.wakes, { count: 0 });
+	const loadingRuntime = statusPresentation.describe(undefined, { statusLoading: true, routesLoading: true });
+	assert.match(loadingRuntime.diagnostic?.text ?? "", /runtime status loading/, "the status projection names its deferred first load without a manager read");
+	assert.match(loadingRuntime.transport.text, /model route status loading/);
+	const staleRuntime = statusPresentation.describe({ messages: [], windows: [], wakes: [] }, { statusLoading: true, routes: { currentId: "status-model", ready: true, models: [] }, routesLoading: true });
+	assert.match(staleRuntime.diagnostic?.text ?? "", /refreshing/, "a cached status snapshot stays visible while its replacement is in flight");
+	assert.match(staleRuntime.transport.text, /native GBNF ready.*refreshing/);
+	const failedRuntime = statusPresentation.describe(undefined, { statusError: { message: "status reader failed" }, routesError: { message: "model server failed" } });
+	assert.match(failedRuntime.diagnostic?.text ?? "", /unavailable.*status reader failed/);
+	assert.match(failedRuntime.transport.text, /unavailable.*model server failed/);
 	assert.throws(() => renderStatusBar({ state }), /terminal activity/);
 });
 
@@ -1706,11 +1758,14 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(ready.ok, true);
 	if (!ready.ok) throw new Error(ready.error.message);
 	assert.equal(ready.meta.requestId, "model-ready");
+	assert.equal(ready.confirmation, undefined, "connecting a route is not destructive and needs no acknowledgement dialog");
+	assert.equal(ready.data.line, "The active model route is ready.");
 	assert.equal(ready.data.limits.usableContextWindow, 4_000);
 	const selected = await modelApp.execute(RUNTIME_ACTION.selectModel, { modelId: "other-model", contextWindow: 8_192 });
 	assert.equal(selected.ok, true);
 	if (!selected.ok) throw new Error(selected.error.message);
 	assert.equal(selected.data.modelId, "other-model");
+	assert.equal(selected.data.line, "Selected model route other-model.");
 	assert.equal(selected.data.limits.usableContextWindow, 8_192);
 	assert.equal(modelCalls, 2);
 	const badModel = await modelApp.execute(RUNTIME_ACTION.selectModel, { modelId: "   " });
@@ -1820,7 +1875,7 @@ test("application: active-context accounting is a deferred typed runtime project
 
 test("application: runtime view, status, activity, and model projections defer shell, wake, engine, model, question, task, and preview snapshots", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusWindows: 0, statusWakes: 0, statusModel: 0, activityQuestion: 0, activityTask: 0, modelInspect: 0, modelCurrent: 0 };
+	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusSize: 0, statusWindows: 0, statusWakes: 0, statusModel: 0, activityQuestion: 0, activityTask: 0, modelInspect: 0, modelCurrent: 0 };
 	const sent = {
 		task: false,
 		requestId: "main:1",
@@ -1837,8 +1892,9 @@ test("application: runtime view, status, activity, and model projections defer s
 		lines: () => { reads.wakeLines++; return ["w1 · every 5 minutes"]; },
 	} });
 	const statusReader = createRuntimeStatusReader({
-		main: { context: async () => { reads.statusContext++; return { messages: [{ role: "assistant", usage: { input: 20, cacheRead: 4, output: 2 } }] }; } },
+		main: { id: "main", context: async () => { reads.statusContext++; return { messages: [{ role: "assistant", usage: { input: 20, cacheRead: 4, output: 2 } }] }; } },
 		context: {},
+		engine: { usedBy: (id) => { reads.statusSize++; assert.equal(id, "main"); return 30; } },
 		windows: { list: (tail) => { reads.statusWindows++; assert.equal(tail, 0); return [window]; } },
 		wakes: { list: () => { reads.statusWakes++; return [wake]; }, nextDue: () => 3_000 },
 		model: async () => { reads.statusModel++; return { modelId: "status-model" }; },
@@ -1849,6 +1905,7 @@ test("application: runtime view, status, activity, and model projections defer s
 	});
 	const modelReader = createRuntimeModelsReader({ models: {
 		known: () => ["known-model"],
+		ready: () => true,
 		inspect: async () => {
 			reads.modelInspect++;
 			return { listing: { entries: [{ id: "known-model", context_length: 4_096 }, { id: "other-model", meta: { n_ctx: 8_192 } }] }, limits: { usableContextWindow: 4_000 } };
@@ -1879,16 +1936,17 @@ test("application: runtime view, status, activity, and model projections defer s
 	assert.equal(current.data.sent, sent);
 	assert.equal(current.meta.requestId, "sent-query");
 	const pendingStatus = queries.runtime.status({ requestId: "status-query" });
-	assert.deepEqual([reads.statusContext, reads.statusWindows, reads.statusWakes, reads.statusModel], [0, 0, 0, 0], "runtime status leaves the current render/key stack before reading live session managers");
+	assert.deepEqual([reads.statusContext, reads.statusSize, reads.statusWindows, reads.statusWakes, reads.statusModel], [0, 0, 0, 0, 0], "runtime status leaves the current render/key stack before reading live session managers");
 	const status = await pendingStatus;
 	assert.equal(status.ok, true);
 	if (!status.ok) throw new Error(status.error.message);
 	assert.equal(status.meta.requestId, "status-query");
 	assert.equal(status.data.modelId, "status-model");
+	assert.equal(status.data.contextSize, 30, "the deferred status snapshot owns the current engine accounting too");
 	assert.equal(status.data.nextWakeDue, 3_000);
 	assert.deepEqual(status.data.windows, [window]);
 	assert.deepEqual(status.data.wakes, [wake]);
-	assert.deepEqual([reads.statusContext, reads.statusWindows, reads.statusWakes, reads.statusModel], [1, 1, 1, 1]);
+	assert.deepEqual([reads.statusContext, reads.statusSize, reads.statusWindows, reads.statusWakes, reads.statusModel], [1, 1, 1, 1, 1]);
 	const pendingActivity = queries.runtime.activity({ requestId: "activity-query" });
 	assert.deepEqual([reads.activityQuestion, reads.activityTask], [0, 0], "question and task ownership leave the screen render stack before their live session readers run");
 	const activity = await pendingActivity;
@@ -1904,6 +1962,7 @@ test("application: runtime view, status, activity, and model projections defer s
 	if (!models.ok) throw new Error(models.error.message);
 	assert.equal(models.meta.requestId, "models-query");
 	assert.equal(models.data.currentId, "known-model");
+	assert.equal(models.data.ready, true, "route readiness stays distinct from discovery and is captured with the deferred model projection");
 	assert.deepEqual(models.data.models, [{ id: "known-model", contextWindow: 4_096 }, { id: "other-model", contextWindow: 8_192 }]);
 	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [1, 1]);
 	const shells = await queries.runtime.shells();
@@ -1924,7 +1983,7 @@ test("application: runtime view, status, activity, and model projections defer s
 	assert.equal(planned.ok, true);
 	if (!planned.ok) throw new Error(planned.error.message);
 	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusWindows: 1, statusWakes: 1, statusModel: 1, activityQuestion: 1, activityTask: 1, modelInspect: 1, modelCurrent: 1 });
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusSize: 1, statusWindows: 1, statusWakes: 1, statusModel: 1, activityQuestion: 1, activityTask: 1, modelInspect: 1, modelCurrent: 1 });
 	const stoppedWakes = new AbortController();
 	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
 	stoppedWakes.abort();

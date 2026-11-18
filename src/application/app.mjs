@@ -94,6 +94,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 	const runtimeStatusReader = runtimeOptions.statusReader ?? queryOptions.runtimeStatusReader ?? createRuntimeStatusReader({
 		main: runtimeOptions.main,
 		context: runtimeOptions.context,
+		engine: runtimeOptions.engine,
 		windows: runtimeOptions.windows,
 		wakes: runtimeOptions.wakes,
 		model: runtimeOptions.model,

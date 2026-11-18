@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration in progress — Chat, Workspace, and Review are complete; Runtime is in progress.
+**Status:** Phase 5 view migration in progress — Chat, Workspace, Review, and Runtime are complete; Settings & Safety is next.
 
 **Date:** 2026-11-16
 
@@ -444,7 +444,9 @@ Migrate capability groups in this order:
 
 **Runtime Shells & Wakes completion record (2026-11-16).** Shell lists, selected output, and the wake schedule now render settled Runtime projections through a Runtime presentation adapter. The screen composes that adapter and the migrated renderers own no window-manager/scheduler/domain import or read. The shared async boundary retains first-load, failure, and cached-stale handling; Shells and Wakes retain their successful empty states. Wake removal uses the existing typed `runtime.wake.remove` action and its scoped acknowledgement dialog; the same action continues to serve `/wakes remove`.
 
-**Runtime Model-surface completion record (2026-11-16).** Latest/Main sent, Raw payload, Next preview, and Current active-context accounting now render settled Runtime projections through the same Runtime presentation adapter. Frozen provider parsing, prospective-plan text, and context-accounting vocabulary stay in that adapter; the screen renderer owns no engine/context/domain import and treats all four surfaces as read-only. The shared async boundary owns first-load, failure, and cached-stale state while each surface retains its successful empty state. Transport/model and status-facing surfaces remain in the Runtime migration group.
+**Runtime Model-surface completion record (2026-11-16).** Latest/Main sent, Raw payload, Next preview, and Current active-context accounting now render settled Runtime projections through the same Runtime presentation adapter. Frozen provider parsing, prospective-plan text, and context-accounting vocabulary stay in that adapter; the screen renderer owns no engine/context/domain import and treats all four surfaces as read-only. The shared async boundary owns first-load, failure, and cached-stale state while each surface retains its successful empty state.
+
+**Runtime transport and status completion record (2026-11-16).** Model Routes now consumes the deferred `runtime.models` snapshot through the Runtime presentation adapter. It distinguishes a listed route from native-GBNF readiness, retains cached route names and a typed listing issue, and sends Enter-driven connect/select controls through `runtime.model.ensure` or `runtime.model.select`; neither action needs a destructive confirmation. The persistent strip now consumes its own scheduled `runtime.status` snapshot plus cached route state, rather than live context/window/wake/model-manager callbacks. It renders first-load, cached-refresh, and typed error diagnostics without initiating a read; successful empty runtime state remains a quiet, valid strip. Runtime projections are cancelled/superseded by the shared scheduler, and route discovery is retried only on entry, explicit refresh, or a route lifecycle event rather than every screen frame.
 
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 

@@ -141,9 +141,9 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
- *   runtimeStatusReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages?: readonly any[], windows?: any[], wakes?: any[], modelId?: string, nextWakeDue?: number } | undefined>,
+ *   runtimeStatusReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages?: readonly any[], contextSize?: number, windows?: any[], wakes?: any[], modelId?: string, nextWakeDue?: number } | undefined>,
  *   runtimeActivityReader?: (options?: { signal?: AbortSignal }) => Promise<{ question?: { since?: number }, taskActive?: boolean } | undefined>,
- *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], limits?: object, issue?: { message?: string } } | undefined>,
+ *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], ready?: boolean, limits?: object, issue?: { message?: string } } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
@@ -514,6 +514,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			if (snapshot === undefined || snapshot === null || typeof snapshot !== "object") return unavailable("runtime status", "the running session did not provide a status snapshot", ready.meta);
 			return uiSuccess({
 				messages: Array.isArray(snapshot.messages) ? snapshot.messages : [],
+				...(Number.isFinite(snapshot.contextSize) ? { contextSize: snapshot.contextSize } : {}),
 				windows: Array.isArray(snapshot.windows) ? snapshot.windows : [],
 				wakes: Array.isArray(snapshot.wakes) ? snapshot.wakes : [],
 				...(typeof snapshot.modelId === "string" && snapshot.modelId !== "" ? { modelId: snapshot.modelId } : {}),
@@ -571,6 +572,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			return uiSuccess({
 				...(currentId === undefined ? {} : { currentId }),
 				models,
+				...(typeof snapshot.ready === "boolean" ? { ready: snapshot.ready } : {}),
 				...(snapshot.limits !== undefined && typeof snapshot.limits === "object" && snapshot.limits !== null ? { limits: snapshot.limits } : {}),
 				...(issue === undefined ? {} : { issue: { message: issue } }),
 			}, { meta: ready.meta });
