@@ -44,11 +44,12 @@ import { createFocusManager } from "./focus.mjs";
 import { createList } from "./list.mjs";
 import { createRouteManager } from "./routes.mjs";
 import { renderAsyncBoundary } from "./async-boundary.mjs";
-import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "./notices.mjs";
+import { createNoticeStore, NOTICE_LEVEL } from "./notices.mjs";
 import { createOverlayManager } from "./overlays.mjs";
+import { renderStatusBar } from "./status.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
-import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
+import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { TOKEN } from "./tokens.mjs";
 import { accountingProjectionView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
@@ -103,8 +104,7 @@ const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "c
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
-/** The marks of the spinner that turns while the agent works, and how long each stands. */
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/** How long each spinner mark stands; the status strip owns its visible marks. */
 const SPIN_MS = POLICY.timing.spinnerMs;
 
 // A palette may safely expose every registered capability before every feature has a dedicated control. Selecting an
@@ -510,10 +510,8 @@ export async function runScreen(session, options, runTerminal) {
 				if (brain.request === request) brain = { ...brain, loading: false };
 			});
 	};
-	const readBrain = () => {
-		refreshBrain();
-		return brain;
-	};
+	/** The status strip reads its settled snapshot only; the clock and invalidations below own replacement reads. */
+	const readBrain = () => brain;
 	/** Drop a possibly stale status result after a durable workspace action, then request a replacement. */
 	const invalidateBrain = () => {
 		brain = { at: 0, loading: false, request: brain.request + 1 };
@@ -521,67 +519,20 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** The strip and composer read one deferred activity snapshot rather than probing asks/task state while they render. */
 	const currentRuntimeActivity = () => runtimeActivityProjection().data ?? {};
-	/** The activity, shared-state, and key-reminder rows of the strip, as spans. */
-	const status = () => {
-		const busy = core.busy();
-		if (busy && state.busySince === undefined) {
-			state.busySince = Date.now();
-			state.rate = undefined;
-		}
-		if (!busy && state.busySince !== undefined) {
-			state.busySince = undefined;
-			state.restSince = Date.now();
-			state.prefill = undefined;
-		}
-		const activity = currentRuntimeActivity();
-		const question = activity.question;
-		const first = [];
-		if (question !== undefined) first.push([Number.isFinite(question.since) ? `? waiting for your answer since ${stamp(question.since).split(", ").at(-1)}` : "? waiting for your answer", "warn bold"], [" · type it below", "muted"]);
-		else if (busy) {
-			const doing = chat.doing();
-			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
-			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (activity.taskActive ? "task" : "working"), "bold"]);
-			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
-			if (reading) {
-				const { fresh, done, ms } = state.prefill;
-				const rate = ms > 0 ? done / (ms / 1000) : 0;
-				const left = rate > 0 ? (fresh - done) / rate : undefined;
-				first.push([` · reading ${short(done)} of ${short(fresh)} new ${bar(done / fresh)} ${Math.round((done / fresh) * 100)}%`, "tool"], [`${rate > 0 ? ` · ${Math.round(rate)} tok/s` : ""}${left !== undefined ? ` · writing in ~${Math.max(1, Math.round(left))} s` : ""}`, "muted"]);
-			} else if (doing !== undefined) first.push([` · ${doing.what}`, ""]);
-			else if (state.prefill?.phase === "sent") first.push([" · waiting for the model", "muted"]);
-			first.push([` · ${span(Date.now() - state.busySince)}`, "muted"]);
-			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < POLICY.limits.format.rateDecimalBelow ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
-			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < POLICY.timing.screen.prefillRecentMs && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
-		} else first.push(["○ ", "muted"], ["resting", ""], [` · ${span(Date.now() - state.restSince)}`, "muted"]);
-		if (core.paused?.()) first.push([" · paused: held · /pause or Ctrl-V lets it go on", "warn"]);
-
-		const second = [];
-		const size = core.contextSize();
-		// /model re-fits the window while running; options.config is the shared object that follows it. A route
-		// error takes precedence over ordinary accounting: the visible status must say why Cartographer is resting.
-		const windowSize = options.config?.contextWindow ?? options.contextWindow;
-		if (state.modelError !== undefined) second.push([`! ${cut(state.modelError, POLICY.limits.screen.consoleErrorChars)}`, "warn"]);
-		else second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
-		const { plan, ledger, waits, requests } = readBrain();
-		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
-		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
-		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
-		const windows = (projectionFor?.("shells.list").data?.windows ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
-		if (windows.length > 0) {
-			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
-			second.push([` · ${windows.length === 1 ? "1 window" : `${windows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
-		}
-		const wakes = projectionFor?.("runtime.wakes").data?.wakes ?? [];
-		if (wakes.length > 0) second.push([` · ${wakes.length === 1 ? "1 wake" : `${wakes.length} wakes`}`, "muted"]);
-		if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
-		if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
-		if (!core.thinking()) second.push([" · notes hidden", "muted"]);
-		const rows = [first, second];
-		const currentNotice = notices.latest({ live: true });
-		if (currentNotice !== undefined) rows.push([[" ", ""], ...noticeSpans(currentNotice)]);
-		rows.push([[` ${legend()}`, TOKEN.text.muted]]);
-		return rows;
-	};
+	/** The strip paints only cached projections; refreshBrain and the projection clock own all deferred reads. */
+	const status = () => renderStatusBar({
+		state,
+		core,
+		chat,
+		activity: currentRuntimeActivity(),
+		brain: readBrain(),
+		windows: projectionFor?.("shells.list").data?.windows,
+		wakes: projectionFor?.("runtime.wakes").data?.wakes,
+		notice: notices.latest({ live: true }),
+		legend: legend(),
+		config,
+		options,
+	});
 
 	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
 	const LEGEND = {
@@ -1845,6 +1796,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (state.closed) return;
 		measure();
 		syncThinking();
+		refreshBrain();
 		if (!chatTab()) refresh();
 		else if (state.view.chat === "consult") refresh("chat.consult");
 		// Shell names and activity are also a status/completion source. Keep their deferred snapshot warm without
@@ -1885,6 +1837,7 @@ export async function runScreen(session, options, runTerminal) {
 	process.once("exit", onExit);
 	process.stdin.on("data", watchInput);
 	tui.start();
+	refreshBrain(true);
 	refreshWakeProjection(true);
 	refreshRuntimeActivity(true);
 	terminal.setTitle(`carto · ${basename(root)}`);

@@ -78,6 +78,7 @@ import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
+import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
@@ -460,6 +461,55 @@ test("screen: notices retain a bounded history while only their current live sta
 	assert.equal(notices.latest({ live: true })?.id, warning.id);
 	assert.equal(notices.clear(), true);
 	assert.equal(notices.clear(), false);
+});
+
+test("screen: status bar paints settled activity, status, notice, and footer snapshots", () => {
+	let at = 1_000;
+	let busy = true;
+	const state = { restSince: 0, prefill: { phase: "sent" }, rate: 12.5 };
+	const core = {
+		busy: () => busy,
+		paused: () => true,
+		thinking: () => true,
+		contextSize: () => 400,
+	};
+	const rows = renderStatusBar({
+		state,
+		core,
+		chat: { doing: () => ({ task: "task-7", what: "writing a patch" }) },
+		activity: { taskActive: true },
+		brain: { plan: "plan 1/2 envelopes", ledger: "1 goal", requests: 2, waits: true },
+		windows: [{ state: POLICY.enums.windowStates.busy }, { state: POLICY.enums.windowStates.gone }],
+		wakes: [{ id: "wake-1" }],
+		notice: { level: NOTICE_LEVEL.success, message: "Saved durable state." },
+		legend: "j k move · Ctrl-K palette",
+		options: { contextWindow: 1_000, gate: { yolo: true }, runner: { mode: "direct" } },
+		now: () => at,
+	});
+	const text = rows.map((row) => row.map(([value]) => value).join("")).join("\n");
+	assert.equal(state.busySince, at, "the status strip owns the local transition into active work");
+	assert.equal(state.rate, undefined, "a new run does not inherit a previous reply rate");
+	assert.match(text, /task-7.*writing a patch/);
+	assert.match(text, /ctx .*400\/1\.0k/);
+	assert.match(text, /1 goal.*plan 1\/2 envelopes.*2 requests for you/);
+	assert.match(text, /1 window, 1 busy.*1 wake.*yolo.*no sandbox/);
+	assert.match(text, /✓ Saved durable state\./);
+	assert.match(text, /j k move · Ctrl-K palette/);
+	assert.equal(rows.at(-1)[0][1], TOKEN.text.muted, "the footer remains a semantic muted shell row");
+
+	busy = false;
+	at = 2_500;
+	const resting = renderStatusBar({ state, core, chat: { doing: () => undefined }, options: { contextWindow: 1_000 }, now: () => at });
+	assert.equal(state.busySince, undefined);
+	assert.equal(state.restSince, at);
+	assert.equal(state.prefill, undefined, "leaving active work clears an unfinished prefill progress indicator");
+	assert.match(resting[0].map(([value]) => value).join(""), /resting/);
+
+	busy = true;
+	at = 3_000;
+	const question = renderStatusBar({ state, core, chat: { doing: () => undefined }, activity: { question: {} }, options: { contextWindow: 1_000 }, now: () => at });
+	assert.match(question[0].map(([value]) => value).join(""), /waiting for your answer/, "a pending question takes precedence over generic task activity");
+	assert.throws(() => renderStatusBar({ state }), /terminal activity/);
 });
 
 test("screen: command palette filters registered actions, keeps disabled reasons visible, and gates asynchronous activation", async () => {
