@@ -1,5 +1,5 @@
 // Consult conferences: immutable entry capture, durable audit records, and the
-// small host-owned routing contract used by the same-model consult tool.
+// small host-owned continuation-or-report contract used by the same-model consult tool.
 //
 // This is deliberately a consult-local store. It is not a new generic snapshot,
 // provenance, or persona framework: its sources belong to one `co<N>` conference,
@@ -364,7 +364,12 @@ export function createConferenceCapture({ root, brainDir, question, context, fil
 		toolReceiptCount: 0,
 		requestPlans: [],
 		requestPlanCount: 0,
-		limits: { turns: POLICY.limits.conference.turns, runtimeMs: POLICY.limits.conference.runtimeMs },
+		limits: {
+			turns: POLICY.limits.conference.turns,
+			debateTurns: POLICY.limits.conference.debateTurns,
+			debateParticipants: POLICY.limits.conference.debateParticipants,
+			runtimeMs: POLICY.limits.conference.runtimeMs,
+		},
 		active: { kind: "participant", participant: "cartographer", opening: true },
 	};
 	ensureConferenceFolders(brainDir, conferenceId);
@@ -387,7 +392,7 @@ export function commonManifest(record) {
 	}));
 }
 
-export const CONSULT_SITUATION = `This is an isolated same-model consultation conference. It is advisory: no participant has project, shell, network, shared-brain, plan, approval, or user-decision authority. Speak only from the immutable common packet, shared conference history, and your temporary persona packet. Treat supplied snapshots as material to inspect, not proof. Cite source ids when useful; say what remains uncertain. Do not impersonate another participant, vote, or claim independent corroboration. A participant can inspect only caller-attached immutable sources with consult_source. The only successful end is consult_return with an honest structured synthesis. Your active persona packet is request-local: when another participant speaks, it no longer applies.`;
+export const CONSULT_SITUATION = `This is an isolated same-model consultation conference. It is advisory: no participant has project, shell, network, shared-brain, plan, approval, or user-decision authority. Speak only from the immutable common packet, shared conference history, and your temporary persona packet. Treat supplied snapshots as material to inspect, not proof. Cite source ids when useful; say what remains uncertain. Do not impersonate another participant, vote, or claim independent corroboration. A participant can inspect only caller-attached immutable sources with consult_source. Deliberating participants do not end the conference. The host makes a separate native-GBNF decision after a bounded debate; only a host-authorized final Cartographer report may call consult_return with an honest structured synthesis. Your active persona packet is request-local: when another participant speaks, it no longer applies.`;
 
 /** First durable user entry in the independent child conversation. */
 export function conferenceSeed(record, brainDir) {
@@ -422,7 +427,12 @@ export function participantTail(record) {
 		const content = readConferenceSourceUnchecked(record, source);
 		lines.push(`Your concern: ${member.criterion}.`, `Your private entry-time ${member.book} snapshot (${source.id}, sha256 ${source.digest}${source.empty ? "; empty snapshot" : ""}):`, content);
 	}
-	lines.push("Respond as this participant. You may call consult_source or consult_return. If you finish without a tool call, the host will route the next eligible participant.");
+	if (active?.phase === "report") {
+		if (member.id !== "cartographer") throw new ConferenceError(`Conference ${record.id} assigned a final report to ${member.id}, not Cartographer.`);
+		lines.push("The host's native GBNF decision found the bounded debate ready for a final advisory. Write Cartographer's report from the completed conference contributions, name uncertainty honestly, and call consult_return. Do not present plain prose as the final result without that call.");
+	} else {
+		lines.push("This is a deliberation turn, not the final report. You may call consult_source, then finish your bounded contribution without a tool call so the host can make the next native routing or report decision. consult_return is intentionally unavailable until the host authorizes Cartographer's final report.");
+	}
 	return lines.join("\n");
 }
 
@@ -434,18 +444,76 @@ export function eligibleParticipants(record) {
 	return PARTICIPANT_IDS.filter((id) => id !== previous);
 }
 
-/** The selector packet is neutral: no persona packet and no participant tool surface. */
-export function selectorTail(record, eligible = eligibleParticipants(record)) {
-	if (!Array.isArray(eligible) || eligible.length === 0 || eligible.some((id) => !PARTICIPANT_IDS.includes(id))) throw new ConferenceError(`Conference ${record.id} has no valid eligible participant after ${record.active?.previousSpeaker ?? "the prior turn"}.`);
+/** The host holds the minimum debate gate; the model cannot bypass it by requesting a final report early. */
+export function debateStatus(record) {
+	const limit = (key) => {
+		const value = record?.limits?.[key] ?? POLICY.limits.conference[key];
+		if (!Number.isInteger(value) || value < 1) throw new ConferenceError(`Conference ${record?.id ?? "record"} has an invalid ${key} debate limit.`);
+		return value;
+	};
+	const turns = Array.isArray(record?.turns) ? record.turns : [];
+	const speakers = new Set();
+	for (const turn of turns) {
+		if (!PARTICIPANT_IDS.includes(turn?.participant)) throw new ConferenceError(`Conference ${record?.id ?? "record"} has an invalid completed participant turn.`);
+		speakers.add(turn.participant);
+	}
+	const debateTurns = limit("debateTurns");
+	const debateParticipants = limit("debateParticipants");
+	return {
+		turns: turns.length,
+		participants: [...speakers],
+		debateTurns,
+		debateParticipants,
+		ready: turns.length >= debateTurns && speakers.size >= debateParticipants,
+	};
+}
+
+const validSelectorEligible = (record, eligible) => {
+	if (!Array.isArray(eligible) || eligible.length === 0 || eligible.some((id) => !PARTICIPANT_IDS.includes(id)) || new Set(eligible).size !== eligible.length) {
+		throw new ConferenceError(`Conference ${record.id} has no valid eligible participant after ${record.active?.previousSpeaker ?? "the prior turn"}.`);
+	}
 	const prior = record.active?.previousSpeaker ?? record.turns?.at(-1)?.participant;
 	if (prior === undefined) throw new ConferenceError(`Conference ${record.id} has no completed participant to route after.`);
 	if (!PARTICIPANT_IDS.includes(prior)) throw new ConferenceError(`Conference ${record.id} has an invalid previous participant for native routing.`);
 	if (eligible.includes(prior)) throw new ConferenceError(`Conference ${record.id} native routing would allow the immediately prior participant ${prior}.`);
-	const previous = prior;
+	return prior;
+};
+
+/** Finite host-owned choices: continue the debate with one eligible persona, or authorize Cartographer's report. */
+export function selectorOptions(record, eligible = eligibleParticipants(record)) {
+	validSelectorEligible(record, eligible);
+	const debate = debateStatus(record);
+	const options = eligible.map((participant) => ({ value: `continue:${participant}`, decision: "continue", participant }));
+	// The report path remains impossible before an actual exchange, and it still respects no-consecutive-speaker
+	// routing by requiring Cartographer to be eligible after the immediately prior participant.
+	if (debate.ready && eligible.includes("cartographer")) options.push({ value: "report:cartographer", decision: "report", participant: "cartographer" });
+	return options;
+}
+
+/** One finite native grammar for the selector's routing-or-report decision. */
+export function selectorGrammar(options) {
+	if (!Array.isArray(options) || options.length === 0 || options.some((option) => typeof option?.value !== "string" || option.value === "" || !PARTICIPANT_IDS.includes(option.participant) || !["continue", "report"].includes(option.decision))) {
+		throw new ConferenceError("Cannot build a selector grammar from invalid conference choices.");
+	}
+	try { return nativeLiteralGrammar(options.map((option) => option.value)); }
+	catch (error) { throw new ConferenceError(`Cannot build a selector grammar: ${error.message ?? error}`); }
+}
+
+/** The selector packet is neutral: no persona packet and no participant tool surface. */
+export function selectorTail(record, eligible = eligibleParticipants(record)) {
+	const previous = validSelectorEligible(record, eligible);
+	const debate = debateStatus(record);
+	const options = selectorOptions(record, eligible);
+	const report = options.find((option) => option.decision === "report");
 	return [
 		"Neutral native selector packet",
-		`The immediately preceding conference contribution was spoken by ${previous}. Choose exactly one next participant from this finite eligible set: ${eligible.join(", ")}.`,
-		"Output only that id. Native GBNF is the output boundary; do not explain, vote, call a tool, or choose the prior participant. This is routing, not analysis.",
+		`The immediately preceding conference contribution was spoken by ${previous}.`,
+		`Host debate gate: ${debate.turns}/${debate.debateTurns} completed contributions and ${debate.participants.length}/${debate.debateParticipants} distinct participants (${debate.ready ? "met" : "not met"}).`,
+		`Choose exactly one finite grammar value: ${options.map((option) => option.value).join(", ")}.`,
+		report === undefined
+			? "The host has not yet observed enough debate to authorize a report; choose a continue value."
+			: "Choose report:cartographer only when the completed debate has reached an honest advisory conclusion or a clearly stated unresolved/needs-input outcome; otherwise choose a continue value.",
+		"Native GBNF is the output boundary; do not explain, vote, call a tool, or choose the prior participant. This is a bounded host decision, not a consultation answer.",
 		"Roster concerns:",
 		...CONSULT_ROSTER.filter((member) => eligible.includes(member.id)).map((member) => `- ${member.id}: ${member.criterion}`),
 	].join("\n");
@@ -471,7 +539,7 @@ export function selectorMessages(record, eligible = eligibleParticipants(record)
 	return [
 		{
 			role: "system",
-			content: "You are Cartographer's host-owned conference router. Make one bounded routing choice from the native grammar. Do not analyze, answer the consultation, call tools, or add prose.",
+			content: "You are Cartographer's host-owned conference router. Make one bounded continuation-or-report decision from the native grammar. Do not analyze, answer the consultation, call tools, or add prose.",
 		},
 		{
 			role: "user",
@@ -485,17 +553,17 @@ export function selectorMessages(record, eligible = eligibleParticipants(record)
 }
 
 /**
- * Durable plans every extension tool before request hooks run. Participants receive
- * exactly their two local capabilities; native selection happens outside that
- * provider payload, so no host routing declaration can leak into a participant turn.
+ * Durable plans every extension tool before request hooks run. Deliberating participants can inspect immutable
+ * sources but cannot end the conference; only host-authorized Cartographer report turns receive consult_return.
+ * Native selection remains outside this provider payload.
  */
-export function restrictParticipantPayload(payload) {
+export function restrictParticipantPayload(payload, { allowReturn = false } = {}) {
 	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new ConferenceError("The participant provider payload is not an OpenAI-compatible object.");
-	const expected = new Set(["consult_source", "consult_return"]);
+	const expected = new Set(allowReturn ? ["consult_source", "consult_return"] : ["consult_source"]);
 	const declared = Array.isArray(payload.tools) ? payload.tools : [];
 	const tools = declared.filter((tool) => tool?.type === "function" && expected.has(tool?.function?.name));
 	if (tools.length !== expected.size || new Set(tools.map((tool) => tool.function.name)).size !== expected.size) {
-		throw new ConferenceError("The isolated participant payload did not contain exactly consult_source and consult_return declarations.");
+		throw new ConferenceError(`The isolated participant payload did not contain exactly ${[...expected].join(" and ")} declarations.`);
 	}
 	const { tool_choice: ignoredToolChoice, ...withoutChoice } = payload;
 	return { ...withoutChoice, tools };
@@ -610,27 +678,33 @@ export function recordParticipantTurn(brainDir, id, participant, message, at = D
 	});
 }
 
-/** Record one validated native selector result and stage its labelled host handoff. */
-export function recordSelectorChoice(brainDir, id, participant, { nativeResult, at = Date.now() } = {}) {
+/** Record one validated native routing-or-report decision and stage its labelled host handoff. */
+export function recordSelectorChoice(brainDir, id, selectedValue, { nativeResult, at = Date.now() } = {}) {
 	return updateConference(brainDir, id, (record) => {
 		record.selectorEvents ??= [];
-		const prior = record.selectorEvents.at(-1);
-		// A replay can arrive after the first execution has already moved the durable state to that participant.
-		if (record.active?.kind === "participant" && record.active.participant === participant && prior?.participant === participant) return record;
-		if (record.status !== "running" || record.active?.kind !== "selector") throw new ConferenceError(`Conference ${id} is not waiting for a neutral selector choice.`);
 		const previous = record.active?.previousSpeaker ?? record.turns?.at(-1)?.participant;
 		if (previous === undefined) throw new ConferenceError(`Conference ${id} has no completed participant to route after.`);
 		const eligible = eligibleParticipants(record);
-		if (!eligible.includes(participant)) throw new ConferenceError(`Selector choice ${participant} is not eligible after ${previous}.`);
-		if (prior?.participant === participant && prior?.after === previous) return record;
+		const options = selectorOptions(record, eligible);
+		const choice = options.find((option) => option.value === selectedValue);
+		if (choice === undefined) throw new ConferenceError(`Selector choice ${String(selectedValue)} is not an eligible native decision after ${previous}.`);
+		const prior = record.selectorEvents.at(-1);
+		// A replay can arrive after the first execution has already moved the durable state to that participant.
+		if (record.active?.kind === "participant" && record.active.participant === choice.participant && prior?.participant === choice.participant && (prior?.decision ?? "continue") === choice.decision) return record;
+		if (record.status !== "running" || record.active?.kind !== "selector") throw new ConferenceError(`Conference ${id} is not waiting for a neutral selector choice.`);
+		if (prior?.participant === choice.participant && prior?.after === previous && (prior?.decision ?? "continue") === choice.decision) return record;
 		const response = nativeResult?.response;
+		const debate = debateStatus(record);
 		record.selectorEvents.push({
 			index: record.selectorEvents.length + 1,
 			at: nowIso(at),
 			after: previous,
 			eligible,
-			participant,
-			grammar: enumGrammar(eligible),
+			options: options.map((option) => option.value),
+			decision: choice.decision,
+			participant: choice.participant,
+			debate: { turns: debate.turns, participants: [...debate.participants], debateTurns: debate.debateTurns, debateParticipants: debate.debateParticipants, ready: debate.ready },
+			grammar: selectorGrammar(options),
 			method: "llama.cpp-native-gbnf",
 			grammarEnforced: true,
 			...(response === undefined ? {} : {
@@ -641,9 +715,16 @@ export function recordSelectorChoice(brainDir, id, participant, { nativeResult, 
 				},
 			}),
 		});
-		// The child needs one labelled continuation after a no-tool participant turn. Clearing this marker in
+		// The child needs one labelled continuation after a native decision. Clearing this marker in
 		// `consumeSelectorHandoff` makes a later participant tool round unable to replay that host event.
-		record.active = { kind: "participant", participant, opening: false, previousSpeaker: previous, nativeSelectionPending: true };
+		record.active = {
+			kind: "participant",
+			participant: choice.participant,
+			opening: false,
+			previousSpeaker: previous,
+			nativeSelectionPending: true,
+			phase: choice.decision === "report" ? "report" : "debate",
+		};
 		return record;
 	});
 }
@@ -705,12 +786,10 @@ export function recordToolReceipt(brainDir, id, receipt) {
 export function completeConference(brainDir, id, participant, outcome, at = Date.now()) {
 	return updateConference(brainDir, id, (record) => {
 		if (record.final !== undefined) return record;
-		if (record.status !== "running" || record.active?.kind !== "participant" || record.active.participant !== participant) {
-			throw new ConferenceError(`Conference ${id} cannot accept a final return from ${participant} in its current state.`);
+		if (record.status !== "running" || record.active?.kind !== "participant" || record.active.participant !== "cartographer" || participant !== "cartographer" || record.active.phase !== "report") {
+			throw new ConferenceError(`Conference ${id} cannot accept a final return from ${participant} without a host-authorized Cartographer report state.`);
 		}
-		const packet = participant === "cartographer"
-			? { kind: "opening-persona", id: "myPersona", digest: record.myPersona?.digest }
-			: { kind: "book-snapshot", id: record.bookSources?.[participant]?.id, digest: record.bookSources?.[participant]?.digest };
+		const packet = { kind: "opening-persona", id: "myPersona", digest: record.myPersona?.digest };
 		if (typeof packet.digest !== "string" || packet.digest === "") throw new ConferenceError(`Conference ${id} has no immutable ${participant} packet to attribute its final return.`);
 		const artifact = {
 			...outcome,
@@ -722,6 +801,9 @@ export function completeConference(brainDir, id, participant, outcome, at = Date
 					index: event.index,
 					after: event.after,
 					eligible: [...event.eligible],
+					...(Array.isArray(event.options) ? { options: [...event.options] } : {}),
+					...(typeof event.decision === "string" ? { decision: event.decision } : {}),
+					...(event.debate === undefined ? {} : { debate: event.debate }),
 					participant: event.participant,
 					grammar: event.grammar,
 					method: event.method ?? (event.payloadObserved === true ? "legacy-openai-custom-tool" : "unknown"),
@@ -809,9 +891,9 @@ export function renderConference(record, { audit = true } = {}) {
 		"Structured notebook only: immutable snapshots, labelled turns, selector events, and tool receipts; no filesystem or command scratch.",
 		`Lifecycle: captured ${record.createdAt ?? "unknown"}${record.startedAt === undefined ? "" : ` · child started ${record.startedAt}`}${duration === undefined ? "" : ` · elapsed ${duration}`}.`,
 		`Budget: ${turns.length}/${limits.turns ?? POLICY.limits.conference.turns} completed participant turns · ${activities.length}/${POLICY.limits.conference.activities} retained participant activities${record.activityCount === undefined || record.activityCount === activities.length ? "" : ` (${record.activityCount} total)`} · ${selections.length} selector events · ${(record.toolReceipts ?? []).length}/${POLICY.limits.conference.toolReceipts} retained local tool receipts${record.toolReceiptCount === undefined || record.toolReceiptCount === (record.toolReceipts ?? []).length ? "" : ` (${record.toolReceiptCount} total)`} · ${plans.length}/${POLICY.limits.conference.requestPlans} retained request-plan audits${record.requestPlanCount === undefined || record.requestPlanCount === plans.length ? "" : ` (${record.requestPlanCount} total)`} · runtime cap ${Math.round((limits.runtimeMs ?? POLICY.limits.conference.runtimeMs) / 1000)}s.`,  
-		"Routing: each selector event is a host-owned llama.cpp native-GBNF choice from a host-computed eligible set; the immediately prior speaker is excluded.",
+		"Routing: each selector event is a host-owned llama.cpp native-GBNF continue-or-report choice from a host-computed eligible set; the immediately prior speaker is excluded.",
 	];
-	if (record.active?.kind === "participant") lines.push(`Current participant: ${record.active.participant}.`);
+	if (record.active?.kind === "participant") lines.push(record.active.phase === "report" ? "Current participant: cartographer, host-authorized to write the final advisory." : `Current participant: ${record.active.participant}.`);
 	else if (record.active?.kind === "selector") lines.push(`Current state: neutral selector after ${record.active.previousSpeaker ?? "the prior participant"}.`);
 	lines.push(`Roster v${record.roster?.version ?? ROSTER_VERSION}: ${CONSULT_ROSTER.map((member) => {
 		const source = record.bookSources?.[member.id];
@@ -860,7 +942,9 @@ export function renderConference(record, { audit = true } = {}) {
 			const method = event.method ?? (event.payloadObserved === true ? "archived legacy selector" : "unknown selector method");
 			const enforced = event.grammarEnforced === true || event.payloadObserved === true;
 			const native = event.native === undefined ? "" : ` · HTTP ${event.native.status}${event.native.finishReason === undefined ? "" : ` · ${event.native.finishReason}`}${event.native.elapsedMs === undefined ? "" : ` · ${event.native.elapsedMs} ms`}`;
-			lines.push(`  ${event.index}. after ${event.after} → ${event.participant}; eligible ${event.eligible.join(", ")} · ${method} · grammar enforced ${enforced ? "yes" : "no"}${native} · ${event.at}.`);
+			const decision = event.decision === "report" ? "authorize Cartographer final report" : `continue with ${event.participant}`;
+			const debate = event.debate === undefined ? "" : ` · debate ${event.debate.turns}/${event.debate.debateTurns} turns, ${event.debate.participants?.length ?? 0}/${event.debate.debateParticipants} members${event.debate.ready ? " ready" : " not ready"}`;
+			lines.push(`  ${event.index}. after ${event.after} → ${decision}; eligible ${event.eligible.join(", ")} · ${method} · grammar enforced ${enforced ? "yes" : "no"}${debate}${native} · ${event.at}.`);
 		}
 	}
 	if ((record.toolReceipts ?? []).length > 0) {

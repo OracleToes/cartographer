@@ -16,18 +16,21 @@ lenses.
 
 A call creates one independent Durable conference using the exact model of the
 conversation that launched it. It starts with a caller-supplied temporary
-`myPersona`, then lets a host-owned constrained selector choose which conference
-participant speaks next. Participants are contextual personas, principally
+`myPersona`, then lets a host-owned constrained selector make a finite
+**continue-or-report** decision. Participants are contextual personas, principally
 personifications of Cartographer's durable books. They are stances with concerns and
 vocabulary, not separate authorities, mutable book maintainers, votes, or independent
 evidence.
 
 Each participant may reason, speak, and call the deliberately restricted consultation
 tools. A participant's turn ends when it emits an assistant response with no tool
-calls. The host removes that persona's temporary request prompt, obtains one
-**grammar-constrained enum choice** for the next eligible participant, and starts that
-participant's turn. Any participant may end the conference only through a dedicated
-`consult_return` call.
+calls. The host removes that persona's temporary request prompt and obtains one
+**grammar-constrained finite choice**. Before an actual exchange has occurred, the
+choice can only continue with an eligible participant. Once the host has recorded the
+minimum debate—two completed contributions from two distinct participants—and
+Cartographer is eligible, the choice may instead authorize Cartographer to write the
+final advisory. Deliberating participants cannot end the conference; only that
+host-authorized Cartographer report can call `consult_return`.
 
 The first slice retains no arbitrary or executable scratch filesystem. Its private
 working area is the durable conference transcript, participant-labelled turn records,
@@ -121,9 +124,11 @@ parent's ambient state block, shell windows, or arbitrary `.brain` material. A b
 snapshot is evidence for a persona's perspective, not its identity and not proof that
 its contents are correct.
 
-`cartographer` is not chair, owner, or final speaker. After its opening turn it is an
-ordinary eligible participant, just as Atlas, Ledger, Plan, Assessment, and Context
-are.
+`cartographer` is not chair, owner, or project authority. During debate, after its
+opening turn, it is an ordinary eligible participant just as Atlas, Ledger, Plan,
+Assessment, and Context are. It becomes the final speaker only after the separate host
+native decision authorizes `report:cartographer`; that authorization grants no authority
+beyond writing the structured advisory.
 
 ### Prompt and request order
 
@@ -139,7 +144,8 @@ Situation Prompt
 The Situation Prompt establishes the conference's purpose, safety boundary, speaker
 protocol, source-citation rules, and return semantics. Tool declarations are provider
 metadata on APIs that represent them outside messages, but their authority is part of
-the same stable conference contract.
+the same stable conference contract: a debate request declares only `consult_source`;
+a host-authorized Cartographer report declares `consult_source` and `consult_return`.
 
 The active persona is **request-local**, not an accumulating system message. Its
 instruction is injected at the tail of that participant's provider request and omitted
@@ -149,11 +155,12 @@ distinction is required: appending a persona system message to the transcript wo
 leave old personas active during later speakers' turns.
 
 After a raw selector result is validated, the host appends one labelled model-visible
-conference event—for example, `Native GBNF selected atlas`—before the selected
-participant's tail. The raw selector request itself is not a Durable conversation
-entry. The recorded host event makes the choice auditable and intelligible to the next
-speaker without turning the selector into a persona or allowing it to contribute prose
-analysis.
+conference event—for example, `Native GBNF selected atlas to continue the bounded
+debate` or `Native GBNF authorized Cartographer to write the final advisory report`—
+before the selected participant's tail. The raw selector request itself is not a Durable
+conversation entry. The recorded host event makes the decision auditable and
+intelligible to the next speaker without turning the selector into a persona or allowing
+it to contribute prose analysis.
 
 The stable Situation Prompt and common conference history remain at the front of each
 **participant** provider request. A speaker swap changes only a small suffix, preserving
@@ -175,7 +182,7 @@ validated selection:
 
 ```text
 active participant:      P(H)       + active-persona tail
-raw native selector:     bounded question + labelled C + eligible roster + GBNF grammar
+raw native selector:     bounded question + labelled C + eligible roster + continue/report GBNF grammar
 selected participant:    P(H + C + S) + selected-persona tail
 ```
 
@@ -201,26 +208,32 @@ one labelled handoff, and explicit failure rather than an unconstrained route.
 ### Turn and handoff protocol
 
 1. At entry, the host activates `cartographer` with the caller's `myPersona` and
-   starts its turn.
-2. An active participant may emit text, call one or more permitted tools, or both in
-   one assistant response. Tool results return to that same active participant; it
-   continues its turn and can reason or speak again.
+   starts its opening debate turn.
+2. An active debate participant may emit text, call `consult_source`, or both in one
+   assistant response. Tool results return to that same participant; it continues its
+   turn and can reason or speak again. `consult_return` is neither declared nor
+   accepted during debate.
 3. A response with **no tool calls** is that participant's completed spoken turn. The
    host records it with the participant ID, then removes the active persona prompt. If
    that turn reaches the conference limit, the host records an interruption without
-   making an unused next-speaker choice.
+   making an unused decision.
 4. Otherwise, the host makes one separate no-tools native-GBNF selector request over
-   its compact routing packet, validates the exact eligible ID, and records a native
-   selector event.
-5. The selected participant gets its own temporary role/book packet and takes the
-   next turn.
-6. The only normal successful end is a valid `consult_return` from any active
-   participant. The host commits the result before terminating the conference.
+   its compact decision packet. The host-enforced gate requires two completed turns
+   from two distinct participants before `report:cartographer` exists in the grammar.
+   The selector validates one exact `continue:<eligible-id>` or, when eligible,
+   `report:cartographer` value and records the native decision event.
+5. A continuation gives the chosen participant its own temporary role/book packet and
+   starts the next debate turn. A report decision gives Cartographer its temporary
+   packet plus the terminal tool, and explicitly tells it to write the final advisory.
+6. The only normal successful end is a valid `consult_return` from that
+   host-authorized Cartographer report. The host commits the result before terminating
+   the conference.
 
 An assistant response that calls `consult_return` is a tool-calling response, but a
-successful return terminates the entire conference rather than continuing that
-participant. A malformed return is a tool error; the same participant remains active
-and can correct it.
+successful return terminates the entire conference rather than continuing Cartographer.
+A malformed return is a tool error; Cartographer remains in its authorized report state
+and can correct it. If that report instead ends without the tool call, the host records
+a failure rather than selecting another participant or fabricating a synthesis.
 
 If a process stops after recording a completed participant turn but before routing,
 the durable `selector` state is recovered by rerunning the same raw native choice.
@@ -248,23 +261,34 @@ no parent-session state, and no consultation tools. The raw request is intention
 clean decision surface rather than a replay of the Durable transcript.
 
 For a roster such as `cartographer`, `atlas`, `ledger`, `plan`, `assessment`, and
-`context`, the host builds a grammar from the eligible IDs:
+`context`, the host builds a grammar from finite host-owned decision values. After the
+opening contribution, for example:
 
 ```text
-root ::= "cartographer" | "atlas" | "ledger" | "plan" | "assessment" | "context"
+root ::= "continue:atlas" | "continue:ledger" | "continue:plan" | "continue:assessment" | "continue:context"
+```
+
+After at least two completed turns by at least two distinct participants, if the prior
+speaker is not Cartographer, the host may add the sole terminal value:
+
+```text
+root ::= "continue:cartographer" | "continue:ledger" | … | "report:cartographer"
 ```
 
 The selector's raw completion carries llama.cpp's native `grammar` field, uses a very
-small output budget and zero temperature, and returns **only one member ID**. It has
-no tool or `tool_choice` field. The host validates the exact result, appends a durable
-selection event with method/HTTP/finish/timing facts, and activates the corresponding
-persona.
+small output budget and zero temperature, and returns **only one host-generated
+continue-or-report value**. It has no tool or `tool_choice` field. The host validates
+the exact result, appends a durable decision event with method/HTTP/finish/timing and
+debate-gate facts, then activates the corresponding debate participant or authorized
+Cartographer report state.
 
-The candidate set is `roster − previousSpeaker`: the same participant cannot be
-selected twice in succession. That rule does not cut off a participant while it has
+Continuation candidates are `roster − previousSpeaker`: the same participant cannot
+be selected twice in succession. That rule does not cut off a participant while it has
 made tool calls; tool calls keep it within its current turn before the selector runs.
-If no eligible member exists, the conference is explicitly blocked rather than silently
-violating the no-consecutive-speaker rule.
+The host adds `report:cartographer` only when its minimum debate gate is met and
+Cartographer is in that eligible continuation set. If no eligible member exists, the
+conference is explicitly blocked rather than silently violating the no-consecutive-
+speaker rule.
 
 The selector reports no pretend numeric confidence. In v1, “confident” means a bounded
 choice from the actual context, enforced grammar, host validation, deterministic
@@ -292,7 +316,7 @@ the same required runtime boundary, not a toggle or a fallback claim.
 The selector demonstrates a small host-owned finite-choice pattern:
 
 ```text
-bounded state + explicit finite candidates + enforced enum grammar → one validated ID
+bounded state + explicit finite continue/report values + enforced enum grammar → one validated host decision
 ```
 
 This is a Cartographer-wide control-plane pattern, implemented in the shared
@@ -359,11 +383,12 @@ state record. Participant provider requests append one active participant packet
 prompt plus that participant's frozen book snapshot.
 
 After a no-tool participant response, the host separately builds the raw native
-selector packet and posts it directly to the configured llama.cpp endpoint. The
-selector event is host-owned—not an assistant sentence or model tool call—and
-records the validated selection plus native response facts. The participant's actual
-assistant answer remains in the Durable transcript with participant metadata so the UI
-and audit log can label it accurately.
+continue-or-report selector packet and posts it directly to the configured llama.cpp
+endpoint. The decision event is host-owned—not an assistant sentence or model tool
+call—and records the validated continuation or Cartographer-report authorization plus
+native response and debate-gate facts. The participant's actual assistant answer remains
+in the Durable transcript with participant metadata so the UI and audit log can label it
+accurately.
 
 This is preferable to repeatedly configuring persistent `instructions` or appending
 system messages: both would retain the old persona in later context. Participant
@@ -377,17 +402,18 @@ The conference profile exposes only:
 | Tool | Authority |
 | --- | --- |
 | `consult_source` | Lists, reads, or searches immutable caller-attached file/context snapshots only. It never resolves a live project path. |
-| `consult_return` | Any active participant may call it to validate and persist the final structured synthesis, then terminate the conference. |
+| `consult_return` | Declared and accepted only for Cartographer after the host's native `report:cartographer` decision. It validates and persists the final structured synthesis, then terminates the conference. |
 
 There is no ordinary `read`, `search`, `list`, `book`, `shelf`, `write`, `edit`, `rm`,
 `shell`, `task`, `chat`, `ask`, `wake`, `sleep`, ordinary focus `return`, or nested
 `consult`. There is no direct network tool. Persona/book prompts never grant an ability
 to update their real counterparts.
 
-A dedicated conference extension selects exactly these tools through both the enabled
-`tools` and model-visible `modelTools` lists, and defends that list in its own tool
-hook. It does not select the ordinary `cartographer` extension and merely ask the
-model to behave: that would retain the main prompt and broader authority.
+A dedicated conference extension owns exactly these tool implementations and defends
+the active surface in its provider hook: debate payloads expose only
+`consult_source`, while only the host-authorized Cartographer report exposes both
+listed tools. It does not select the ordinary `cartographer` extension and merely ask
+the model to behave: that would retain the main prompt and broader authority.
 
 ## Immutable supplied and book snapshots
 
@@ -465,11 +491,13 @@ answer such as:
 }
 ```
 
-Any active participant can make this call. The host adds provenance—speaker ID,
-participant/book snapshot IDs, ordered selector history, timestamps, and final digest.
-A citation means a snapshot was consulted, not that a claim is proven. The parent still
-verifies claims against current sources/tests and keeps user-value decisions with the
-user.
+The call is available only after the host-native `report:cartographer` decision puts
+Cartographer in its authorized report state. Debate participants cannot invoke it: it
+is omitted from their provider payload and a direct tool invocation is refused. The
+host adds provenance—Cartographer's opening-persona packet ID, ordered native decision
+history, debate-gate facts, timestamps, and final digest. A citation means a snapshot
+was consulted, not that a claim is proven. The parent still verifies claims against
+current sources/tests and keeps user-value decisions with the user.
 
 ### Scratch-space decision
 
@@ -506,7 +534,8 @@ A conference timeline shows:
 - the full fixed roster—Cartographer, Atlas, Ledger, Plan, Assessment, and Context—with
   active/ready/final status;
 - persona-attributed, independently foldable blocks for reasoning, chat/prose, local
-  tool calls, local tool results, host-native-routing events, and the final advisory;
+  tool calls, local tool results, host-native debate-routing and final-report decisions,
+  and the final advisory;
 - local durable activity plus the current child stream/tool output while a conference is
   running, without adding either to parent Work or context;
 - supplied-file and book-source manifests with digests, ranges, clipping, and citations;
@@ -553,13 +582,16 @@ Case runtime.
 
 - `co<N>` records capture caller/file/book snapshots with digests; tests prove later
   file/book mutation cannot change the entry packet.
-- An independent Durable child uses the launching conversation's captured model,
-  request-local personas, and only `consult_source`/`consult_return` authority.
+- An independent Durable child uses the launching conversation's captured model and
+  request-local personas. Debate payloads expose only `consult_source`; only the
+  host-authorized Cartographer report exposes `consult_return`.
 - A shared native-GBNF boundary proves the selected endpoint/model at session open and
   model switch. Selector records are durable, exclude the prior speaker, retain native
-  HTTP/timing facts, and fail explicitly rather than using an unconstrained fallback.
-- Participant return, malformed return, recovery, cancellation, limits, and bounded
-  request-plan audit retention are tested without fabricating a result.
+  HTTP/timing and debate-gate facts, choose continue-or-report values, and fail
+  explicitly rather than using an unconstrained fallback.
+- Premature return refusal, host-authorized Cartographer return, malformed return,
+  recovery, cancellation, limits, and bounded request-plan audit retention are tested
+  without fabricating a result.
 - Cutover tests prove fresh requests expose only conference consultation, archived
   bytes/digests/export recovery stay readable, legacy shelf text is inert, and no
   archived material or second configured model enters a conference request.

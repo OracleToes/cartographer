@@ -195,13 +195,14 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 		const text = textOf(message);
 		const later = messages.slice(i + 1);
 		const raw = rawOf(message);
-		// The isolated conference fixture first gives Cartographer one ordinary contribution; Cartographer's
-		// host-owned raw native-GBNF selector then chooses another participant, which returns the advisory result.
+		// The isolated conference fixture gives Cartographer and then a second persona one bounded contribution.
+		// The host's next raw native-GBNF decision authorizes Cartographer's final report; only that report calls
+		// consult_return, so the fixture exercises the same terminal gate as production.
 		if (message.role === "user" && text.startsWith("Active participant packet")) {
 			const participant = /You are [^(]+\(([^)]+)\)/.exec(text)?.[1];
-			const alreadySpoke = messages.some((entry) => entry.role === "user" && textOf(entry).startsWith("Conference host event:"));
-			if (participant === "cartographer" && !alreadySpoke) return { text: "OPENING CONFERENCE CONTRIBUTION" };
-			return { calls: [{ name: "consult_return", args: { outcome: "answered", synthesis: `CONFERENCE RETURN FROM ${participant ?? "participant"}`, evidence: [{ source: "c0", claim: "fixture source was captured" }], uncertainties: ["fixture-only result"] } }] };
+			const finalReport = participant === "cartographer" && messages.some((entry) => entry.role === "user" && /Native GBNF authorized Cartographer to write the final advisory report/.test(textOf(entry)));
+			if (finalReport) return { calls: [{ name: "consult_return", args: { outcome: "answered", synthesis: "CONFERENCE RETURN FROM cartographer", evidence: [{ source: "c0", claim: "fixture source was captured" }], uncertainties: ["fixture-only result"] } }] };
+			return { text: participant === "cartographer" ? "OPENING CONFERENCE CONTRIBUTION" : `${String(participant ?? "participant").toUpperCase()} CONFERENCE CONTRIBUTION` };
 		}
 		// A task that said yes to the question before its steps collapse: it notes what its results began with.
 		if (message.role === "user" && raw.includes("Your steps will be collapsed after this reply")) {
@@ -391,7 +392,9 @@ export async function startStandIn(options = {}) {
 			const wantsHandoff = texts.some((entry) => /ON COLLAPSE/.test(entry));
 			const handoffChoice = nativeGrammarChoices.includes('{"handoff": true}') && nativeGrammarChoices.includes('{"handoff": false}')
 				? JSON.stringify({ handoff: wantsHandoff })
-				: nativeGrammarChoices[0];
+				: nativeGrammarChoices.includes("report:cartographer")
+					? "report:cartographer"
+					: nativeGrammarChoices[0];
 			const content = options.ignoreNativeGrammar === true ? "outside-the-allowed-selector-set" : handoffChoice;
 			const prompt = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 			response.writeHead(200, { "content-type": "application/json" });

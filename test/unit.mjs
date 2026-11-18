@@ -34,7 +34,7 @@ import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { createConferenceExtension } from "../src/conference-extension.mjs";
-import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantActivity, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, recordToolReceipt, renderConference, restrictParticipantPayload, selectorMessages, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
+import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, debateStatus, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantActivity, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, recordToolReceipt, renderConference, restrictParticipantPayload, selectorGrammar, selectorMessages, selectorOptions, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
 import { chooseNativeGrammar, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
@@ -2205,76 +2205,102 @@ test("conference C1-C4: an independent same-model child preserves the handoff pr
 	const submitted = await session.main.submit({ type: "input", content: `PARENT-EXCLUSION-SENTINEL || consult: ${JSON.stringify(input)}` }, session.context);
 	const settled = await submitted.wait(session.context);
 	assert.equal(settled.status, "done", "the root ends after its post-consult sleep rather than repeatedly accepting the completed receipt");
-	assert.equal(server.requests.length, 4, "root call, opening participant, selected participant, then one root receipt turn");
-	const [rootBefore, opening, selected, rootAfter] = server.requests;
+	assert.equal(server.requests.length, 5, "root call, two bounded debate turns, host-authorized Cartographer report, then one root receipt turn");
+	const [rootBefore, opening, selected, report, rootAfter] = server.requests;
 	assert.equal(rootBefore.model, "stand-in");
-	const [capability, selector] = server.nativeRequests;
+	const [capability, firstSelector, reportSelector] = server.nativeRequests;
 	const tools = (request) => (request.tools ?? []).map((tool) => `function:${tool.function?.name}`);
 	const messageText = (message) => typeof message.content === "string" ? message.content : (message.content ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
 	const joined = (request) => request.messages.map(messageText).join("\n");
 
 	assert.equal(capability.model, "stand-in");
 	assert.match(capability.grammar, /"cartographer"/);
-	assert.deepEqual(tools(opening), ["function:consult_source", "function:consult_return"]);
+	assert.deepEqual(tools(opening), ["function:consult_source"], "an opening/debate participant cannot receive consult_return");
 	assert.equal(opening.tool_choice, undefined);
-	assert.deepEqual(tools(selected), ["function:consult_source", "function:consult_return"]);
+	assert.deepEqual(tools(selected), ["function:consult_source"], "an arbitrary selected debater cannot return the conference");
 	assert.equal(selected.tool_choice, undefined);
-	assert.equal(selector.tools, undefined, "the raw native selector has no tool surface");
-	assert.equal(selector.tool_choice, undefined);
-	assert.match(selector.grammar, /"atlas"/);
-	assert.doesNotMatch(selector.grammar, /"cartographer"/, "the prior speaker is physically absent from the finite grammar");
-	for (const request of [opening, selected]) {
+	assert.deepEqual(tools(report), ["function:consult_source", "function:consult_return"], "only the host-authorized Cartographer report receives the terminal tool");
+	assert.equal(report.tool_choice, undefined);
+	for (const selector of [firstSelector, reportSelector]) {
+		assert.equal(selector.tools, undefined, "the raw native selector has no tool surface");
+		assert.equal(selector.tool_choice, undefined);
+	}
+	assert.match(firstSelector.grammar, /"continue:atlas"/);
+	assert.doesNotMatch(firstSelector.grammar, /"report:cartographer"/, "the host gate physically removes the report choice before two members have debated");
+	assert.doesNotMatch(firstSelector.grammar, /"continue:cartographer"/, "the prior speaker is physically absent from the finite grammar");
+	assert.match(reportSelector.grammar, /"report:cartographer"/, "only the host-native selector can authorize Cartographer's final report");
+	for (const request of [opening, selected, report]) {
 		assert.equal(request.model, "stand-in", "every participant request uses the caller's resolved model");
 		assert.doesNotMatch(joined(request), /PARENT-EXCLUSION-SENTINEL/, "the independent child has no parent transcript");
 	}
-	const selectorText = selector.messages.map(messageText).join("\n");
+	const firstSelectorText = firstSelector.messages.map(messageText).join("\n");
+	const reportSelectorText = reportSelector.messages.map(messageText).join("\n");
 	assert.match(joined(opening), /OPENING PERSONA SENTINEL/, "Cartographer alone receives the request-local opening persona");
 	assert.match(joined(opening), /COMMON CONTEXT SENTINEL/, "the captured caller context is part of the immutable common packet");
-	assert.doesNotMatch(selectorText, /OPENING PERSONA SENTINEL/, "the native selector receives no active persona packet");
-	assert.doesNotMatch(selectorText, /COMMON CONTEXT SENTINEL/, "the native selector receives no raw captured project context");
+	assert.doesNotMatch(firstSelectorText, /OPENING PERSONA SENTINEL/, "the native selector receives no active persona packet");
+	assert.doesNotMatch(firstSelectorText, /COMMON CONTEXT SENTINEL/, "the native selector receives no raw captured project context");
 	assert.doesNotMatch(joined(selected), /OPENING PERSONA SENTINEL/, "the selected participant does not inherit the prior persona tail");
 	assert.match(joined(selected), /You are Atlas \(atlas\)/);
 	assert.match(joined(selected), /private entry-time atlas snapshot.*empty snapshot/is, "even an empty Atlas book remains a real role packet");
 	assert.match(joined(selected), /OPENING CONFERENCE CONTRIBUTION/, "the selected participant retains the completed shared contribution");
-	assert.match(joined(selected), /Native GBNF selected atlas/, "the host records the native routing handoff in the durable child");
-	assert.match(messageText(rootAfter.messages.at(-1)), /Consult conference co1 returned answered from atlas/);
+	assert.match(joined(selected), /Native GBNF selected atlas to continue the bounded debate/, "the host records the native continuation handoff in the durable child");
+	assert.match(reportSelectorText, /Host debate gate: 2\/2 completed contributions and 2\/2 distinct participants \(met\)/, "the host-native selector receives explicit debate evidence before it may conclude");
+	assert.match(joined(report), /host's native GBNF decision found the bounded debate ready for a final advisory/i);
+	assert.match(joined(report), /Native GBNF authorized Cartographer to write the final advisory report/);
+	assert.match(messageText(rootAfter.messages.at(-1)), /Consult conference co1 returned answered from cartographer/);
 
 	const { conference } = loadConference(brainDir, "co1");
 	assert.equal(conference.status, "returned");
 	assert.notEqual(conference.childConversationId, session.main.id, "the conference owns a new Durable conversation, not a parent fork");
 	assert.deepEqual(conference.model, { provider: "local", modelId: "stand-in" });
-	assert.deepEqual(conference.turns.map((turn) => turn.participant), ["cartographer"]);
-	assert.deepEqual(conference.selectorEvents.map((event) => [event.after, event.participant]), [["cartographer", "atlas"]]);
-	assert.equal(conference.final.participant, "atlas", "any active selected participant can return the conference");
-	assert.equal(conference.requestPlans.length, 3);
+	assert.deepEqual(conference.turns.map((turn) => turn.participant), ["cartographer", "atlas"]);
+	assert.deepEqual(conference.selectorEvents.map((event) => [event.after, event.participant, event.decision]), [["cartographer", "atlas", "continue"], ["atlas", "cartographer", "report"]]);
+	assert.equal(conference.final.participant, "cartographer", "only host-authorized Cartographer can return the conference");
+	assert.equal(conference.requestPlans.length, 5);
 	assert.ok(conference.requestPlans.length <= POLICY.limits.conference.requestPlans, "the audit cap is above this complete bounded handoff and did not discard its evidence");
 	assert.ok(POLICY.limits.conference.requestPlans >= Math.max(8, POLICY.limits.conference.turns * 4 + 4) + POLICY.limits.conference.turns, "the request-plan audit cap covers every bounded child request plus each possible raw selector handoff");
 });
 
-test("conference C1/C2: participant provider payloads have no selector authority, while the native selector has no tools", () => {
-	const participant = restrictParticipantPayload({
+test("conference C1/C2: host-native choices gate the terminal report and debate payloads cannot expose it", () => {
+	const declared = {
 		model: "fixture",
 		tool_choice: "required",
 		tools: [
 			{ type: "function", function: { name: "consult_source", parameters: {} } },
 			{ type: "function", function: { name: "consult_return", parameters: {} } },
 		],
-	});
-	assert.deepEqual(participant.tools.map((tool) => tool.function.name), ["consult_source", "consult_return"]);
-	assert.equal(participant.tool_choice, undefined, "a participant never inherits host routing control");
-	assert.throws(() => restrictParticipantPayload({ tools: [{ type: "function", function: { name: "consult_source" } }] }), ConferenceError);
+	};
+	const deliberation = restrictParticipantPayload(declared);
+	assert.deepEqual(deliberation.tools.map((tool) => tool.function.name), ["consult_source"]);
+	assert.equal(deliberation.tool_choice, undefined, "a participant never inherits host routing control");
+	const report = restrictParticipantPayload(declared, { allowReturn: true });
+	assert.deepEqual(report.tools.map((tool) => tool.function.name), ["consult_source", "consult_return"]);
+	assert.throws(() => restrictParticipantPayload({ tools: [{ type: "function", function: { name: "consult_source" } }] }, { allowReturn: true }), ConferenceError);
 	const record = {
 		id: "co1",
 		question: "Which role should inspect the boundary?",
 		turns: [{ participant: "cartographer", text: "The opening contribution is complete." }],
 		active: { kind: "selector", previousSpeaker: "cartographer" },
 	};
+	assert.deepEqual(debateStatus(record), { turns: 1, participants: ["cartographer"], debateTurns: POLICY.limits.conference.debateTurns, debateParticipants: POLICY.limits.conference.debateParticipants, ready: false });
+	const firstOptions = selectorOptions(record, ["atlas", "ledger"]);
+	assert.deepEqual(firstOptions.map((option) => option.value), ["continue:atlas", "continue:ledger"]);
+	assert.equal(selectorGrammar(firstOptions), 'root ::= "continue:atlas" | "continue:ledger"');
 	const messages = selectorMessages(record, ["atlas", "ledger"]);
 	assert.equal(messages.length, 2);
-	assert.match(messages[1].content, /atlas, ledger/);
+	assert.match(messages[1].content, /continue:atlas, continue:ledger/);
+	assert.match(messages[1].content, /Host debate gate: 1\/2 completed contributions and 1\/2 distinct participants \(not met\)/);
 	assert.match(messages[1].content, /opening contribution/);
 	assert.doesNotMatch(messages.map((message) => message.content).join("\n"), /consult_source|consult_return|select_persona/);
 	assert.equal(enumGrammar(["atlas", "ledger"]), 'root ::= "atlas" | "ledger"');
+	const ready = {
+		...record,
+		turns: [...record.turns, { participant: "atlas", text: "A second perspective completed the debate." }],
+		active: { kind: "selector", previousSpeaker: "atlas" },
+	};
+	const readyOptions = selectorOptions(ready, ["cartographer", "ledger"]);
+	assert.deepEqual(readyOptions.map((option) => option.value), ["continue:cartographer", "continue:ledger", "report:cartographer"]);
+	assert.match(selectorTail(ready, ["cartographer", "ledger"]), /report:cartographer/);
 	assert.throws(() => selectorMessages({ ...record, active: { kind: "selector", previousSpeaker: "invented" } }), /unvalidated state|invalid previous/i, "a corrupt routing record cannot widen a native grammar");
 	assert.throws(() => selectorTail(record, ["cartographer", "atlas"]), /immediately prior participant/, "a caller cannot reinsert the prior speaker into an explicit eligible set");
 });
@@ -2302,15 +2328,16 @@ test("conference recovery resumes a pending native selector and commits its labe
 	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
 	const planned = await generation.beforeRequest({ messages: [{ role: "user", content: "Conference entry packet" }] }, { conversationId: "recovery-child", now: () => 4 });
 	const joined = planned.messages.map((message) => message.content).join("\n");
-	assert.match(joined, /Native GBNF selected atlas/, "recovery recreates the labelled host handoff before the selected participant request");
+	assert.match(joined, /Native GBNF selected atlas to continue the bounded debate/, "recovery recreates the labelled host handoff before the selected participant request");
 	assert.match(joined, /You are Atlas \(atlas\)/, "the recovered request uses the selected participant's private tail");
 	assert.equal(server.nativeRequests.length, 2, "cold recovery first proves native enforcement, then makes its bounded selector decision");
 	const [capability, selector] = server.nativeRequests;
 	assert.equal(capability.tools, undefined);
 	assert.match(capability.grammar, /"cartographer"/);
 	assert.equal(selector.tools, undefined);
-	assert.match(selector.grammar, /"atlas"/);
-	assert.doesNotMatch(selector.grammar, /"cartographer"/);
+	assert.match(selector.grammar, /"continue:atlas"/);
+	assert.doesNotMatch(selector.grammar, /"continue:cartographer"/);
+	assert.doesNotMatch(selector.grammar, /"report:cartographer"/, "a recovered one-member opening cannot skip the debate gate");
 	const resumed = loadConference(brainDir, conference.id).conference;
 	assert.equal(resumed.active.participant, "atlas");
 	assert.equal(resumed.active.nativeSelectionPending, undefined, "the restart path consumes the handoff marker before a provider request can replay it");
@@ -2346,8 +2373,8 @@ test("conference C2/C3: entry snapshots stay immutable, persona tails are privat
 	assert.match(opening, /Care about a reversible migration boundary/);
 	assert.doesNotMatch(opening, /Atlas entry snapshot/);
 	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
-	assert.throws(() => recordSelectorChoice(brainDir, conference.id, "cartographer", { at: 4 }), /not eligible/);
-	recordSelectorChoice(brainDir, conference.id, "atlas", { at: 4 });
+	assert.throws(() => recordSelectorChoice(brainDir, conference.id, "continue:cartographer", { at: 4 }), /not an eligible native decision/);
+	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
 	const atlas = loadConference(brainDir, conference.id).conference;
 	const atlasTail = participantTail(withConferenceBrain(atlas, brainDir));
 	assert.match(atlasTail, /You are Atlas \(atlas\)/);
@@ -2413,7 +2440,7 @@ test("conference C4: a recovered completed turn is idempotent after the selector
 	attachChildConference(brainDir, conference.id, "replay-child", 2);
 	const response = { id: "durable-generation-7", content: [{ type: "text", text: "The first member completed this contribution." }] };
 	recordParticipantTurn(brainDir, conference.id, "cartographer", response, 3, "durable-generation-7");
-	recordSelectorChoice(brainDir, conference.id, "atlas", { at: 4 });
+	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
 	const before = loadConference(brainDir, conference.id).conference;
 	assert.equal(before.active.participant, "atlas");
 	// Durable may replay its afterResponse hook after the selector has moved on. This must be an idempotent no-op,
@@ -2445,6 +2472,7 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 		at: 1,
 	});
 	attachChildConference(brainDir, captured.id, "conference-child", 2);
+	assert.throws(() => completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Opening prose is not a host-authorized conclusion." }, 3), /host-authorized Cartographer report state/, "a direct storage call cannot turn the opening contribution into a final advisory");
 	const extension = createConferenceExtension({ brainDir, server: server.url });
 	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
 	const source = extension.tools.find((tool) => tool.name === "consult_source");
@@ -2470,30 +2498,50 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 	assert.equal(running.active.kind, "participant");
 	assert.equal(running.active.participant, "atlas", "the raw native grammar selector activates the validated next participant");
 	assert.equal(running.turns.length, 1, "only the no-tool response closes the participant turn");
+	assert.equal(running.active.phase, "debate");
 	assert.equal(running.selectorEvents[0].method, "llama.cpp-native-gbnf");
 	assert.equal(running.selectorEvents[0].grammarEnforced, true);
-	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF selected atlas/);
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF selected atlas to continue the bounded debate/);
 	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined, "the labelled host continuation is consumed exactly once");
+
+	const premature = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
+	assert.equal(premature.isError, true);
+	assert.match(premature.output[0].text, /host must first make a native-GBNF report decision/i);
+	running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.status, "running");
+	assert.equal(running.active.participant, "atlas", "a deliberating participant cannot end the conference even by calling the registered tool directly");
+	assert.equal(running.active.phase, "debate");
+	assert.throws(() => validateConsultReturn({ outcome: "answered", synthesis: "x", alternatives: [{ option: "", tradeoff: "missing option" }] }), /alternatives/);
+
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "Atlas completed the second bounded contribution." }] }, api);
+	running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.active.participant, "cartographer");
+	assert.equal(running.active.phase, "report", "the native selector alone advances a completed debate to Cartographer's report state");
+	assert.equal(running.turns.length, 2);
+	assert.equal(running.selectorEvents.at(-1).decision, "report");
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF authorized Cartographer to write the final advisory report/);
+	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined);
 
 	const malformed = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
 	assert.equal(malformed.isError, true);
 	running = loadConference(brainDir, captured.id).conference;
 	assert.equal(running.status, "running");
-	assert.equal(running.active.participant, "atlas", "a malformed return leaves its same participant active to correct it");
-	assert.throws(() => validateConsultReturn({ outcome: "answered", synthesis: "x", alternatives: [{ option: "", tradeoff: "missing option" }] }), /alternatives/);
+	assert.equal(running.active.participant, "cartographer", "a malformed host-authorized return leaves Cartographer active to correct it");
+	assert.equal(running.active.phase, "report");
 
 	const final = await returned.execute({
 		outcome: "answered",
 		synthesis: "Use the captured evidence and keep the conclusion advisory.",
-		evidence: [{ source: "b-atlas", claim: "The entry snapshot had no mapped nodes." }],
+		evidence: [{ source: "c0", claim: "The caller captured bounded common context." }],
 		uncertainties: ["No live project verification happened."],
 	}, api);
 	assert.equal(final.isError, undefined);
 	assert.equal(final.control.terminate, true);
 	const returnedRecord = loadConference(brainDir, captured.id).conference;
 	assert.equal(returnedRecord.status, "returned");
-	assert.deepEqual(returnedRecord.final.provenance.participantPacket, { kind: "book-snapshot", id: "b-atlas", digest: returnedRecord.bookSources.atlas.digest });
-	assert.deepEqual(returnedRecord.final.provenance.selectorHistory.map((event) => [event.after, event.participant]), [["cartographer", "atlas"]]);
+	assert.deepEqual(returnedRecord.final.provenance.participantPacket, { kind: "opening-persona", id: "myPersona", digest: returnedRecord.myPersona.digest });
+	assert.deepEqual(returnedRecord.final.provenance.selectorHistory.map((event) => [event.after, event.participant, event.decision]), [["cartographer", "atlas", "continue"], ["atlas", "cartographer", "report"]]);
+	assert.match(renderConference(returnedRecord), /authorize Cartographer final report/);
 	assert.match(renderConference(returnedRecord), /grammar enforced yes/);
 	assert.match(conferenceStatusLine(returnedRecord), /returned/);
 
@@ -2537,6 +2585,26 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 	assert.doesNotMatch(viewText(liveChat, "work"), /Cartographer · active|Atlas · active/, "Work remains isolated from private conference activity");
 });
 
+test("conference C4: an authorized report that omits consult_return fails closed", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Must a report use the terminal boundary?", myPersona: "Preserve the final-return contract.", model: { provider: "local", modelId: "fixture" }, caller: {}, at: 1 });
+	attachChildConference(brainDir, conference.id, "report-child", 2);
+	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
+	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
+	recordParticipantTurn(brainDir, conference.id, "atlas", { content: [{ type: "text", text: "Second contribution." }] }, 5);
+	recordSelectorChoice(brainDir, conference.id, "report:cartographer", { at: 6 });
+	const extension = createConferenceExtension({ brainDir, server: "http://unused.invalid" });
+	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
+	const api = { conversationId: "report-child", now: () => 7 };
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /authorized Cartographer to write the final advisory report/);
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "An unstructured final-looking sentence." }] }, api);
+	const failed = loadConference(brainDir, conference.id).conference;
+	assert.equal(failed.status, "failed");
+	assert.equal(failed.final, undefined);
+	assert.match(failed.ended.reason, /ended without consult_return/);
+	assert.match(renderConference(failed), /No synthesis was fabricated/);
+});
+
 test("conference C4: recovery resumes the captured child and captured model rather than allocating or adopting a later model", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const server = await startStandIn({ tokenDelayMs: 0 });
@@ -2578,7 +2646,11 @@ test("conference C4: recovery resumes the captured child and captured model rath
 			return {
 				submit: async (input) => {
 					submissions.push(input);
-					completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Recovered from the existing isolated child.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] }, 4);
+					recordParticipantTurn(brainDir, captured.id, "cartographer", { content: [{ type: "text", text: "Recovered opening contribution." }] }, 4);
+					recordSelectorChoice(brainDir, captured.id, "continue:atlas", { at: 5 });
+					recordParticipantTurn(brainDir, captured.id, "atlas", { content: [{ type: "text", text: "Recovered second contribution." }] }, 6);
+					recordSelectorChoice(brainDir, captured.id, "report:cartographer", { at: 7 });
+					completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Recovered from the existing isolated child.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] }, 8);
 					return { wait: async () => ({ status: "done" }) };
 				},
 				abort: async () => {},

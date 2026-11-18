@@ -906,18 +906,24 @@ test("consult C1-C5: a CLI conference uses the caller model, returns an isolated
 		const loaded = loadConference(join(root, ".brain"), "co1").conference;
 		assert.equal(loaded.status, "returned");
 		assert.equal(loaded.model.modelId, "stand-in", "the conference records the model resolved for its caller");
-		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM atlas");
+		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM cartographer");
+		assert.equal(loaded.final.participant, "cartographer", "the host authorizes Cartographer alone to write the terminal advisory");
 		assert.ok(loaded.childConversationId, "the independent child identity is durable");
-		assert.ok(loaded.requestPlans.length >= 3, "participant and native finite-selector request plans are auditable");
+		assert.ok(loaded.requestPlans.length >= 5, "two debate turns, two native finite decisions, and the terminal report request are auditable");
 		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the conference has no storyteller writer");
 		assert.equal(server.requests.some((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom")), false, "conference routing does not retain the OpenAI custom-tool adapter");
 		const selectorRequests = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("Neutral native selector packet"));
-		assert.equal(selectorRequests.length, 1, "the conference makes one raw native GBNF selector request after the opening contribution");
+		assert.equal(selectorRequests.length, 2, "the conference makes a native continuation decision after each completed debate contribution");
 		assert.ok(selectorRequests.every((request) => request.tools === undefined && request.tool_choice === undefined && request.stream === false), "native selection has no tool surface");
-		assert.equal(loaded.selectorEvents[0].method, "llama.cpp-native-gbnf");
-		assert.equal(loaded.selectorEvents[0].grammarEnforced, true);
+		assert.match(selectorRequests[0].grammar, /"continue:atlas"/);
+		assert.doesNotMatch(selectorRequests[0].grammar, /"report:cartographer"/, "one opening contribution cannot authorize a conclusion");
+		assert.match(selectorRequests[1].grammar, /"report:cartographer"/, "the ready debate makes a final-report decision a native finite choice");
+		assert.deepEqual(loaded.selectorEvents.map((event) => event.decision), ["continue", "report"]);
+		assert.ok(loaded.selectorEvents.every((event) => event.method === "llama.cpp-native-gbnf" && event.grammarEnforced === true));
 		const participantRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Active participant packet"));
 		assert.equal(participantRequests.some((request) => request.messages.map(rawText).join("\n").includes("CLI CAPTURED CONTEXT")), true, "the immutable conference seed reaches its independent child");
+		const reportRequest = participantRequests.find((request) => request.messages.map(rawText).join("\n").includes("host's native GBNF decision found the bounded debate ready for a final advisory"));
+		assert.deepEqual((reportRequest?.tools ?? []).map((tool) => tool.function?.name), ["consult_source", "consult_return"], "only the host-authorized report request exposes consult_return");
 	} finally {
 		await server.close();
 	}
@@ -2036,7 +2042,7 @@ test("screen: only Consult loads a conference audit; parent rows remain private 
 		bookSources: {},
 		myPersona: { digest: "a".repeat(64) },
 		turns: [], selectorEvents: [], requestPlans: [], sources: [], toolReceipts: [], activities: [],
-		final: { participant: "atlas", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
+		final: { participant: "cartographer", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
 	};
 	let reads = 0;
 	const chat = createChat({ now: () => 1_000, readConference: (id) => { reads++; return id === "co7" ? record : undefined; } });
@@ -2045,7 +2051,7 @@ test("screen: only Consult loads a conference audit; parent rows remain private 
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
 	const text = (projection) => chat.lines(100, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	chat.entry(0, reply([call("c1", "consult", { question: "What must the parent verify?", myPersona: "Audit the source boundary." })], 1));
-	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from atlas.", { details: { consult: true, conference: "co7" } }));
+	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from cartographer.", { details: { consult: true, conference: "co7" } }));
 	assert.equal(reads, 0, "the private notebook is not loaded into Conversation or Work");
 	hasNot(text("work"), "What must the parent verify?", "the parent consult call is absent from Work");
 	// A child replay without terminal-supplied persona metadata must not synchronously open co<N> just to guess one
@@ -2088,10 +2094,16 @@ test("screen: Consult is a separate persona-attributed conference timeline with 
 			prose: "I will inspect only the frozen packet.",
 			calls: [{ id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } }],
 		}],
-		turns: [{ index: 1, participant: "cartographer", at: "2026-11-16T12:00:00.000Z", text: "I will inspect only the frozen packet." }],
-		selectorEvents: [{ index: 1, at: "2026-11-16T12:00:01.000Z", after: "cartographer", participant: "atlas", eligible: ["atlas", "ledger", "plan", "assessment", "context"], grammarEnforced: true }],
+		turns: [
+			{ index: 1, participant: "cartographer", at: "2026-11-16T12:00:00.000Z", text: "I will inspect only the frozen packet." },
+			{ index: 2, participant: "atlas", at: "2026-11-16T12:00:01.500Z", text: "The second perspective completed the bounded debate." },
+		],
+		selectorEvents: [
+			{ index: 1, at: "2026-11-16T12:00:01.000Z", after: "cartographer", participant: "atlas", decision: "continue", eligible: ["atlas", "ledger", "plan", "assessment", "context"], grammarEnforced: true, debate: { turns: 1, debateTurns: 2, participants: ["cartographer"], debateParticipants: 2, ready: false } },
+			{ index: 2, at: "2026-11-16T12:00:02.000Z", after: "atlas", participant: "cartographer", decision: "report", eligible: ["cartographer", "ledger", "plan", "assessment", "context"], grammarEnforced: true, debate: { turns: 2, debateTurns: 2, participants: ["cartographer", "atlas"], debateParticipants: 2, ready: true } },
+		],
 		toolReceipts: [{ id: "source-1", callId: "source-1", participant: "cartographer", action: "read", source: "s1", result: "== s1\n1 immutable evidence", at: "2026-11-16T12:00:00.500Z" }],
-		final: { participant: "atlas", outcome: "answered", at: "2026-11-16T12:00:02.000Z", synthesis: "Keep the conference audit isolated from parent context.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] },
+		final: { participant: "cartographer", outcome: "answered", at: "2026-11-16T12:00:03.000Z", synthesis: "Keep the conference audit isolated from parent context.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] },
 	};
 	let reads = 0;
 	const chat = createChat({
@@ -2114,8 +2126,9 @@ test("screen: Consult is a separate persona-attributed conference timeline with 
 	has(consult, "Cartographer · chat / prose", "participant prose is distinct from reasoning");
 	has(consult, "Cartographer · tool call · consult_source · read s1", "local tool calls name their participant and action");
 	has(consult, "Cartographer · tool result · consult_source · read s1 · completed", "local tool results stay with the same participant");
-	has(consult, "Conference host · native GBNF routing", "host routing is visibly distinguished from participant prose");
-	has(consult, "Atlas · final advisory · answered", "the final advisory result names its returning persona");
+	has(consult, "Conference host · native debate routing", "host continuation routing is visibly distinguished from participant prose");
+	has(consult, "Conference host · native final-report decision", "the host's conclusion decision is visibly distinct from debate routing");
+	has(consult, "Cartographer · final advisory · answered", "the host-authorized final advisory names Cartographer");
 	has(consult, "Keep the conference audit isolated from parent context.", "the durable final synthesis stays readable in Consult");
 
 	// Child streaming comes through the same separate projection and never creates a generic focus/Work row.

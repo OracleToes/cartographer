@@ -97,6 +97,7 @@ function previewTail(text, cols, rows) {
 
 const CONSULT_MEMBERS = new Map(CONSULT_ROSTER.map((member) => [member.id, member]));
 const personaName = (id) => CONSULT_MEMBERS.get(id)?.name ?? (typeof id === "string" && id !== "" ? `${id.slice(0, 1).toUpperCase()}${id.slice(1)}` : "Conference host");
+const selectorLabel = (selection) => selection?.decision === "report" ? "Conference host · native final-report decision" : "Conference host · native debate routing";
 const consultCall = (call) => {
 	const args = call?.arguments ?? call?.args ?? {};
 	if (call?.name === "consult_source" || call?.action !== undefined) {
@@ -401,12 +402,17 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			add({ key: `audit:result:${receiptKey}`, at: receipt.at, participant: receipt.participant ?? known?.participant, type: "tool-result", call, callId, text: consultResult(receipt), isError: receipt.isError === true, clipped: receipt.resultClipped === true, chars: receipt.resultChars });
 		}
 		for (const selection of record?.selectorEvents ?? []) {
+			const report = selection.decision === "report";
+			const debate = selection.debate === undefined ? "" : ` Debate gate: ${selection.debate.turns}/${selection.debate.debateTurns} contributions and ${(selection.debate.participants ?? []).length}/${selection.debate.debateParticipants} members${selection.debate.ready ? " met" : " not met"}.`;
 			add({
 				key: `audit:selector:${selection.index ?? ++order}`,
 				at: selection.at,
 				type: "selector",
 				participant: selection.participant,
-				text: `After ${personaName(selection.after)} → ${personaName(selection.participant)}. Eligible: ${(selection.eligible ?? []).map(personaName).join(", ") || "none"}. Native GBNF routing${selection.grammarEnforced === true ? " · grammar enforced" : ""}${selection.native?.status === undefined ? "" : ` · HTTP ${selection.native.status}`}.`,
+				decision: selection.decision,
+				text: report
+					? `After ${personaName(selection.after)}, native GBNF concluded the bounded debate and authorized Cartographer to write the final advisory. Eligible: ${(selection.eligible ?? []).map(personaName).join(", ") || "none"}.${debate}${selection.grammarEnforced === true ? " Grammar enforced." : ""}${selection.native?.status === undefined ? "" : ` HTTP ${selection.native.status}.`}`
+					: `After ${personaName(selection.after)} → ${personaName(selection.participant)} to continue the debate. Eligible: ${(selection.eligible ?? []).map(personaName).join(", ") || "none"}.${debate}${selection.grammarEnforced === true ? " Native GBNF grammar enforced." : ""}${selection.native?.status === undefined ? "" : ` HTTP ${selection.native.status}.`}`,
 			});
 		}
 		if (record?.final !== undefined) {
@@ -466,6 +472,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		const active = record?.active?.kind === "participant" && record.active.participant === id;
 		const final = record?.final?.participant === id;
 		if (final) return `final advisory · ${record.final.outcome}`;
+		if (active && record?.active?.phase === "report") return activity.some((event) => event.live) ? "writing host-authorized final advisory" : "host-authorized final advisory";
 		if (active) return activity.some((event) => event.live) ? "speaking now" : "active · awaiting contribution";
 		if (activity.length > 0) return `${activity.filter((event) => event.type === "prose").length} contribution${activity.filter((event) => event.type === "prose").length === 1 ? "" : "s"} · standing by`;
 		if (record?.active?.kind === "selector" && (record.selectorEvents ?? []).at(-1)?.eligible?.includes(id)) return "eligible for host routing";
@@ -478,13 +485,13 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		if (eventKey !== undefined) {
 			const event = events.find((candidate) => candidate.key === String(eventKey));
 			if (event === undefined) return "";
-			const label = event.type === "selector" ? "Conference host · native routing" : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
+			const label = event.type === "selector" ? selectorLabel(event) : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
 			return `${label}\n\n${event.type === "tool-call" ? `${consultCall(event.call)}\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}` : event.text ?? ""}\n`;
 		}
 		const rows = [heading, `Status: ${record?.status ?? session.outerState ?? "starting"}`, `Question: ${record?.question ?? session.question ?? "(not available yet)"}`, "", "## Roster", ""];
 		for (const member of CONSULT_ROSTER) rows.push(`- ${member.name}: ${consultMemberStatus(member, record, events)}`);
 		for (const event of events) {
-			const label = event.type === "selector" ? "Conference host · native routing" : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
+			const label = event.type === "selector" ? selectorLabel(event) : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
 			rows.push("", `## ${label}`, "", event.type === "tool-call" ? `${consultCall(event.call)}\n\n\`\`\`json\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}\n\`\`\`` : event.text ?? "");
 		}
 		return `${rows.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
@@ -536,7 +543,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				event.open = session.eventOpen?.get(event.key) ?? event.open ?? (session.openAllEvents === true);
 				const eventRef = { item: session.key, row: event.key, kind: "consult-event", bg: event.type === "reasoning" ? "bgNote" : "bgTool" };
 				const label = event.type === "selector"
-					? "Conference host · native GBNF routing"
+					? selectorLabel(event)
 					: event.type === "tool-call"
 						? `${personaName(event.participant)} · tool call · ${consultCall(event.call)}`
 						: event.type === "tool-result"
