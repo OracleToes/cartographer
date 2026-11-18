@@ -12,6 +12,8 @@ import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
+import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
+import { pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
@@ -296,6 +298,35 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	assert.equal(jobs.get(cancelled.id)?.state, "cancelled");
 	assert.equal(cancelled.cancel(), false, "settled jobs cannot be cancelled again");
 	off();
+});
+
+test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
+	const { brainDir } = fresh(t);
+	const scratch = await writeScratch(brainDir, "message.md", "A draft from the editor");
+	assert.equal(await pathExists(scratch), true);
+	assert.equal(await pathExists(join(brainDir, "missing.md")), false);
+	const writes = [];
+	const calls = [];
+	const ways = await toClipboard("copied words", {
+		write: (sequence) => writes.push(sequence),
+		env: { WAYLAND_DISPLAY: "wayland-1" },
+		run: async (command, args, options) => {
+			calls.push({ command, args, input: options.input, timeoutMs: options.timeoutMs });
+			return { status: 0 };
+		},
+	});
+	assert.deepEqual(ways, ["the terminal (OSC 52)", "wl-copy"]);
+	assert.equal(writes.length, 1, "OSC 52 remains immediate terminal feedback while helper work is asynchronous");
+	assert.deepEqual(calls, [{ command: "wl-copy", args: [], input: "copied words", timeoutMs: POLICY.limits.screen.copyTimeoutMs }]);
+	const exported = await copyOut("exported words", {
+		brainDir,
+		name: "session",
+		now: Date.parse(NOW),
+		env: {},
+		write: () => {},
+	});
+	assert.match(exported.file, /export\/session-20261115-000000\.md$/);
+	assert.equal(readFileSync(exported.file, "utf8"), "exported words\n");
 });
 
 test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {

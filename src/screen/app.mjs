@@ -24,8 +24,7 @@
 // everything Cartographer has to say, exactly as it does line by line.
 import { DEFAULTS, POLICY } from "../config.mjs";
 import { EventEmitter } from "node:events";
-import { accessSync, constants, existsSync } from "node:fs";
-import { basename, delimiter, join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath } from "../context.mjs";
 import { listConferences, loadConference } from "../conference.mjs";
@@ -33,7 +32,7 @@ import { charsPerTokenNow } from "../calibrate.mjs";
 import { TALK_ACTION, createTalkApplication } from "../application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
-import { readText, writeScratch } from "../infrastructure/filesystem.mjs";
+import { findExecutable, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
@@ -215,20 +214,6 @@ class Term extends ProcessTerminal {
 /** Ctrl-Shift-F, as a terminal with the Kitty keyboard protocol sends it. */
 const SEARCH_KEY = "\x1b[102;6u";
 
-/** The program `name` on the PATH, or undefined. */
-function onPath(name) {
-	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-		if (dir === "") continue;
-		try {
-			accessSync(join(dir, name), constants.X_OK);
-			return join(dir, name);
-		} catch {
-			// Not here.
-		}
-	}
-	return undefined;
-}
-
 /**
  * Run carto in the full screen.
  * @param {any} session
@@ -240,6 +225,8 @@ export async function runScreen(session, options, runTerminal) {
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
 	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
+	// The file-completion helper is resolved before the terminal starts, never by a render or key handler.
+	const fileSearch = await findExecutable(["fd", "fdfind"]);
 
 	// ─── The terminal, in pi-tui's hands ─────────────────────────────────────
 	// The lines that break in what is typed, and the keys that bring back what was sent before.
@@ -259,7 +246,7 @@ export async function runScreen(session, options, runTerminal) {
 		mouse: true,
 		wheelScrollLines: POLICY.limits.screen.wheelScrollLines,
 		// What is selected with the mouse is copied when the button is let go, every way there is.
-		copySelection: async (text) => (toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) }).length > 0 ? true : "no way to the clipboard was found"),
+		copySelection: async (text) => ((await toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) })).length > 0 ? true : "no way to the clipboard was found"),
 		scrollToEndIndicator: () => `${sgr("bgSel")} ↓ the newest · G or End \x1b[0m`,
 		searchMatchStyle: (text) => `${sgr("under")}${text}\x1b[24m`,
 		searchCurrentMatchStyle: (text) => `${sgr("chip")}${text}\x1b[0m`,
@@ -642,13 +629,13 @@ export async function runScreen(session, options, runTerminal) {
 	};
 
 	// ─── Copying ─────────────────────────────────────────────────────────────
-	const copy = (text, name, what, extension = "md") => {
+	const copy = async (text, name, what, extension = "md") => {
 		if (String(text).trim() === "") {
 			flash(`nothing to copy: ${what} is empty`);
 			return void chat.print(`  Nothing to copy: ${what} is empty.\n`);
 		}
 		try {
-			const done = copyOut(text, { brainDir, name, extension, write: (sequence) => terminal.write(sequence) });
+			const done = await copyOut(text, { brainDir, name, extension, write: (sequence) => terminal.write(sequence) });
 			chat.print(`  Copied ${what} (${done.chars.toLocaleString("en-US")} characters) to the clipboard by way of ${done.ways.join(", ") || "nothing that was found"}.\n  Also written to ${done.file}\n`);
 			if (process.env.TMUX) chat.print("  In tmux the clipboard needs `set -g set-clipboard on`; without it, paste from tmux's buffer (prefix ]) or take the file.\n");
 			// (Said shortly: it is laid over the row of tabs. The file is named in Chat.)
@@ -883,14 +870,14 @@ export async function runScreen(session, options, runTerminal) {
 				if (typeof item.key === "string" && item.key.startsWith("entry:")) return void openFieldBox(viewId(), item.key);
 				// Current shared brain: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
-					if (!existsSync(item.path)) return flash("the shelved file is not there");
+					if (!(await pathExists(item.path))) return flash("the shelved file is not there");
 					if (!(await runEditor(item.path))) return;
 					refresh(viewId(), true);
 					return flash("edited; the shelf reads it anew at the next collapse");
 				}
 				if (typeof item.key === "string" && item.key.startsWith("report:")) {
 					const file = join(brainDir, "reports", `${item.key.slice(7)}.md`);
-					if (!existsSync(file)) return flash("the report's file is not there");
+					if (!(await pathExists(file))) return flash("the report's file is not there");
 					if (!(await runEditor(file))) return;
 					return flash("the report's file is edited; the record line keeps the summary it was written with");
 				}
@@ -1119,7 +1106,7 @@ export async function runScreen(session, options, runTerminal) {
 		const target = item?.target ?? (fileOf(viewId()) !== undefined ? { file: fileOf(viewId()) } : undefined);
 		if (target === undefined) return flash("this line has no file to open");
 		if (target.folder) return flash("that is a folder: open it with Enter, and press e on a file");
-		if (!existsSync(target.file)) return flash(`${relative(root, target.file)} does not exist`);
+		if (!(await pathExists(target.file))) return flash(`${relative(root, target.file)} does not exist`);
 		if (!(await runEditor(target.file, target.line))) return;
 		brain.at = 0;
 		refresh(viewId(), true);
@@ -1519,7 +1506,7 @@ export async function runScreen(session, options, runTerminal) {
 					: {}),
 			})),
 			root,
-			onPath("fd") ?? onPath("fdfind") ?? null,
+			fileSearch ?? null,
 		),
 	);
 	const full = { basis: 0, grow: 1, minSize: 1 };
