@@ -73,6 +73,7 @@ import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../sr
 import { createFocusManager } from "../src/screen/focus.mjs";
 import { createList } from "../src/screen/list.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
+import { createRouteManager } from "../src/screen/routes.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
@@ -590,6 +591,34 @@ test("screen: shared focus restores the last viable shell region after temporary
 	assert.equal(focus.focus("missing"), false);
 	assert.equal(focus.active(), "commands");
 	assert.throws(() => createFocusManager({ initial: "composer", resolve: () => ({}) }), /focus applier/);
+});
+
+test("screen: shared routes retain per-tab views and publish one atomic navigation change", () => {
+	const state = { tab: "chat", view: { chat: "conversation" } };
+	const changes = [];
+	const routes = createRouteManager({
+		tabs: [{ id: "chat" }, { id: "carto" }],
+		views: { chat: [{ id: "conversation" }, { id: "work" }], carto: [{ id: "atlas" }, { id: "ledger" }] },
+		state,
+		onChange: (change) => changes.push(change),
+	});
+	assert.deepEqual(state.view, { chat: "conversation", carto: "atlas" }, "missing remembered views start at their tab's first stable route");
+	assert.equal(routes.setRoute({ tab: "carto", view: "ledger" }), true);
+	assert.deepEqual(changes.map(({ previous, current, changed }) => [previous.id, current.id, changed]), [["chat.conversation", "carto.ledger", true]], "a destination transition has no intermediate tab-only route");
+	assert.equal(routes.setTab("chat"), true);
+	assert.equal(routes.id(), "chat.conversation", "each tab retains its own selected subview");
+	assert.equal(routes.stepView(1), true);
+	assert.equal(routes.id(), "chat.work");
+	assert.equal(routes.stepTab(1), true);
+	assert.equal(routes.id(), "carto.ledger", "cycling back to a tab restores its remembered subview");
+	const before = structuredClone(state);
+	assert.equal(routes.setRoute({ tab: "carto", view: "missing" }), false);
+	assert.equal(routes.setView("missing"), false);
+	assert.equal(routes.stepView(Number.NaN), false);
+	assert.deepEqual(state, before, "invalid navigation leaves the active route untouched");
+	assert.equal(routes.setTab("carto"), true);
+	assert.equal(changes.at(-1).changed, false, "an explicit visit to the current route remains observable for caller-owned refresh behavior");
+	assert.throws(() => createRouteManager({ tabs: [{ id: "chat" }], views: { other: [] }, state: { tab: "chat", view: {} } }), /unknown tab/);
 });
 
 test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {

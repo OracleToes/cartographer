@@ -42,6 +42,7 @@ import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createFocusManager } from "./focus.mjs";
 import { createList } from "./list.mjs";
+import { createRouteManager } from "./routes.mjs";
 import { renderAsyncBoundary } from "./async-boundary.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "./notices.mjs";
 import { createOverlayManager } from "./overlays.mjs";
@@ -349,6 +350,10 @@ export async function runScreen(session, options, runTerminal) {
 	const draw = () => {
 		if (!state.closed) tui.requestRender();
 	};
+	// A route is tab plus its remembered subview. Its shell effects are installed after projection refresh exists;
+	// the manager itself is ready now so every later reader gets the same validated route identity.
+	let settleRoute = () => {};
+	const routes = createRouteManager({ tabs: TABS, views: VIEWS, state, onChange: (change) => settleRoute(change) });
 	// Replaced once the composer and command sink exist. Keeping a harmless coordinator here makes early lifecycle
 	// callbacks unable to trip over a temporal focus dependency.
 	let shellFocus = Object.freeze({ focus: () => false, restore: () => false });
@@ -606,7 +611,7 @@ export async function runScreen(session, options, runTerminal) {
 		return `${LEGEND[id] ?? "j k move · Enter open"} · Ctrl-K palette · ? all keys`;
 	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
-	const viewId = (tab = state.tab) => (VIEWS[tab] !== undefined ? `${tab}.${state.view[tab]}` : tab);
+	const viewId = () => routes.id();
 	/** The file a view comes from, for `e` when no item names one. */
 	const fileOf = (id) =>
 		({
@@ -858,36 +863,22 @@ export async function runScreen(session, options, runTerminal) {
 	// ─── Tabs, views and what scrolls ───────────────────────────────────────
 	const chatTab = () => state.tab === "chat";
 	const scrollOf = () => (chatTab() ? chatScroll : pageOf().scroll);
-	const setTab = (id) => {
-		if (!TABS.some((tab) => tab.id === id)) return;
-		const previous = viewId();
-		state.tab = id;
-		if (previous !== viewId()) {
-			cancelProjection(previous);
-			if (previous === "chat.consult") cancelConsultProjection();
+	// One route transition owns selection reset, stale-query cancellation, replacement reads, and redraw. Its callback
+	// still runs for an explicit visit to the current route, preserving the old click/key refresh behavior.
+	settleRoute = ({ previous, current, changed }) => {
+		if (changed) {
+			cancelProjection(previous.id);
+			if (previous.id === "chat.consult") cancelConsultProjection();
 		}
 		tui.resetTextSelection();
-		refresh(viewId(), true);
+		refresh(current.id, true);
 		draw();
 	};
-	const stepTab = (by) => setTab(TABS[(TABS.findIndex((tab) => tab.id === state.tab) + by + TABS.length) % TABS.length].id);
-	const setView = (id) => {
-		if (VIEWS[state.tab] === undefined) return;
-		const previous = viewId();
-		state.view[state.tab] = id;
-		if (previous !== viewId()) {
-			cancelProjection(previous);
-			if (previous === "chat.consult") cancelConsultProjection();
-		}
-		tui.resetTextSelection();
-		refresh(viewId(), true);
-		draw();
-	};
-	const stepView = (by) => {
-		const views = VIEWS[state.tab];
-		if (views === undefined) return;
-		setView(views[(views.findIndex((view) => view.id === state.view[state.tab]) + by + views.length) % views.length].id);
-	};
+	const setTab = (id) => routes.setTab(id);
+	const stepTab = (by) => routes.stepTab(by);
+	const setView = (id) => routes.setView(id);
+	const stepView = (by) => routes.stepView(by);
+	const setRoute = (route) => routes.setRoute(route);
 	/** Scroll a view so that a row of it shows. */
 	const reveal = (scroll, row, { top = false, header = 0 } = {}) => {
 		const rows = scroll.viewportHeight;
@@ -1384,9 +1375,8 @@ export async function runScreen(session, options, runTerminal) {
 			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
 			// Work that lives in a tab is shown there; anything else opens where it stands.
 			if (jump && home !== undefined && line.kind === "call" && !row.open && row.state !== "failed") {
-				if (home.view !== undefined) state.view[home.tab] = home.view;
-				if (home.tab === "diff") state.view.diff = "last";
-				return void setTab(home.tab);
+				const view = home.tab === "diff" ? "last" : home.view;
+				return void setRoute({ tab: home.tab, ...(view === undefined ? {} : { view }) });
 			}
 			inPlace(() => chat.toggleRow(line.item, line.row, to));
 		}
@@ -1743,9 +1733,9 @@ export async function runScreen(session, options, runTerminal) {
 	];
 	const openPaletteDestination = (destination) => {
 		if (destination === undefined) return false;
-		if (state.tab !== destination.tab) setTab(destination.tab);
-		if (destination.view !== undefined && state.view[state.tab] !== destination.view) setView(destination.view);
-		return true;
+		const current = routes.current();
+		if (current.tab === destination.tab && (destination.view === undefined || current.view === destination.view)) return true;
+		return setRoute({ tab: destination.tab, ...(destination.view === undefined ? {} : { view: destination.view }) });
 	};
 	const showPalette = () => openModal(({ close }) => new CommandPalette({
 		title: "Command palette",
