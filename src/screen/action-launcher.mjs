@@ -359,7 +359,9 @@ export class ActionLauncher {
 			pending.phase = "dialog";
 			const openedDialog = this.openDialog({
 				plan,
-				submit: (input) => this.dispatch(pending, plan.actionId, input, { fromDialog: true }),
+				// Dialog implementations may hand us only their field drafts or may already include plan.input. Merge at
+				// this boundary either way, so a selected settled target cannot be lost between picker and execution.
+				submit: (input) => this.dispatch(pending, plan.actionId, { ...plan.input, ...(input ?? {}) }, { fromDialog: true }),
 			});
 			if (promise(openedDialog)) {
 				const openedAsync = await openedDialog;
