@@ -2549,6 +2549,39 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");
 });
 
+test("screen: registry, palette, and help retain six-tab control parity", async () => {
+	const [
+		{ TABS, VIEWS, KEYS_HELP, paletteDestinationFor },
+		{ CONTEXT_ACTION },
+		{ REQUEST_ACTION },
+		{ REVIEW_ACTION },
+		{ RUNTIME_ACTION },
+		{ TALK_ACTION },
+		{ WORKSPACE_ACTION },
+	] = await Promise.all([
+		import("../src/screen/app.mjs"),
+		import("../src/application/context.mjs"),
+		import("../src/application/requests.mjs"),
+		import("../src/application/review.mjs"),
+		import("../src/application/runtime-actions.mjs"),
+		import("../src/application/talk.mjs"),
+		import("../src/application/workspace.mjs"),
+	]);
+	assert.match(KEYS_HELP, /1 to 6\s+go to a tab/, "the help sheet names the six-tab dispatcher");
+	assert.match(KEYS_HELP, /Ctrl-C\s+clear what you have typed/, "the help sheet keeps Ctrl-C as clear-line/quit, not stop");
+	assert.match(KEYS_HELP, /Ctrl-X\s+stop the agent/, "the help sheet names the canonical stop control");
+	assert.match(KEYS_HELP, /Ctrl-V pauses it/, "the help sheet names the stream pause control");
+	assert.match(KEYS_HELP, /Ctrl-K\s+search navigation and registered actions/, "the help sheet names the registry-backed palette");
+	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION].flatMap((actions) => Object.values(actions));
+	assert.equal(registered.length, 30, "the complete application action registry has the expected phase-six surface");
+	for (const action of registered) {
+		const destination = paletteDestinationFor(action);
+		assert.ok(destination, `${action} remains discoverable from the command palette`);
+		assert.ok(TABS.some((tab) => tab.id === destination.tab), `${action} has a declared palette tab`);
+		assert.ok(VIEWS[destination.tab]?.some((view) => view.id === destination.view), `${action} has a declared palette subview`);
+	}
+});
+
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
 	const { contextView } = await import("../src/screen/runtime.mjs");
 	// Exactly what dressRequest produces after a read batch: the blocks are glued to the result, and the current batch stands at the very end.
