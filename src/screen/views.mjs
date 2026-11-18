@@ -15,7 +15,6 @@ import { POLICY } from "../config.mjs";
 import { join } from "node:path";
 import { changeSummary } from "../checkpoints.mjs";
 import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
-import { planPath } from "../plan.mjs";
 import { flat } from "../rows.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { short, width } from "./text.mjs";
@@ -36,45 +35,6 @@ const when = (value) => {
 };
 
 // ─── Carto ──────────────────────────────────────────────────────────────────
-
-/** What waits for the user: change moves and questions of taste. */
-export function requestsView({ brainDir, requests: provided, error } = {}) {
-	if (error !== undefined) return { header: [[[`! ${error}`, "warn"]]], items: [note("  Requests will be retried automatically.", "muted")] };
-	if (provided === undefined) return { header: [[["Loading requests…", "muted"]]], items: [] };
-	const all = provided;
-	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
-	const items = all.map((request) => {
-		// The head row holds one line; the whole request stands in the body, and `e` opens the book where it lives.
-		const home = request.file ?? (request.kind === POLICY.enums.ledgerKind.question ? join(brainDir, "carto-ledger.json") : planPath(brainDir));
-		return {
-			key: `request:${request.id}`,
-			head: [
-				[request.kind === "approval" ? "● " : "? ", request.kind === "approval" ? "warn" : "tool"],
-				[`${request.id}  `, "tool"],
-				[`[${request.kind}] `, "muted"],
-				[request.text, ""],
-			],
-			body: [
-				flat(request.text),
-				...(request.detail ?? []),
-				request.kind === POLICY.enums.ledgerKind.question
-					? `answer with /answer ${request.id} words · d forgets the question`
-					: `a approves it · n turns it down · d forgets it, and the agent is not told`,
-			].join("\n"),
-			copy: `${request.id} [${request.kind}] ${request.text}`,
-			target: { file: home, line: request.line },
-		};
-	});
-	const approvals = all.some((request) => request.kind === "approval");
-	return {
-		header: [
-			[[all.length === 1 ? "1 request waits for you" : `${all.length} requests wait for you`, "warn"]],
-			[["  a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "muted"]],
-			[[approvals ? "  /approve ID ... · /deny ID [why] · /delete ID --yes · /answer ID words" : "  /answer ID words · /deny ID [why] · /delete ID --yes", "muted"]],
-		],
-		items,
-	};
-}
 
 /** The project's files as a tree whose folders open and fold. `e` opens a file itself. */
 export function treeView({ root, tree: provided } = {}, isOpen = () => false) {

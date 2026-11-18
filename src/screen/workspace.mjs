@@ -218,3 +218,48 @@ export function planView({ file, yolo = false, plan, lines, error, presentation 
 	const waits = !yolo && presentation.waiting(plan).length > 0;
 	return { header: [[[presentation.authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to snapshot the current move revisions." : "", "warn"]]], items };
 }
+
+/**
+ * Render requests that wait for a user decision.
+ * @param {{
+ *   requests?: { id: string, kind: string, text: string, detail?: string[], file?: string, line?: number }[],
+ *   error?: string,
+ *   presentation: { flat: (text: string) => string, isApproval: (request: object) => boolean, isQuestion: (request: object) => boolean },
+ * }} input
+ */
+export function requestsView({ requests: provided, error, presentation } = {}) {
+	if (presentation === undefined || typeof presentation.flat !== "function" || typeof presentation.isApproval !== "function" || typeof presentation.isQuestion !== "function") throw new TypeError("Requests need their Workspace presentation adapter.");
+	if (error !== undefined) return { header: [[[`! ${error}`, "warn"]]], items: [note("  Requests will be retried automatically.", "muted")] };
+	if (provided === undefined) return { header: [[["Loading requests…", "muted"]]], items: [] };
+	const all = provided;
+	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
+	const items = all.map((request) => {
+		const approval = presentation.isApproval(request);
+		const question = presentation.isQuestion(request);
+		return {
+			key: `request:${request.id}`,
+			head: [
+				[approval ? "● " : "? ", approval ? "warn" : "tool"],
+				[`${request.id}  `, "tool"],
+				[`[${request.kind}] `, "muted"],
+				[request.text, ""],
+			],
+			body: [
+				presentation.flat(request.text),
+				...(request.detail ?? []),
+				question ? `answer with /answer ${request.id} words · d forgets the question` : `a approves it · n turns it down · d forgets it, and the agent is not told`,
+			].join("\n"),
+			copy: `${request.id} [${request.kind}] ${request.text}`,
+			target: request.file === undefined ? undefined : { file: request.file, line: request.line },
+		};
+	});
+	const approvals = all.some((request) => presentation.isApproval(request));
+	return {
+		header: [
+			[[all.length === 1 ? "1 request waits for you" : `${all.length} requests wait for you`, "warn"]],
+			[["  a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "muted"]],
+			[[approvals ? "  /approve ID ... · /deny ID [why] · /delete ID --yes · /answer ID words" : "  /answer ID words · /deny ID [why] · /delete ID --yes", "muted"]],
+		],
+		items,
+	};
+}

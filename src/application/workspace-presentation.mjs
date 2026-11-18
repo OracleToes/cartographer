@@ -6,6 +6,7 @@ import { atlasSummary, renderAttention } from "../atlas.mjs";
 import { POLICY } from "../config.mjs";
 import { entryLine } from "../ledger.mjs";
 import { authorizationLine, itemLine, movesOf, waiting } from "../plan.mjs";
+import { flat } from "../rows.mjs";
 import { stamp } from "../time.mjs";
 
 const when = (value) => {
@@ -57,6 +58,11 @@ export function createWorkspacePresentation() {
 			authorizationLine,
 			isDone: (item) => item.status === POLICY.enums.entryStatus.done,
 			moveState: planMoveState,
+		}),
+		requests: Object.freeze({
+			flat,
+			isApproval: (request) => request.kind === "approval",
+			isQuestion: (request) => request.kind === POLICY.enums.ledgerKind.question,
 		}),
 	});
 }

@@ -83,7 +83,7 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
-import { atlasView, ledgerView, planView } from "../src/screen/workspace.mjs";
+import { atlasView, ledgerView, planView, requestsView } from "../src/screen/workspace.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -538,6 +538,36 @@ test("screen: Plan renders settled workspace projections through its application
 	const stale = renderAsyncBoundary({ id: "carto.plan", name: "Plan", projection: { data, loading: true }, render });
 	assert.equal(rendered, 3, "cached Plan data remains renderable while its replacement is in flight");
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Plan rows");
+});
+
+test("screen: Requests render settled workspace projections through its application presentation adapter", () => {
+	const presentation = createWorkspacePresentation().requests;
+	const emptyData = { items: [] };
+	const data = {
+		items: [{ id: "q1", kind: "question", text: "Which release should carry the change?", file: "/project/.brain/carto-ledger.json", line: 4 }],
+	};
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return requestsView({ ...projection, presentation });
+	};
+	assert.throws(() => requestsView({ requests: data.items }), /presentation adapter/, "Requests cannot fall back to direct domain classification or formatting");
+	const loading = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Requests are not asked to invent data while their projection is loading");
+	assert.match(loading.header[0][0][0], /Requests is loading/, "the shared boundary names Requests loading");
+	const failed = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { error: { message: "Requests are unavailable." } }, render });
+	assert.equal(rendered, 0, "a Requests query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Requests could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { data: emptyData }, render });
+	assert.equal(rendered, 1, "a settled empty projection reaches Requests");
+	assert.match(empty.items[0].head[0][0], /Nothing waits for you/, "Requests own their successful empty state");
+	const settled = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { data }, render });
+	assert.equal(rendered, 2, "a settled request projection uses its adapter for a question row");
+	assert.equal(settled.items.find((item) => item.key === "request:q1")?.target?.file, data.items[0].file);
+	assert.match(settled.items.find((item) => item.key === "request:q1")?.body ?? "", /answer with \/answer q1 words/);
+	const stale = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached Requests remain renderable while their replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above request rows");
 });
 
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {

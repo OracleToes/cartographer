@@ -2652,7 +2652,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const [{ requestsView, shellsView }, { atlasView, ledgerView, planView }, { createWorkspacePresentation }] = await Promise.all([
+	const [{ shellsView }, { atlasView, ledgerView, planView, requestsView }, { createWorkspacePresentation }] = await Promise.all([
 		import("../src/screen/views.mjs"),
 		import("../src/screen/workspace.mjs"),
 		import("../src/application/workspace-presentation.mjs"),
@@ -2704,7 +2704,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		moves: [{ id: "m1", parent: "p1", action: PLAN_LONG, text: PLAN_LONG, doneWhen: "The narrow update is checked.", capabilities: { files: true, commands: true, network: false }, budget: { replies: 6, fileOps: 4, commandStarts: 2 }, turns: 6, revision: 1, parentRevision: 1, status: "open", targets: ["src/main.js"], proof: "The focused check passes." }],
 	});
 	const requests = await projection(queries.requests());
-	expectReachable("approval request", requestsView({ brainDir, requests: requests.items }), PLAN_LONG);
+	expectReachable("approval request", requestsView({ requests: requests.items, presentation: workspacePresentation.requests }), PLAN_LONG);
 	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
 	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] }), LONG);
 });
