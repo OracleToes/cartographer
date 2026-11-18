@@ -28,6 +28,7 @@ import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
+import { createWorkspacePresentation } from "../src/application/workspace-presentation.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
@@ -82,6 +83,7 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
+import { atlasView } from "../src/screen/workspace.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -449,6 +451,29 @@ test("screen: the shared async boundary keeps loading, stale, error, issue, and 
 	]);
 	assert.equal(cachedFailure.items[0].key, "cached");
 	assert.throws(() => renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: {}, render: undefined }), /needs a data renderer/);
+});
+
+test("screen: Atlas renders settled workspace projections through its application presentation adapter", () => {
+	const presentation = createWorkspacePresentation().atlas;
+	const data = { file: "/project/.brain/carto-atlas.json", atlas: { nodes: [] } };
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return atlasView({ ...projection, presentation });
+	};
+	assert.throws(() => atlasView({ file: data.file, atlas: data.atlas }), /presentation adapter/, "Atlas cannot fall back to a direct domain formatter");
+	const loading = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Atlas is not asked to invent data while its projection is loading");
+	assert.match(loading.header[0][0][0], /Atlas is loading/, "the shared boundary names Atlas loading");
+	const failed = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { error: { message: "The graph is unavailable." } }, render });
+	assert.equal(rendered, 0, "an Atlas query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Atlas could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data }, render });
+	assert.equal(rendered, 1, "a settled empty projection reaches Atlas");
+	assert.match(empty.items.at(-1).head[0][0], /No nodes yet/, "Atlas owns its successful empty state");
+	const stale = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data, loading: true }, render });
+	assert.equal(rendered, 2, "cached Atlas data remains renderable while its replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above the Atlas empty state");
 });
 
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {

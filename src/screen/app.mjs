@@ -30,6 +30,7 @@ import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerm
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
 import { createChatPresentation } from "../application/chat.mjs";
+import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
@@ -55,7 +56,8 @@ import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, S
 import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { TOKEN } from "./tokens.mjs";
-import { accountingProjectionView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
+import { accountingProjectionView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
+import { atlasView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
 const TOOL_SOURCE_DIR = fileURLToPath(new URL("../tools", import.meta.url));
@@ -301,6 +303,7 @@ export async function runScreen(session, options, runTerminal) {
 	let refreshReferenceLabels = () => {};
 	const referenceLabels = createDeferredReferenceLabels({ brainDir, onResolved: () => refreshReferenceLabels() });
 	const describeRef = referenceLabels.describe;
+	const workspacePresentation = createWorkspacePresentation();
 	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
 	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
 	const CONSULT_PROJECTION = "chat.consult";
@@ -731,7 +734,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
 	const build = (id, isOpen, cols) => {
-		if (id === "carto.atlas") return projectionView(id, (data) => atlasView({ brainDir, atlas: data.atlas, attention: data.attention, lines: data.lines }));
+		if (id === "carto.atlas") return projectionView(id, (data) => atlasView({ file: data.file, atlas: data.atlas, attention: data.attention, lines: data.lines, presentation: workspacePresentation.atlas }));
 		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ brainDir, ledger: data.ledger, lines: data.lines }));
 		if (id === "carto.plan") return projectionView(id, (data) => planView({ brainDir, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines }));
 		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ brainDir, requests: data.items }));

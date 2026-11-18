@@ -13,7 +13,6 @@
 // snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
 import { join } from "node:path";
-import { atlasPath, atlasSummary, renderAttention } from "../atlas.mjs";
 import { changeSummary } from "../checkpoints.mjs";
 import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
 import { entryLine } from "../ledger.mjs";
@@ -38,44 +37,6 @@ const when = (value) => {
 };
 
 // ─── Carto ──────────────────────────────────────────────────────────────────
-
-/** The graph: one item for each node. */
-export function atlasView({ brainDir, atlas, attention, lines, error } = {}) {
-	const file = atlasPath(brainDir);
-	if (atlas === undefined) return { header: [[[`! The graph cannot be read: ${error ?? "its projection is not available"}`, "warn"]], [[`  ${file} · e opens it`, "muted"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-	const care = new Map((attention?.care ?? []).map(({ node, why }) => [node.id, why]));
-	const local = attention === undefined ? "" : renderAttention(attention, { idle: (attention.active ?? []).length === 0 });
-	const items = [];
-	if (local !== "") items.push({ key: "atlas:attention", plain: true, head: [["Local map", "heading"]], body: local });
-	items.push(...atlas.nodes.map((node) => {
-		const checking = care.get(node.id);
-		const body = [
-			`gist: ${node.gist}`,
-			node.detail,
-			node.files.length > 0 ? `files: ${node.files.join(", ")}` : undefined,
-			node.links.length > 0 ? `links: ${node.links.join(", ")}` : undefined,
-			`written ${when(node.written) ?? "at an unknown time"} by ${node.by === "task" ? "a task" : "the main agent"}`,
-			checking?.length > 0 ? `needs checking: ${checking.join(", ")}` : undefined,
-		].filter((line) => line !== undefined && line !== "");
-		return {
-			key: `node:${node.name}`,
-			archived: node.archived === true,
-			head: [
-				[node.name, "bold"],
-				[`  ${node.gist}`, ""],
-				[node.files.length > 0 ? `  [${node.files.join(", ")}]` : "", "tool"],
-				[node.links.length > 0 ? `  → ${node.links.join(", ")}` : "", "muted"],
-				[checking?.length > 0 ? "  (needs checking)" : "", "warn"],
-				[node.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
-			],
-			body: body.join("\n"),
-			target: { file, line: lines?.[node.name] },
-		};
-	}));
-	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [care.size > 0 ? ` · ${care.size} need checking` : "", "warn"]]];
-	if (atlas.nodes.length === 0) items.push(note("  No nodes yet. The agent and its tasks write them as they learn the project."));
-	return { header, items };
-}
 
 /** The ledger: goals, questions and notes that are open, then what is closed. */
 export function ledgerView({ brainDir, ledger, lines, error } = {}) {
