@@ -8,6 +8,7 @@ import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
 import { createRuntimeContextReader, createRuntimeViewReader } from "./runtime.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
+import { REVIEW_ACTION, REVIEW_CAPABILITY_DEFINITIONS, createReviewApplication } from "./review.mjs";
 import { TALK_ACTION, TALK_CAPABILITY_DEFINITIONS, createTalkApplication } from "./talk.mjs";
 import { WORKSPACE_ACTION, WORKSPACE_CAPABILITY_DEFINITIONS, createWorkspaceApplication } from "./workspace.mjs";
 import { uiError, uiFailure } from "./result.mjs";
@@ -19,6 +20,7 @@ const ACTION_SCOPES = Object.freeze({
 	[REQUEST_ACTION.approve]: ["requests", "workspace"],
 	[REQUEST_ACTION.deny]: ["requests", "workspace"],
 	[REQUEST_ACTION.answer]: ["requests", "workspace"],
+	[REVIEW_ACTION.undo]: ["review", "workspace", "context", "requests"],
 	[TALK_ACTION.revise]: ["chat", "context"],
 	[TALK_ACTION.forget]: ["chat", "context"],
 	[WORKSPACE_ACTION.archive]: ["workspace", "context"],
@@ -53,17 +55,19 @@ const metadata = (options, now) => ({
  *   workspace?: Parameters<typeof createWorkspaceApplication>[0],
  *   context?: Parameters<typeof createContextApplication>[0],
  *   requests?: Parameters<typeof createRequestApplication>[0],
+ *   review?: Parameters<typeof createReviewApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
  *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
-export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
+export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
 	const eventStream = events;
 	const jobManager = jobs ?? createJobManager({ events: eventStream, now });
 	const workspace = createWorkspaceApplication({ ...workspaceOptions, brainDir, root, config, now });
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
+	const review = createReviewApplication({ ...reviewOptions, brainDir, root, now });
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });
 	const runtimeContextReader = runtimeOptions.reader ?? queryOptions.runtimeContextReader ?? createRuntimeContextReader({
 		main: runtimeOptions.main,
@@ -86,12 +90,14 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,
 		...REQUEST_CAPABILITY_DEFINITIONS,
+		...REVIEW_CAPABILITY_DEFINITIONS,
 		...TALK_CAPABILITY_DEFINITIONS,
 	]);
 	const owners = new Map([
 		...Object.values(WORKSPACE_ACTION).map((id) => [id, workspace]),
 		...Object.values(CONTEXT_ACTION).map((id) => [id, context]),
 		...Object.values(REQUEST_ACTION).map((id) => [id, requests]),
+		...Object.values(REVIEW_ACTION).map((id) => [id, review]),
 		...Object.values(TALK_ACTION).map((id) => [id, talk]),
 	]);
 

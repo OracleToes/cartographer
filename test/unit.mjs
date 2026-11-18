@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
+import { CheckpointError } from "../src/checkpoints.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
@@ -17,6 +18,7 @@ import { createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
+import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
 import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
@@ -598,6 +600,66 @@ test("application: review queries defer checkpoint and Git projections", async (
 	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
 });
 
+test("application: review undo defers checkpoint recovery and returns its plan revision outcome", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const undone = { item: "m1", text: "restore the original file", changes: [{ path: "src/main.mjs", status: "changed", added: 0, removed: 1 }] };
+	const app = createReviewApplication({
+		root,
+		brainDir,
+		now: () => Date.parse(NOW),
+		operations: {
+			undo: () => { calls.push("undo"); return undone; },
+			loadPlan: () => { calls.push("plan"); return { plan: { moves: [] } }; },
+			undoMove: (plan, id, at) => {
+				calls.push({ action: "undo-move", plan, id, at });
+				return { line: "m1 is open again and needs approval.", stale: 0 };
+			},
+			savePlan: (dir, plan) => calls.push({ action: "save-plan", dir, plan }),
+		},
+	});
+	const pending = app.execute(REVIEW_ACTION.undo, {}, { requestId: "undo-1" });
+	assert.deepEqual(calls, [], "checkpoint recovery leaves the command/render stack before its synchronous domain seam runs");
+	const result = await pending;
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.meta.requestId, "undo-1");
+	assert.equal(result.data.undone, undone);
+	assert.deepEqual(result.data.plan, { state: "updated", line: "m1 is open again and needs approval.", stale: 0 });
+	assert.deepEqual(calls, [
+		"undo",
+		"plan",
+		{ action: "undo-move", plan: { moves: [] }, id: "m1", at: NOW },
+		{ action: "save-plan", dir: brainDir, plan: { moves: [] } },
+	]);
+	const none = createReviewApplication({
+		root,
+		brainDir,
+		operations: { undo: () => undefined },
+	});
+	const empty = await none.execute(REVIEW_ACTION.undo);
+	assert.equal(empty.ok, true);
+	if (!empty.ok) throw new Error(empty.error.message);
+	assert.equal(empty.data.undone, undefined, "no checkpoint left is an empty successful recovery outcome");
+	const unavailable = createReviewApplication({
+		root,
+		brainDir,
+		operations: { undo: () => { throw new CheckpointError("git is not installed"); } },
+	});
+	const failed = await unavailable.execute(REVIEW_ACTION.undo);
+	assert.equal(failed.ok, false);
+	if (failed.ok) throw new Error("checkpoint trouble must remain a typed unavailable result");
+	assert.equal(failed.error.kind, UI_ERROR_KIND.unavailable);
+	assert.equal(failed.error.retryable, true);
+	const cancelledController = new AbortController();
+	const cancelled = none.execute(REVIEW_ACTION.undo, {}, { signal: cancelledController.signal });
+	cancelledController.abort();
+	const stopped = await cancelled;
+	assert.equal(stopped.ok, false);
+	if (stopped.ok) throw new Error("a cancelled undo must not reach checkpoint recovery");
+	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
+});
+
 test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let reads = 0;
@@ -904,17 +966,24 @@ test("application: composed facade dispatches actions and publishes cache-invali
 			foldReports: () => "",
 			shelveForUser: () => "",
 		} },
+		review: { operations: { undo: () => undefined } },
 	});
 	app.events.subscribe((event) => events.push(event));
 	const result = await app.execute(WORKSPACE_ACTION.archive, { id: "a1" }, { requestId: "archive-1" });
 	assert.equal(result.ok, true);
 	assert.equal(result.meta.requestId, "archive-1");
+	const undone = await app.execute(REVIEW_ACTION.undo, {}, { requestId: "undo-1" });
+	assert.equal(undone.ok, true);
+	assert.equal(undone.meta.requestId, "undo-1");
 	assert.deepEqual(events.map((event) => [event.type, event.payload.action]), [
 		["action.completed", WORKSPACE_ACTION.archive],
 		["projection.invalidated", WORKSPACE_ACTION.archive],
+		["action.completed", REVIEW_ACTION.undo],
+		["projection.invalidated", REVIEW_ACTION.undo],
 	]);
-	assert.deepEqual(events.at(-1).payload.scopes, ["workspace", "context"]);
+	assert.deepEqual(events.at(-1).payload.scopes, ["review", "workspace", "context", "requests"]);
 	assert.equal(app.capabilities.get(WORKSPACE_ACTION.archive)?.label, "Archive");
+	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.label, "Undo last checkpoint change");
 	const unknown = await app.execute("workspace.unknown", {});
 	assert.equal(unknown.ok, false);
 	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");

@@ -22,7 +22,7 @@ import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasSummary, attentionSnapshot, attentionSummary, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
-import { changeRecord, changeSummary, CheckpointError, undo, windowStep } from "./checkpoints.mjs";
+import { changeRecord, changeSummary, CheckpointError, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
 import { describeCall, describeResult } from "./application/activity.mjs";
@@ -30,12 +30,13 @@ export { describeCall, describeResult } from "./application/activity.mjs";
 import { CONTEXT_ACTION } from "./application/context.mjs";
 import { WORKSPACE_ACTION } from "./application/workspace.mjs";
 import { REQUEST_ACTION } from "./application/requests.mjs";
+import { REVIEW_ACTION } from "./application/review.mjs";
 import { conferenceStatusLine, findConferenceByChild, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableMoves, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { approvalWords } from "./requests.mjs";
 import { splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -1603,9 +1604,14 @@ export async function runTerminal(session, options) {
 				}
 				try {
 					recordWindows();
-					const result = undo(options.root, options.brainDir);
+					const outcome = await application.execute(REVIEW_ACTION.undo);
+					if (!outcome.ok) {
+						line(`! ${outcome.error.message}`);
+						return true;
+					}
+					const result = outcome.data.undone;
 					if (result === undefined) {
-						line("  There is no change task left to undo.");
+						line(`  ${outcome.data.line}`);
 						return true;
 					}
 					line(`${bold("●")} undone  ${result.item ?? (result.windows ? `window ${result.windows.join(", ")}` : "change task")} · ${result.text}`);
@@ -1613,19 +1619,8 @@ export async function runTerminal(session, options) {
 					for (const text of changeRecord(result.changes)) line(dim(text));
 					// A checkpoint belongs to one move. Undoing it makes that exact move a new, unapproved
 					// revision; later accepted siblings are blocked for deliberate review.
-					const { plan } = loadPlan(options.brainDir);
-					if (plan === undefined) {
-						line("! The plan file cannot be read, so the undo is not noted in it. Tell the agent which move you took back.");
-					} else if (result.item !== undefined) {
-						const now = new Date().toISOString();
-						try {
-							const changed = undoMove(plan, result.item, now);
-							savePlan(options.brainDir, plan);
-							line(dim(`  ${changed.line} ${gate.yolo ? "Approval is off, but the new revision still has to stay within its move contract." : "Its new revision needs /approve before another focus can run it."}`));
-						} catch (error) {
-							line(`! The files were undone, but ${result.item} could not be updated in the plan: ${error.message}. Tell the agent before any further change.`);
-						}
-					}
+					if (outcome.data.plan?.state === "unavailable" || outcome.data.plan?.state === "failed") line(`! ${outcome.data.plan.message}`);
+					else if (outcome.data.plan?.state === "updated") line(dim(`  ${outcome.data.plan.line} ${gate.yolo ? "Approval is off, but the new revision still has to stay within its move contract." : "Its new revision needs /approve before another focus can run it."}`));
 					if (result.windows !== undefined) line(dim("  The plan is as it was, and the window may still be running: /shells shows it. Tell the agent what you took back."));
 					line(dim("  /undo again takes back the change task before this one."));
 				} catch (error) {
