@@ -2654,11 +2654,14 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const [{ shellsView }, { atlasView, ledgerView, planView, requestsView }, { createWorkspacePresentation }] = await Promise.all([
+	const [{ shellsView }, { diffView }, { atlasView, ledgerView, planView, requestsView }, { createReviewPresentation }, { createWorkspacePresentation }] = await Promise.all([
 		import("../src/screen/views.mjs"),
+		import("../src/screen/review.mjs"),
 		import("../src/screen/workspace.mjs"),
+		import("../src/application/review-presentation.mjs"),
 		import("../src/application/workspace-presentation.mjs"),
 	]);
+	const reviewPresentation = createReviewPresentation();
 	const workspacePresentation = createWorkspacePresentation();
 	const queries = createWorkspaceQueries({ root, brainDir });
 	const projection = async (promise) => {
@@ -2683,6 +2686,8 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	};
 	const LONG = "word ".repeat(70).trim(); // about 350 characters, longer than any head row at a usual width
 	const PLAN_LONG = "word ".repeat(55).trim(); // below the plan's 300-character contract limit, still longer than a head row
+	const review = { root, last: { item: "m1", text: LONG, finished: true, changes: [{ path: "src/main.js", status: "changed", added: 1, removed: 0 }], patch: "diff --git a/src/main.js b/src/main.js\n--- a/src/main.js\n+++ b/src/main.js\n@@ -1 +1 @@\n-old\n+new\n" } };
+	expectReachable("last checkpoint change", diffView({ review, presentation: reviewPresentation }, "last"), LONG);
 	saveLedger(brainDir, { version: 1, next: 3, items: [
 		{ id: "q1", kind: "question", text: LONG, status: "open", added: 1 },
 		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },

@@ -20,6 +20,7 @@ import { consultMessageFingerprint, createWorkspaceQueries } from "../src/applic
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { createChatPresentation } from "../src/application/chat.mjs";
+import { createReviewPresentation } from "../src/application/review-presentation.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
@@ -81,6 +82,7 @@ import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
+import { diffView } from "../src/screen/review.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -633,6 +635,43 @@ test("screen: Current shared brain renders settled workspace projections through
 	const stale = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data, loading: true }, render });
 	assert.equal(rendered, 3, "cached Current shared brain data remains renderable while its replacement is in flight");
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Current shared brain rows");
+});
+
+test("screen: Review renders settled checkpoint projections through its application presentation adapter", () => {
+	const presentation = createReviewPresentation();
+	const emptyData = { root: "/project", last: undefined };
+	const data = {
+		root: emptyData.root,
+		last: {
+			item: "m1",
+			text: "Write the focused change.",
+			finished: true,
+			changes: [{ path: "src/main.mjs", status: "changed", added: 1, removed: 0 }],
+			patch: "diff --git a/src/main.mjs b/src/main.mjs\nindex 1111111..2222222 100644\n--- a/src/main.mjs\n+++ b/src/main.mjs\n@@ -1 +1 @@\n-old\n+new\n",
+		},
+	};
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return diffView({ review: projection, presentation }, "last");
+	};
+	assert.throws(() => diffView({ review: data }, "last"), /presentation adapter/, "Review cannot fall back to direct checkpoint formatting or path construction");
+	const loading = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Review is not asked to invent data while its projection is loading");
+	assert.match(loading.header[0][0][0], /Last checkpoint change is loading/, "the shared boundary names Review loading");
+	const failed = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { error: { message: "The checkpoint is unavailable." } }, render });
+	assert.equal(rendered, 0, "a Review query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Last checkpoint change could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data: emptyData }, render });
+	assert.equal(rendered, 1, "a settled empty projection reaches Review");
+	assert.match(empty.items[0].head[0][0], /No change task has run/, "Review owns its successful empty state");
+	const settled = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data }, render });
+	assert.equal(rendered, 2, "a settled Review projection uses its adapter for summaries and editor targets");
+	assert.equal(settled.items.find((item) => item.key === "change:src/main.mjs")?.target?.file, "/project/src/main.mjs");
+	assert.match(settled.items.find((item) => item.key === "change:src/main.mjs")?.body ?? "", /\+new/);
+	const stale = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached Review data remains renderable while its replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Review rows");
 });
 
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
@@ -1196,6 +1235,7 @@ test("application: review queries defer checkpoint and Git projections", async (
 	const last = await pending;
 	assert.equal(last.ok, true);
 	if (!last.ok) throw new Error(last.error.message);
+	assert.equal(last.data.root, root, "the settled Review projection owns its project target root");
 	assert.equal(last.data.last, lastChange);
 	assert.equal(last.meta.requestId, "review-last");
 	const session = await queries.review.session({ started: Date.parse(NOW) });
@@ -1218,9 +1258,9 @@ test("application: review queries defer checkpoint and Git projections", async (
 	if (cancelled.ok) throw new Error("a cancelled review query must not inspect Git");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
 	assert.equal(reads.git, 1);
-	const { diffView } = await import("../src/screen/views.mjs");
-	const view = diffView({ root, review: last.data }, "last");
-	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
+	const view = diffView({ review: last.data, presentation: createReviewPresentation() }, "last");
+	assert.match(view.header[0][0][0], /m1/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
+	assert.equal(view.items.find((item) => item.key === "last:task")?.copy, "write the report", "the complete task text stays reachable when its Review header does not fit");
 });
 
 test("application: review undo defers checkpoint recovery and returns its plan revision outcome", async (t) => {

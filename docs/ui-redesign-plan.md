@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration in progress — Chat and Workspace are complete; Review is next.
+**Status:** Phase 5 view migration in progress — Chat and Workspace are complete; Review is in progress.
 
 **Date:** 2026-11-16
 

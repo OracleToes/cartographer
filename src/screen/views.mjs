@@ -1,5 +1,5 @@
-// The legacy Review and Runtime views of the full screen: changes, shell windows, and context.
-// Workspace's migrated renderers live in workspace.mjs.
+// The legacy Runtime and sent-payload views of the full screen: shell windows and context.
+// Workspace and Review's migrated renderers live in workspace.mjs and review.mjs.
 //
 // Each function here turns one already-read brain or session projection into what a list shows
 // (src/screen/list.mjs): a few lines for the top, and items that fold. Rendering has no legacy readers: deferred
@@ -13,8 +13,6 @@
 // Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto; a sent
 // snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
-import { join } from "node:path";
-import { changeSummary } from "../checkpoints.mjs";
 import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
 import { flat } from "../rows.mjs";
 import { ago, stamp, took } from "../time.mjs";
@@ -36,78 +34,6 @@ const when = (value) => {
 };
 
 // ─── Diff ───────────────────────────────────────────────────────────────────
-
-/** A patch cut into its files: path -> the lines about that file, without git's own first lines. */
-function patchByFile(patch) {
-	const byFile = new Map();
-	let current;
-	for (const line of String(patch ?? "").split("\n")) {
-		const start = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
-		if (start) {
-			current = [];
-			byFile.set(start[2], current);
-			continue;
-		}
-		if (current === undefined || /^(index |new file mode|deleted file mode|old mode|new mode|similarity index)/.test(line)) continue;
-		current.push(line);
-	}
-	return byFile;
-}
-const patchStyle = (line) => (/^\+(?!\+\+)/.test(line) ? "ok" : /^-(?!--)/.test(line) ? "err" : /^@@/.test(line) ? "tool" : /^(\+\+\+|---) /.test(line) ? "bold" : "");
-/** One item for each changed file: its line, and the patch inside. */
-function changeItems(root, changes, patch) {
-	const byFile = patchByFile(patch);
-	return changes.map((change) => {
-		const lines = byFile.get(change.path) ?? [];
-		const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(lines.find((line) => line.startsWith("@@")) ?? "");
-		const counts = change.added === undefined ? "" : ` (${[change.added > 0 ? `+${change.added}` : "", change.removed > 0 ? `−${change.removed}` : ""].filter((part) => part !== "").join(" ")})`;
-		return {
-			key: `change:${change.path}`,
-			head: [[change.status.padEnd(8), change.status === "new" ? "ok" : change.status === "deleted" ? "err" : "warn"], [` ${change.path}`, "bold"], [counts === " ()" ? "" : counts, "muted"]],
-			body: lines.length > 0 ? lines.join("\n") : change.added === undefined ? "(not a text file)" : "(no lines changed)",
-			bodyStyle: patchStyle,
-			copy: () => lines.join("\n"),
-			target: change.status === "deleted" ? undefined : { file: join(root, change.path), line: hunk ? Number(hunk[1]) : undefined },
-		};
-	});
-}
-
-export function diffView({ root, review: provided } = {}, which) {
-	if (provided === undefined) return { header: [[["Review is loading…", "muted"]]], items: [] };
-	if (which === "last") {
-		const last = provided.last;
-		if (last === undefined) return { header: [], items: [note("  No change task has run that is still in effect.")] };
-		const what = last.item ?? (last.windows ? `window ${last.windows.join(", ")}` : "change task");
-		const header = [[[`${what} · ${last.text}`, "bold"], [`  ${changeSummary(last.changes)}${last.finished ? "" : " · cut off before it finished; compared with the files as they are now"}`, "muted"]]];
-		return { header, items: last.changes.length === 0 ? [note("  It changed no file.")] : changeItems(root, last.changes, last.patch) };
-	}
-	if (which === "session") {
-		const change = provided.change;
-		if (change === undefined) return { header: [], items: [note("  No change task has run since carto started here.")] };
-		return { header: [[[`Since carto started: ${change.steps === 1 ? "1 step" : `${change.steps} steps`}`, "bold"], [`  ${changeSummary(change.changes)}`, "muted"]]], items: change.changes.length === 0 ? [note("  The files are as they were.")] : changeItems(root, change.changes, change.patch) };
-	}
-	const own = provided.own;
-	if (own === undefined) return { header: [], items: [note("  This project is not a git repository, so there is no HEAD to compare with."), note("  The other two views do not need one: they come from Cartographer's own checkpoints.")] };
-	if (own.status.trim() === "") return { header: [], items: [note("  Nothing uncommitted: the project is as its git HEAD has it.")] };
-	const byFile = patchByFile(own.patch);
-	const items = own.status
-		.replace(/\n$/, "")
-		.split("\n")
-		.map((row) => {
-			const mark = row.slice(0, 2);
-			const path = row.slice(3).replace(/^"(.*)"$/, "$1");
-			const lines = byFile.get(path) ?? [];
-			const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)/.exec(lines.find((line) => line.startsWith("@@")) ?? "");
-			return {
-				key: `git:${path}`,
-				head: [[mark.padEnd(3), mark.includes("?") ? "ok" : mark.includes("D") ? "err" : "warn"], [path, "bold"], [mark.includes("?") ? "  (not known to git yet)" : "", "muted"]],
-				...(lines.length > 0 ? { body: lines.join("\n"), bodyStyle: patchStyle } : {}),
-				copy: () => lines.join("\n") || path,
-				target: mark.includes("D") ? undefined : { file: join(root, path), line: hunk ? Number(hunk[1]) : undefined },
-			};
-		});
-	return { header: [[["Uncommitted in the project's own repository", "bold"], ["  (git status --short, and git diff HEAD inside each file)", "muted"]]], items };
-}
 
 // ─── Shells ─────────────────────────────────────────────────────────────────
 

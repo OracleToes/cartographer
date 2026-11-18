@@ -378,7 +378,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 	};
 	const reviewResult = (name, key, loader, meta) => {
 		try {
-			return uiSuccess({ [key]: loader() }, { meta });
+			return uiSuccess({ root, [key]: loader() }, { meta });
 		} catch (error) {
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
