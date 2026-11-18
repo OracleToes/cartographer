@@ -7,7 +7,7 @@
 // and each function carries the operation out and returns the line to show.
 import { POLICY } from "./config.mjs";
 import { applyContextRowAction, ContextRowError, foldReports, loadContext, recallReport, unshelveForUser } from "./context.mjs";
-import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "./atlas.mjs";
+import { applyAtlasOp, AtlasError, findNode, loadAtlas, saveAtlas } from "./atlas.mjs";
 import { applyOp, LedgerError, loadLedger, prune, saveLedger } from "./ledger.mjs";
 import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
 import { pin } from "./top.mjs";
@@ -169,6 +169,47 @@ export function foldRow(brainDir, id) {
 /** x on a shelved file: take it off the shelf. @returns the line to show */
 export function unshelveRow(brainDir, id) {
 	return unshelveForUser(brainDir, id);
+}
+
+/** Set the user's explicit atlas lens by node id/name or project path. @returns the line to show */
+export function focusAtlas(brainDir, root, target, reason) {
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The atlas cannot be read: ${error}`;
+	try {
+		const node = findNode(atlas, target);
+		const result = applyAtlasOp(atlas, node === undefined
+			? { action: POLICY.enums.atlasActions.focus, path: target, reason }
+			: { action: POLICY.enums.atlasActions.focus, name: node.id, reason }, {
+				root,
+				now: new Date().toISOString(),
+				by: POLICY.enums.atlasAuthors.user,
+				main: false,
+			});
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error_) {
+		if (error_ instanceof AtlasError) return `! ${error_.message}`;
+		throw error_;
+	}
+}
+
+/** Clear the user's explicit atlas lens. @returns the line to show */
+export function unfocusAtlas(brainDir, root) {
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The atlas cannot be read: ${error}`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.unfocus }, {
+			root,
+			now: new Date().toISOString(),
+			by: POLICY.enums.atlasAuthors.user,
+			main: false,
+		});
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error_) {
+		if (error_ instanceof AtlasError) return `! ${error_.message}`;
+		throw error_;
+	}
 }
 
 /**

@@ -21,7 +21,7 @@ import { createRefDescriber } from "./refs.mjs";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
-import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
+import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, clearFront, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
@@ -1444,38 +1444,12 @@ export async function runTerminal(session, options) {
 					line("  /focus needs a node id/name or project path, then a short reason. Example: /focus c3 trace the request path");
 					return true;
 				}
-				const { atlas, error } = loadAtlas(options.brainDir);
-				if (atlas === undefined) {
-					line(`! The atlas cannot be read: ${error}`);
-					return true;
-				}
-				try {
-					const node = findNode(atlas, argument);
-					const result = applyAtlasOp(atlas, node === undefined ? { action: POLICY.enums.atlasActions.focus, path: argument, reason: tail } : { action: POLICY.enums.atlasActions.focus, name: node.id, reason: tail }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
-					if (result.changed) saveAtlas(options.brainDir, atlas);
-					line(result.line);
-				} catch (error) {
-					if (error instanceof AtlasError) line(`! ${error.message}`);
-					else throw error;
-				}
+				line(await workspaceLine(WORKSPACE_ACTION.focusAtlas, { target: argument, reason: tail }));
 				return true;
 			}
-			case "unfocus": {
-				const { atlas, error } = loadAtlas(options.brainDir);
-				if (atlas === undefined) {
-					line(`! The atlas cannot be read: ${error}`);
-					return true;
-				}
-				try {
-					const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.unfocus }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
-					if (result.changed) saveAtlas(options.brainDir, atlas);
-					line(result.line);
-				} catch (error) {
-					if (error instanceof AtlasError) line(`! ${error.message}`);
-					else throw error;
-				}
+			case "unfocus":
+				line(await workspaceLine(WORKSPACE_ACTION.unfocusAtlas));
 				return true;
-			}
 			case "atlas": {
 				const { atlas, error } = loadAtlas(options.brainDir);
 				line(bold("Tree"));

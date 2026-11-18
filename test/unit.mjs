@@ -303,6 +303,19 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	const unshelved = await app.execute(WORKSPACE_ACTION.unshelve, { id: shelf.id });
 	assert.equal(unshelved.ok, true);
 	assert.equal(loadContext(brainDir).shelf.length, 0, "the existing unshelve action clears the placement through the same facade");
+	const missingFocusReason = await app.execute(WORKSPACE_ACTION.focusAtlas, { target: "focus.txt", reason: "   " });
+	assert.equal(missingFocusReason.ok, false);
+	if (missingFocusReason.ok) throw new Error("an atlas focus needs a reason before it mutates the atlas");
+	assert.equal(missingFocusReason.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(missingFocusReason.error.field, "reason");
+	writeFileSync(join(root, "focus.txt"), "follow this path\n");
+	const focused = await app.execute(WORKSPACE_ACTION.focusAtlas, { target: "focus.txt", reason: "Trace the application boundary." });
+	assert.equal(focused.ok, true);
+	if (!focused.ok) throw new Error(focused.error.message);
+	assert.deepEqual(loadAtlas(brainDir).atlas?.view.focus?.target, { kind: "path", path: "focus.txt" }, "the typed atlas action persists its explicit lens");
+	const unfocused = await app.execute(WORKSPACE_ACTION.unfocusAtlas);
+	assert.equal(unfocused.ok, true);
+	assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the typed atlas action clears only the explicit lens");
 	const entry = loadLedger(brainDir).ledger.items[0];
 	assert.ok(entry, "the successful result comes from the same durable row operation the terminal already uses");
 	const cannotFold = await app.execute(WORKSPACE_ACTION.toggleFold, { id: entry.id });
@@ -348,6 +361,9 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	const shelfCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.shelve);
 	assert.deepEqual(shelfCapability?.availability, { enabled: true });
 	assert.equal(shelfCapability?.intent, "mutate");
+	const focusCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.focusAtlas);
+	assert.deepEqual(focusCapability?.availability, { enabled: true });
+	assert.equal(focusCapability?.intent, "mutate");
 });
 
 test("application: kept-talk actions preserve the durable transcript boundary and require confirmation to forget", async (t) => {

@@ -5,7 +5,7 @@
 // code consumes the structured result below rather than inferring success from those lines; later async storage
 // work stays behind this facade instead of changing every caller again.
 import { ShelfError, foldReports, parseLines, recallReport, shelveForUser } from "../context.mjs";
-import { ADD_BOOKS, addMove, addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { ADD_BOOKS, addMove, addTemplate, applyAdd, archiveRow, dropRow, editRow, focusAtlas, foldRow, settleRow, unarchiveRow, unfocusAtlas, unshelveRow } from "../ops.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
@@ -18,6 +18,8 @@ export const WORKSPACE_ACTION = Object.freeze({
 	recall: "workspace.recall",
 	toggleFold: "workspace.toggle-fold",
 	settle: "workspace.settle",
+	focusAtlas: "workspace.focus-atlas",
+	unfocusAtlas: "workspace.unfocus-atlas",
 	shelve: "workspace.shelve",
 	unshelve: "workspace.unshelve",
 	add: "workspace.add",
@@ -33,6 +35,8 @@ export const WORKSPACE_CAPABILITY_DEFINITIONS = Object.freeze([
 	{ id: WORKSPACE_ACTION.recall, label: "Recall report", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.toggleFold, label: "Toggle report fold", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.settle, label: "Settle", category: "workspace", intent: UI_ACTION_INTENT.mutate },
+	{ id: WORKSPACE_ACTION.focusAtlas, label: "Focus atlas", category: "workspace", intent: UI_ACTION_INTENT.mutate },
+	{ id: WORKSPACE_ACTION.unfocusAtlas, label: "Clear atlas focus", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.shelve, label: "Shelve", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.unshelve, label: "Unshelve", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.add, label: "Add", category: "workspace", intent: UI_ACTION_INTENT.mutate },
@@ -49,12 +53,14 @@ const DEFAULT_OPERATIONS = Object.freeze({
 	archiveRow,
 	dropRow,
 	editRow,
+	focusAtlas,
 	foldReports,
 	foldRow,
 	recallReport,
 	shelveForUser,
 	settleRow,
 	unarchiveRow,
+	unfocusAtlas,
 	unshelveRow,
 });
 
@@ -94,6 +100,15 @@ const shelfInput = (input, meta) => {
 	return { value: { path, ...(typeof input.lines === "string" ? { lines: input.lines } : {}) } };
 };
 
+const focusAtlasInput = (input, meta) => {
+	if (!isRecord(input)) return { result: invalidInput("Focusing the atlas needs an input object.", meta) };
+	const target = nonEmpty(input.target);
+	if (target === undefined) return { result: invalidInput("Choose an atlas node or project path to focus.", meta, "target") };
+	const reason = nonEmpty(input.reason);
+	if (reason === undefined) return { result: invalidInput("Say why this atlas focus matters.", meta, "reason") };
+	return { value: { target, reason } };
+};
+
 const addMoveInput = (input, meta) => {
 	if (!isRecord(input)) return { result: invalidInput("Adding a plan move needs an input object.", meta) };
 	const parent = nonEmpty(input.parent);
@@ -126,6 +141,8 @@ const checkedInput = (action, input, meta) => {
 		return { value: { ...checked.value, ...(typeof input.review === "string" ? { review: input.review } : {}) } };
 	}
 	if (action === WORKSPACE_ACTION.shelve) return shelfInput(input, meta);
+	if (action === WORKSPACE_ACTION.focusAtlas) return focusAtlasInput(input, meta);
+	if (action === WORKSPACE_ACTION.unfocusAtlas) return { value: {} };
 	if (action === WORKSPACE_ACTION.add) {
 		if (!isRecord(input)) return { result: invalidInput("Adding a row needs an input object.", meta) };
 		const book = nonEmpty(input.book);
@@ -251,6 +268,8 @@ export function createWorkspaceApplication({ brainDir, root, config = {}, operat
 				case WORKSPACE_ACTION.recall: line = operations.recallReport(brainDir, checked.value.id) ?? `There is no report ${checked.value.id}. /context lists the kept ones.`; break;
 				case WORKSPACE_ACTION.toggleFold: line = operations.foldRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.settle: line = operations.settleRow(brainDir, checked.value.id, root, checked.value.review); break;
+				case WORKSPACE_ACTION.focusAtlas: line = operations.focusAtlas(brainDir, root, checked.value.target, checked.value.reason); break;
+				case WORKSPACE_ACTION.unfocusAtlas: line = operations.unfocusAtlas(brainDir, root); break;
 				case WORKSPACE_ACTION.shelve: line = operations.shelveForUser(root, brainDir, config, checked.value.path, checked.value.lines); break;
 				case WORKSPACE_ACTION.unshelve: line = operations.unshelveRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.add: line = operations.applyAdd(brainDir, checked.value.book, checked.value.text, root); break;
@@ -263,7 +282,7 @@ export function createWorkspaceApplication({ brainDir, root, config = {}, operat
 					retryable: false,
 				}), { meta });
 			}
-			const target = checked.value.id ?? checked.value.book ?? checked.value.parent ?? checked.value.path;
+			const target = checked.value.id ?? checked.value.book ?? checked.value.parent ?? checked.value.path ?? checked.value.target ?? "atlas";
 			return workspaceOutcome(action, target, line, meta);
 		} catch (error) {
 			if (error instanceof ShelfError) return uiFailure(uiErrorFrom(error, {

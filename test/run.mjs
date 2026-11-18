@@ -227,14 +227,14 @@ test("launch: Cartographer opens without a server and keeps local commands avail
 	assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session opens before a server is reachable");
 });
 
-test("terminal: workspace row commands share typed outcomes and deletion needs --yes", async () => {
+test("terminal: workspace actions share typed outcomes and deletion needs --yes", async () => {
 	const root = makeProject("terminal-workspace-actions", { git: false });
 	configure(root, { initiate: false });
 	const { brainDir } = setUpBrain(root);
 	assert.match(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep this only while the command is tested." }), root), /n1 added/);
 	const server = await startStandIn();
 	try {
-		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/quit\n" });
+		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/quit\n" });
 		ok(result, "terminal workspace actions");
 		has(result.stdout, "n1 archived", "archive reaches the shared workspace action");
 		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
@@ -242,7 +242,10 @@ test("terminal: workspace row commands share typed outcomes and deletion needs -
 		has(result.stdout, "n1 is gone for good", "acknowledged delete reaches the shared workspace action");
 		has(result.stdout, "README.md (lines 1-1) is on the shelf as sh1", "shelve reaches the shared workspace action");
 		has(result.stdout, "Taken off the shelf: README.md (lines 1-1) [sh1]", "unshelve reaches the shared workspace action");
+		has(result.stdout, "Focus is README.md: trace startup.", "focus reaches the shared workspace action");
+		has(result.stdout, "The explicit atlas focus is cleared", "unfocus reaches the shared workspace action");
 		assert.equal(loadLedger(brainDir).ledger.items.length, 0, "only the acknowledged delete mutates the durable ledger");
+		assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the unfocus action persisted the cleared atlas lens");
 		assert.equal(server.requests.length, 0, "local workspace commands do not need an agent request");
 	} finally {
 		await server.close();
