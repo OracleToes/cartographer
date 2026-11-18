@@ -21,6 +21,7 @@ import { createApplication } from "../src/application/app.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createSettingsReader } from "../src/application/settings.mjs";
+import { SETTINGS_ACTION, createSettingsApplication } from "../src/application/settings-actions.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { createChatPresentation } from "../src/application/chat.mjs";
 import { createReviewPresentation } from "../src/application/review-presentation.mjs";
@@ -2325,6 +2326,122 @@ test("application: Settings & Safety is a deferred, fail-closed configuration an
 	assert.match(JSON.stringify(emptyAssessment), /No assessment yet/, "an empty assessment remains a successful Settings state");
 });
 
+test("application: Settings provenance and persisted actions share revisions without mutating process overrides", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	const project = join(brainDir, "config.json");
+	writeFileSync(install, JSON.stringify({ server: "http://install.test/v1", model: "install-model", collapseFull: 70 }));
+	writeFileSync(project, JSON.stringify({ colors: "none", collapseFull: 75 }));
+	const env = { CARTO_CONFIG: install, CARTO_SERVER: "http://environment.test/v1", CARTO_MODEL: "environment-model" };
+	const flags = { url: "http://command-line.test/v1", model: "command-line-model" };
+	const repository = createConfigurationRepository({ paths: { install, project } });
+	const config = loadConfig({ brainDir, flags, env });
+	const events = [];
+	const app = createApplication({
+		brainDir,
+		root,
+		config,
+		configuration: { repository, env, flags },
+		now: () => Date.parse(NOW),
+	});
+	app.events.subscribe((event) => events.push(event));
+	const snapshot = await app.queries.settings.status({ requestId: "settings-provenance" });
+	assert.equal(snapshot.ok, true);
+	if (!snapshot.ok) throw new Error(snapshot.error.message);
+	assert.equal(snapshot.data.configuration.rows.length, 30, "the typed query includes one row for every known setting");
+	const server = snapshot.data.configuration.rows.find((row) => row.key === "server");
+	assert.equal(server?.effectiveValue, "http://command-line.test/v1");
+	assert.equal(server?.source.layer, "command-line");
+	assert.equal(server?.contributors.find((entry) => entry.layer === "project"), undefined, "an absent source is not invented in provenance");
+	const collapse = snapshot.data.configuration.rows.find((row) => row.key === "collapseFull");
+	assert.equal(collapse?.effectiveValue, 75);
+	assert.equal(collapse?.source.layer, "project");
+	assert.equal(collapse?.source.writable, true);
+	const edited = await app.execute(SETTINGS_ACTION.edit, {
+		key: "collapseFull",
+		value: "80",
+		scope: "project",
+		expectedRevision: snapshot.data.configuration.revisions.project,
+	}, { requestId: "settings-edit" });
+	assert.equal(edited.ok, true);
+	if (!edited.ok) throw new Error(edited.error.message);
+	assert.equal(edited.data.row.effectiveValue, 80, "form text is coerced, then full configuration validation runs before write");
+	assert.equal(edited.meta.revision, edited.data.revision);
+	assert.equal(JSON.parse(readFileSync(project, "utf8")).collapseFull, 80);
+	assert.deepEqual(events.slice(-3).map((event) => [event.type, event.payload.action]), [
+		["action.completed", SETTINGS_ACTION.edit],
+		["configuration.changed", SETTINGS_ACTION.edit],
+		["projection.invalidated", SETTINGS_ACTION.edit],
+	], "a saved setting emits one narrow configuration fact and Settings invalidation");
+	assert.deepEqual(events.at(-1).payload.scopes, ["settings", "configuration"]);
+	const reset = await app.execute(SETTINGS_ACTION.reset, {
+		key: "collapseFull",
+		scope: "project",
+		expectedRevision: edited.data.revision,
+	});
+	assert.equal(reset.ok, true);
+	if (!reset.ok) throw new Error(reset.error.message);
+	assert.equal(reset.data.row.effectiveValue, 70, "reset removes only the selected project override and reveals install precedence");
+	assert.equal(Object.hasOwn(JSON.parse(readFileSync(project, "utf8")), "collapseFull"), false);
+	const shadowed = await app.execute(SETTINGS_ACTION.edit, {
+		key: "server",
+		value: "http://saved-project.test/v1",
+		scope: "project",
+		expectedRevision: reset.data.revision,
+	});
+	assert.equal(shadowed.ok, true);
+	if (!shadowed.ok) throw new Error(shadowed.error.message);
+	assert.equal(shadowed.data.row.source.layer, "command-line", "a persisted source reports a CLI shadow rather than pretending to reconfigure this run");
+	assert.equal(env.CARTO_SERVER, "http://environment.test/v1", "Settings never writes process environment overrides");
+	assert.deepEqual(flags, { url: "http://command-line.test/v1", model: "command-line-model" }, "Settings never mutates invocation flags");
+	const stale = await app.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "dark",
+		scope: "project",
+		expectedRevision: reset.data.revision,
+	});
+	assert.equal(stale.ok, false);
+	if (stale.ok) throw new Error("a stale source revision must be refused");
+	assert.equal(stale.error.code, UI_ERROR_CODE.conflict);
+	const blocked = await app.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "dark",
+		scope: "environment",
+		expectedRevision: shadowed.data.revision,
+	});
+	assert.equal(blocked.ok, false);
+	if (blocked.ok) throw new Error("environment must stay read-only");
+	assert.equal(blocked.error.code, UI_ERROR_CODE.policyBlocked);
+	const invalid = await app.execute(SETTINGS_ACTION.edit, {
+		key: "chatWindow",
+		value: "60000",
+		scope: "project",
+		expectedRevision: shadowed.data.revision,
+	});
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("cross-setting validation must run in the action owner");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+
+	const broken = createSettingsApplication({
+		repository: createConfigurationRepository({
+			paths: { install, project },
+			fs: { rename: async () => { throw Object.assign(new Error("disk full"), { code: "EIO" }); } },
+		}),
+		env,
+		flags,
+		now: () => Date.parse(NOW),
+	});
+	const failed = await broken.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "dark",
+		scope: "project",
+		expectedRevision: shadowed.data.revision,
+	});
+	assert.equal(failed.ok, false);
+	if (failed.ok) throw new Error("a repository write failure must not look saved");
+	assert.equal(failed.error.code, UI_ERROR_CODE.internal);
+});
+
 test("application: consult projection defers its isolated audit list", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let reads = 0;
@@ -2572,8 +2689,8 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
-	const registeredActions = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION].flatMap((actions) => Object.values(actions));
-	assert.equal(registeredActions.length, 30, "the composed application has the complete phase-six action surface");
+	const registeredActions = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
+	assert.equal(registeredActions.length, 32, "the composed application has the phase-six actions plus the authorized Settings edit/reset surface");
 	assert.equal(new Set(registeredActions).size, registeredActions.length, "every declared action id is unique");
 	const registeredCapabilities = app.capabilities.list().map((capability) => capability.id);
 	assert.equal(registeredCapabilities.length, registeredActions.length, "every action has one capability presentation");

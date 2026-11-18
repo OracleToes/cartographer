@@ -142,6 +142,7 @@ export const paletteDestinationFor = (id) => {
 	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
 	if (id.startsWith("runtime.model.")) return { tab: "context", view: "routes", name: "Model · Routes", hint: "Choose a route, then connect or select it through the Runtime action boundary." };
 	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
+	if (id.startsWith("settings.")) return { tab: "settings", view: "overview", name: "Settings · Safety", hint: "Inspect the settled saved-source provenance before choosing a persisted setting action." };
 	return undefined;
 };
 
@@ -659,6 +660,7 @@ export async function runScreen(session, options, runTerminal) {
 		brainDir,
 		root,
 		config,
+		configuration: options.configuration,
 		runtime: {
 			main: session.main,
 			context: session.context,
