@@ -1056,13 +1056,13 @@ export async function runTerminal(session, options) {
 
 	/** Said once for each state of the plan that waits for the user, when the agent has stopped. */
 	let reminded;
-	const approvalLine = () => {
-		const { plan } = loadPlan(options.brainDir);
-		if (plan === undefined || !planWaits(plan) || gate.yolo) {
+	const approvalLine = async () => {
+		const projection = await queries.plan();
+		if (!projection.ok || !planWaits(projection.data.plan) || gate.yolo) {
 			reminded = undefined;
 			return;
 		}
-		const waiting = waitingItems(plan);
+		const waiting = waitingItems(projection.data.plan);
 		const mark = JSON.stringify(waiting.map((move) => [move.id, move.action ?? move.text, move.capabilities?.network === true]));
 		const online = waiting.filter((move) => move.capabilities?.network === true).length;
 		const notes = [online > 0 ? `${online} with network access` : ""].filter((note) => note !== "");
@@ -1095,7 +1095,7 @@ export async function runTerminal(session, options) {
 		await waitFor(submission);
 		await settle();
 		usageLine();
-		approvalLine();
+		await approvalLine();
 	};
 
 	/**
@@ -1170,7 +1170,7 @@ export async function runTerminal(session, options) {
 			await waitFor(submission);
 			await settle();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 		}
 	};
 
@@ -1514,7 +1514,7 @@ export async function runTerminal(session, options) {
 						line(`${bold("●")} approval: on · declared change moves wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
 						setPrompt();
 						reminded = undefined;
-						if (!busy) approvalLine();
+						if (!busy) await approvalLine();
 					}
 				} else line("  /yolo shows the setting, /yolo on switches approval off, /yolo off switches it back on.");
 				return true;
@@ -2029,7 +2029,7 @@ export async function runTerminal(session, options) {
 		const finishing = async () => {
 			await settle();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 		};
 		if (options.oneShot !== undefined || !options.interactive) await finishing();
 		else finishing().catch((error) => line(`! display error: ${error?.message ?? error}`));
@@ -2071,7 +2071,7 @@ export async function runTerminal(session, options) {
 			await waitFor(submission);
 			await settle();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 			await woken();
 			// The agent rests until the next line: the moment to collapse its context when that is due.
 			await rest({ final: piped.length === 0 });
@@ -2115,7 +2115,7 @@ export async function runTerminal(session, options) {
 			for (const print of [...afterResult.splice(0), ...afterReply.splice(0)]) print();
 			endLine();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 			// Something may have happened in a window while the agent was finishing.
 			if (closing || (await wake()) !== undefined) return;
 			// The agent rests: the moment to collapse its context when that is due.

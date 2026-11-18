@@ -429,6 +429,7 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 test("application: workspace queries defer readers and return typed empty, unavailable, and cancelled outcomes", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let ledgerReads = 0;
+	let planReads = 0;
 	let contextReads = 0;
 	mkdirSync(join(brainDir, "reports"), { recursive: true });
 	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
@@ -448,7 +449,10 @@ test("application: workspace queries defer readers and return typed empty, unava
 				ledgerReads++;
 				return { ledger: { items: [] } };
 			},
-			loadPlan: () => ({ plan: { items: [], moves: [] } }),
+			loadPlan: () => {
+			planReads++;
+			return { plan: { items: [], moves: [] } };
+		},
 			loadContext: () => {
 				contextReads++;
 				return contextStore;
@@ -463,6 +467,14 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(ledgerReads, 1);
 	assert.deepEqual(empty.data.ledger.items, []);
 	assert.equal(empty.meta.requestId, "ledger-query");
+	const pendingPlan = queries.plan({ requestId: "plan-query" });
+	assert.equal(planReads, 0, "the plan reader also leaves a terminal lifecycle callback before reading durable state");
+	const projectedPlan = await pendingPlan;
+	assert.equal(projectedPlan.ok, true);
+	if (!projectedPlan.ok) throw new Error(projectedPlan.error.message);
+	assert.deepEqual(projectedPlan.data.plan, { items: [], moves: [] });
+	assert.equal(projectedPlan.meta.requestId, "plan-query");
+	assert.equal(planReads, 1);
 	const listed = await queries.tree({ requestId: "tree-query" });
 	assert.equal(listed.ok, true);
 	if (!listed.ok) throw new Error(listed.error.message);
@@ -505,6 +517,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(cancelled.ok, false);
 	if (cancelled.ok) throw new Error("an aborted projection must not read disk");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(planReads, 1, "cancellation leaves the deferred plan reader untouched");
 
 	const unavailable = createWorkspaceQueries({
 		brainDir,
