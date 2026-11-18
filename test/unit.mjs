@@ -41,7 +41,7 @@ import { taskTool } from "../src/tools/task.mjs";
 import { returnTool } from "../src/tools/return.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
-import { describeCall, describeResult } from "../src/terminal.mjs";
+import { describeCall, describeResult } from "../src/application/activity.mjs";
 import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { createConferenceExtension } from "../src/conference-extension.mjs";

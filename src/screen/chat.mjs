@@ -19,7 +19,7 @@
 // belongs to, and `styled` is the line with its escape sequences when a Markdown renderer made it. It draws
 // nothing and knows no terminal (src/screen/app.mjs does).
 import { POLICY } from "../config.mjs";
-import { describeCall, describeResult } from "../terminal.mjs";
+import { describeCall, describeResult } from "../application/activity.mjs";
 import { isFront } from "../context.mjs";
 import { splitTop } from "../top.mjs";
 import { CONSULT_ROSTER } from "../conference.mjs";

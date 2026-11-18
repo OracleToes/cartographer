@@ -17,7 +17,7 @@
 import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { describeCall, describeResult } from "./terminal.mjs";
+import { describeCall, describeResult } from "./application/activity.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
 import { calibrate } from "./calibrate.mjs";
