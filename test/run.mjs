@@ -2553,7 +2553,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 
 test("screen: registry, palette, and help retain six-tab control parity", async () => {
 	const [
-		{ TABS, VIEWS, KEYS_HELP, COMMANDS, paletteDestinationFor },
+		{ TABS, VIEWS, KEYS_HELP, COMMANDS, paletteDestinationFor, paletteItemForCapability },
 		{ CONTEXT_ACTION },
 		{ REQUEST_ACTION },
 		{ REVIEW_ACTION },
@@ -2590,6 +2590,11 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 		assert.ok(destination, `${action} remains discoverable from the command palette`);
 		assert.ok(TABS.some((tab) => tab.id === destination.tab), `${action} has a declared palette tab`);
 		assert.ok(VIEWS[destination.tab]?.some((view) => view.id === destination.view), `${action} has a declared palette subview`);
+		const item = paletteItemForCapability({ id: action, label: `Label for ${action}`, category: "test", availability: { enabled: false, reason: "Unavailable in this fixture." } });
+		assert.equal(item.id, `capability:${action}`, `${action} has one actual palette entry`);
+		assert.deepEqual(item.destination, destination, `${action}'s actual palette entry keeps its declared destination`);
+		assert.deepEqual(item.availability, { enabled: false, reason: "Unavailable in this fixture." }, `${action}'s actual palette entry preserves its availability reason`);
+		assert.doesNotMatch(item.description, /remains on the terminal command surface/, `${action} has a focused screen seam rather than a terminal-only fallback`);
 	}
 });
 
