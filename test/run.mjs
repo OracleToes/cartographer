@@ -37,6 +37,7 @@ import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
+import { createWorkspaceQueries } from "../src/application/queries.mjs";
 import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
 import { loadConference } from "../src/conference.mjs";
 
@@ -2501,7 +2502,12 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
 	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
-	const current = handsView({ root: scratch, brainDir: join(scratch, "empty-current-brain") });
+	const brainDir = join(scratch, "empty-current-brain");
+	mkdirSync(brainDir, { recursive: true });
+	const projected = await createWorkspaceQueries({ root: scratch, brainDir }).context();
+	assert.equal(projected.ok, true);
+	if (!projected.ok) throw new Error(projected.error.message);
+	const current = handsView({ root: scratch, context: projected.data });
 	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");
 	has(header, "Current shared brain", "the live scope is named in the view itself");
 	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");
@@ -2619,6 +2625,13 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	const { ledgerView, planView, atlasView, requestsView, shellsView } = await import("../src/screen/views.mjs");
+	const queries = createWorkspaceQueries({ root, brainDir });
+	const projection = async (promise) => {
+		const result = await promise;
+		assert.equal(result.ok, true);
+		if (!result.ok) throw new Error(result.error.message);
+		return result.data;
+	};
 	const flatStr = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 	const exposed = (item) => flatStr([item.body, typeof item.copy === "function" ? item.copy() : item.copy].filter((part) => part !== undefined).join("\n"));
 	const expectReachable = (name, view, needle) => {
@@ -2639,14 +2652,17 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		{ id: "q1", kind: "question", text: LONG, status: "open", added: 1 },
 		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },
 	] });
-	expectReachable("ledger question", ledgerView({ brainDir }), LONG);
-	expectReachable("ledger goal done-when", ledgerView({ brainDir }), LONG);
+	const ledger = await projection(queries.ledger());
+	expectReachable("ledger question", ledgerView({ brainDir, ledger: ledger.ledger, lines: ledger.lines }), LONG);
+	expectReachable("ledger goal done-when", ledgerView({ brainDir, ledger: ledger.ledger, lines: ledger.lines }), LONG);
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
 	savePlan(brainDir, { version: 2, next: 2, nextMove: 1, items: [{ id: "p1", mode: "look", text: PLAN_LONG, status: "open", revision: 1 }], moves: [] });
-	expectReachable("plan envelope", planView({ brainDir, yolo: false }), PLAN_LONG);
+	const plan = await projection(queries.plan());
+	expectReachable("plan envelope", planView({ brainDir, yolo: false, plan: plan.plan, lines: plan.lines }), PLAN_LONG);
 	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
-	expectReachable("atlas gist", atlasView({ root, brainDir }), LONG.slice(0, 200));
-	expectReachable("atlas detail", atlasView({ root, brainDir }), LONG);
+	const atlas = await projection(queries.atlas());
+	expectReachable("atlas gist", atlasView({ brainDir, atlas: atlas.atlas, attention: atlas.attention, lines: atlas.lines }), LONG.slice(0, 200));
+	expectReachable("atlas detail", atlasView({ brainDir, atlas: atlas.atlas, attention: atlas.attention, lines: atlas.lines }), LONG);
 	savePlan(brainDir, {
 		version: 2,
 		next: 2,
@@ -2654,7 +2670,8 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		items: [{ id: "p1", mode: "change", text: "Apply the narrow update.", doneWhen: "The update is checked.", status: "open", revision: 1 }],
 		moves: [{ id: "m1", parent: "p1", action: PLAN_LONG, text: PLAN_LONG, doneWhen: "The narrow update is checked.", capabilities: { files: true, commands: true, network: false }, budget: { replies: 6, fileOps: 4, commandStarts: 2 }, turns: 6, revision: 1, parentRevision: 1, status: "open", targets: ["src/main.js"], proof: "The focused check passes." }],
 	});
-	expectReachable("approval request", requestsView({ brainDir, yolo: false }), PLAN_LONG);
+	const requests = await projection(queries.requests());
+	expectReachable("approval request", requestsView({ brainDir, requests: requests.items }), PLAN_LONG);
 	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
 	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] }), LONG);
 });

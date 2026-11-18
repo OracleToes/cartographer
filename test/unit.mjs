@@ -481,9 +481,9 @@ test("application: workspace queries defer readers and return typed empty, unava
 	if (missingReport.ok) throw new Error("a missing report must stay an explicit typed outcome");
 	assert.equal(missingReport.error.code, UI_ERROR_CODE.notFound);
 	const { handsView, treeView } = await import("../src/screen/views.mjs");
-	const sharedView = handsView({ root, brainDir, context: shared.data, deferred: true });
+	const sharedView = handsView({ root, context: shared.data });
 	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
-	const treeViewProjection = treeView({ root, brainDir, tree: listed.data, deferred: true }, () => false);
+	const treeViewProjection = treeView({ root, tree: listed.data }, () => false);
 	assert.match(treeViewProjection.items.find((item) => item.key === "file:tree.txt")?.head[1][0] ?? "", /3 B/);
 	const absent = await queries.entry({ book: "ledger", id: "g1" });
 	assert.equal(absent.ok, false);
@@ -593,7 +593,7 @@ test("application: review queries defer checkpoint and Git projections", async (
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
 	assert.equal(reads.git, 1);
 	const { diffView } = await import("../src/screen/views.mjs");
-	const view = diffView({ root, brainDir, review: last.data, deferred: true }, "last");
+	const view = diffView({ root, review: last.data }, "last");
 	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
 });
 

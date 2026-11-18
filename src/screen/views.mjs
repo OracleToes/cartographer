@@ -1,10 +1,10 @@
 // What tabs 2 to 5 of the full screen hold: the brain, the changes, the shell windows, and the context.
 //
 // Each function here turns one already-read brain or session projection into what a list shows
-// (src/screen/list.mjs): a few lines for the top, and items that fold. The optional legacy readers remain only for
-// standalone render callers during the migration; the full screen always passes its deferred cache. `isOpen(key)` is given because for a folder
-// what is open decides which items there are. An item names the file it comes from and the line, so that `e` can
-// open it there.
+// (src/screen/list.mjs): a few lines for the top, and items that fold. Rendering has no legacy readers: deferred
+// application queries own durable and live snapshots before a view receives them. `isOpen(key)` is given because for
+// a folder what is open decides which items there are. An item names the file it comes from and the line, so that
+// `e` can open it there.
 //
 // The Model tab is the one that is not read from a file. Its sent panes show the frozen provider payload captured
 // immediately before dispatch in semantic reading order: the system prompt, tools, then messages, with Cartographer's
@@ -12,17 +12,14 @@
 // Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto; a sent
 // snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
-import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, fileMarks, loadAtlas, renderAttention } from "../atlas.mjs";
-import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate, isFront, loadContext, loadReport, recordLine, sameShelfItem, shelfLabel, shelfText, composedRows, splitReadTail } from "../context.mjs";
-import { entryLine, loadLedger } from "../ledger.mjs";
-import { authorizationLine, itemLine, loadPlan, movesOf, planPath, waiting } from "../plan.mjs";
+import { atlasPath, atlasSummary, renderAttention } from "../atlas.mjs";
+import { changeSummary } from "../checkpoints.mjs";
+import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
+import { entryLine } from "../ledger.mjs";
+import { authorizationLine, itemLine, movesOf, planPath, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
-import { listRequests } from "../requests.mjs";
-import { ago, clock, stamp, took } from "../time.mjs";
-import { projectFiles } from "../tools/look.mjs";
+import { ago, stamp, took } from "../time.mjs";
 import { short, width } from "./text.mjs";
 import { RECORD } from "../voice.mjs";
 import { USER_NAME } from "../user.mjs";
@@ -40,31 +37,14 @@ const when = (value) => {
 	return Number.isFinite(ms) ? stamp(ms) : undefined;
 };
 
-/** The line of a file on which `needle` first stands, counted from 1; undefined when it does not. */
-function lineOf(file, needle) {
-	try {
-		const at = readFileSync(file, "utf8").indexOf(needle);
-		if (at === -1) return undefined;
-		return readFileSync(file, "utf8").slice(0, at).split("\n").length;
-	} catch {
-		return undefined;
-	}
-}
-/** Where an entry with this value of `field` stands in one of the brain's JSON files. */
-const jsonLine = (file, field, value) => lineOf(file, `"${field}": ${JSON.stringify(value)}`);
-
 // ─── Carto ──────────────────────────────────────────────────────────────────
 
 /** The graph: one item for each node. */
-export function atlasView({ root, brainDir, atlas: provided, attention: providedAttention, lines, plan: providedPlan, error: providedError, deferred = false }) {
+export function atlasView({ brainDir, atlas, attention, lines, error } = {}) {
 	const file = atlasPath(brainDir);
-	const loaded = provided === undefined && !deferred ? loadAtlas(brainDir) : { atlas: provided, error: providedError };
-	const { atlas, error } = loaded;
-	if (atlas === undefined) return { header: [[[`! The graph cannot be read: ${error ?? "it is still loading"}`, "warn"]], [[`  ${file} · e opens it`, "muted"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-	const active = providedAttention === undefined ? activeMoveOverlays(providedPlan ?? (deferred ? undefined : loadPlan(brainDir).plan)) : [];
-	const snapshot = providedAttention ?? attentionSnapshot(root, atlas, { active });
-	const care = new Map(snapshot.care.map(({ node, why }) => [node.id, why]));
-	const local = renderAttention(snapshot, { idle: providedAttention === undefined ? active.length === 0 : snapshot.active.length === 0 });
+	if (atlas === undefined) return { header: [[[`! The graph cannot be read: ${error ?? "its projection is not available"}`, "warn"]], [[`  ${file} · e opens it`, "muted"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
+	const care = new Map((attention?.care ?? []).map(({ node, why }) => [node.id, why]));
+	const local = attention === undefined ? "" : renderAttention(attention, { idle: (attention.active ?? []).length === 0 });
 	const items = [];
 	if (local !== "") items.push({ key: "atlas:attention", plain: true, head: [["Local map", "heading"]], body: local });
 	items.push(...atlas.nodes.map((node) => {
@@ -89,7 +69,7 @@ export function atlasView({ root, brainDir, atlas: provided, attention: provided
 				[node.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 			],
 			body: body.join("\n"),
-			target: { file, line: lines?.[node.name] ?? (deferred ? undefined : jsonLine(file, "name", node.name)) },
+			target: { file, line: lines?.[node.name] },
 		};
 	}));
 	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [care.size > 0 ? ` · ${care.size} need checking` : "", "warn"]]];
@@ -98,11 +78,9 @@ export function atlasView({ root, brainDir, atlas: provided, attention: provided
 }
 
 /** The ledger: goals, questions and notes that are open, then what is closed. */
-export function ledgerView({ brainDir, ledger: provided, lines, error: providedError, deferred = false }) {
+export function ledgerView({ brainDir, ledger, lines, error } = {}) {
 	const file = join(brainDir, "carto-ledger.json");
-	const loaded = provided === undefined && !deferred ? loadLedger(brainDir) : { ledger: provided, error: providedError };
-	const { ledger, error } = loaded;
-	if (ledger === undefined) return { header: [[[`! The ledger cannot be read: ${error}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
+	if (ledger === undefined) return { header: [[[`! The ledger cannot be read: ${error ?? "its projection is not available"}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
 	const now = Date.now();
 	const items = [];
 	const entry = (item) => ({
@@ -125,7 +103,7 @@ export function ledgerView({ brainDir, ledger: provided, lines, error: providedE
 			.filter((line) => line !== undefined)
 			.join("\n"),
 		copy: entryLine(item, now),
-		target: { file, line: lines?.[item.id] ?? (deferred ? undefined : jsonLine(file, "id", item.id)) },
+		target: { file, line: lines?.[item.id] },
 	});
 	for (const [kind, title] of [[POLICY.enums.ledgerKind.goal, "Goals"], [POLICY.enums.ledgerKind.question, "Questions for you"], [POLICY.enums.ledgerKind.note, "Notes"]]) {
 		const open = ledger.items.filter((item) => item.kind === kind && item.status === POLICY.enums.entryStatus.open);
@@ -144,12 +122,13 @@ export function ledgerView({ brainDir, ledger: provided, lines, error: providedE
 }
 
 /** The plan: authorization envelopes, then their declared executable moves. */
-export function planView({ brainDir, yolo, plan: provided, lines, error: providedError, deferred = false }) {
+export function planView({ brainDir, yolo, plan, lines, error } = {}) {
 	const file = planPath(brainDir);
-	const loaded = provided === undefined && !deferred ? loadPlan(brainDir) : { plan: provided, error: providedError };
-	const { plan, error } = loaded;
-	if (plan === undefined && error !== undefined) return { header: [[[`! The plan cannot be read: ${error}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-	if (plan === undefined || plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes an envelope when a goal needs changes.")] };
+	if (plan === undefined) {
+		if (error !== undefined) return { header: [[[`! The plan cannot be read: ${error}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
+		return { header: [[["Plan is loading…", "muted"]]], items: [] };
+	}
+	if (plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes an envelope when a goal needs changes.")] };
 	const items = [];
 	for (const envelope of plan.items) {
 		items.push({
@@ -173,7 +152,7 @@ export function planView({ brainDir, yolo, plan: provided, lines, error: provide
 				.filter((line) => line !== undefined)
 				.join("\n"),
 			copy: itemLine(envelope),
-			target: { file, line: lines?.[envelope.id] ?? (deferred ? undefined : jsonLine(file, "id", envelope.id)) },
+			target: { file, line: lines?.[envelope.id] },
 		});
 		for (const move of movesOf(plan, envelope.id)) {
 			const state = move.status === "done" ? "✓" : move.status === "reported" ? "!" : move.status === "running" ? "▶" : move.status === "blocked" ? "×" : move.approvedRevision === move.revision ? "●" : "○";
@@ -210,7 +189,7 @@ export function planView({ brainDir, yolo, plan: provided, lines, error: provide
 					.filter((line) => line !== undefined)
 					.join("\n"),
 				copy: itemLine(move),
-				target: { file, line: lines?.[move.id] ?? (deferred ? undefined : jsonLine(file, "id", move.id)) },
+				target: { file, line: lines?.[move.id] },
 			});
 		}
 	}
@@ -219,10 +198,10 @@ export function planView({ brainDir, yolo, plan: provided, lines, error: provide
 }
 
 /** What waits for the user: change moves and questions of taste. */
-export function requestsView({ brainDir, yolo, requests: provided, error: providedError, deferred = false }) {
-	if (providedError !== undefined) return { header: [[[`! ${providedError}`, "warn"]]], items: [note("  Requests will be retried automatically.", "muted")] };
-	if (provided === undefined && deferred) return { header: [[["Loading requests…", "muted"]]], items: [] };
-	const all = provided ?? listRequests(brainDir, { yolo });
+export function requestsView({ brainDir, requests: provided, error } = {}) {
+	if (error !== undefined) return { header: [[[`! ${error}`, "warn"]]], items: [note("  Requests will be retried automatically.", "muted")] };
+	if (provided === undefined) return { header: [[["Loading requests…", "muted"]]], items: [] };
+	const all = provided;
 	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
 	const items = all.map((request) => {
 		// The head row holds one line; the whole request stands in the body, and `e` opens the book where it lives.
@@ -243,7 +222,7 @@ export function requestsView({ brainDir, yolo, requests: provided, error: provid
 					: `a approves it · n turns it down · d forgets it, and the agent is not told`,
 			].join("\n"),
 			copy: `${request.id} [${request.kind}] ${request.text}`,
-			target: { file: home, line: request.line ?? (deferred ? undefined : jsonLine(home, "id", request.id)) },
+			target: { file: home, line: request.line },
 		};
 	});
 	const approvals = all.some((request) => request.kind === "approval");
@@ -258,15 +237,10 @@ export function requestsView({ brainDir, yolo, requests: provided, error: provid
 }
 
 /** The project's files as a tree whose folders open and fold. `e` opens a file itself. */
-export function treeView({ root, brainDir, tree: provided, deferred = false }, isOpen) {
-	if (provided === undefined && deferred) return { header: [[["Project tree is loading…", "muted"]]], items: [] };
-	const files = (provided?.files ?? projectFiles(root)).map((entry) => (typeof entry === "string" ? { path: entry } : entry));
-	const marks = provided?.marks === undefined
-		? (() => {
-			const { atlas } = loadAtlas(brainDir);
-			return atlas ? fileMarks(atlas) : new Map();
-		})()
-		: new Map(Object.entries(provided.marks));
+export function treeView({ root, tree: provided } = {}, isOpen = () => false) {
+	if (provided === undefined) return { header: [[["Project tree is loading…", "muted"]]], items: [] };
+	const files = (provided.files ?? []).map((entry) => (typeof entry === "string" ? { path: entry } : entry));
+	const marks = new Map(Object.entries(provided.marks ?? {}));
 	/** @type {{ dirs: Map<string, any>, files: Array<{ name: string, bytes?: number }>, count: number }} */
 	const top = { dirs: new Map(), files: [], count: 0 };
 	for (const file of files) {
@@ -300,11 +274,7 @@ export function treeView({ root, brainDir, tree: provided, deferred = false }, i
 		for (const file of [...dir.files].sort((a, b) => a.name.localeCompare(b.name))) {
 			const path = `${prefix}${file.name}`;
 			const nodes = marks.get(path);
-			let bytes = file.bytes;
-			if (bytes === undefined && !deferred) {
-				try { bytes = statSync(join(root, path)).size; }
-				catch { bytes = undefined; }
-			}
+			const bytes = file.bytes;
 			const size = bytes === undefined ? "gone" : sizeText(bytes);
 			items.push({ key: `file:${path}`, depth, head: [[file.name, ""], [`  ${size}`, "muted"], [nodes ? `  ← ${nodes.join(", ")}` : "", "tool"]], copy: path, target: { file: join(root, path) } });
 		}
@@ -351,21 +321,21 @@ function changeItems(root, changes, patch) {
 	});
 }
 
-export function diffView({ root, brainDir, started, review: provided, deferred = false }, which) {
-	if (provided === undefined && deferred) return { header: [[["Review is loading…", "muted"]]], items: [] };
+export function diffView({ root, review: provided } = {}, which) {
+	if (provided === undefined) return { header: [[["Review is loading…", "muted"]]], items: [] };
 	if (which === "last") {
-		const last = provided === undefined ? lastChange(root, brainDir) : provided.last;
+		const last = provided.last;
 		if (last === undefined) return { header: [], items: [note("  No change task has run that is still in effect.")] };
 		const what = last.item ?? (last.windows ? `window ${last.windows.join(", ")}` : "change task");
 		const header = [[[`${what} · ${last.text}`, "bold"], [`  ${changeSummary(last.changes)}${last.finished ? "" : " · cut off before it finished; compared with the files as they are now"}`, "muted"]]];
 		return { header, items: last.changes.length === 0 ? [note("  It changed no file.")] : changeItems(root, last.changes, last.patch) };
 	}
 	if (which === "session") {
-		const change = provided === undefined ? changeSince(root, brainDir, started) : provided.change;
+		const change = provided.change;
 		if (change === undefined) return { header: [], items: [note("  No change task has run since carto started here.")] };
 		return { header: [[[`Since carto started: ${change.steps === 1 ? "1 step" : `${change.steps} steps`}`, "bold"], [`  ${changeSummary(change.changes)}`, "muted"]]], items: change.changes.length === 0 ? [note("  The files are as they were.")] : changeItems(root, change.changes, change.patch) };
 	}
-	const own = provided === undefined ? uncommitted(root) : provided.own;
+	const own = provided.own;
 	if (own === undefined) return { header: [], items: [note("  This project is not a git repository, so there is no HEAD to compare with."), note("  The other two views do not need one: they come from Cartographer's own checkpoints.")] };
 	if (own.status.trim() === "") return { header: [], items: [note("  Nothing uncommitted: the project is as its git HEAD has it.")] };
 	const byFile = patchByFile(own.patch);
@@ -839,21 +809,21 @@ export function editorCommand(editor, file, line) {
  * the same things from the prompt.
  * @param {{ root: string, brainDir: string }} env
  */
-export function handsView({ root, brainDir, context: provided, error: providedError, deferred = false }) {
-	if (providedError !== undefined) return { header: [[[`! ${providedError}`, "warn"]]], items: [note("  Current shared brain will be retried automatically.", "muted")] };
-	if (provided === undefined && deferred) return { header: [[["Loading current shared brain…", "muted"]]], items: [] };
-	const store = provided?.store ?? provided ?? loadContext(brainDir);
+export function handsView({ root, context: provided, error } = {}) {
+	if (error !== undefined) return { header: [[[`! ${error}`, "warn"]]], items: [note("  Current shared brain will be retried automatically.", "muted")] };
+	if (provided === undefined) return { header: [[["Loading current shared brain…", "muted"]]], items: [] };
+	const store = provided.store ?? provided;
 	const header = [
 		[["Current shared brain", "bold"], ["  ·  live shelf and reports; not part of any sent provider request", "muted"]],
 		[["Your hands on what the agent keeps", "muted"], ["  ·  salient notes live in the Ledger view", "muted"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
-	const shelves = provided?.shelf ?? store.shelf.map((item) => ({ item, text: shelfText(root, item, brainDir) }));
+	const shelves = provided.shelf ?? [];
 	if (shelves.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `shelf`."));
 	for (const shelf of shelves) {
 		const item = shelf.item ?? shelf;
-		const text = shelf.text ?? shelfText(root, item, brainDir);
+		const text = shelf.text ?? "(the shelf snapshot cannot be read)";
 		items.push({
 			key: `shelf:${shelfLabel(item)}`,
 			kind: "shelf",
@@ -862,14 +832,14 @@ export function handsView({ root, brainDir, context: provided, error: providedEr
 			...(item.path === undefined ? {} : { path: join(root, item.path) }),
 		});
 	}
-	const standing = provided?.standing ?? composedRows(store).filter((record) => record.archived !== true).map((record) => ({ record, text: loadReport(brainDir, record.id) }));
-	const archived = provided?.archived ?? composedRows(store).filter((record) => record.archived === true).map((record) => ({ record, text: loadReport(brainDir, record.id) }));
+	const standing = provided.standing ?? [];
+	const archived = provided.archived ?? [];
 	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d deletes it (press d again)"));
 	if (standing.length === 0 && archived.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
 	for (const source of standing) {
 		const record = source.record ?? source;
-		const text = Object.hasOwn(source, "text") ? source.text : loadReport(brainDir, record.id);
-		const folded = store.dropped.includes(record.id);
+		const text = Object.hasOwn(source, "text") ? source.text : undefined;
+		const folded = (store.dropped ?? []).includes(record.id);
 		items.push({
 			key: `report:${record.id}`,
 			kind: "report",
@@ -887,7 +857,7 @@ export function handsView({ root, brainDir, context: provided, error: providedEr
 		items.push(heading("  Archived · the record no longer lists them; recall by id still finds them"));
 		for (const source of archived) {
 			const record = source.record ?? source;
-			const text = Object.hasOwn(source, "text") ? source.text : loadReport(brainDir, record.id);
+			const text = Object.hasOwn(source, "text") ? source.text : undefined;
 			items.push({
 				key: `report:${record.id}`,
 				kind: "report",

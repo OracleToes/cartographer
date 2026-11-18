@@ -571,7 +571,6 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.ledger": queries.paths.ledger,
 			"carto.plan": queries.paths.plan,
 		})[id];
-	const env = { root, brainDir, started };
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
 	const application = options.application ?? createApplication({
@@ -678,13 +677,13 @@ export async function runScreen(session, options, runTerminal) {
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
 	const build = (id, isOpen, cols) => {
-		if (id === "carto.atlas") return projectionView(id, (data) => atlasView({ ...env, atlas: data.atlas, attention: data.attention, lines: data.lines, deferred: true }));
-		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ brainDir, ledger: data.ledger, lines: data.lines, deferred: true }));
-		if (id === "carto.plan") return projectionView(id, (data) => planView({ ...env, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, deferred: true }));
-		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ brainDir, yolo: options.gate?.yolo === true, requests: data.items, deferred: true }));
-		if (id === "carto.tree") return projectionView(id, (data) => treeView({ ...env, tree: data, deferred: true }, isOpen));
-		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, brainDir, context: data, deferred: true }));
-		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ ...env, review: data, deferred: true }, id.slice(5)));
+		if (id === "carto.atlas") return projectionView(id, (data) => atlasView({ brainDir, atlas: data.atlas, attention: data.attention, lines: data.lines }));
+		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ brainDir, ledger: data.ledger, lines: data.lines }));
+		if (id === "carto.plan") return projectionView(id, (data) => planView({ brainDir, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines }));
+		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ brainDir, requests: data.items }));
+		if (id === "carto.tree") return projectionView(id, (data) => treeView({ root, tree: data }, isOpen));
+		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, context: data }));
+		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ root, review: data }, id.slice(5)));
 		if (id === "shells.list") return projectionView(id, (data) => shellsView(data));
 		if (id === "shells.out") return projectionView(id, (data) => shellsOutView(data));
 		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
