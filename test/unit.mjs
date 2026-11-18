@@ -549,7 +549,7 @@ test("screen: Requests render settled workspace projections through its applicat
 	let rendered = 0;
 	const render = (projection) => {
 		rendered++;
-		return requestsView({ ...projection, presentation });
+		return requestsView({ requests: projection.items, presentation });
 	};
 	assert.throws(() => requestsView({ requests: data.items }), /presentation adapter/, "Requests cannot fall back to direct domain classification or formatting");
 	const loading = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { loading: true }, render });
