@@ -146,7 +146,7 @@ export const paletteDestinationFor = (id) => {
 };
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
-const COMMANDS = [
+export const COMMANDS = [
 	["requests", "what waits for you: change moves, questions of taste, "],
 	["approve", "approve requests by id, or the whole plan as it stands"],
 	["deny", "turn a request down: /deny ID [why]"],
@@ -160,6 +160,7 @@ const COMMANDS = [
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
+	["consult", "consultation conference audits; /consult co1 shows its immutable packet; /consult probe [PATH] writes a native-grammar diagnostic", ["probe"]],
 	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
@@ -188,6 +189,7 @@ const COMMANDS = [
 	["keys", "the keys of the full screen"],
 	["help", "every command, with what it does"],
 	["quit", "leave; unfinished work continues the next time carto starts here"],
+	["exit", "leave; the same as /quit"],
 ];
 
 // A heading stands at the start of its line; an entry is a key, at least two spaces, and what the key does. The
