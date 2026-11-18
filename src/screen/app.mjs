@@ -23,9 +23,8 @@
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
 // everything Cartographer has to say, exactly as it does line by line.
 import { DEFAULTS, POLICY } from "../config.mjs";
-import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath } from "../context.mjs";
@@ -33,6 +32,8 @@ import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { TALK_ACTION, createTalkApplication } from "../application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
+import { launchEditor } from "../infrastructure/editor.mjs";
+import { readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
@@ -737,11 +738,11 @@ export async function runScreen(session, options, runTerminal) {
 		draw();
 	};
 	/** Give the terminal to another program for a while (an editor), then take it back. */
-	const lend = (work) => {
+	const lend = async (work) => {
 		process.stdin.off("data", watchInput);
 		tui.stop({ preserveScreen: true });
 		try {
-			return work();
+			return await work();
 		} finally {
 			process.stdin.on("data", watchInput);
 			tui.start();
@@ -750,9 +751,9 @@ export async function runScreen(session, options, runTerminal) {
 		}
 	};
 	/** Hand the terminal to the editor over `file`; false when the editor could not be run. */
-	const runEditor = (file, line) => {
+	const runEditor = async (file, line) => {
 		const editor = process.env.VISUAL || process.env.EDITOR || "vi";
-		const done = lend(() => spawnSync(editorCommand(editor, file, line), { stdio: "inherit", shell: true }));
+		const done = await lend(() => launchEditor(editorCommand(editor, file, line)));
 		if (done.error !== undefined || (done.status !== 0 && done.status !== null)) {
 			const why = done.error?.message ?? `it ended with exit ${done.status}`;
 			chat.print(`! The editor could not be run (${editor}): ${why}. Set $EDITOR to the editor you use.\n`);
@@ -762,15 +763,9 @@ export async function runScreen(session, options, runTerminal) {
 		return true;
 	};
 	/** A file to edit a thing in, under the brain's scratch folder. */
-	const scratch = (name, text) => {
-		const dir = join(brainDir, "scratch");
-		mkdirSync(dir, { recursive: true });
-		const file = join(dir, name);
-		writeFileSync(file, `${text}\n`);
-		return file;
-	};
+	const scratch = (name, text) => writeScratch(brainDir, name, text);
 	/** e in Conversation changes only a row that names the source it changes. Work and Consult are private/read-only. */
-	const editChat = () => {
+	const editChat = async () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
 		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be edited");
@@ -778,9 +773,9 @@ export async function runScreen(session, options, runTerminal) {
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
 		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
 		if (item?.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
-		const file = scratch("message.md", item.text);
-		if (!runEditor(file)) return;
-		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
+		const file = await scratch("message.md", item.text);
+		if (!(await runEditor(file))) return;
+		const now = (await readText(file)).replace(/\n+$/, "");
 		if (now === item.text || now === "") return flash("the message stands as it was");
 		void talk.execute(TALK_ACTION.revise, { source: item.source, text: now })
 			.then((result) => {
@@ -825,47 +820,48 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
 	/** n in a book view: the external editor stays a transitional handoff; its template and saved row use the typed action boundary. */
-	const newEntry = (book) => {
+	const newEntry = async (book) => {
 		const id = viewId();
-		void workspace.template(book)
-			.then((template) => {
-				if (!template.ok) return presentWorkspaceResult(template, id);
-				const file = scratch(`new-${book}.json`, template.data.text);
-				if (!runEditor(file)) return false;
-				return workspace.execute(WORKSPACE_ACTION.add, { book, text: readFileSync(file, "utf8") })
-					.then((result) => presentWorkspaceResult(result, id));
-			})
-			.catch((error) => flash(`could not prepare that new row: ${error?.message ?? error}`));
+		try {
+			const template = await workspace.template(book);
+			if (!template.ok) return presentWorkspaceResult(template, id);
+			const file = await scratch(`new-${book}.json`, template.data.text);
+			if (!(await runEditor(file))) return false;
+			return presentWorkspaceResult(await workspace.execute(WORKSPACE_ACTION.add, { book, text: await readText(file) }), id);
+		} catch (error) {
+			flash(`could not prepare that new row: ${error?.message ?? error}`);
+			return false;
+		}
 	};
 	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
 	/** e in Model, or on a Current shared brain record that has its own source. */
-	const editCurrent = () => {
+	const editCurrent = async () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
 		switch (item.editKind) {
 			case "prompt": {
 				const file = promptSource();
 				if (file === undefined) return flash("the source of the prompt is not here");
-				if (!runEditor(file)) return;
+				if (!(await runEditor(file))) return;
 				return flash("the prompt's wording is code: the next run of carto reads it as it is now");
 			}
 			case "tool": {
 				const name = String(item.key).startsWith("tool:") ? String(item.key).slice(5) : String(item.key);
 				const found = toolSource(name);
 				if (found === undefined) return flash(`no source file defines the ${name} tool`);
-				if (!runEditor(found.file, found.line)) return;
+				if (!(await runEditor(found.file, found.line))) return;
 				return flash(`${name}'s description is code: the next run of carto reads it as it is now`);
 			}
 			case "tools":
 				return flash("the tools are one block; Enter opens it to a line per tool, and e on one opens where it is defined");
 			case "assessment": {
 				const file = assessmentPath(brainDir);
-				if (!runEditor(file)) return;
+				if (!(await runEditor(file))) return;
 				refresh(viewId(), true);
 				return flash("edited; the copy at the top of the context is rewritten at the next collapse, or /pin now");
 			}
 			case "store": {
-				if (!runEditor(contextPath(brainDir))) return;
+				if (!(await runEditor(contextPath(brainDir)))) return;
 				refresh(viewId(), true);
 				return flash("the store of what the collapse keeps, edited by hand · take care: a file that does not parse falls back to a fresh one");
 			}
@@ -888,14 +884,14 @@ export async function runScreen(session, options, runTerminal) {
 				// Current shared brain: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
 					if (!existsSync(item.path)) return flash("the shelved file is not there");
-					if (!runEditor(item.path)) return;
+					if (!(await runEditor(item.path))) return;
 					refresh(viewId(), true);
 					return flash("edited; the shelf reads it anew at the next collapse");
 				}
 				if (typeof item.key === "string" && item.key.startsWith("report:")) {
 					const file = join(brainDir, "reports", `${item.key.slice(7)}.md`);
 					if (!existsSync(file)) return flash("the report's file is not there");
-					if (!runEditor(file)) return;
+					if (!(await runEditor(file))) return;
 					return flash("the report's file is edited; the record line keeps the summary it was written with");
 				}
 				return flash("that is what was sent, and what was sent cannot be changed");
@@ -1118,17 +1114,17 @@ export async function runScreen(session, options, runTerminal) {
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
 	/** The $EDITOR on the file of the row, or on the whole book by the row's line: the door Ctrl-O keeps open everywhere. */
-	const editTarget = () => {
+	const editTarget = async () => {
 		const item = pageOf().list.selected();
 		const target = item?.target ?? (fileOf(viewId()) !== undefined ? { file: fileOf(viewId()) } : undefined);
 		if (target === undefined) return flash("this line has no file to open");
 		if (target.folder) return flash("that is a folder: open it with Enter, and press e on a file");
 		if (!existsSync(target.file)) return flash(`${relative(root, target.file)} does not exist`);
-		if (!runEditor(target.file, target.line)) return;
+		if (!(await runEditor(target.file, target.line))) return;
 		brain.at = 0;
 		refresh(viewId(), true);
 	};
-	const edit = () => {
+	const edit = async () => {
 		if (chatTab()) return editChat();
 		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		if (BOOK_VIEWS[viewId()] !== undefined) {
@@ -1136,12 +1132,12 @@ export async function runScreen(session, options, runTerminal) {
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			if (rowKey !== undefined && ROW_KEY.test(rowKey)) return void openFieldBox(viewId(), rowKey);
 			// Not an entry (the book could not be read, or it is empty): the editor door is what is left.
-			return void editTarget();
+			return editTarget();
 		}
-		editTarget();
+		return editTarget();
 	};
 	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
-	const editInEditor = () => {
+	const editInEditor = async () => {
 		if (chatTab()) return editChat();
 		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		const book = BOOK_VIEWS[viewId()];
@@ -1150,7 +1146,7 @@ export async function runScreen(session, options, runTerminal) {
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			if (rowKey === undefined || !ROW_KEY.test(rowKey)) return newEntry(book);
 		}
-		editTarget();
+		return editTarget();
 	};
 
 	// ─── Selecting in Chat ───────────────────────────────────────────────────
