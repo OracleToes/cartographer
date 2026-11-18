@@ -28,9 +28,10 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
+import { contextPath, loadContext, shelveForUser } from "../context.mjs";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
+import { TALK_ACTION, createTalkApplication } from "../application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
@@ -549,9 +550,10 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.plan": planPath(brainDir),
 		})[id];
 	const env = { root, brainDir, session, started };
-	// Row mutations enter the application boundary here. The direct editor forms remain a later migration because
-	// Box currently needs a synchronous save decision; keyboard row actions already consume typed results.
+	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
+	// narrow transitional seams; keyboard actions and overlays consume typed results.
 	const workspace = createWorkspaceApplication({ brainDir, root });
+	const talk = createTalkApplication({ brainDir });
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
@@ -775,14 +777,19 @@ export async function runScreen(session, options, runTerminal) {
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
 		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
-		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
+		if (item?.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
 		const file = scratch("message.md", item.text);
 		if (!runEditor(file)) return;
 		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
 		if (now === item.text || now === "") return flash("the message stands as it was");
-		if (!reviseTalkSource(brainDir, item.source, now)) return flash("this source is no longer in the kept talk, so it is left unchanged");
-		inPlace(() => chat.revise(item.key, now));
-		flash(item.type === "user" ? "your future kept speech is edited · a later collapse may copy these words; active context and sent requests stay unchanged" : "the delivered agent speech is edited for future kept talk · a later collapse may copy it; sent requests stay as sent");
+		void talk.execute(TALK_ACTION.revise, { source: item.source, text: now })
+			.then((result) => {
+				if (!result.ok) return flash(result.error.message);
+				inPlace(() => chat.revise(item.key, now));
+				flash(result.data.line);
+				draw();
+			})
+			.catch((error) => flash(`could not edit that kept source: ${error?.message ?? error}`));
 	};
 	/** Remove one selected source from a future collapse; it does not omit its Durable entry or rewrite a sent request. */
 	const removeChat = () => {
@@ -792,16 +799,29 @@ export async function runScreen(session, options, runTerminal) {
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
 		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
-		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
+		if (item?.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
 		const arm = `talk:${item.key}`;
 		if (state.deleteArm?.id !== arm || Date.now() - state.deleteArm.at >= POLICY.timing.screen.deleteConfirmMs) {
-			state.deleteArm = { id: arm, at: Date.now() };
-			return flash("Press d again: remove this source from future kept talk; sent requests and the active conversation stay unchanged");
+			void talk.execute(TALK_ACTION.forget, { source: item.source })
+				.then((result) => {
+					if (result.confirmation === undefined) return flash(result.ok ? result.data.line : result.error.message);
+					state.deleteArm = { id: arm, at: Date.now(), confirmation: result.confirmation };
+					flash("Press d again: remove this source from future kept talk; sent requests and the active conversation stay unchanged");
+				})
+				.catch((error) => flash(`could not prepare that kept-source removal: ${error?.message ?? error}`));
+			return;
 		}
+		const confirmation = state.deleteArm.confirmation;
 		state.deleteArm = undefined;
-		if (!removeTalkSource(brainDir, item.source)) return flash("this source is no longer in the kept talk, so it is left unchanged");
-		inPlace(() => chat.forget(item.key));
-		flash("removed from future kept talk · the Durable transcript, active conversation, and sent requests stay unchanged");
+		if (confirmation === undefined) return flash("the removal confirmation expired; press d again");
+		void talk.execute(TALK_ACTION.forget, { source: item.source }, { confirmation: { ...confirmation, acknowledged: true } })
+			.then((result) => {
+				if (!result.ok) return flash(result.error.message);
+				inPlace(() => chat.forget(item.key));
+				flash(result.data.line);
+				draw();
+			})
+			.catch((error) => flash(`could not remove that kept source: ${error?.message ?? error}`));
 	};
 	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
 	/** n in a book view: the external editor stays a transitional handoff; its template and saved row use the typed action boundary. */

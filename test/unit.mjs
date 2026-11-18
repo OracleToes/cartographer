@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
+import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
@@ -323,6 +324,33 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	const deleteCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.delete);
 	assert.deepEqual(deleteCapability?.availability, { enabled: true });
 	assert.equal(deleteCapability?.confirmation, "acknowledge");
+});
+
+test("application: kept-talk actions preserve the durable transcript boundary and require confirmation to forget", async (t) => {
+	const { brainDir } = fresh(t);
+	const app = createTalkApplication({ brainDir, now: () => Date.parse(NOW) });
+	const source = { kind: "chat-call", conversationId: "root", callId: "call-1" };
+	noteChat(brainDir, "user", Date.parse(NOW), "Keep this wording for a future collapse.", { source });
+	const invalid = await app.execute(TALK_ACTION.revise, { source, text: "   " });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("empty kept talk must be refused");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(invalid.error.field, "text");
+	const revised = await app.execute(TALK_ACTION.revise, { source, text: "Keep the corrected wording for a future collapse." });
+	assert.equal(revised.ok, true);
+	if (!revised.ok) throw new Error(revised.error.message);
+	assert.equal(loadContext(brainDir).chat[0]?.text, "Keep the corrected wording for a future collapse.");
+	const asked = await app.execute(TALK_ACTION.forget, { source });
+	assert.equal(asked.ok, false);
+	if (asked.ok) throw new Error("forgetting kept talk needs confirmation");
+	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.ok(asked.confirmation, "the action gives the screen a scoped acknowledgement request");
+	assert.equal(loadContext(brainDir).chat.length, 1, "asking for confirmation does not alter the kept talk");
+	const forgotten = await app.execute(TALK_ACTION.forget, { source }, { confirmation: { ...asked.confirmation, acknowledged: true } });
+	assert.equal(forgotten.ok, true);
+	assert.equal(loadContext(brainDir).chat.length, 0, "only the acknowledged action removes the future-collapse source");
+	const forgetCapability = app.capabilities.list().find((capability) => capability.id === TALK_ACTION.forget);
+	assert.equal(forgetCapability?.confirmation, "acknowledge");
 });
 
 test("model listing: llama-swap context_length wins over legacy metadata", () => {
