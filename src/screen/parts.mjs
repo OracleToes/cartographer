@@ -532,13 +532,14 @@ export class Sheet {
  * `n / limit` — and the most it may hold. Nothing past the limit goes in, typed or pasted. `Enter` saves a one-line
  * field; a field that holds a long text lets `Enter` end a line and `Ctrl-Enter` save. `Tab` moves through the fields
  * of the row and the drafts ride along until `Esc`. The screen is one more client of the same operations the
- * agent uses: `save(drafts)` flashes what was saved or the refusal, and says whether it was saved.
+ * agent uses: `save(drafts)` flashes what was saved or the refusal, and says whether it was saved. A save may
+ * settle asynchronously; the box keeps its drafts and makes its pending state plain until the result arrives.
  */
 export class Box {
 	static VISIBLE = 6;
 	/**
 	 * @param {{ title: string, fields: { id: string, label: string, limit: number, multiline?: boolean, value?: string }[],
-	 *   keyOf: (data: string) => string | undefined, save: (drafts: Map<string, string>) => boolean, close: () => void, flash: (text: string) => void }} given
+	 *   keyOf: (data: string) => string | undefined, save: (drafts: Map<string, string>) => boolean | Promise<boolean>, close: () => void, flash: (text: string) => void, redraw?: () => void }} given
 	 *   `save` flashes the outcome itself and says whether the drafts were kept; a false means the box stays open.
 	 */
 	constructor(given) {
@@ -549,6 +550,7 @@ export class Box {
 		this.cursors = given.fields.map((_, at) => given.fields[at].value?.length ?? 0);
 		this.scrolls = given.fields.map(() => 0);
 		this.inner = 60;
+		this.saving = false;
 	}
 	get field() {
 		return this.given.fields[this.index];
@@ -622,15 +624,38 @@ export class Box {
 		this.moveTo(offsetAtCells(this.text, target.start, cells));
 	}
 	save() {
+		if (this.saving) return void this.given.flash("this save is still finishing");
 		const drafts = new Map(this.given.fields.map((field, at) => [field.id, this.drafts[at]]));
-		if (this.given.save(drafts)) this.given.close();
+		let saved;
+		try {
+			saved = this.given.save(drafts);
+		} catch (error) {
+			this.given.flash(`could not save: ${error?.message ?? error}`);
+			return;
+		}
+		if (saved === null || typeof saved !== "object" || typeof saved.then !== "function") {
+			if (saved) this.given.close();
+			return;
+		}
+		this.saving = true;
+		this.given.redraw?.();
+		void Promise.resolve(saved)
+			.then((didSave) => {
+				if (didSave) this.given.close();
+			})
+			.catch((error) => this.given.flash(`could not save: ${error?.message ?? error}`))
+			.finally(() => {
+				this.saving = false;
+				this.given.redraw?.();
+			});
 	}
 	handleInput(data) {
+		const key = this.given.keyOf(data);
+		if (this.saving) return void this.given.flash(key === "escape" ? "the save is still finishing" : "saving…");
 		// A read that is several lines and holds no escape sequence is pasted text, line ends and all.
 		if (typeof data === "string" && data.length > 1 && !data.includes("\x1b") && /[\r\n]/.test(data)) return void this.insert(data);
 		const bracketed = /^\x1b\[200~([\s\S]*?)\x1b\[201~$/.exec(String(data));
 		if (bracketed) return void this.insert(bracketed[1]);
-		const key = this.given.keyOf(data);
 		if (key === "escape") return void this.given.close();
 		const fields = this.given.fields;
 		if (fields.length > 1 && (key === "tab" || key === "shift+tab")) {
@@ -676,6 +701,7 @@ export class Box {
 		return [bar, [` ${before}`, ""], [cursorChar, "inverse"], [after, ""]];
 	}
 	footer() {
+		if (this.saving) return "Saving… · the draft stays here until Cartographer replies";
 		const field = this.field;
 		const parts = [field.multiline ? "Enter newline · Ctrl-Enter save" : "Enter save"];
 		if (this.given.fields.length > 1) parts.push(`Tab ${this.given.fields[(this.index + 1) % this.given.fields.length].label}`);

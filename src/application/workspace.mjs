@@ -5,7 +5,7 @@
 // code consumes the structured result below rather than inferring success from those lines; later async storage
 // work stays behind this facade instead of changing every caller again.
 import { ShelfError, foldReports, recallReport } from "../context.mjs";
-import { ADD_BOOKS, addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { ADD_BOOKS, addMove, addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
@@ -20,6 +20,7 @@ export const WORKSPACE_ACTION = Object.freeze({
 	settle: "workspace.settle",
 	unshelve: "workspace.unshelve",
 	add: "workspace.add",
+	addMove: "workspace.add-move",
 	edit: "workspace.edit",
 });
 
@@ -33,12 +34,14 @@ export const WORKSPACE_CAPABILITY_DEFINITIONS = Object.freeze([
 	{ id: WORKSPACE_ACTION.settle, label: "Settle", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.unshelve, label: "Unshelve", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.add, label: "Add", category: "workspace", intent: UI_ACTION_INTENT.mutate },
+	{ id: WORKSPACE_ACTION.addMove, label: "Add plan move", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.edit, label: "Edit", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 ]);
 
 export const WORKSPACE_CAPABILITIES = createCapabilityRegistry(WORKSPACE_CAPABILITY_DEFINITIONS);
 
 const DEFAULT_OPERATIONS = Object.freeze({
+	addMove,
 	addTemplate,
 	applyAdd,
 	archiveRow,
@@ -73,6 +76,29 @@ const idInput = (input, meta) => {
 	return { value: { id } };
 };
 
+const addMoveInput = (input, meta) => {
+	if (!isRecord(input)) return { result: invalidInput("Adding a plan move needs an input object.", meta) };
+	const parent = nonEmpty(input.parent);
+	if (parent === undefined) return { result: invalidInput("Choose an envelope before adding a move.", meta, "parent") };
+	if (typeof input.text !== "string") return { result: invalidInput("A plan move needs its action text.", meta, "text") };
+	if (typeof input.doneWhen !== "string") return { result: invalidInput("A plan move needs its done-when text.", meta, "doneWhen") };
+	if (input.targets !== undefined && (!Array.isArray(input.targets) || input.targets.some((target) => typeof target !== "string"))) return { result: invalidInput("Plan move targets must be a list of paths.", meta, "targets") };
+	if (input.proof !== undefined && typeof input.proof !== "string") return { result: invalidInput("A plan move proof must be text.", meta, "proof") };
+	if (input.capabilities !== undefined && !isRecord(input.capabilities)) return { result: invalidInput("Plan move capabilities must be fields.", meta, "capabilities") };
+	if (input.budget !== undefined && !isRecord(input.budget)) return { result: invalidInput("A plan move budget must be fields.", meta, "budget") };
+	return {
+		value: {
+			parent,
+			text: input.text,
+			doneWhen: input.doneWhen,
+			...(input.targets !== undefined ? { targets: input.targets } : {}),
+			...(input.proof !== undefined ? { proof: input.proof } : {}),
+			...(input.capabilities !== undefined ? { capabilities: input.capabilities } : {}),
+			...(input.budget !== undefined ? { budget: input.budget } : {}),
+		},
+	};
+};
+
 const checkedInput = (action, input, meta) => {
 	if (action === WORKSPACE_ACTION.archive || action === WORKSPACE_ACTION.unarchive || action === WORKSPACE_ACTION.delete || action === WORKSPACE_ACTION.fold || action === WORKSPACE_ACTION.recall || action === WORKSPACE_ACTION.toggleFold || action === WORKSPACE_ACTION.unshelve) return idInput(input, meta);
 	if (action === WORKSPACE_ACTION.settle) {
@@ -88,6 +114,7 @@ const checkedInput = (action, input, meta) => {
 		if (typeof input.text !== "string") return { result: invalidInput("The new row must be supplied as JSON text.", meta, "text") };
 		return { value: { book, text: input.text } };
 	}
+	if (action === WORKSPACE_ACTION.addMove) return addMoveInput(input, meta);
 	if (action === WORKSPACE_ACTION.edit) {
 		const checked = idInput(input, meta);
 		if (checked.result !== undefined) return checked;
@@ -206,6 +233,7 @@ export function createWorkspaceApplication({ brainDir, root, operations = DEFAUL
 				case WORKSPACE_ACTION.settle: line = operations.settleRow(brainDir, checked.value.id, root, checked.value.review); break;
 				case WORKSPACE_ACTION.unshelve: line = operations.unshelveRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.add: line = operations.applyAdd(brainDir, checked.value.book, checked.value.text, root); break;
+				case WORKSPACE_ACTION.addMove: line = operations.addMove(brainDir, checked.value); break;
 				case WORKSPACE_ACTION.edit: line = operations.editRow(brainDir, checked.value.id, checked.value.changes, root); break;
 				default: return uiFailure(uiError({
 					code: UI_ERROR_CODE.unknownAction,
@@ -214,7 +242,7 @@ export function createWorkspaceApplication({ brainDir, root, operations = DEFAUL
 					retryable: false,
 				}), { meta });
 			}
-			const target = checked.value.id ?? checked.value.book;
+			const target = checked.value.id ?? checked.value.book ?? checked.value.parent;
 			return workspaceOutcome(action, target, line, meta);
 		} catch (error) {
 			if (error instanceof ShelfError) return uiFailure(uiErrorFrom(error, {

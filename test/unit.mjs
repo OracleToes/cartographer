@@ -261,6 +261,26 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	if (!added.ok) throw new Error(added.error.message);
 	assert.equal(added.data.action, WORKSPACE_ACTION.add);
 	assert.equal(added.notices[0].level, "success");
+	const incompleteMove = await app.execute(WORKSPACE_ACTION.addMove, { parent: "p1", text: "Read the entry point." });
+	assert.equal(incompleteMove.ok, false);
+	if (incompleteMove.ok) throw new Error("a move without done-when text must be refused before the plan operation");
+	assert.equal(incompleteMove.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(incompleteMove.error.field, "doneWhen");
+	const envelope = await app.execute(WORKSPACE_ACTION.add, {
+		book: "plan",
+		text: JSON.stringify({ mode: "look", text: "Inspect the entry point.", done_when: "The entry point is identified." }),
+	});
+	assert.equal(envelope.ok, true);
+	if (!envelope.ok) throw new Error(envelope.error.message);
+	const moved = await app.execute(WORKSPACE_ACTION.addMove, {
+		parent: "p1",
+		text: "Read src/index.mjs.",
+		doneWhen: "The entry point is identified.",
+	});
+	assert.equal(moved.ok, true);
+	if (!moved.ok) throw new Error(moved.error.message);
+	assert.equal(moved.data.action, WORKSPACE_ACTION.addMove);
+	assert.equal(loadPlan(brainDir).plan.moves[0]?.parent, "p1", "a typed plan-move action uses the durable plan operation");
 	const entry = loadLedger(brainDir).ledger.items[0];
 	assert.ok(entry, "the successful result comes from the same durable row operation the terminal already uses");
 	const cannotFold = await app.execute(WORKSPACE_ACTION.toggleFold, { id: entry.id });

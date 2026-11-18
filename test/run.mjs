@@ -2651,7 +2651,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	expectReachable("shell command", shellsView({ session }), LONG);
 });
 
-test("screen: the small box caps what goes in, counts it live, and saves through the operations", async () => {
+test("screen: the small box caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {
 	const { Box } = await import("../src/screen/parts.mjs");
 	const caps = [];
 	const flashes = [];
@@ -2705,6 +2705,31 @@ test("screen: the small box caps what goes in, counts it live, and saves through
 	// Enter on a one-line field saves it.
 	box2.handleInput("enter");
 	assert.equal(closed, 2, "Enter saves a one-line field");
+	// A typed action result is asynchronous: the draft stays visible and cannot be submitted twice while it settles.
+	let resolveSave;
+	let redraws = 0;
+	const pending = new Box({
+		title: "pending",
+		fields: [{ id: "text", label: "Text", limit: 6, value: "draft" }],
+		keyOf: (data) => data,
+		flash: (text) => flashes.push(text),
+		close: () => closed++,
+		redraw: () => redraws++,
+		save: () => new Promise((resolve) => { resolveSave = resolve; }),
+	});
+	pending.handleInput("enter");
+	assert.equal(closed, 2, "an unresolved action does not close the box");
+	assert.match(pending.render(50).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n"), /Saving…/, "the pending state stays visible");
+	pending.handleInput("enter");
+	assert.equal(redraws, 1, "a second submit does not start another action while the first is pending");
+	resolveSave(false);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(closed, 2, "a typed failure leaves the drafts open for correction");
+	pending.handleInput("enter");
+	resolveSave(true);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(closed, 3, "a successful asynchronous action closes the box after it settles");
+	assert.ok(redraws >= 4, "the box redraws when asynchronous saving starts and finishes");
 });
 
 

@@ -31,12 +31,11 @@ import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerm
 import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
-import { addTemplate, applyAdd, editRow } from "../ops.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
-import { applyPlanOp, isAuthorized, loadPlan, planPath, PlanError, savePlan, waiting } from "../plan.mjs";
+import { isAuthorized, loadPlan, planPath, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
@@ -623,14 +622,19 @@ export async function runScreen(session, options, runTerminal) {
 		if (page.list.version !== before) draw();
 	};
 
+	/** Present one typed workspace outcome, then redraw the projection that started the action. */
+	const presentWorkspaceResult = (result, id = viewId()) => {
+		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
+		if (result.ok) brain.at = 0;
+		refresh(id, true);
+		draw();
+		return result.ok;
+	};
 	/** Run a row action through the typed application boundary, then redraw its projection after it settles. */
 	const runWorkspaceAction = (action, input, options_ = {}) => {
+		const id = viewId();
 		void workspace.execute(action, input, options_)
-			.then((result) => {
-				flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
-				if (result.ok) brain.at = 0;
-				refresh(viewId(), true);
-			})
+			.then((result) => presentWorkspaceResult(result, id))
 			.catch((error) => flash(`could not complete that workspace action: ${error?.message ?? error}`));
 	};
 
@@ -800,15 +804,18 @@ export async function runScreen(session, options, runTerminal) {
 		flash("removed from future kept talk · the Durable transcript, active conversation, and sent requests stay unchanged");
 	};
 	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
-	/** n in a book view: an editor opens on a template; on save the entry goes in through the same operations the agent uses. */
+	/** n in a book view: the external editor stays a transitional handoff; its template and saved row use the typed action boundary. */
 	const newEntry = (book) => {
-		const template = addTemplate(book);
-		if (template === undefined) return flash("this view has no add");
-		const file = scratch(`new-${book}.json`, template);
-		if (!runEditor(file)) return;
-		const said = applyAdd(brainDir, book, readFileSync(file, "utf8"), root);
-		flash(said);
-		refresh(viewId(), true);
+		const id = viewId();
+		void workspace.template(book)
+			.then((template) => {
+				if (!template.ok) return presentWorkspaceResult(template, id);
+				const file = scratch(`new-${book}.json`, template.data.text);
+				if (!runEditor(file)) return false;
+				return workspace.execute(WORKSPACE_ACTION.add, { book, text: readFileSync(file, "utf8") })
+					.then((result) => presentWorkspaceResult(result, id));
+			})
+			.catch((error) => flash(`could not prepare that new row: ${error?.message ?? error}`));
 	};
 	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
 	/** e in Model, or on a Current shared brain record that has its own source. */
@@ -983,13 +990,10 @@ export async function runScreen(session, options, runTerminal) {
 					}
 					if (Object.keys(budget).length > 0) changes.budget = budget;
 				}
-				const said = editRow(brainDir, id, changes, root);
-				flash(said.replace(/\n+/g, " "));
-				if (said.startsWith("! ")) return false;
-				brain.at = 0;
-				refresh(viewId(), true);
-				return true;
+				return workspace.execute(WORKSPACE_ACTION.edit, { id, changes })
+					.then((result) => presentWorkspaceResult(result, viewId_));
 			},
+			redraw: draw,
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
 	/** The fields of a new entry of `book`, from the same template n used to open in the editor. */
@@ -1032,6 +1036,7 @@ export async function runScreen(session, options, runTerminal) {
 	const openAddBox = (book) => {
 		const template = ADD_FIELDS[book];
 		if (template === undefined) return flash("this view has no add");
+		const id = viewId();
 		const fields = template();
 		const handle = tui.showOverlay(new Box({
 			title: `new ${book}`,
@@ -1039,17 +1044,12 @@ export async function runScreen(session, options, runTerminal) {
 			keyOf,
 			flash,
 			close: () => handle.hide(),
-			save: (drafts) => {
-				const said = applyAdd(brainDir, book, JSON.stringify(addOpOf(book, drafts)), root);
-				flash(said.replace(/\n+/g, " "));
-				if (said.startsWith("! ")) return false;
-				brain.at = 0;
-				refresh(viewId(), true);
-				return true;
-			},
+			save: (drafts) => workspace.execute(WORKSPACE_ACTION.add, { book, text: JSON.stringify(addOpOf(book, drafts)) })
+				.then((result) => presentWorkspaceResult(result, id)),
+			redraw: draw,
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
-	/** `n` on an envelope declares a child move through the same plan operation as the agent. */
+	/** `n` on an envelope declares a child move through the typed workspace action. */
 	const openMoveBox = (parentId) => {
 		const { plan } = loadPlan(brainDir);
 		const parent = plan?.items.find((item) => item.id === parentId);
@@ -1082,32 +1082,19 @@ export async function runScreen(session, options, runTerminal) {
 					const raw = said(key).trim();
 					return /^\d+$/.test(raw) ? Number(raw) : raw;
 				};
-				const op = {
-					action: "addMove",
+				return workspace.execute(WORKSPACE_ACTION.addMove, {
 					parent: parent.id,
 					text: said("text"),
-					done_when: said("doneWhen"),
+					doneWhen: said("doneWhen"),
 					...(changing ? {
 						targets: said("targets").split(/[\n,]/).map((path) => path.trim()).filter((path) => path !== ""),
 						proof: said("proof"),
 						capabilities: { files: boolOf(said("filesAllowed")), commands: boolOf(said("commandsAllowed")), network: boolOf(said("networkAllowed")) },
 						budget: { replies: number("replies"), fileOps: number("fileOps"), commandStarts: number("commandStarts") },
 					} : said("proof").trim() !== "" ? { proof: said("proof") } : {}),
-				};
-				try {
-					const current = loadPlan(brainDir).plan;
-					if (current === undefined) return false;
-					const result = applyPlanOp(current, op, new Date().toISOString());
-					savePlan(brainDir, current);
-					flash(result.line);
-					brain.at = 0;
-					refresh(viewId(), true);
-					return true;
-				} catch (error) {
-					flash(error instanceof PlanError ? error.message : String(error.message ?? error));
-					return false;
-				}
+				}).then((result) => presentWorkspaceResult(result, "carto.plan"));
 			},
+			redraw: draw,
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
 	/** The $EDITOR on the file of the row, or on the whole book by the row's line: the door Ctrl-O keeps open everywhere. */

@@ -289,6 +289,29 @@ export function applyAdd(brainDir, book, text, root) {
 	}
 }
 
+/** Add one child move under an envelope through the same plan operation the agent uses. @returns the line to show */
+export function addMove(brainDir, { parent, text, doneWhen, targets, proof, capabilities, budget }) {
+	const { plan, error } = loadPlan(brainDir);
+	if (plan === undefined) return `! The plan cannot be read: ${error}`;
+	try {
+		const result = applyPlanOp(plan, {
+			action: "addMove",
+			parent,
+			text,
+			done_when: doneWhen,
+			...(targets !== undefined ? { targets } : {}),
+			...(proof !== undefined ? { proof } : {}),
+			...(capabilities !== undefined ? { capabilities } : {}),
+			...(budget !== undefined ? { budget } : {}),
+		}, new Date().toISOString());
+		savePlan(brainDir, plan);
+		return result.line;
+	} catch (error_) {
+		if (error_ instanceof PlanError) return `! ${error_.message}`;
+		throw error_;
+	}
+}
+
 /**
  * The fields the screen's small box edits, applied with the same operations the agent uses. `changes` holds only
  * what was edited — `text`, `doneWhen`, `outcome`, `gist`, `detail`, `name` — so a save carries the whole edit in
