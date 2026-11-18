@@ -41,6 +41,7 @@ import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
 import { renderAsyncBoundary } from "./async-boundary.mjs";
+import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "./notices.mjs";
 import { createOverlayManager } from "./overlays.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
@@ -330,6 +331,13 @@ export async function runScreen(session, options, runTerminal) {
 	const draw = () => {
 		if (!state.closed) tui.requestRender();
 	};
+	const notices = createNoticeStore({ ttlMs: POLICY.timing.screen.flashMs });
+	const noticeLevel = (text) => {
+		const message = String(text ?? "").trim();
+		if (/^(?:!|could not\b|cannot\b|failed\b|error\b)/i.test(message)) return NOTICE_LEVEL.error;
+		if (/^(?:nothing\b|no\b|not\b|only\b|the .* is not\b)/i.test(message)) return NOTICE_LEVEL.warning;
+		return NOTICE_LEVEL.info;
+	};
 	refreshReferenceLabels = () => {
 		if (state.closed || !chat.refreshActivityLabels()) return;
 		draw();
@@ -349,9 +357,13 @@ export async function runScreen(session, options, runTerminal) {
 		chat.setThinking(lastThinking);
 		draw();
 	};
-	/** Something to say in passing, which is not worth a line of the conversation. */
-	const flash = (text) => {
-		if (!state.closed) tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, POLICY.timing.screen.flashMs);
+	/** Something to say in passing: a flash for immediacy, plus a bounded notice that stays in the shell footer. */
+	const flash = (text, level = noticeLevel(text)) => {
+		if (state.closed) return undefined;
+		const notice = notices.add({ message: text, level });
+		tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, POLICY.timing.screen.flashMs);
+		draw();
+		return notice;
 	};
 
 	// ─── The terminal core's side ────────────────────────────────────────────
@@ -538,7 +550,11 @@ export async function runScreen(session, options, runTerminal) {
 		if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 		if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
 		if (!core.thinking()) second.push([" · notes hidden", "muted"]);
-		return [first, second, [[` ${legend()}`, "faint"]]];
+		const rows = [first, second];
+		const currentNotice = notices.latest({ live: true });
+		if (currentNotice !== undefined) rows.push([[" ", ""], ...noticeSpans(currentNotice)]);
+		rows.push([[` ${legend()}`, TOKEN.text.muted]]);
+		return rows;
 	};
 
 	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
@@ -746,7 +762,7 @@ export async function runScreen(session, options, runTerminal) {
 
 	/** Present one typed workspace outcome, then redraw the projection that started the action. */
 	const presentWorkspaceResult = (result, id = viewId()) => {
-		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
+		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
 		if (!result.ok) refresh(id, true);
 		draw();
 		return result.ok;

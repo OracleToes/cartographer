@@ -375,7 +375,7 @@ export class Strip {
 		return guarded(width, () => {
 			// The strip reads from now to later: immediate activity, quieter shared state, then the key reminder next
 			// to the input. Giving those rows descending chrome makes the information order visible without extra rules.
-			const grounds = [TOKEN.surface.raised, TOKEN.surface.content, TOKEN.surface.input];
+			const grounds = [TOKEN.surface.raised, TOKEN.surface.content, TOKEN.surface.content, TOKEN.surface.input];
 			return this.ui.status(width).map((spans, index) => barRow(spans, width, grounds[index] ?? TOKEN.surface.content));
 		});
 	}

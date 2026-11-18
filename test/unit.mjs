@@ -69,6 +69,7 @@ import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat } from "../src/screen/chat.mjs";
+import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
@@ -432,6 +433,27 @@ test("screen: the shared async boundary keeps loading, stale, error, issue, and 
 	]);
 	assert.equal(cachedFailure.items[0].key, "cached");
 	assert.throws(() => renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: {}, render: undefined }), /needs a data renderer/);
+});
+
+test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
+	let clock = 0;
+	const notices = createNoticeStore({ now: () => clock, limit: 2, ttlMs: 10 });
+	const first = notices.add({ message: "  Loaded   Atlas  ", level: NOTICE_LEVEL.success });
+	assert.deepEqual(noticeSpans(first), [["✓ ", TOKEN.feedback.success], ["Loaded Atlas", TOKEN.text.primary]]);
+	assert.equal(notices.latest({ live: true })?.id, first.id);
+	clock = 10;
+	assert.equal(notices.latest({ live: true }), undefined, "an expired flash leaves the footer without discarding session history");
+	assert.equal(notices.history().length, 1);
+
+	const warning = notices.add({ message: "The durable view is stale.", level: NOTICE_LEVEL.warning, ttl: Infinity });
+	const error = notices.add({ message: "Refresh failed.", level: NOTICE_LEVEL.error, ttl: Infinity });
+	assert.deepEqual(notices.history().map((notice) => notice.message), ["The durable view is stale.", "Refresh failed."], "history stays bounded to the most recent notices");
+	assert.deepEqual(noticeSpans(error), [["! ", TOKEN.feedback.danger], ["Refresh failed.", TOKEN.text.primary]]);
+	assert.equal(notices.latest({ live: true })?.id, error.id, "a persistent safety notice remains visible until it is dismissed");
+	assert.equal(notices.dismiss(error.id), true);
+	assert.equal(notices.latest({ live: true })?.id, warning.id);
+	assert.equal(notices.clear(), true);
+	assert.equal(notices.clear(), false);
 });
 
 test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {
