@@ -19,6 +19,7 @@ import { createApplication } from "../src/application/app.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
+import { createChatPresentation } from "../src/application/chat.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
@@ -68,7 +69,7 @@ import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, 
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
-import { createChat } from "../src/screen/chat.mjs";
+import { createChat as createChatModel } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
 import { createFocusManager } from "../src/screen/focus.mjs";
 import { createKeyHints } from "../src/screen/key-hints.mjs";
@@ -83,6 +84,13 @@ import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
+
+// Chat is a pure screen model; its domain-shaped labels enter through the same application adapter that the screen
+// composition supplies.
+const createChat = (options = {}) => {
+	const { presentation, describeRef, ...rest } = options;
+	return createChatModel({ ...rest, presentation: presentation ?? createChatPresentation({ describeRef }) });
+};
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -1628,17 +1636,20 @@ test("application: consult projection defers its isolated audit list", async (t)
 	if (cancelled.ok) throw new Error("a cancelled Consult projection must not inspect its audit directory");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
 	assert.equal(reads, 3);
-	const cache = { loading: true, conferences: [] };
-	const chat = createChat({
-		listConferences: () => cache.conferences,
-		readConference: (id) => cache.conferences.find((entry) => entry.id === id)?.conference,
-		consultStatus: () => cache,
-	});
+	const chat = createChat();
 	const chatText = (projection) => chat.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
+	chat.setConsultProjection({ loading: true });
+	const loadingVersion = chat.version;
 	assert.match(chatText("consult"), /Loading consultation conferences/, "Consult names its asynchronous cache state rather than reading audit files while it renders");
-	cache.loading = false;
-	cache.conferences = [{ id: "co1", conference }];
-	chat.refreshConsult();
+	assert.equal(chat.version, loadingVersion, "painting a loading Consult cache does not transition or synchronize Chat state");
+	chat.setConsultProjection({ data: { conferences: [] } });
+	assert.match(chatText("consult"), /No consultation conferences yet/, "an empty settled audit cache is a successful Consult state");
+	chat.setConsultProjection({ error: { message: "The private audit is unavailable." } });
+	assert.match(chatText("consult"), /Consult could not be loaded/, "an uncached query failure is explicit and retryable");
+	chat.setConsultProjection({ data: { conferences: [{ id: "co1", conference }] }, loading: true });
+	assert.match(chatText("consult"), /Refreshing consultation conferences · showing cached audit/, "a refresh keeps its cached Consult audit visible as stale");
+	chat.setConsultProjection({ data: { conferences: [{ id: "co1", conference }] }, error: { message: "The refresh failed." } });
+	assert.match(chatText("consult"), /The refresh failed\. · showing cached audit/, "a failed refresh keeps its cached Consult audit visible");
 	assert.match(chatText("consult"), /Consultation co1/);
 	assert.doesNotMatch(chatText("work"), /Does the cache stay private/, "a cached conference remains exclusive to Consult");
 });
@@ -4449,7 +4460,8 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 	assert.equal(cancelledRecord.status, "cancelled", "aborting an in-flight raw selector preserves cancellation instead of recording a generic failure");
 	assert.match(cancelledRecord.ended.reason, /native selector/i);
 
-	const chat = createChat({ readConference: (id) => id === captured.id ? returnedRecord : undefined });
+	const chat = createChat();
+	chat.setConsultProjection({ data: { conferences: [{ id: captured.id, conference: returnedRecord }] } });
 	chat.entry(0, { id: "entry-1", conversationId: "parent", model: [
 		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-call", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
 		{ role: "toolResult", toolCallId: "consult-call", toolName: "consult", isError: false, details: { conference: captured.id }, content: [{ type: "text", text: "Only the compact parent receipt." }] },
@@ -4458,17 +4470,19 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 	const viewText = (instance, projection) => instance.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
 	assert.doesNotMatch(viewText(chat, "work"), /Consult conference|Only the compact parent receipt/, "the parent Work projection has no conference notebook or receipt");
 	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot export conference activity");
-	assert.match(viewText(chat, "consult"), /Consultation co1/, "only Consult reads the local co<N> notebook");
+	assert.match(viewText(chat, "consult"), /Consultation co1/, "only Consult renders the local co<N> notebook");
 
 	let liveAudit = { ...returnedRecord, status: "running", final: undefined, ended: undefined, active: { kind: "participant", participant: "cartographer" } };
-	const liveChat = createChat({ readConference: () => liveAudit });
+	const liveChat = createChat();
+	liveChat.setConsultProjection({ data: { conferences: [{ id: captured.id, conference: liveAudit }] } });
 	liveChat.entry(0, { id: "entry-live", conversationId: "parent", model: [
 		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-live", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
 	] });
 	liveChat.liveTools(0, [{ callId: "consult-live", status: "running", details: { conference: captured.id } }]);
 	assert.match(viewText(liveChat, "consult"), /Cartographer · active/, "Consult reads live conference status without exposing it through parent Work");
 	liveAudit = { ...liveAudit, active: { kind: "participant", participant: "atlas" } };
-	assert.match(viewText(liveChat, "consult"), /Atlas · active/, "Consult refreshes its private audit while the conference progresses");
+	liveChat.setConsultProjection({ data: { conferences: [{ id: captured.id, conference: liveAudit }] } });
+	assert.match(viewText(liveChat, "consult"), /Atlas · active/, "Consult ingests its refreshed private audit without exposing it through parent Work");
 	assert.doesNotMatch(viewText(liveChat, "work"), /Cartographer · active|Atlas · active/, "Work remains isolated from private conference activity");
 });
 

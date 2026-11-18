@@ -38,6 +38,8 @@ import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
+import { createChatPresentation } from "../src/application/chat.mjs";
+import { createChat as createChatModel, homeOf } from "../src/screen/chat.mjs";
 import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
 import { loadConference } from "../src/conference.mjs";
 
@@ -51,6 +53,12 @@ const only = process.argv[2];
 
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
+// Chat's presentation contract is injected by the screen composition. The integration model cases use the same
+// adapter so their assertions remain about rendered behavior rather than direct domain imports.
+const createChat = (options = {}) => {
+	const { presentation, describeRef, ...rest } = options;
+	return createChatModel({ ...rest, presentation: presentation ?? createChatPresentation({ describeRef }) });
+};
 /** Write the project's config by hand (tests use it to switch features off). */
 const configure = (root, config) => {
 	mkdirSync(join(root, ".brain"), { recursive: true });
@@ -1805,7 +1813,6 @@ test("atlas attention: a completed read and shelf batch publishes one durable ma
 });
 
 test("screen: a collapse of the main context leaves only the marker, and the agent's blocks fold open", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
 	const out = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -1887,7 +1894,6 @@ test("screen: keys are named for the commands mode, and several lines that arriv
 });
 
 test("screen: Work folds the agent's private trace into one line, opens it to a line per call, and shows what is being written", async () => {
-	const { createChat, homeOf } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
 	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -1962,7 +1968,6 @@ test("screen: Work folds the agent's private trace into one line, opens it to a 
 });
 
 test("screen: Talk separates delivered speech from private Work", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
 	const text = (projection, cols = 120) => chat.lines(cols, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -2020,7 +2025,6 @@ test("screen: Talk separates delivered speech from private Work", async () => {
 });
 
 test("screen: Talk binds an admitted Durable source by lifecycle, not matching words", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
 	const chat = createChat();
 	chat.user("same visible words");
 	chat.entry(0, {
@@ -2042,7 +2046,6 @@ test("screen: Talk binds an admitted Durable source by lifecycle, not matching w
 });
 
 test("screen: long live reasoning names its compact tail, opens in Work, and resets when it finishes", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
 	const chat = createChat();
 	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const previewRows = POLICY.limits.screen.notePreviewLines;
@@ -2085,7 +2088,6 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 });
 
 test("screen: only Consult loads a conference audit; parent rows remain private pointers", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
 	const record = {
 		id: "co7",
 		status: "returned",
@@ -2098,32 +2100,31 @@ test("screen: only Consult loads a conference audit; parent rows remain private 
 		turns: [], selectorEvents: [], requestPlans: [], sources: [], toolReceipts: [], activities: [],
 		final: { participant: "cartographer", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
 	};
-	let reads = 0;
-	const chat = createChat({ now: () => 1_000, readConference: (id) => { reads++; return id === "co7" ? record : undefined; } });
+	const chat = createChat({ now: () => 1_000 });
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
 	const text = (projection) => chat.lines(100, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	chat.entry(0, reply([call("c1", "consult", { question: "What must the parent verify?", myPersona: "Audit the source boundary." })], 1));
 	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from cartographer.", { details: { consult: true, conference: "co7" } }));
-	assert.equal(reads, 0, "the private notebook is not loaded into Conversation or Work");
+	assert.equal(chat.lines(100, "work").some((line) => line.spans.some(([part]) => part.includes(record.question))), false, "the private notebook is not loaded into Conversation or Work");
 	hasNot(text("work"), "What must the parent verify?", "the parent consult call is absent from Work");
-	// A child replay without terminal-supplied persona metadata must not synchronously open co<N> just to guess one
-	// while the user is still in another Chat subview. Consult will reconstruct it from its durable audit on demand.
-	let childReads = 0;
-	const child = createChat({ readConference: () => { childReads++; return record; } });
+	// A child replay without terminal-supplied persona metadata cannot infer one from a private audit while the user
+	// is still in another Chat subview. Attribution arrives only with a settled Consult projection.
+	const child = createChat();
 	child.entry(1, reply([{ type: "text", text: "Private child replay words." }], 2), "", { conference: "co7" });
 	child.live(1, { timestamp: 3, content: [{ type: "thinking", thinking: "Private child live reasoning." }] }, { conference: "co7" });
-	assert.equal(childReads, 0, "unattributed child replay/live state never loads a private audit outside Consult");
 	hasNot(child.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "Private child", "child state cannot become an ordinary Work row while attribution is unavailable");
 	const group = chat.items.find((item) => item.type === "group");
 	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot load or export the audit");
+	chat.setConsultProjection({ data: { conferences: [{ id: record.id, conference: record }] } });
+	const beforePaint = chat.version;
 	const consult = text("consult");
-	assert.equal(reads, 1, "Consult deliberately reads its co<N> audit");
+	assert.equal(chat.version, beforePaint, "Consult paints the settled cache without a domain read or local state transition");
 	has(consult, "Consultation co7 · returned", "the dedicated view names the conference record");
 	has(consult, "Verify the current source before acting.", "the durable advisory renders only in Consult");
 
-	const historical = createChat({ readConference: () => { throw new Error("a historical row must not load an archive"); } });
+	const historical = createChat();
 	historical.entry(0, reply([call("c2", "consult", { question: "Old question", thread: "st1" })], 1));
 	historical.entry(0, result("c2", "consult", "Legacy row", { details: { consult: true, thread: "st1" } }));
 	const historicalWork = historical.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -2133,7 +2134,6 @@ test("screen: only Consult loads a conference audit; parent rows remain private 
 });
 
 test("screen: Consult is a separate persona-attributed conference timeline with durable and live activity", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
 	const record = {
 		id: "co18",
 		status: "returned",
@@ -2159,22 +2159,19 @@ test("screen: Consult is a separate persona-attributed conference timeline with 
 		toolReceipts: [{ id: "source-1", callId: "source-1", participant: "cartographer", action: "read", source: "s1", result: "== s1\n1 immutable evidence", at: "2026-11-16T12:00:00.500Z" }],
 		final: { participant: "cartographer", outcome: "answered", at: "2026-11-16T12:00:03.000Z", synthesis: "Keep the conference audit isolated from parent context.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] },
 	};
-	let reads = 0;
-	const chat = createChat({
-		readConference: (id) => { reads++; return id === record.id ? record : undefined; },
-		listConferences: () => [{ id: record.id, conference: record }],
-	});
+	const chat = createChat();
+	chat.setConsultProjection({ data: { conferences: [{ id: record.id, conference: record }] } });
 	const text = (projection) => chat.lines(110, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 
 	// A parent call creates only a private Consult pointer. Ordinary Work does not fetch or echo the co<N> audit.
 	chat.entry(0, { model: [{ role: "assistant", content: [call("outer-consult", "consult", { question: record.question, myPersona: "Keep the boundary explicit." })] }] });
 	chat.liveTools(0, [{ callId: "outer-consult", status: "running", details: { consult: true, conference: record.id } }]);
-	assert.equal(reads, 0, "the parent Work projection does not read a consult audit");
 	hasNot(text("work"), record.question, "the parent consult call is not mixed into ordinary Work");
 
+	const beforePaint = chat.version;
 	const consult = text("consult");
-	assert.equal(reads, 0, "Consult uses the durable conference listing supplied for this paint instead of redundantly rereading its record");
+	assert.equal(chat.version, beforePaint, "Consult uses the settled conference projection without mutating local state while it paints");
 	for (const name of ["Cartographer", "Atlas", "Ledger", "Plan", "Assessment", "Context"]) has(consult, `${name} ·`, `the roster visibly labels ${name}`);
 	has(consult, "Cartographer · reasoning", "a participant's reasoning is its own named block");
 	has(consult, "Cartographer · chat / prose", "participant prose is distinct from reasoning");
@@ -2255,7 +2252,6 @@ test("screen: the palette is made for the terminal's background: levels of text,
 test("screen: lines are painted on their block's background, and text says by its style what it is", async () => {
 	const { applyTheme, paint, paintStyled, sgr, STYLES } = await import("../src/screen/text.mjs");
 	const { TOKEN } = await import("../src/screen/tokens.mjs");
-	const { createChat } = await import("../src/screen/chat.mjs");
 	try {
 		applyTheme({ bgTool: "48;5;235", bgSel: "48;5;239", muted: "38;5;246", ok: "38;5;115" });
 		assert.equal(paint([["✓ ", "ok"], ["read", ""]], 8, "bgTool"), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");

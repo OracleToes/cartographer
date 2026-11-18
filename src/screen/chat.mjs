@@ -19,10 +19,6 @@
 // belongs to, and `styled` is the line with its escape sequences when a Markdown renderer made it. It draws
 // nothing and knows no terminal (src/screen/app.mjs does).
 import { POLICY } from "../config.mjs";
-import { describeCall, describeResult } from "../application/activity.mjs";
-import { isFront } from "../context.mjs";
-import { splitTop } from "../top.mjs";
-import { CONSULT_ROSTER } from "../conference.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
@@ -95,8 +91,6 @@ function previewTail(text, cols, rows) {
 	return { lines: wrapped.slice(omitted), omitted };
 }
 
-const CONSULT_MEMBERS = new Map(CONSULT_ROSTER.map((member) => [member.id, member]));
-const personaName = (id) => CONSULT_MEMBERS.get(id)?.name ?? (typeof id === "string" && id !== "" ? `${id.slice(0, 1).toUpperCase()}${id.slice(1)}` : "Conference host");
 const selectorLabel = (selection) => selection?.decision === "report" ? "Conference host · native final-report decision" : "Conference host · native debate routing";
 const consultCall = (call) => {
 	const args = call?.arguments ?? call?.args ?? {};
@@ -122,13 +116,18 @@ const resultSignature = (record) => {
 };
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readConference?: (id: string) => object | undefined, listConferences?: () => { id: string, conference?: object }[], consultStatus?: () => { loading?: boolean, error?: { message?: string } } }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], presentation: { describeCall: (call: object) => string, describeResult: (message: object) => string | undefined, isCollapsedContext: (text: string) => boolean, consultRoster: { id: string, name: string }[] } }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readConference/listConferences: use consult-local co<N> audit records only for the dedicated Consult
- *   projection. Their private material is never copied into a parent conversation or ordinary Work projection.
- *   consultStatus: reports the screen-owned asynchronous Consult projection cache; it never reads the audit itself.
+ *   presentation: application-owned labels and fixed semantics. Chat never imports or reads a domain book itself.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef, readConference, listConferences, consultStatus } = {}) {
+export function createChat({ now = () => Date.now(), markdown, presentation } = {}) {
+	if (presentation === undefined || typeof presentation.describeCall !== "function" || typeof presentation.describeResult !== "function" || typeof presentation.isCollapsedContext !== "function" || !Array.isArray(presentation.consultRoster)) throw new TypeError("Chat needs its presentation adapter.");
+	const describeCall = presentation.describeCall;
+	const describeResult = presentation.describeResult;
+	const isCollapsedContext = presentation.isCollapsedContext;
+	const consultRoster = presentation.consultRoster;
+	const consultMembers = new Map(consultRoster.map((member) => [member.id, member]));
+	const personaName = (id) => consultMembers.get(id)?.name ?? (typeof id === "string" && id !== "" ? `${id.slice(0, 1).toUpperCase()}${id.slice(1)}` : "Conference host");
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -139,6 +138,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 	const consultations = new Map(); // co<N> (or provisional parent-call key) -> session
 	const consultByCall = new Map(); // parent/child tool call id -> session key
 	const consultLive = new Map(); // child depth -> currently-streaming participant reply
+	// Set only by the composition-owned projection lifecycle. `lines()` reads this settled cache and never starts or
+	// synchronizes a private-audit read of its own.
+	let consultProjection = { loading: false, data: undefined, error: undefined, sign: undefined };
 	let thinking = true;
 	// Counted up when the colours change: what was rendered with the old ones is made again.
 	let styleRev = 0;
@@ -238,38 +240,57 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		session.question ??= typeof record.question === "string" ? record.question : undefined;
 		return changed;
 	};
-	const readConsult = (session) => {
-		if (session.id === undefined || typeof readConference !== "function") return session.record;
-		try { updateConsultRecord(session, readConference(session.id)); } catch { /* An unreadable private audit is named in Consult rather than copied elsewhere. */ }
-		return session.record;
-	};
-	const syncConsults = ({ discover = false } = {}) => {
+	/** Index durable child calls when a settled Consult snapshot arrives, never while a line is being made. */
+	const indexConsultRecord = (session, record) => {
 		let changed = false;
-		const loaded = new Set();
-		if (discover && typeof listConferences === "function") {
-			try {
-				for (const listed of listConferences() ?? []) {
-					const id = typeof listed?.id === "string" ? listed.id : listed?.conference?.id;
-					if (id === undefined || !/^co\d+$/.test(id)) continue;
-					const session = ensureConsult({ id, question: listed?.conference?.question });
-					if (listed?.conference !== undefined) {
-						changed = updateConsultRecord(session, listed.conference) || changed;
-						loaded.add(session.key);
-					}
+		for (const activity of Array.isArray(record?.activities) ? record.activities : []) {
+			for (const call of Array.isArray(activity?.calls) ? activity.calls : []) {
+				if (typeof call?.id !== "string") continue;
+				const next = { participant: activity.participant, call, at: activity.at };
+				if (resultSignature(session.calls.get(call.id)) !== resultSignature(next)) {
+					session.calls.set(call.id, next);
+					changed = true;
 				}
-			} catch { /* A broken consult directory is rendered as an empty/unavailable view, never as parent work. */ }
-		}
-		for (const session of consultations.values()) {
-			if (loaded.has(session.key)) continue;
-			const before = session.recordSign;
-			readConsult(session);
-			if (before !== session.recordSign) changed = true;
+				if (consultByCall.get(call.id) !== session.key) {
+					consultByCall.set(call.id, session.key);
+					changed = true;
+				}
+			}
 		}
 		return changed;
 	};
+	/** Accept a settled or in-flight screen projection. This is the sole ingress for durable conference records. */
+	const setConsultProjection = (projection = {}) => {
+		const next = {
+			loading: projection?.loading === true,
+			data: projection?.data,
+			error: projection?.error,
+		};
+		const sign = resultSignature({ loading: next.loading, data: next.data, error: next.error?.message ?? next.error });
+		let changed = consultProjection.sign !== sign;
+		consultProjection = { ...next, sign };
+		for (const listed of Array.isArray(next.data?.conferences) ? next.data.conferences : []) {
+			const id = typeof listed?.id === "string" ? listed.id : listed?.conference?.id;
+			if (id === undefined || !/^co\d+$/.test(id)) continue;
+			const existed = consultations.has(consultKey(id));
+			const session = ensureConsult({ id, question: listed?.conference?.question });
+			if (!existed) changed = true;
+			const auditError = listed?.conference === undefined && typeof listed?.error === "string" && listed.error !== "" ? listed.error : undefined;
+			if (session.auditError !== auditError) {
+				session.auditError = auditError;
+				changed = true;
+			}
+			if (listed?.conference !== undefined) {
+				changed = updateConsultRecord(session, listed.conference) || changed;
+				changed = indexConsultRecord(session, listed.conference) || changed;
+			}
+		}
+		if (changed) touch();
+		return changed;
+	};
 	const activityParticipant = (session, message, fallback) => {
-		// Terminal ownership propagation carries the active persona for a current child response. Never synchronously
-		// read co<N> merely to guess a historic one: only a deliberate Consult paint may load that private audit.
+		// Terminal ownership propagation carries the active persona for a current child response. Historic attribution
+		// comes only from the last settled Consult snapshot; Chat never opens a co<N> audit to guess it.
 		if (fallback !== undefined) return fallback;
 		const record = session.record;
 		const calls = callsOf(message);
@@ -281,6 +302,23 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		));
 		const turn = ids.size === 0 && prose !== "" ? record?.turns?.findLast?.((entry) => entry?.participant && entry.text === prose) : undefined;
 		return activity?.participant ?? turn?.participant ?? (calls.some((call) => call.name === "consult_return") ? record?.final?.participant : undefined);
+	};
+	/** Record child call identity as it arrives so later tool lifecycle events never depend on a paint. */
+	const indexConsultMessage = (session, message, participant, at) => {
+		let changed = false;
+		for (const call of callsOf(message)) {
+			if (typeof call.id !== "string") continue;
+			const next = { participant, call, at };
+			if (resultSignature(session.calls.get(call.id)) !== resultSignature(next)) {
+				session.calls.set(call.id, next);
+				changed = true;
+			}
+			if (consultByCall.get(call.id) !== session.key) {
+				consultByCall.set(call.id, session.key);
+				changed = true;
+			}
+		}
+		return changed;
 	};
 	const addConsultEvent = (session, event) => {
 		const old = session.events.get(event.key);
@@ -330,6 +368,8 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		const durableCallIds = new Set();
 		const durableResults = new Set();
 		const matchedReceiptCalls = new Set();
+		// This local index joins a settled audit to in-memory child lifecycle events without changing Chat during paint.
+		const calls = new Map(session.calls);
 		// A digest-less replay event can only be paired with durable prose by content. Keep a count rather than a
 		// boolean: repeated identical contributions are distinct events and must not erase one another from Consult.
 		const durableTextEvents = new Map();
@@ -352,8 +392,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				const callId = typeof call?.id === "string" ? call.id : undefined;
 				if (callId !== undefined) {
 					durableCallIds.add(callId);
-					session.calls.set(callId, { participant: activity.participant, call, at: activity.at });
-					consultByCall.set(callId, session.key);
+					calls.set(callId, { participant: activity.participant, call, at: activity.at });
 				}
 				add({ key: `${base}:call:${callId ?? index}`, at: activity.at, participant: activity.participant, type: "tool-call", call, callId });
 			}
@@ -367,11 +406,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		}
 		for (const receipt of record?.toolReceipts ?? []) {
 			let callId = typeof receipt.callId === "string" ? receipt.callId : undefined;
-			let known = callId === undefined ? undefined : session.calls.get(callId);
+			let known = callId === undefined ? undefined : calls.get(callId);
 			// Very old/local direct callers may not retain a Durable call id on their receipt. Pair that receipt with an
 			// unclaimed matching activity call before synthesizing a historic one, so one source read stays one call/result.
 			if (known === undefined && callId === undefined) {
-				const match = [...session.calls.entries()].findLast(([knownId, entry]) => {
+				const match = [...calls.entries()].findLast(([knownId, entry]) => {
 					if (matchedReceiptCalls.has(knownId) || entry.participant !== receipt.participant) return false;
 					const args = entry.call?.arguments ?? entry.call?.args ?? {};
 					if (receipt.action === "return") return entry.call?.name === "consult_return" || args.action === "return";
@@ -455,12 +494,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (prose !== "") add({ key: `live:${depth}:prose`, at: now(), participant, type: "prose", text: prose, live: true });
 			for (const call of callsOf(current.message)) {
 				const callId = typeof call.id === "string" ? call.id : `live:${depth}:${call.name}`;
-				session.calls.set(callId, { participant, call, at: now() });
+				calls.set(callId, { participant, call, at: now() });
 				add({ key: `live:${depth}:call:${callId}`, at: now(), participant, type: "tool-call", call, callId, live: true });
 			}
 		}
 		for (const [callId, tool] of session.liveTools) {
-			const known = session.calls.get(callId);
+			const known = calls.get(callId);
 			const participant = tool.participant ?? known?.participant ?? record?.active?.participant;
 			if (participant === undefined) continue;
 			add({ key: `live:tool:${callId}`, at: now(), participant, type: "tool-result", call: tool.call ?? known?.call, callId, text: tool.text === "" ? "Waiting for the consult-local tool result…" : tool.text, isError: false, clipped: tool.clipped, live: true });
@@ -480,7 +519,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		return "ready · no contribution yet";
 	};
 	const consultExport = (session, eventKey) => {
-		const record = readConsult(session);
+		const record = session.record;
 		const events = consultEvents(session, record);
 		const heading = `# Consultation ${session.id ?? "starting"}\n\n`;
 		if (eventKey !== undefined) {
@@ -490,7 +529,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			return `${label}\n\n${event.type === "tool-call" ? `${consultCall(event.call)}\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}` : event.text ?? ""}\n`;
 		}
 		const rows = [heading, `Status: ${record?.status ?? session.outerState ?? "starting"}`, `Question: ${record?.question ?? session.question ?? "(not available yet)"}`, "", "## Roster", ""];
-		for (const member of CONSULT_ROSTER) rows.push(`- ${member.name}: ${consultMemberStatus(member, record, events)}`);
+		for (const member of consultRoster) rows.push(`- ${member.name}: ${consultMemberStatus(member, record, events)}`);
 		for (const event of events) {
 			const label = event.type === "selector" ? selectorLabel(event) : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
 			rows.push("", `## ${label}`, "", event.type === "tool-call" ? `${consultCall(event.call)}\n\n\`\`\`json\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}\n\`\`\`` : event.text ?? "");
@@ -498,23 +537,26 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		return `${rows.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
 	};
 	const consultLines = (cols) => {
-		syncConsults({ discover: true });
 		const out = [];
 		const inner = cols - 2;
 		const add = (spans, ref = {}) => out.push({ spans, ...ref, ...(ref.bg !== undefined ? { pad: 1 } : {}) });
 		const blank = () => { if (out.length > 0 && out.at(-1).spans.length > 0) out.push(BLANK); };
-		const projection = typeof consultStatus === "function" ? consultStatus() ?? {} : {};
-		if (projection.error?.message) add([[`! ${projection.error.message}`, "err"]], { kind: "consult-status", bg: "bgTool" });
-		else if (projection.loading && consultations.size > 0) add([["Refreshing consultation conferences…", "muted"]], { kind: "consult-status", bg: "bgTool" });
+		const projection = consultProjection;
+		const cached = projection.data !== undefined;
+		if (projection.error?.message && !cached) {
+			add([[`! ${projection.error.message}`, "err"]], { kind: "consult-error", bg: "bgTool" });
+			add([["Consult could not be loaded. Press r to retry.", "muted"]], { kind: "consult-error", bg: "bgTool" });
+			if (consultations.size === 0) return out;
+		} else if (projection.loading && cached) add([["Refreshing consultation conferences · showing cached audit", "muted"]], { kind: "consult-status", bg: "bgTool" });
+		else if (projection.error?.message && cached) add([[`! ${projection.error.message} · showing cached audit`, "err"]], { kind: "consult-status", bg: "bgTool" });
 		if (consultations.size === 0) {
-			add([[projection.loading ? "Loading consultation conferences…" : "No consultation conferences yet", "muted"]], { kind: "consult-empty", bg: "bgTool" });
-			add([["When Cartographer runs consult, its isolated member activity appears here — never in parent Conversation or Work.", "faint"]], { kind: "consult-empty", bg: "bgTool" });
+			if (projection.loading) add([["Loading consultation conferences…", "muted"]], { kind: "consult-loading", bg: "bgTool" });
+			else add([["No consultation conferences yet", "muted"]], { kind: "consult-empty", bg: "bgTool" });
+			add([["When Cartographer runs consult, its isolated member activity appears here — never in parent Conversation or Work.", "faint"]], { kind: projection.loading ? "consult-loading" : "consult-empty", bg: "bgTool" });
 			return out;
 		}
 		for (const session of consultations.values()) {
-			// syncConsults just refreshed this local audit. Reuse that snapshot for this render so Consult does one read
-			// per conference per paint, while still refreshing on every deliberate Consult view/refresh.
-			const record = session.record ?? readConsult(session);
+			const record = session.record;
 			const events = consultEvents(session, record);
 			const id = session.id ?? "starting";
 			const status = record?.status ?? session.outerState ?? session.status ?? "starting";
@@ -531,12 +573,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (retained.length > 0) add([[`  Retention · durable audit keeps newest ${retained.join(" · ")}`, "faint"]], ref);
 			if (!session.open) continue;
 			add([["  Members", "carto bold"]], ref);
-			for (const member of CONSULT_ROSTER) {
+			for (const member of consultRoster) {
 				const memberStatus = consultMemberStatus(member, record, events);
 				const active = record?.active?.kind === "participant" && record.active.participant === member.id;
 				add([["  ○ ", active ? "warn" : "faint"], [`${member.name} · ${memberStatus}`, active ? "bold" : "muted"]], ref);
 			}
-			if (record === undefined && session.id !== undefined) add([["  ! The private conference record cannot be read yet; the parent receipt below is all that is available.", "err"]], ref);
+			if (record === undefined && session.id !== undefined) add([[`  ! ${session.auditError ?? "The private conference record cannot be read yet"}; the parent receipt below is all that is available.`, "err"]], ref);
 			if (events.length === 0) {
 				const pending = record?.active?.kind === "selector" ? `The host is choosing after ${personaName(record.active.previousSpeaker)} with native GBNF.` : record?.active?.participant ? `${personaName(record.active.participant)} has the active consult turn.` : "No member activity has been recorded yet.";
 				add([["  ", "faint"], [pending, "faint"]], ref);
@@ -544,7 +586,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			for (const event of events) {
 				if (event.type === "reasoning" && !thinking) continue;
 				blank();
-				event.open = session.eventOpen?.get(event.key) ?? event.open ?? (session.openAllEvents === true);
+				const open = session.eventOpen?.get(event.key) ?? event.open ?? (session.openAllEvents === true);
 				const eventRef = { item: session.key, row: event.key, kind: "consult-event", bg: event.type === "reasoning" ? "bgNote" : "bgTool" };
 				const label = event.type === "selector"
 					? selectorLabel(event)
@@ -564,9 +606,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				const body = detail === "" ? [] : wrap(detail, room);
 				const preview = event.type === "reasoning" ? LIVE_NOTE_ROWS : event.type === "tool-result" ? LIVE_TEXT_ROWS : DETAIL_ROWS;
 				const expandable = body.length > preview;
-				add([[expandable ? (event.open ? "  ▾ " : "  ▸ ") : "  · ", "faint"], [cut(label, inner - 4), event.isError ? "err" : event.type === "final" ? "ok bold" : event.type === "reasoning" ? "faint" : "bold"]], eventRef);
-				for (const piece of (event.open ? body : body.slice(0, preview))) add([["    ", "faint"], [piece, event.isError ? "err" : event.type === "reasoning" ? "note italic" : "muted"]], eventRef);
-				if (!event.open && body.length > preview) add([["    ", "faint"], [`… ${body.length - preview} more lines · Enter opens`, "faint"]], eventRef);
+				add([[expandable ? (open ? "  ▾ " : "  ▸ ") : "  · ", "faint"], [cut(label, inner - 4), event.isError ? "err" : event.type === "final" ? "ok bold" : event.type === "reasoning" ? "faint" : "bold"]], eventRef);
+				for (const piece of (open ? body : body.slice(0, preview))) add([["    ", "faint"], [piece, event.isError ? "err" : event.type === "reasoning" ? "note italic" : "muted"]], eventRef);
+				if (!open && body.length > preview) add([["    ", "faint"], [`… ${body.length - preview} more lines · Enter opens`, "faint"]], eventRef);
 				if (event.clipped) add([["    ", "faint"], [`… retained result was clipped from ${event.chars ?? "a longer"} characters`, "faint"]], eventRef);
 			}
 			if (session.receipt !== undefined && record?.final === undefined && record?.ended === undefined) {
@@ -583,12 +625,8 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			return version;
 		},
 		items,
-		/** Refresh consult-local audit files only while the caller deliberately asks for Consult. */
-		refreshConsult() {
-			const changed = syncConsults({ discover: true });
-			if (changed) touch();
-			return changed;
-		},
+		/** Ingest the app-owned Consult cache after its projection lifecycle changes. Rendering only consumes this state. */
+		setConsultProjection,
 		setThinking(on) {
 			thinking = on;
 			touch();
@@ -682,7 +720,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 							rows.set(call.id, { quiet: true, name: "chat", speech });
 							continue;
 						}
-						const row = { kind: "call", depth, id: call.id, name: call.name, call, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}), ...(call.name === "consult" ? { hiddenInAll: true, hiddenInWork: true } : {}) };
+						const row = { kind: "call", depth, id: call.id, name: call.name, call, label: describeCall(call), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}), ...(call.name === "consult" ? { hiddenInAll: true, hiddenInWork: true } : {}) };
 						if (call.name === "consult") {
 							const conference = ensureConsult({ callId: call.id, question: call.arguments?.question, depth });
 							row.consultKey = conference.key;
@@ -726,7 +764,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						say({ type: "console", text: outcome.endsWith("\n") ? outcome : `${outcome}\n`, sealed: true, of: row.id });
 					}
 					touch();
-				} else if (message.role === "user" && depth === 0 && isFront({ role: "user", content: [{ type: "text", text: splitTop(textOf(message)).text }] })) {
+				} else if (message.role === "user" && depth === 0 && isCollapsedContext(textOf(message))) {
 					// The front block of a collapse, whenever it reached the tab — live or replayed: everything the
 					// agent could see before it is out of view, so only the marker stands.
 					api.collapse();
@@ -751,7 +789,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				const session = ensureConsult({ id: consult.conference, depth });
 				const before = consultLive.get(depth);
 				const sameReply = before?.message?.timestamp === message.timestamp;
-				consultLive.set(depth, { key: session.key, depth, message, participant: consult.participant ?? activityParticipant(session, message), since: sameReply ? before.since : now(), open: sameReply && before.open === true });
+				const participant = consult.participant ?? activityParticipant(session, message);
+				indexConsultMessage(session, message, participant, message.timestamp);
+				consultLive.set(depth, { key: session.key, depth, message, participant, since: sameReply ? before.since : now(), open: sameReply && before.open === true });
 				touch();
 				return;
 			}
@@ -859,7 +899,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				const { message } = live.get(deepest);
 				const call = callsOf(message).at(-1);
 				if (call?.name === "chat" || call?.name === "ask") return { what: "writing to you", depth: deepest, task };
-				if (call !== undefined) return { what: `writing ${cut(describeCall(call, describeRef).replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars)}`, depth: deepest, task };
+				if (call !== undefined) return { what: `writing ${cut(describeCall(call).replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars)}`, depth: deepest, task };
 				if (textOf(message).trim() !== "") return { what: "writing a note", depth: deepest, task };
 				return { what: "thinking", depth: deepest, task };
 			}
@@ -914,7 +954,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			let changed = false;
 			for (const row of rows.values()) {
 				if (row?.kind !== "call" || row.call === undefined) continue;
-				const label = describeCall(row.call, describeRef);
+				const label = describeCall(row.call);
 				if (label === row.label) continue;
 				row.label = label;
 				changed = true;
@@ -1195,7 +1235,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					before = "note";
 				}
 				for (const call of calls.filter((entry) => entry.name !== "chat")) {
-					const label = describeCall(call, describeRef).replace(/\n/g, " ");
+					const label = describeCall(call).replace(/\n/g, " ");
 					const shown = projection === "work" ? `${source} · call · ${label} · sending` : label;
 					add([[`${indent}✎ `, "warn"], [cut(shown, inner - width(indent) - 2), "bold"]], { kind: "live", bg: "bgTool" });
 					const body = bodyOf(call);

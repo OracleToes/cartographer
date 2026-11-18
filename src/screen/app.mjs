@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
+import { createChatPresentation } from "../application/chat.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
@@ -306,15 +307,11 @@ export async function runScreen(session, options, runTerminal) {
 	let settleConsultProjection = () => {};
 	const consultProjections = createProjectionScheduler({ onSettled: (id, projection) => settleConsultProjection(id, projection) });
 	const consultProjection = () => consultProjections.get(CONSULT_PROJECTION);
-	const readConferenceRaw = (id) => (consultProjection().data?.conferences ?? []).find((entry) => entry.id === id)?.conference;
-	const listConferenceRaw = () => consultProjection().data?.conferences ?? [];
 	const chat = createChat({
 		markdown,
-		describeRef,
-		readConference: readConferenceRaw,
-		listConferences: listConferenceRaw,
-		consultStatus: () => ({ loading: consultProjection().loading, error: consultProjection().error }),
+		presentation: createChatPresentation({ describeRef }),
 	});
+	chat.setConsultProjection(consultProjection());
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -370,9 +367,9 @@ export async function runScreen(session, options, runTerminal) {
 		if (state.closed || !chat.refreshActivityLabels()) return;
 		draw();
 	};
-	settleConsultProjection = (id) => {
+	settleConsultProjection = (id, projection) => {
 		if (id !== CONSULT_PROJECTION) return;
-		chat.refreshConsult();
+		chat.setConsultProjection(projection);
 		if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
 	};
 	/** The cells between the margins, as the parts count them. */
@@ -640,9 +637,15 @@ export async function runScreen(session, options, runTerminal) {
 	const refreshConsultProjection = (force = false) => {
 		const prior = consultProjection();
 		if (!force && Date.now() - (prior.requestedAt ?? 0) < (EVERY.chat ?? POLICY.timing.screenRefreshMs.fallback)) return false;
-		return consultProjections.refresh(CONSULT_PROJECTION, ({ signal }) => queries.consult.list({ signal }), { force });
+		const started = consultProjections.refresh(CONSULT_PROJECTION, ({ signal }) => queries.consult.list({ signal }), { force });
+		if (started) chat.setConsultProjection(consultProjection());
+		return started;
 	};
-	const cancelConsultProjection = () => consultProjections.cancel(CONSULT_PROJECTION);
+	const cancelConsultProjection = () => {
+		const cancelled = consultProjections.cancel(CONSULT_PROJECTION);
+		if (cancelled) chat.setConsultProjection(consultProjection());
+		return cancelled;
+	};
 	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
 	const DEFERRED_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
@@ -764,8 +767,7 @@ export async function runScreen(session, options, runTerminal) {
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
 		if (id === "chat.consult") {
-			refreshConsultProjection(force);
-			if (chat.refreshConsult()) draw();
+			if (refreshConsultProjection(force)) draw();
 			return;
 		}
 		const page = pageOf(id);
