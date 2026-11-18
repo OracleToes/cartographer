@@ -186,6 +186,8 @@ export const POLICY = freezeTree({
 		escapeSequenceMs: 40,
 		reaperPollMs: 400,
 		modelCheckMs: 5000,
+		// A no-project native grammar selector diagnostic may need to wake a large local model, unlike /models.
+		consult: { nativeGrammarProbeMs: 60_000 },
 		gracefulExitMs: 50,
 		terminal: {
 			inputFlushMs: 20, taskFlushMs: 5, retryMinimumMs: 50, inputPollMs: 100,

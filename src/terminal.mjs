@@ -18,7 +18,7 @@
 // when something happens in a shell window while the agent is not working.
 import { POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
@@ -26,6 +26,7 @@ import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowS
 import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
 import { conferenceStatusLine, listConferences, loadConference, renderConference } from "./conference.mjs";
+import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
@@ -1171,7 +1172,7 @@ export async function runTerminal(session, options) {
 					[
 						"  /thinking  show or hide what the agent thinks and notes for itself (/thinking on, /thinking off; Ctrl-T does the same)",
 						"  /report   the last task's report in full; /report t12 shows a kept one",
-						"  /consult  consultation conference audits; /consult co1 shows its immutable packet, participant/selector trail, receipts, and final or incomplete outcome",
+						"  /consult  consultation conference audits; /consult co1 shows its immutable packet, participant/selector trail, receipts, and final or incomplete outcome; /consult probe [PATH] writes a no-project llama.cpp native-grammar selector diagnostic",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
 						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
@@ -1229,17 +1230,43 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "consult": {
+				if (argument === "probe") {
+					if (args.length > 2) {
+						line("  /consult probe [PATH] accepts at most one project-relative JSON log path (paths with spaces are not supported).");
+						return true;
+					}
+					if (busy) {
+						line("  The agent is working. /stop first, then /consult probe, so the raw native-grammar check does not compete with a live request.");
+						return true;
+					}
+					try {
+						const current = await session.model?.();
+						const modelId = current?.modelId ?? config.model;
+						const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path: args[1] });
+						line(dim("  Running two synthetic, selector-only llama.cpp GBNF requests. They send no project files, chat, tools, or conference capture."));
+						const record = await runLlamaCppSelectorProbe({ server: config.server, modelId });
+						const written = writeSelectorProbeLog(logPath, record);
+						line(renderLlamaCppSelectorProbe(record));
+						const shown = relative(options.root, written) || written;
+						line(`  JSON log: ${shown}${args[1] === undefined ? "  (ignored under .brain/export; pass a project-relative PATH to commit one)" : ""}`);
+						line(dim("  A PASS proves only native finite-output enforcement on this endpoint; it does not enable the current OpenAI custom-tool conference adapter or establish calibrated routing."));
+					} catch (error) {
+						const message = error instanceof ConsultProbeError ? error.message : error?.message ?? String(error);
+						line(`! Native llama.cpp selector probe could not run: ${message}`);
+					}
+					return true;
+				}
 				if (argument !== undefined) {
 					const loaded = loadConference(options.brainDir, argument);
 					line(loaded.conference === undefined ? `! ${loaded.error}` : renderConference(loaded.conference));
 					return true;
 				}
 				const conferences = listConferences(options.brainDir);
-				if (conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook.");
+				if (conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook. /consult probe checks a llama.cpp native GBNF selector without creating a conference.");
 				else {
 					line(`  ${bold("Consult conferences")}`);
 					for (const entry of conferences) line(entry.error === undefined ? `    ${conferenceStatusLine(entry.conference)}` : `    ${entry.id} · unreadable: ${entry.error}`);
-					line(dim("  /consult co1 shows immutable sources, roster snapshots, participant turns, selector grammar events, tool receipts, and the returned or incomplete outcome. /stop cancels an active outer call."));
+					line(dim("  /consult co1 shows immutable sources, roster snapshots, participant turns, selector grammar events, tool receipts, and the returned or incomplete outcome. /consult probe [PATH] writes a standalone native-grammar diagnostic. /stop cancels an active outer call."));
 				}
 				return true;
 			}

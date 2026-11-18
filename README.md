@@ -278,6 +278,12 @@ A host-owned, grammar-constrained selector routes a limited set of independent p
 
 A completed conference has an immutable private audit record. The Work view reveals that audit only when deliberately expanded or copied; it is not a continuing conversation. The former `thread` follow-up field is removed and is explicitly refused. On a brain that contains retired material, C5 preserves original storyteller and Case bytes under `.brain/legacy/raw/`, writes readable static exports under `.brain/legacy/exports/`, and converts old storyteller shelf placements to immutable snapshots. An active, resumable, unreadable, or malformed legacy Case blocks startup: use the pre-C5 release to explicitly stop unfinished work, then rerun C5 to archive it. C5 never loads or resumes archived material.
 
+#### Checking a llama.cpp native selector
+
+`/consult probe [PATH]` is a standalone diagnostic for a llama.cpp-style endpoint. It sends two tiny synthetic, non-streaming requests to the **current selected model**: a forced-literal GBNF enforcement check and a finite-roster routing check. Both requests deliberately have no tools, no project files, no chat transcript, and no conference capture. They exercise llama.cpp's native `grammar` request field rather than Cartographer's current OpenAI custom-grammar-tool adapter.
+
+Without `PATH`, Cartographer writes the raw request/response JSON log under `.brain/export/` (ignored by git). Give one project-relative filename, for example `/consult probe llama-cpp-selector-probe.json`, to write a log you can inspect or commit. A passing diagnostic proves only that this endpoint constrained these selector-only outputs to the finite grammar. It neither enables the current conference adapter nor proves calibrated or semantically correct routing.
+
 ### Which folder is the project
 
 Going up from the folder you are in, the first folder that has a Cartographer brain or is the top of a git repository. If there is none, the folder you are in.

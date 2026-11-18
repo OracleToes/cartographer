@@ -271,6 +271,13 @@ If a server cannot enforce the grammar, it must not silently downgrade to an
 unconstrained persona-routing answer. A separately approved fallback could use a strict
 enum response schema or forced typed call, but that is not this v1 contract.
 
+For endpoint investigation, `/consult probe [PATH]` makes two synthetic no-tool calls
+through llama.cpp's native GBNF `grammar` field: a forced literal and a finite roster.
+It writes raw request/response evidence, captures no project/conference material, and
+does not enable or substitute for this OpenAI custom-tool adapter. It is a capability
+experiment for a separately reviewed llama.cpp-specific adapter, not a prompt-only
+fallback or a claim of calibrated routing.
+
 ### General decision direction
 
 The selector demonstrates a small host-owned finite-choice pattern:

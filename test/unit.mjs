@@ -51,6 +51,7 @@ import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, 
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { createChat } from "../src/screen/chat.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
+import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -85,6 +86,46 @@ test("C5: the only consult contract is same-model conference, and obsolete threa
 	}
 	writeFileSync(join(brainDir, "config.json"), "{}");
 	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model", CARTO_CONSULT_MODEL: "" } }), /CARTO_CONSULT_MODEL was removed/i);
+});
+
+test("native llama.cpp selector probe uses no tools, records raw evidence, and fails closed when grammar is ignored", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const allowedFetch = async (_url, init) => {
+		const request = JSON.parse(init.body);
+		calls.push(request);
+		const output = /"([^"\\]+)"/.exec(request.grammar)?.[1];
+		return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: output }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
+	};
+	const record = await runLlamaCppSelectorProbe({ server: "http://selector.test/v1", modelId: "qwen-test", fetchImpl: allowedFetch, now: () => Date.parse(NOW) });
+	assert.equal(record.passed, true);
+	assert.equal(calls.length, 2, "the forced literal and finite-route checks are separate no-tool requests");
+	for (const request of calls) {
+		assert.equal(request.tools, undefined, "native grammar routing does not mix grammar with tools");
+		assert.equal(request.tool_choice, undefined);
+		assert.match(request.grammar, /^root ::= /);
+		assert.equal(request.chat_template_kwargs.enable_thinking, false);
+	}
+	assert.deepEqual(record.cases.map((entry) => entry.output), ["cartographer", "atlas"]);
+	const explicit = selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.json", at: Date.parse(NOW) });
+	writeSelectorProbeLog(explicit, record);
+	assert.deepEqual(JSON.parse(readFileSync(explicit, "utf8")), record, "the shareable log preserves raw synthetic requests and responses exactly");
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "../outside.json" }), /stay inside the project/i);
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "/tmp/outside.json" }), /relative to the project/i);
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.txt" }), /end in .json/i);
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.json" }), /already exists/i);
+
+	const ignored = await runLlamaCppSelectorProbe({
+		server: "http://selector.test/v1",
+		modelId: "qwen-test",
+		fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "outside-the-allowed-selector-set" }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } }),
+		now: () => Date.parse(NOW),
+	});
+	assert.equal(ignored.passed, false, "prompt obedience alone cannot make an ignored grammar look like a valid selector");
+	assert.equal(ignored.cases[0].passed, false);
+	assert.equal(ignored.cases[1].skipped, true, "the multi-choice request is not sent after enforcement has already failed");
+	assert.match(ignored.cases[0].reason, /outside the grammar/i);
+	assert.deepEqual(llamaCppSelectorProbePayload({ modelId: "qwen-test", ids: ["atlas"], instruction: "Choose atlas." }).grammar, 'root ::= "atlas"');
 });
 
 test("C5: stopped legacy data is byte-archived, shelf snapshots become inert, and exports recover", (t) => {

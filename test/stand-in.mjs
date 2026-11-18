@@ -340,7 +340,7 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 }
 
 /**
- * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
+ * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, ignoreNativeGrammar?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   releaseAfterMs: a held reply lets itself go after this many milliseconds, without anyone calling `release()`.
  *   progress: { total, cache, steps, stepMs }: before each reply, say in `steps` steps how far the prompt is read.
@@ -374,6 +374,17 @@ export async function startStandIn(options = {}) {
 		const chunks = [];
 		for await (const chunk of request) chunks.push(chunk);
 		const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		// The native llama.cpp selector diagnostic is intentionally a plain non-streaming completion: no tools, just
+		// a GBNF grammar in the raw request. It is not one of the context-engine asides below.
+		const nativeGrammarChoice = typeof body.grammar === "string" ? /"([^"\\]+)"/.exec(body.grammar)?.[1] : undefined;
+		if (body.stream !== true && nativeGrammarChoice !== undefined) {
+			requests.push(body);
+			const content = options.ignoreNativeGrammar === true ? "outside-the-allowed-selector-set" : nativeGrammarChoice;
+			const prompt = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ id: `chatcmpl-native-grammar-${++counter}`, object: "chat.completion", model: body.model, choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: prompt, completion_tokens: 1, total_tokens: prompt + 1 } }));
+			return;
+		}
 		// One of Cartographer's own requests: the question before a collapse (it names the reply's shape), or the
 		// read-ahead after one (a single token of answer).
 		if (body.stream !== true) {

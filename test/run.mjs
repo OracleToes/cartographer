@@ -848,6 +848,32 @@ test("consult C1-C5: a CLI conference uses the caller model, returns an isolated
 	}
 });
 
+test("consult probe: /consult probe sends standalone native GBNF selector checks and writes a shareable log", async () => {
+	const root = makeProject("consult-native-grammar-probe", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	try {
+		const result = await carto(root, server, [], { input: "/consult probe llama-cpp-selector-probe.json\n/quit\n" });
+		ok(result, "native grammar selector diagnostic");
+		has(result.stdout, "Native llama.cpp selector probe", "the terminal identifies the standalone diagnostic");
+		has(result.stdout, "Result: PASS", "the terminal reports both grammar checks passed");
+		const logPath = join(root, "llama-cpp-selector-probe.json");
+		assert.equal(existsSync(logPath), true, "an explicit project-relative path makes the evidence easy to commit");
+		const log = JSON.parse(readFileSync(logPath, "utf8"));
+		assert.equal(log.kind, "cartographer.llama-cpp-native-selector-probe");
+		assert.equal(log.model, "stand-in", "the command probes the model currently selected by the session");
+		assert.equal(log.passed, true);
+		assert.deepEqual(log.cases.map((entry) => entry.id), ["forced-literal", "finite-route"]);
+		assert.ok(log.cases.every((entry) => entry.request.tools === undefined && entry.request.tool_choice === undefined), "the selector grammar is deliberately isolated from the tool surface");
+		assert.doesNotMatch(readFileSync(logPath, "utf8"), /MARKER-ONLY-IN-FILE/, "the synthetic diagnostic does not capture project material");
+		const probes = server.requests.filter((request) => typeof request.grammar === "string");
+		assert.equal(probes.length, 2, "the server receives one forced grammar enforcement request and one finite routing request");
+		assert.ok(probes.every((request) => request.stream === false && request.tools === undefined && request.tool_choice === undefined));
+	} finally {
+		await server.close();
+	}
+});
+
 test("C5 CLI cutover blocks running Cases, archives stopped data, and exposes no Case tool", async () => {
 	const root = makeProject("c5-cli-cutover", { git: false });
 	const brainDir = join(root, ".brain");
