@@ -56,6 +56,18 @@ export function wakesView({ wakes = [], lines = [], presentation } = {}) {
 			head: [[`${wake.id}  `, "bold"], [described.about, ""], [`  · ${described.kindLabel}`, "muted"]],
 			body: described.line,
 			copy: described.line,
+			// This is an immutable settled trigger snapshot. Screen can prefill a complete replacement form from it,
+			// but never asks the live scheduler to rediscover a selected wake.
+			target: {
+				id: wake.id,
+				kind: wake.kind,
+				every: wake.every,
+				times: wake.times,
+				note: wake.note,
+				...(wake.path === undefined ? {} : { path: wake.path }),
+				...(wake.window === undefined ? {} : { window: wake.window }),
+				...(wake.match === undefined ? {} : { match: wake.match }),
+			},
 		};
 	});
 	return {

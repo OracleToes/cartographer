@@ -13,7 +13,7 @@ import { ConfigurationRepositoryError, createConfigurationRepository } from "../
 import { CONFIGURATION_SOURCE, resolveConfigurationSources } from "../src/configuration/sources.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { CheckpointError } from "../src/checkpoints.mjs";
-import { WakeError } from "../src/wakes.mjs";
+import { WakeError, createWakes } from "../src/wakes.mjs";
 import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
@@ -84,6 +84,7 @@ import { ACTION_PLACEMENTS, assertActionPlacementParity, createActionPlacementRe
 import { ActionDialog } from "../src/screen/action-dialog.mjs";
 import { ActionLauncher, ActionRequestGate, actionInputFromDrafts, actionLaunchPlan, normalizeActionTargets, resolveActionTarget } from "../src/screen/action-launcher.mjs";
 import { TargetPicker } from "../src/screen/target-picker.mjs";
+import { WakeDialog, wakeInputFromDrafts } from "../src/screen/wake-dialog.mjs";
 import { createFocusManager } from "../src/screen/focus.mjs";
 import { createKeyHints } from "../src/screen/key-hints.mjs";
 import { createList } from "../src/screen/list.mjs";
@@ -1355,6 +1356,34 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	assert.equal(await openingExisting, true);
 	assert.equal(pendingExisting.state().state, "idle");
 
+	const wakeSpec = createActionSpecRegistry([{ id: "runtime.wake.create", launch: "existing-control", target: { kind: "none" }, fields: [] }]);
+	const wakePlacement = createActionPlacementRegistry([{ id: "runtime.wake.create", route: { tab: "shells", view: "wakes" }, targetSource: "none" }]);
+	let wakeControl;
+	const wakeCalls = [];
+	const wakeLauncher = new ActionLauncher({
+		capabilities: { get: (id) => id === "runtime.wake.create" ? { id, label: "Create wake", availability: { enabled: true } } : undefined },
+		specs: wakeSpec,
+		placements: wakePlacement,
+		currentRoute: () => ({ tab: "shells", view: "wakes" }),
+		execute: async (action, input, options) => {
+			wakeCalls.push({ action, input, options });
+			return { ok: true, data: { line: "Created wake w1." }, meta: { requestId: options.requestId }, notices: [] };
+		},
+		openExistingControl: (given) => {
+			wakeControl = given;
+			return { opened: true, pending: true, close: () => {} };
+		},
+	});
+	assert.equal(await wakeLauncher.launch("runtime.wake.create"), true);
+	assert.equal(wakeLauncher.state().state, "existing-control", "a custom wake form retains its launcher gate until it saves or cancels");
+	assert.equal(await wakeLauncher.begin("runtime.wake.create"), false, "a retained custom form cannot open a duplicate wake action");
+	assert.equal(await wakeControl.dispatch({ kind: "time", note: "Check", every: 60, times: 1 }, { fromDialog: true }), true);
+	assert.deepEqual(wakeCalls[0].input, { kind: "time", note: "Check", every: 60, times: 1 });
+	assert.equal(wakeLauncher.state().state, "idle");
+	assert.equal(await wakeLauncher.launch("runtime.wake.create"), true);
+	assert.equal(wakeControl.cancel(), true, "custom control cancellation releases a retained launcher gate");
+	assert.equal(wakeLauncher.state().state, "idle");
+
 	let release;
 	const gate = new ActionRequestGate({ execute: () => new Promise((resolve) => { release = resolve; }), requestId: () => "dedupe-1" });
 	const first = gate.run("workspace.archive", { id: "a1" });
@@ -1394,6 +1423,31 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	});
 	cancelledForm.handleInput("escape");
 	assert.deepEqual([formCancelled, formClosed], [1, 1], "Escape abandons a schema action dialog instead of leaving its launcher pending");
+	assert.deepEqual(wakeInputFromDrafts(new Map([["kind", "window"], ["note", "Watch build."], ["every", "60"], ["times", "0"], ["window", "build"], ["match", "done"]])), {
+		ok: true,
+		input: { kind: "window", note: "Watch build.", every: 60, times: 0, window: "build", match: "done" },
+	}, "WakeDialog produces a complete typed trigger instead of a loose patch");
+	assert.equal(wakeInputFromDrafts(new Map([["kind", "file"], ["note", "Watch source."], ["every", "60"], ["times", "1"]])).ok, false);
+	let wakeCancelled = 0;
+	let wakeClosed = 0;
+	let wakeSubmitted;
+	const wakeDialog = new WakeDialog({
+		input: { id: "w4", kind: "time", note: "Old", every: 60, times: 1, path: "stale-path" },
+		windowSuggestions: ["build"],
+		keyOf: (key) => key,
+		close: () => { wakeClosed++; },
+		flash: (message) => flashes.push(message),
+		cancel: () => { wakeCancelled++; },
+		submit: (input) => { wakeSubmitted = input; return true; },
+	});
+	wakeDialog.drafts = ["window", "Watch build.", "60", "0", "stale-path", "build", "done"];
+	wakeDialog.syncKind();
+	assert.equal(wakeDialog.given.fields.find((field) => field.id === "path").disabled, true, "switching trigger kind disables irrelevant prior-trigger fields");
+	wakeDialog.handleInput("ctrl+enter");
+	assert.deepEqual(wakeSubmitted, { id: "w4", kind: "window", note: "Watch build.", every: 60, times: 0, window: "build", match: "done" }, "a replacement only retains its id, not stale fields from the former trigger kind");
+	assert.equal(wakeClosed, 1);
+	wakeDialog.handleInput("escape");
+	assert.deepEqual([wakeCancelled, wakeClosed], [1, 2], "Escape cancels a wake form through its launcher callback");
 });
 
 test("screen: target picker keeps unavailable settled rows visible and gates an asynchronous choice", async () => {
@@ -2070,6 +2124,14 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 		},
 	};
 	const wakes = {
+		set: (wanted) => {
+			calls.push({ action: "wake-set", wanted });
+			return { id: "w3", kind: wanted.path ? "file" : wanted.window ? "window" : "time", ...wanted };
+		},
+		replace: (id, wanted) => {
+			calls.push({ action: "wake-replace", id, wanted });
+			return { previous: { id, fired: 3, note: "old" }, wake: { id, kind: wanted.path ? "file" : wanted.window ? "window" : "time", ...wanted, fired: 0 } };
+		},
 		remove: (id) => {
 			calls.push({ action: "remove", id });
 			return id === "all" ? [{ id: "w1" }, { id: "w2" }] : [{ id }];
@@ -2115,6 +2177,31 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.deepEqual(removed.data.removed.map((wake) => wake.id), ["w1", "w2"]);
 	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
 
+	const createPending = app.execute(RUNTIME_ACTION.createWake, { kind: "file", note: "Watch the source.", every: 60, times: 2, path: "src" }, { requestId: "wake-create" });
+	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" }, "wake creation leaves the caller stack before it touches the scheduler");
+	const created = await createPending;
+	assert.equal(created.ok, true);
+	if (!created.ok) throw new Error(created.error.message);
+	assert.equal(created.meta.requestId, "wake-create");
+	assert.equal(created.data.wake.id, "w3");
+	assert.deepEqual(calls.at(-1), { action: "wake-set", wanted: { note: "Watch the source.", every: 60, times: 2, path: "src" } });
+	const replaced = await app.execute(RUNTIME_ACTION.replaceWake, { id: "w3", kind: "window", note: "Watch build output.", every: 60, times: 0, window: "build", match: "done" });
+	assert.equal(replaced.ok, true);
+	if (!replaced.ok) throw new Error(replaced.error.message);
+	assert.equal(replaced.data.wake.id, "w3", "a complete replacement preserves the selected wake identity");
+	assert.equal(replaced.data.wake.fired, 0, "a replacement starts with no old firing history");
+	assert.match(replaced.data.line, /schedule and firing history start over/);
+	assert.deepEqual(calls.at(-1), { action: "wake-replace", id: "w3", wanted: { note: "Watch build output.", every: 60, times: 0, window: "build", match: "done" } });
+	const badWake = await app.execute(RUNTIME_ACTION.createWake, { kind: "file", note: "Watch", every: 60, times: 1 });
+	assert.equal(badWake.ok, false);
+	if (badWake.ok) throw new Error("a file wake without a project path must be refused");
+	assert.equal(badWake.error.field, "path");
+	const staleWake = createRuntimeApplication({ wakes: { replace: () => { throw new WakeError("There is no wake \"w9\". Set: w1."); } } });
+	const missingReplacement = await staleWake.execute(RUNTIME_ACTION.replaceWake, { id: "w9", kind: "time", note: "Retry", every: 60, times: 1 });
+	assert.equal(missingReplacement.ok, false);
+	if (missingReplacement.ok) throw new Error("a wake that disappears after target selection must not be recreated");
+	assert.equal(missingReplacement.error.code, UI_ERROR_CODE.notFound);
+
 	const invalid = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "   " });
 	assert.equal(invalid.ok, false);
 	if (invalid.ok) throw new Error("blank shell input must be refused");
@@ -2127,7 +2214,7 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(cancelled.ok, false);
 	if (cancelled.ok) throw new Error("a cancelled runtime action must not reach its manager");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
+	assert.deepEqual(calls.at(-1), { action: "wake-replace", id: "w3", wanted: { note: "Watch build output.", every: 60, times: 0, window: "build", match: "done" } }, "a cancelled wake action does not reach its scheduler");
 
 	const noWindows = createRuntimeApplication({});
 	const unavailable = await noWindows.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" });
@@ -2228,6 +2315,33 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(blankTaskMessage.ok, false);
 	if (blankTaskMessage.ok) throw new Error("a blank task message must be refused");
 	assert.equal(blankTaskMessage.error.field, "text");
+});
+
+test("wakes: a complete replacement preserves id while resetting trigger lifecycle", (t) => {
+	const { root, brainDir } = fresh(t);
+	let now = Date.parse(NOW);
+	const wakes = createWakes({ root, brainDir, config: { wakeMin: 1, wakesMax: 2 }, tickMs: 60_000, clock: () => now });
+	t.after(() => wakes.shutdown());
+	const original = wakes.set({ note: "Check the first result.", every: 5, times: 2 });
+	now += 5_000;
+	wakes.check();
+	assert.equal(wakes.list()[0].fired, 1, "the original trigger can have lifecycle state before replacement");
+	const replaced = wakes.replace(original.id, { note: "Watch source changes.", every: 3, times: 0, path: "." });
+	assert.equal(replaced.previous.id, original.id);
+	assert.equal(replaced.previous.fired, 1);
+	assert.deepEqual(wakes.list(), [{
+		id: original.id,
+		kind: POLICY.enums.wakeKinds.file,
+		every: 3,
+		times: 0,
+		note: "Watch source changes.",
+		created: now,
+		fired: 0,
+		path: ".",
+	}], "replacement keeps its stable id but discards schedule/history state from the old trigger");
+	const next = wakes.set({ note: "A separate timer.", every: 3, times: 1 });
+	assert.equal(next.id, "w2", "replacement does not consume a new durable wake id");
+	assert.throws(() => wakes.replace("w9", { note: "Gone", every: 3, times: 1 }), WakeError, "a disappeared selection is refused rather than recreated");
 });
 
 test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
@@ -3058,7 +3172,7 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
 	const registeredActions = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
-	assert.equal(registeredActions.length, 32, "the composed application has the phase-six actions plus the authorized Settings edit/reset surface");
+	assert.equal(registeredActions.length, 34, "the composed application includes Settings plus complete wake create/replace/remove actions");
 	assert.equal(new Set(registeredActions).size, registeredActions.length, "every declared action id is unique");
 	const registeredCapabilities = app.capabilities.list().map((capability) => capability.id);
 	assert.equal(registeredCapabilities.length, registeredActions.length, "every action has one capability presentation");

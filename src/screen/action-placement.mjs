@@ -121,6 +121,8 @@ const RAW_ACTION_PLACEMENTS = [
 	placement("runtime.shell.send", { route: route("shells", "list"), targetSource: ACTION_TARGET_SOURCE.shellWindows, shortcut: "s", paletteText: "Send shell input", formTitle: "Send shell input", terminalPath: "/send NAME line" }),
 	placement("runtime.shell.close", { route: route("shells", "list"), targetSource: ACTION_TARGET_SOURCE.shellWindows, shortcut: "d", paletteText: "Close shell window", formTitle: "Close shell window", terminalPath: "/kill NAME" }),
 	placement("runtime.shell.close-all", { route: route("shells", "list"), shortcut: "D", paletteText: "Close all shell windows", formTitle: "Close all shell windows", terminalPath: "/kill all" }),
+	placement("runtime.wake.create", { route: route("shells", "wakes"), shortcut: "n", paletteText: "Create wake", formTitle: "Create wake", terminalPath: "Wake schedule form" }),
+	placement("runtime.wake.replace", { route: route("shells", "wakes"), targetSource: ACTION_TARGET_SOURCE.wakes, shortcut: "e", paletteText: "Replace wake", formTitle: "Replace wake", terminalPath: "Wake schedule form" }),
 	placement("runtime.wake.remove", { route: route("shells", "wakes"), targetSource: ACTION_TARGET_SOURCE.wakes, shortcut: "d", paletteText: "Remove wake", terminalPath: "/wakes remove ID" }),
 	placement("runtime.task.message", { route: route("chat", "work"), shortcut: "m", paletteText: "Message active task", formTitle: "Message active task", terminalPath: "task-message boundary" }),
 	placement("runtime.model.ensure", { route: route("context", "routes"), shortcut: "Enter", paletteText: "Connect model route", terminalPath: "/model" }),

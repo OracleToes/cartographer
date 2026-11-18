@@ -15,6 +15,8 @@ export const RUNTIME_ACTION = Object.freeze({
 	sendShell: "runtime.shell.send",
 	closeShell: "runtime.shell.close",
 	closeAllShells: "runtime.shell.close-all",
+	createWake: "runtime.wake.create",
+	replaceWake: "runtime.wake.replace",
 	removeWake: "runtime.wake.remove",
 	routeTaskMessage: "runtime.task.message",
 	ensureModel: "runtime.model.ensure",
@@ -44,6 +46,20 @@ export const RUNTIME_CAPABILITY_DEFINITIONS = Object.freeze([
 		intent: UI_ACTION_INTENT.destructive,
 		confirmation: UI_CONFIRMATION.acknowledge,
 		available: ({ windows }) => typeof windows?.closeAll === "function" ? true : { enabled: false, reason: "This session has no shell-window manager." },
+	},
+	{
+		id: RUNTIME_ACTION.createWake,
+		label: "Create wake",
+		category: "runtime",
+		intent: UI_ACTION_INTENT.mutate,
+		available: ({ wakes }) => typeof wakes?.set === "function" ? true : { enabled: false, reason: "This session has no wake schedule." },
+	},
+	{
+		id: RUNTIME_ACTION.replaceWake,
+		label: "Replace wake",
+		category: "runtime",
+		intent: UI_ACTION_INTENT.mutate,
+		available: ({ wakes }) => typeof wakes?.replace === "function" ? true : { enabled: false, reason: "This session cannot replace scheduled wakes." },
 	},
 	{
 		id: RUNTIME_ACTION.removeWake,
@@ -98,6 +114,44 @@ const unavailable = (message, meta) => uiFailure(uiError({
 	retryable: false,
 }), { meta });
 
+const wakeKinds = new Set(Object.values(POLICY.enums.wakeKinds));
+const whole = (value) => Number.isInteger(value) ? value : undefined;
+/** A wake replace is a complete new trigger, never a patch against cached lifecycle fields. */
+const checkedWakeInput = (action, input, meta) => {
+	const kind = nonEmpty(input.kind)?.toLowerCase();
+	if (kind === undefined || !wakeKinds.has(kind)) return { result: invalidInput("Choose a time, file, or window trigger.", meta, "kind") };
+	const note = nonEmpty(input.note);
+	if (note === undefined) return { result: invalidInput("A wake needs a note for the agent.", meta, "note") };
+	const every = whole(input.every);
+	if (every === undefined) return { result: invalidInput("Wake cadence must be a whole number of seconds.", meta, "every") };
+	const times = whole(input.times);
+	if (times === undefined || times < 0) return { result: invalidInput("Wake repetitions must be zero or a positive whole number.", meta, "times") };
+	const path = nonEmpty(input.path);
+	const window = nonEmpty(input.window);
+	const match = input.match === undefined ? undefined : nonEmpty(input.match);
+	if (kind === POLICY.enums.wakeKinds.time) {
+		if (path !== undefined || window !== undefined || match !== undefined) return { result: invalidInput("A time wake has no file, shell window, or match text.", meta, "kind") };
+	} else if (kind === POLICY.enums.wakeKinds.file) {
+		if (path === undefined) return { result: invalidInput("Choose a project file or folder for this wake.", meta, "path") };
+		if (window !== undefined || match !== undefined) return { result: invalidInput("A file wake has no shell window or match text.", meta, "kind") };
+	} else {
+		if (window === undefined) return { result: invalidInput("Choose a shell window for this wake.", meta, "window") };
+		if (path !== undefined) return { result: invalidInput("A window wake has no project file path.", meta, "kind") };
+	}
+	const id = action === RUNTIME_ACTION.replaceWake ? nonEmpty(input.id) : undefined;
+	if (action === RUNTIME_ACTION.replaceWake && id === undefined) return { result: invalidInput("Choose a wake before replacing it.", meta, "id") };
+	return { value: {
+		...(id === undefined ? {} : { id }),
+		wanted: {
+			note,
+			every,
+			times,
+			...(kind === POLICY.enums.wakeKinds.file ? { path } : {}),
+			...(kind === POLICY.enums.wakeKinds.window ? { window, ...(match === undefined ? {} : { match }) } : {}),
+		},
+	} };
+};
+
 const checkedInput = (action, input, meta) => {
 	if (!isRecord(input)) return { result: invalidInput("This action needs an input object.", meta) };
 	if (action === RUNTIME_ACTION.sendShell) {
@@ -117,6 +171,7 @@ const checkedInput = (action, input, meta) => {
 		if (input.reason !== undefined && nonEmpty(input.reason) === undefined) return { result: invalidInput("A shell-close reason cannot be blank.", meta, "reason") };
 		return { value: { ...(input.reason === undefined ? {} : { reason: input.reason.trim() }) } };
 	}
+	if (action === RUNTIME_ACTION.createWake || action === RUNTIME_ACTION.replaceWake) return checkedWakeInput(action, input, meta);
 	if (action === RUNTIME_ACTION.removeWake) {
 		const id = nonEmpty(input.id);
 		if (id === undefined) return { result: invalidInput("Choose a wake before removing it.", meta, "id") };
@@ -186,7 +241,7 @@ const modelFailure = (error, meta) => {
 /**
  * @param {{
  *   windows?: { send?: (name: string, line: string, options?: { waitMs?: number, signal?: AbortSignal }) => Promise<any>, close?: (name: string, options?: { why?: string }) => object, closeAll?: (options?: { why?: string }) => string[] },
- *   wakes?: { remove?: (id: string) => any[] },
+ *   wakes?: { set?: (wanted: { note: string, every?: number, times?: number, path?: string, window?: string, match?: string }) => object, replace?: (id: string, wanted: { note: string, every?: number, times?: number, path?: string, window?: string, match?: string }) => { previous: object, wake: object }, remove?: (id: string) => any[] },
  *   work?: { tell?: (text: string) => boolean | { kind?: string } | Promise<boolean | { kind?: string }> },
  *   models?: { ensure?: () => Promise<object>, select?: (modelId: string, limits?: { contextWindow?: number }) => Promise<object | false> },
  *   shellSendWaitMs?: number,
@@ -260,6 +315,16 @@ export function createRuntimeApplication({ windows, wakes, work, models, shellSe
 				const count = closed.length;
 				const line = count === 0 ? "No shell windows were open." : `Closed ${count} shell ${count === 1 ? "window" : "windows"}.`;
 				return uiSuccess({ action, target: "all", closed, line }, { meta, notices: [{ level: "success", message: line }] });
+			}
+			if (action === RUNTIME_ACTION.createWake) {
+				const wake = wakes.set(checked.value.wanted);
+				const line = `Created wake ${wake.id}.`;
+				return uiSuccess({ action, target: wake.id, wake, line }, { meta, notices: [{ level: "success", message: line }] });
+			}
+			if (action === RUNTIME_ACTION.replaceWake) {
+				const replacement = wakes.replace(checked.value.id, checked.value.wanted);
+				const line = `Replaced wake ${replacement.wake.id}; its schedule and firing history start over.`;
+				return uiSuccess({ action, target: replacement.wake.id, ...replacement, line }, { meta, notices: [{ level: "success", message: line }] });
 			}
 			const removed = wakes.remove(checked.value.id);
 			const line = removed.length === 1 ? `Removed wake ${removed[0].id}.` : `Removed ${removed.length} wakes.`;

@@ -31,6 +31,8 @@ const ACTION_SCOPES = Object.freeze({
 	[RUNTIME_ACTION.sendShell]: ["runtime"],
 	[RUNTIME_ACTION.closeShell]: ["runtime"],
 	[RUNTIME_ACTION.closeAllShells]: ["runtime"],
+	[RUNTIME_ACTION.createWake]: ["runtime"],
+	[RUNTIME_ACTION.replaceWake]: ["runtime"],
 	[RUNTIME_ACTION.removeWake]: ["runtime"],
 	[RUNTIME_ACTION.routeTaskMessage]: ["runtime"],
 	[RUNTIME_ACTION.ensureModel]: ["runtime"],

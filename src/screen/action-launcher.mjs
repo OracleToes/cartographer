@@ -180,7 +180,7 @@ export class ActionLauncher {
 	 *   openDialog?: (given: { plan: object, submit: (input: object) => Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, close?: () => void },
 	 *   openTargetPicker?: (given: { title: string, targets: object[], choose: (target: object) => boolean | Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, close?: () => void },
 	 *   openConfirmation?: (given: { confirmation: object, confirm: () => Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, close?: () => void },
-	 *   openExistingControl?: (given: { plan: object, placement: object, dispatch: () => Promise<boolean> }) => boolean | { opened?: boolean, close?: () => void } | Promise<boolean | { opened?: boolean, close?: () => void }>,
+	 *   openExistingControl?: (given: { plan: object, placement: object, dispatch: (input?: object, options?: { fromDialog?: boolean }) => Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, pending?: boolean, close?: () => void } | Promise<boolean | { opened?: boolean, pending?: boolean, close?: () => void }>,
 	 *   present?: (result: object, pending: object) => void,
 	 *   flash?: (message: string) => void,
 	 *   defer?: (work: () => void) => void,
@@ -375,16 +375,24 @@ export class ActionLauncher {
 		if (plan.state === "existing-control") {
 			pending.phase = "existing-control";
 			let openedControl;
-			try { openedControl = this.openExistingControl({ plan, placement: pending.placement, dispatch: () => this.dispatch(pending, plan.actionId, plan.input, { fromDialog: false }) }); }
+			try {
+				openedControl = this.openExistingControl({
+					plan,
+					placement: pending.placement,
+					dispatch: (input = plan.input, options = {}) => this.dispatch(pending, plan.actionId, input, { fromDialog: options.fromDialog === true }),
+					cancel: () => this.cancel(pending),
+				});
+			}
 			catch (error) {
 				this.clear();
 				this.flash(`Could not open that action: ${error?.message ?? error}`);
 				return false;
 			}
 			if (promise(openedControl)) openedControl = await openedControl;
-			// A legacy control may synchronously start dispatch through the callback above. Keep its pending state
-			// until that dispatch can present or open its generic confirmation; otherwise it observes a cleared launch.
-			if (this.pending === pending && pending.phase === "existing-control") this.clear();
+			if (record(openedControl) && typeof openedControl.close === "function") pending.close = openedControl.close;
+			// A legacy control may synchronously start dispatch through the callback above. A modern custom control may
+			// retain the launch for its own form; it must call the supplied dispatch or cancel callback before it closes.
+			if (this.pending === pending && pending.phase === "existing-control" && !(record(openedControl) && openedControl.pending === true)) this.clear();
 			return opened(openedControl);
 		}
 		if (plan.state === "dialog") {
