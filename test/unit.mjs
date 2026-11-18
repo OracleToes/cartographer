@@ -18,10 +18,12 @@ import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
+import { createSettingsReader } from "../src/application/settings.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { createChatPresentation } from "../src/application/chat.mjs";
 import { createReviewPresentation } from "../src/application/review-presentation.mjs";
 import { createRuntimePresentation } from "../src/application/runtime-presentation.mjs";
+import { createSettingsPresentation } from "../src/application/settings-presentation.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
@@ -85,6 +87,7 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
+import { settingsAssessmentView, settingsOverviewView } from "../src/screen/settings.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -2089,6 +2092,93 @@ test("application: assessment projection defers its runtime summary", async (t) 
 	if (cancelled.ok) throw new Error("a cancelled assessment projection must not inspect durable runtime state");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
 	assert.deepEqual(reads, { assessment: 1, atlas: 1, top: 1, since: 1 });
+});
+
+test("application: Settings & Safety is a deferred, fail-closed configuration and policy projection", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let routeReads = 0;
+	const gate = { yolo: true };
+	const initiation = { on: false };
+	const reader = createSettingsReader({
+		config: {
+			server: "http://127.0.0.1:8080/v1",
+			model: "configured-model",
+			contextWindow: 8_000,
+			maxTokens: 2_000,
+			mainTurns: 12,
+			taskTurns: 4,
+			shellWait: 30,
+			windowTail: 10,
+			wakeMin: 60,
+			chatWindow: 800,
+			collapseTokens: 1_200,
+			collapseMinutes: 5,
+			colors: "none",
+			theme: "dark",
+			yolo: false,
+			initiate: true,
+			bwrap: true,
+		},
+		runner: { off: false, mode: "none", available: { ok: false, why: "bubblewrap cannot start here" } },
+		gate,
+		initiation,
+		modelReader: async () => {
+			routeReads++;
+			return {
+				currentId: "configured-model",
+				models: [{ id: "configured-model", contextWindow: 4_096 }],
+				ready: false,
+				diagnostic: { kind: "native-grammar", message: "the server ignored the required grammar" },
+				issue: { message: "the route listing is offline" },
+				limits: { usableContextWindow: 4_096, configuredContextWindow: 8_000, serverContextWindow: 4_096 },
+			};
+		},
+	});
+	const queries = createWorkspaceQueries({ brainDir, root, now: () => Date.parse(NOW), settingsReader: reader });
+	const pending = queries.settings.status({ requestId: "settings-status" });
+	assert.equal(routeReads, 0, "Settings leaves the render/key stack before it asks the provider-route reader");
+	const result = await pending;
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.meta.requestId, "settings-status");
+	assert.equal(routeReads, 1);
+	assert.deepEqual(result.data.policy.approval, { yolo: true, defaultYolo: false });
+	assert.deepEqual(result.data.policy.initiation, { on: false, defaultOn: true });
+	assert.equal(result.data.policy.sandbox.mode, "none");
+	assert.equal(result.data.provider.routes?.ready, false, "route discovery cannot manufacture native-grammar readiness");
+	assert.deepEqual(result.data.provider.routes?.diagnostic, { kind: "native-grammar", message: "the server ignored the required grammar" });
+	const stopped = new AbortController();
+	stopped.abort();
+	const cancelled = await queries.settings.status({ signal: stopped.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled Settings projection must not inspect live route state");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(routeReads, 1);
+
+	const presentation = createSettingsPresentation();
+	assert.throws(() => settingsOverviewView({ settings: result.data }), /presentation adapter/, "Settings cannot reach configuration or policy state behind the application boundary");
+	const overview = settingsOverviewView({ settings: result.data, presentation: presentation.overview });
+	const overviewText = JSON.stringify(overview);
+	assert.match(overviewText, /Settings & Safety/);
+	assert.match(overviewText, /Route listing/);
+	assert.match(overviewText, /native llama\.cpp GBNF validation is blocked/);
+	assert.match(overviewText, /does not fall back to ordinary tool calls or prompt-only decisions/);
+	assert.match(overviewText, /YOLO · approval off/);
+	assert.match(overviewText, /the agent waits/);
+	assert.match(overviewText, /no usable sandbox/);
+	const loading = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
+	assert.match(loading.header[0][0][0], /Settings & Safety is loading/);
+	const stale = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { data: result.data, loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
+	assert.match(stale.header[0][0][0], /showing cached data/);
+
+	const assessment = settingsAssessmentView({
+		assessment: { assessment: { text: "The project is mapped.", written: Date.parse(NOW) }, top: { at: NOW, reason: "a safe pin" }, changes: { assessment: true, written: [], removed: [] }, file: "/project/.brain/assessment.md" },
+		presentation: presentation.assessment,
+	});
+	assert.match(JSON.stringify(assessment), /top-of-context copy.*stale/i);
+	assert.match(assessment.items.find((item) => item.key === "assessment:text").body, /project is mapped/);
+	const emptyAssessment = settingsAssessmentView({ assessment: { assessment: { text: "" } }, presentation: presentation.assessment });
+	assert.match(JSON.stringify(emptyAssessment), /No assessment yet/, "an empty assessment remains a successful Settings state");
 });
 
 test("application: consult projection defers its isolated audit list", async (t) => {

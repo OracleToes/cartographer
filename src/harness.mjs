@@ -264,6 +264,13 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	let activeModelId = config.model;
 	const readyModels = new Map();
 	const readyValues = new Map();
+	// A failed native route proof is a durable session diagnostic, not a reason to open a generic or prompt-only
+	// fallback. Runtime and Settings render this fact until a later positive proof clears it.
+	const routeDiagnostics = new Map();
+	const routeDiagnostic = (error) => ({
+		kind: error?.name === "NativeGrammarError" ? "native-grammar" : error?.name === "ModelServerUnavailableError" ? "transport" : error?.name === "ModelRouteError" ? "route" : "unavailable",
+		message: String(error?.message ?? error),
+	});
 	const readListing = async () => {
 		if (listingFlight !== undefined) return await listingFlight;
 		const pending = listedModels(config.server);
@@ -308,6 +315,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			const capacity = modelContextWindow(after.entry) ?? modelContextWindow(before.entry) ?? fallbackContextWindow;
 			const limits = applyCapacity(modelId, capacity);
 			readyValues.set(modelId, limits);
+			routeDiagnostics.delete(modelId);
 			if (modelId === activeModelId) notify({ type: "model-ready", modelId, limits });
 			return limits;
 		})();
@@ -317,6 +325,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		} catch (error) {
 			readyModels.delete(modelId);
 			readyValues.delete(modelId);
+			routeDiagnostics.set(modelId, routeDiagnostic(error));
 			throw error;
 		}
 	};
@@ -761,6 +770,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		inspect: async () => await inspectServer(activeModelId),
 		ensure: async () => await ensureModelReady(activeModelId),
 		ready: () => readyValues.has(activeModelId),
+		diagnostic: () => routeDiagnostics.get(activeModelId),
 		known: () => [...known],
 		select: async (modelId, limits = {}) => await selectModel(modelId, context, limits),
 	});
