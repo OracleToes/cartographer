@@ -441,6 +441,8 @@ Migrate capability groups in this order:
 
 **Review completion record (2026-11-16).** Diff now renders settled checkpoint and Git projections through the Review presentation adapter; its renderer owns no checkpoint/Git read or durable path construction. The shared async boundary owns first-load, failure, and cached-stale states while Diff retains its successful empty states. `review.undo` is a destructive, capability-gated action shared by `/undo` and Diff's `u` control: it previews the current checkpoint, asks for a scoped acknowledgement before files change, warns when a cut-off task returns the project to its earlier checkpoint, and reopens a move revision only after recovery. Diff's recovery control records active shell changes through the typed Review ingress when a window manager is available before it names a recovery.
 
+**Runtime Shells completion record (2026-11-16).** Shell lists and selected output now render settled Runtime projections through a Runtime presentation adapter. The screen composes that adapter and the migrated renderers own no window-manager/domain import or read. The shared async boundary retains first-load, failure, and cached-stale handling; Shells retains its successful empty state. Existing typed shell actions and their confirmation behavior remain unchanged. Context, Wakes, and Model/transport remain in the Runtime migration group.
+
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 
 ### Phase 6 — polish and verification

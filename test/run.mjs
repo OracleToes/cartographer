@@ -2654,14 +2654,16 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const [{ shellsView }, { diffView }, { atlasView, ledgerView, planView, requestsView }, { createReviewPresentation }, { createWorkspacePresentation }] = await Promise.all([
-		import("../src/screen/views.mjs"),
+	const [{ shellsView }, { diffView }, { atlasView, ledgerView, planView, requestsView }, { createReviewPresentation }, { createRuntimePresentation }, { createWorkspacePresentation }] = await Promise.all([
+		import("../src/screen/runtime.mjs"),
 		import("../src/screen/review.mjs"),
 		import("../src/screen/workspace.mjs"),
 		import("../src/application/review-presentation.mjs"),
+		import("../src/application/runtime-presentation.mjs"),
 		import("../src/application/workspace-presentation.mjs"),
 	]);
 	const reviewPresentation = createReviewPresentation();
+	const runtimePresentation = createRuntimePresentation();
 	const workspacePresentation = createWorkspacePresentation();
 	const queries = createWorkspaceQueries({ root, brainDir });
 	const projection = async (promise) => {
@@ -2713,7 +2715,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const requests = await projection(queries.requests());
 	expectReachable("approval request", requestsView({ requests: requests.items, presentation: workspacePresentation.requests }), PLAN_LONG);
 	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
-	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] }), LONG);
+	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }], presentation: runtimePresentation.shells }), LONG);
 });
 
 test("screen: the small box caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {

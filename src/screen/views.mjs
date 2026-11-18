@@ -1,20 +1,10 @@
-// The legacy Runtime and sent-payload views of the full screen: shell windows and context.
-// Workspace and Review's migrated renderers live in workspace.mjs and review.mjs.
+// Legacy Model and sent-payload views of the full screen.
 //
-// Each function here turns one already-read brain or session projection into what a list shows
-// (src/screen/list.mjs): a few lines for the top, and items that fold. Rendering has no legacy readers: deferred
-// application queries own durable and live snapshots before a view receives them. `isOpen(key)` is given because for
-// a folder what is open decides which items there are. An item names the file it comes from and the line, so that
-// `e` can open it there.
-//
-// The Model tab is the one that is not read from a file. Its sent panes show the frozen provider payload captured
-// immediately before dispatch in semantic reading order: the system prompt, tools, then messages, with Cartographer's
-// additions as parts of their own. The raw serialized payload has its own audit view; it is not another context part.
-// Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto; a sent
-// snapshot is never rebuilt from it.
+// Migrated Runtime shell renderers live in runtime.mjs; Workspace and Review live in workspace.mjs and review.mjs.
+// The remaining functions turn already-settled provider projections into foldable list rows. Rendering has no legacy
+// readers: deferred application queries own durable and live snapshots before a view receives them.
 import { POLICY } from "../config.mjs";
 import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
-import { flat } from "../rows.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { short, width } from "./text.mjs";
 import { RECORD } from "../voice.mjs";
@@ -26,43 +16,7 @@ const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\n${ANCHOR}[\\s\
 const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.state.close}`);
 const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.windows.close}`);
 
-const heading = (text) => ({ key: `heading:${text}`, plain: true, head: [[text, "heading"]] });
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
-const when = (value) => {
-	const ms = typeof value === "number" ? value : Date.parse(value ?? "");
-	return Number.isFinite(ms) ? stamp(ms) : undefined;
-};
-
-// ─── Diff ───────────────────────────────────────────────────────────────────
-
-// ─── Shells ─────────────────────────────────────────────────────────────────
-
-/** Render the deferred Runtime shell-list projection; this renderer never touches a live window manager. */
-export function shellsView({ windows: all = [] } = {}) {
-	if (all.length === 0) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const one = (text) => (text.length > POLICY.limits.screen.viewSummaryChars ? `${text.slice(0, POLICY.limits.screen.viewSummaryChars)}…` : text).replace(/\s+/g, " ");
-	const items = all.map((win) => {
-		const marks = win.sandbox === false ? " · no sandbox" : win.network ? " · network" : "";
-		// When the head cuts the command short, the whole command stands in the body: a cut is never silent.
-		const shown = win.state === POLICY.enums.windowStates.busy ? win.command ?? "" : win.last?.command ?? "";
-		const whole = shown !== "" && one(shown) !== shown ? `$ ${flat(shown)}` : undefined;
-		const state =
-			win.state === POLICY.enums.windowStates.gone
-				? [["gone", "err"], [`  ${win.why}`, "muted"]]
-				: win.state === POLICY.enums.windowStates.busy
-					? [["busy", "warn"], [` ${took(win.running)}`, ""], [`  $ ${one(shown)}`, "bold"], [win.asks ? "  may be waiting for input" : "", "warn"]]
-					: [["free", "ok"], [win.last ? `  last: $ ${one(shown)} → exit ${win.last.exit}, ${ago(win.last.ago)}` : "  nothing was run in it yet", "muted"]];
-		const body = [whole, ...win.tail].filter((line) => line !== undefined).join("\n");
-		const wholeCommand = shown === "" ? undefined : `$ ${flat(shown)}`;
-		return {
-			key: `window:${win.name}`,
-			head: [[`${win.name}  `, "bold"], ...state, [`${win.cwd && win.cwd !== "." ? `  in ${win.cwd}/` : ""}${marks}`, "muted"]],
-			...(body !== "" ? { body, bodyStyle: (line) => (line.startsWith("$ ") ? "bold" : "") } : {}),
-			copy: () => [wholeCommand, ...win.tail].filter((line) => line !== undefined).join("\n"),
-		};
-	});
-	return { header: [[[`${all.length === 1 ? "1 shell window" : `${all.length} shell windows`}`, "bold"], ["  · opened, a window shows its newest lines, live · /kill NAME ends one", "muted"]]], items };
-}
 
 // ─── Context ────────────────────────────────────────────────────────────────
 
@@ -474,26 +428,4 @@ export function editorCommand(editor, file, line) {
 	if (["hx", "helix", "zed", "subl"].includes(name)) return `${editor} ${quote(`${file}:${line}`)}`;
 	// vi, vim, nvim, nano, emacs, micro, kak, joe, ne, mg and most others take +LINE.
 	return `${editor} +${line} ${quote(file)}`;
-}
-
-// ─── Current shared brain ───────────────────────────────────────────────────
-
-/** The selected deferred shell-output projection, as a terminal emulator sees its newest lines. */
-export function shellsOutView({ window: pick, lines = [] } = {}) {
-	if (pick === undefined) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const what =
-		pick.state === POLICY.enums.windowStates.busy
-			? [["busy", "warn"], [`  $ ${pick.command ?? ""}`, "bold"], [pick.asks ? "  · may be waiting for input" : "", "warn"]]
-			: pick.state === POLICY.enums.windowStates.gone
-				? [["gone", "err"], [`  ${pick.why ?? ""}`, "muted"]]
-				: [["free", "ok"]];
-	const header = [
-		[["Output of ", "bold"], [pick.name, "bold"], ["  ·  ", "muted"], ...what, [`${pick.cwd && pick.cwd !== "." ? `  in ${pick.cwd}/` : ""}${pick.sandbox === false ? "  · no sandbox" : pick.network ? "  · network" : ""}`, "muted"]],
-		[["The newest lines, as the window keeps them; the view follows on its own.", "faint"]],
-		[["/send " + pick.name + " line types into it from the prompt.", "faint"]],
-	];
-	const items = [
-		{ key: "term", plain: true, head: lines.length === 0 ? [["  (nothing has been printed yet)", "muted"]] : lines.map((line) => [line || " ", ""]) },
-	];
-	return { header, items };
 }

@@ -31,6 +31,7 @@ import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
 import { createChatPresentation } from "../application/chat.mjs";
 import { createReviewPresentation } from "../application/review-presentation.mjs";
+import { createRuntimePresentation } from "../application/runtime-presentation.mjs";
 import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
 import { REVIEW_ACTION } from "../application/review.mjs";
@@ -58,8 +59,9 @@ import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, S
 import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { TOKEN } from "./tokens.mjs";
-import { accountingProjectionView, contextView, editorCommand, previewView, rawPayloadView, shellsOutView, shellsView } from "./views.mjs";
+import { accountingProjectionView, contextView, editorCommand, previewView, rawPayloadView } from "./views.mjs";
 import { diffView } from "./review.mjs";
+import { shellsOutView, shellsView } from "./runtime.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -309,6 +311,7 @@ export async function runScreen(session, options, runTerminal) {
 	const describeRef = referenceLabels.describe;
 	const workspacePresentation = createWorkspacePresentation();
 	const reviewPresentation = createReviewPresentation();
+	const runtimePresentation = createRuntimePresentation();
 	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
 	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
 	const CONSULT_PROJECTION = "chat.consult";
@@ -749,8 +752,8 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.tree") return projectionView(id, (data) => treeView({ tree: data, presentation: workspacePresentation.tree }, isOpen));
 		if (id === "carto.hands") return projectionView(id, (data) => handsView({ context: data, presentation: workspacePresentation.hands }));
 		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ review: data, presentation: reviewPresentation }, id.slice(5)));
-		if (id === "shells.list") return projectionView(id, (data) => shellsView(data));
-		if (id === "shells.out") return projectionView(id, (data) => shellsOutView(data));
+		if (id === "shells.list") return projectionView(id, (data) => shellsView({ ...data, presentation: runtimePresentation.shells }));
+		if (id === "shells.out") return projectionView(id, (data) => shellsOutView({ ...data, presentation: runtimePresentation.shells }));
 		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
 			const sent = data.sent;
 			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });

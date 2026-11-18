@@ -21,6 +21,7 @@ import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeSt
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { createChatPresentation } from "../src/application/chat.mjs";
 import { createReviewPresentation } from "../src/application/review-presentation.mjs";
+import { createRuntimePresentation } from "../src/application/runtime-presentation.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
@@ -83,6 +84,7 @@ import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
+import { shellsOutView, shellsView } from "../src/screen/runtime.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -672,6 +674,55 @@ test("screen: Review renders settled checkpoint projections through its applicat
 	const stale = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data, loading: true }, render });
 	assert.equal(rendered, 3, "cached Review data remains renderable while its replacement is in flight");
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Review rows");
+});
+
+test("screen: Runtime shell views render settled projections through their application presentation adapter", () => {
+	const presentation = createRuntimePresentation().shells;
+	const window = { name: "main", state: POLICY.enums.windowStates.busy, command: "npm test", running: 1_200, cwd: ".", network: false, sandbox: true, asks: false, tail: ["TAP version 13"] };
+	const listData = { windows: [window] };
+	let rendered = 0;
+	const renderList = (projection) => {
+		rendered++;
+		return shellsView({ ...projection, presentation });
+	};
+	assert.throws(() => shellsView(listData), /presentation adapter/, "Shell windows cannot fall back to direct window-manager formatting");
+	const loading = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { loading: true }, render: renderList });
+	assert.equal(rendered, 0, "Shell windows are not asked to invent data while their projection is loading");
+	assert.match(loading.header[0][0][0], /Shell windows is loading/, "the shared boundary names Runtime shell loading");
+	const failed = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { error: { message: "The shell manager is unavailable." } }, render: renderList });
+	assert.equal(rendered, 0, "a Shell windows query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Shell windows could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { data: { windows: [] } }, render: renderList });
+	assert.equal(rendered, 1, "a settled empty shell projection reaches Runtime");
+	assert.match(empty.items[0].head[0][0], /No shell window is open/, "Runtime owns its successful empty shell state");
+	const settled = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { data: listData }, render: renderList });
+	assert.equal(rendered, 2, "a settled shell projection uses its adapter for manager-state vocabulary");
+	assert.match(settled.items[0].head.map(([text]) => text).join(""), /busy/);
+	const stale = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { data: listData, loading: true }, render: renderList });
+	assert.equal(rendered, 3, "cached Shell windows remain renderable while their replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above shell rows");
+
+	let outputRendered = 0;
+	const renderOutput = (projection) => {
+		outputRendered++;
+		return shellsOutView({ ...projection, presentation });
+	};
+	assert.throws(() => shellsOutView({ window, lines: window.tail }), /presentation adapter/, "Shell output cannot fall back to direct window-manager formatting");
+	const outputLoading = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { loading: true }, render: renderOutput });
+	assert.equal(outputRendered, 0, "Shell output is not asked to invent data while its projection is loading");
+	assert.match(outputLoading.header[0][0][0], /Shell output is loading/);
+	const outputFailed = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { error: { message: "The selected shell is unavailable." } }, render: renderOutput });
+	assert.equal(outputRendered, 0, "a Shell output query error remains outside the feature renderer");
+	assert.match(outputFailed.items[0].head[0][0], /Shell output could not be loaded/);
+	const outputEmpty = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { lines: [] } }, render: renderOutput });
+	assert.equal(outputRendered, 1, "a settled empty shell-output projection reaches Runtime");
+	assert.match(outputEmpty.items[0].head[0][0], /No shell window is open/);
+	const outputSettled = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { window, lines: window.tail } }, render: renderOutput });
+	assert.equal(outputRendered, 2, "a settled shell-output projection uses its adapter for manager-state vocabulary");
+	assert.match(outputSettled.items[0].head.map(([text]) => text).join("\n"), /TAP version 13/);
+	const outputStale = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { window, lines: window.tail }, loading: true }, render: renderOutput });
+	assert.equal(outputRendered, 3, "cached Shell output remains renderable while its replacement is in flight");
+	assert.match(outputStale.header[0][0][0], /showing cached data/);
 });
 
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
@@ -1783,9 +1834,10 @@ test("application: runtime view, status, activity, and model projections defer s
 	assert.equal(wakeFailure.error.kind, UI_ERROR_KIND.internal);
 	assert.equal(wakeFailure.error.retryable, true);
 	assert.match(wakeFailure.error.message, /wake schedule/i);
-	const { contextView, previewView, rawPayloadView, shellsOutView, shellsView } = await import("../src/screen/views.mjs");
-	assert.match(shellsView(shells.data).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
-	assert.match(shellsOutView(output.data).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
+	const { contextView, previewView, rawPayloadView } = await import("../src/screen/views.mjs");
+	const shellPresentation = createRuntimePresentation().shells;
+	assert.match(shellsView({ ...shells.data, presentation: shellPresentation }).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
+	assert.match(shellsOutView({ ...output.data, presentation: shellPresentation }).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
 	assert.match(contextView(current.data.sent, { windowSize: 1_000, cols: 80 }).header[0][0][0], /Sent provider request/, "the sent-request renderer consumes its typed engine snapshot");
 	assert.match(rawPayloadView(current.data.sent).header[0][0][0], /Raw provider payload/, "the raw audit renderer reuses that same projection");
 	assert.match(previewView(planned.data.preview).header[0][0][0], /Next request preview/, "the preview renderer receives prepared runtime data");
