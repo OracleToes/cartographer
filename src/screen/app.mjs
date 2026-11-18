@@ -557,6 +557,7 @@ export async function runScreen(session, options, runTerminal) {
 		"carto.ledger": ({ signal }) => queries.ledger({ signal }),
 		"carto.plan": ({ signal }) => queries.plan({ signal }),
 		"carto.requests": ({ signal }) => queries.requests({ yolo: options.gate?.yolo === true, signal }),
+		"carto.tree": ({ signal }) => queries.tree({ signal }),
 		"carto.hands": ({ signal }) => queries.context({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
@@ -564,6 +565,7 @@ export async function runScreen(session, options, runTerminal) {
 		"carto.ledger": "Ledger",
 		"carto.plan": "Plan",
 		"carto.requests": "Requests",
+		"carto.tree": "Project tree",
 		"carto.hands": "Current shared brain",
 	});
 	const projections = new Map();
@@ -649,7 +651,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ brainDir, ledger: data.ledger, lines: data.lines, deferred: true }));
 		if (id === "carto.plan") return projectionView(id, (data) => planView({ ...env, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, deferred: true }));
 		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ brainDir, yolo: options.gate?.yolo === true, requests: data.items, deferred: true }));
-		if (id === "carto.tree") return treeView(env, isOpen);
+		if (id === "carto.tree") return projectionView(id, (data) => treeView({ ...env, tree: data, deferred: true }, isOpen));
 		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, brainDir, context: data, deferred: true }));
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
 		if (id === "shells.list") return shellsView(env);

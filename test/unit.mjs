@@ -338,6 +338,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	let contextReads = 0;
 	mkdirSync(join(brainDir, "reports"), { recursive: true });
 	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
+	writeFileSync(join(root, "tree.txt"), "abc");
 	const contextStore = {
 		rows: [{ id: "t1", species: "composed", mode: "look", at: 0, brief: "Inspect", outcome: "Done." }],
 		shelf: [{ id: "sh1", path: "README.md", snapshot: "Shelf snapshot." }],
@@ -368,6 +369,11 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(ledgerReads, 1);
 	assert.deepEqual(empty.data.ledger.items, []);
 	assert.equal(empty.meta.requestId, "ledger-query");
+	const listed = await queries.tree({ requestId: "tree-query" });
+	assert.equal(listed.ok, true);
+	if (!listed.ok) throw new Error(listed.error.message);
+	assert.deepEqual(listed.data.files.find((file) => file.path === "tree.txt"), { path: "tree.txt", bytes: 3 });
+	assert.equal(listed.meta.requestId, "tree-query");
 	const current = queries.context({ requestId: "context-query" });
 	assert.equal(contextReads, 0, "the shared-brain reader also waits until after the current UI stack");
 	const shared = await current;
@@ -377,9 +383,11 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(shared.data.shelf[0].text, "Shelf snapshot.");
 	assert.equal(shared.data.standing[0].text, "The report body.");
 	assert.equal(shared.meta.requestId, "context-query");
-	const { handsView } = await import("../src/screen/views.mjs");
+	const { handsView, treeView } = await import("../src/screen/views.mjs");
 	const sharedView = handsView({ root, brainDir, context: shared.data, deferred: true });
 	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
+	const treeViewProjection = treeView({ root, brainDir, tree: listed.data, deferred: true }, () => false);
+	assert.match(treeViewProjection.items.find((item) => item.key === "file:tree.txt")?.head[1][0] ?? "", /3 B/);
 	const absent = await queries.entry({ book: "ledger", id: "g1" });
 	assert.equal(absent.ok, false);
 	if (absent.ok) throw new Error("a missing entry must be explicit");

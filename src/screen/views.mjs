@@ -259,14 +259,19 @@ export function requestsView({ brainDir, yolo, requests: provided, error: provid
 }
 
 /** The project's files as a tree whose folders open and fold. `e` opens a file itself. */
-export function treeView({ root, brainDir }, isOpen) {
-	const files = projectFiles(root);
-	const { atlas } = loadAtlas(brainDir);
-	const marks = atlas ? fileMarks(atlas) : new Map();
-	/** @type {{ dirs: Map<string, any>, files: string[], count: number }} */
+export function treeView({ root, brainDir, tree: provided, deferred = false }, isOpen) {
+	if (provided === undefined && deferred) return { header: [[["Project tree is loading…", "muted"]]], items: [] };
+	const files = (provided?.files ?? projectFiles(root)).map((entry) => (typeof entry === "string" ? { path: entry } : entry));
+	const marks = provided?.marks === undefined
+		? (() => {
+			const { atlas } = loadAtlas(brainDir);
+			return atlas ? fileMarks(atlas) : new Map();
+		})()
+		: new Map(Object.entries(provided.marks));
+	/** @type {{ dirs: Map<string, any>, files: Array<{ name: string, bytes?: number }>, count: number }} */
 	const top = { dirs: new Map(), files: [], count: 0 };
-	for (const path of files) {
-		const parts = path.split("/");
+	for (const file of files) {
+		const parts = file.path.split("/");
 		let dir = top;
 		dir.count++;
 		for (const part of parts.slice(0, -1)) {
@@ -274,9 +279,10 @@ export function treeView({ root, brainDir }, isOpen) {
 			dir = dir.dirs.get(part);
 			dir.count++;
 		}
-		dir.files.push(parts.at(-1));
+		dir.files.push({ name: parts.at(-1), ...(Number.isFinite(file.bytes) ? { bytes: file.bytes } : {}) });
 	}
 	const items = [];
+	const sizeText = (bytes) => bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`;
 	const walk = (dir, prefix, depth) => {
 		for (const name of [...dir.dirs.keys()].sort()) {
 			const path = `${prefix}${name}`;
@@ -292,17 +298,16 @@ export function treeView({ root, brainDir }, isOpen) {
 			});
 			if (isOpen(`dir:${path}`)) walk(child, `${path}/`, depth + 1);
 		}
-		for (const name of dir.files.sort()) {
-			const path = `${prefix}${name}`;
+		for (const file of [...dir.files].sort((a, b) => a.name.localeCompare(b.name))) {
+			const path = `${prefix}${file.name}`;
 			const nodes = marks.get(path);
-			let size = "";
-			try {
-				const bytes = statSync(join(root, path)).size;
-				size = bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`;
-			} catch {
-				size = "gone";
+			let bytes = file.bytes;
+			if (bytes === undefined && !deferred) {
+				try { bytes = statSync(join(root, path)).size; }
+				catch { bytes = undefined; }
 			}
-			items.push({ key: `file:${path}`, depth, head: [[name, ""], [`  ${size}`, "muted"], [nodes ? `  ← ${nodes.join(", ")}` : "", "tool"]], copy: path, target: { file: join(root, path) } });
+			const size = bytes === undefined ? "gone" : sizeText(bytes);
+			items.push({ key: `file:${path}`, depth, head: [[file.name, ""], [`  ${size}`, "muted"], [nodes ? `  ← ${nodes.join(", ")}` : "", "tool"]], copy: path, target: { file: join(root, path) } });
 		}
 	};
 	walk(top, "", 0);

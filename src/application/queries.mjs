@@ -4,13 +4,14 @@
 // presentation adapter asks for them: reads are deferred from render/key stacks, cancellation is explicit, and
 // malformed local state becomes a typed unavailable outcome rather than display-text parsing.
 import { assessmentPath } from "../assessment.mjs";
-import { activeMoveOverlays, atlasPath, attentionSnapshot, loadAtlas } from "../atlas.mjs";
+import { activeMoveOverlays, atlasPath, attentionSnapshot, fileMarks, loadAtlas } from "../atlas.mjs";
 import { composedRows, contextPath, loadContext, loadReport, shelfText } from "../context.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
 import { POLICY } from "../config.mjs";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { projectFiles } from "../tools/look.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
 
@@ -22,6 +23,7 @@ export const WORKSPACE_QUERY = Object.freeze({
 	status: "workspace.status",
 	entry: "workspace.entry",
 	context: "workspace.context",
+	tree: "workspace.tree",
 });
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -132,6 +134,31 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,
 				message: "Cartographer could not read the graph.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const tree = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (nonEmpty(root) === undefined) return invalid("A project root is needed before listing its files.", "root", ready.meta);
+		try {
+			const loadedAtlas = readers.loadAtlas(brainDir);
+			const issues = loadedAtlas.atlas === undefined ? [{ source: "atlas", message: loadedAtlas.error ?? "The graph cannot be read." }] : [];
+			const files = projectFiles(root).map((path) => {
+				try { return { path, bytes: statSync(join(root, path)).size }; }
+				catch { return { path }; }
+			});
+			return uiSuccess({
+				files,
+				marks: loadedAtlas.atlas === undefined ? {} : Object.fromEntries(fileMarks(loadedAtlas.atlas)),
+				issues,
+			}, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not list the project files.",
 				retryable: true,
 			}), { meta: ready.meta });
 		}
@@ -290,5 +317,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, ledger, plan, requests, status, context, entry });
+	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, entry });
 }
