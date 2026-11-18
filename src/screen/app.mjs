@@ -39,6 +39,7 @@ import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
+import { renderAsyncBoundary } from "./async-boundary.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
@@ -658,27 +659,14 @@ export async function runScreen(session, options, runTerminal) {
 		runtimeActivityAt = Date.now();
 		return projections.refresh(RUNTIME_ACTIVITY_PROJECTION, ({ signal }) => queries.runtime.activity({ signal }), { force });
 	};
-	const projectionMessage = (projection) => projection?.error?.message ?? "Cartographer could not refresh this view.";
-	const projectionView = (id, render) => {
-		const projection = projectionFor(id);
-		const name = PROJECTION_NAME[id] ?? "view";
-		if (projection.data === undefined) {
-			if (projection.error !== undefined) return {
-				header: [[[`! ${projectionMessage(projection)}`, "warn"]]],
-				items: [{ key: `projection:${id}:error`, plain: true, head: [[`  ${name} could not be loaded. Press r to retry.`, "muted"]] }],
-			};
-			return {
-				header: [[[`${name} is loading…`, "muted"]]],
-				items: [{ key: `projection:${id}:loading`, plain: true, head: [["  Reading the current durable view without blocking input…", "faint"]] }],
-			};
-		}
-		const view = render(projection.data);
-		const notices = [];
-		if (projection.loading) notices.push([[`↻ Refreshing ${name.toLowerCase()} · showing cached data`, "muted"]]);
-		else if (projection.error !== undefined) notices.push([[`! ${projectionMessage(projection)} · showing cached data`, "warn"]]);
-		if (Array.isArray(projection.data.issues) && projection.data.issues.length > 0) notices.push([[`! ${projection.data.issues.map((issue) => issue.message).join(" · ")}`, "warn"]]);
-		return notices.length === 0 ? view : { ...view, header: [...notices, ...view.header] };
-	};
+	// Feature renderers receive settled data only. The shared boundary owns the shell language for first load,
+	// stale cache, retryable failure, and projection issues without letting a paint trigger another read.
+	const projectionView = (id, render) => renderAsyncBoundary({
+		id,
+		name: PROJECTION_NAME[id] ?? "view",
+		projection: projectionFor(id),
+		render,
+	});
 	const refreshProjection = (id, force = false) => {
 		const query = DEFERRED_PROJECTION[id];
 		return query === undefined ? false : projections.refresh(id, query, { force });

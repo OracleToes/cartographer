@@ -66,8 +66,10 @@ import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
+import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { createChat } from "../src/screen/chat.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
+import { TOKEN } from "../src/screen/tokens.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -389,6 +391,45 @@ test("screen: deferred projection scheduling keeps cached data through stale, ca
 	await flush();
 	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
 	assert.equal(settled.length, 4, "only current success, failure, retry, and typed cancellation notify a render; stale settlements do not");
+});
+
+test("screen: the shared async boundary keeps loading, stale, error, issue, and empty data states outside feature renderers", () => {
+	let calls = 0;
+	const render = (data) => {
+		calls++;
+		return { header: [[[`Rows · ${data.rows.length}`, TOKEN.text.primary]]], items: data.rows.map((row) => ({ key: row, head: [[row, TOKEN.text.primary]] })) };
+	};
+
+	const loading = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { loading: true }, render });
+	assert.equal(calls, 0, "a first load does not call a feature renderer with no durable data");
+	assert.deepEqual(loading.header, [[["Atlas is loading…", TOKEN.text.secondary]]]);
+	assert.deepEqual(loading.items[0].head, [["  Reading the current durable view without blocking input…", TOKEN.text.muted]]);
+
+	const failed = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { error: { message: "The atlas file is malformed." } }, render });
+	assert.equal(calls, 0, "a cold failure stays in the boundary rather than asking a renderer to invent data");
+	assert.deepEqual(failed.header, [[["! The atlas file is malformed.", TOKEN.feedback.warning]]]);
+	assert.deepEqual(failed.items[0].head, [["  Atlas could not be loaded. Press r to retry.", TOKEN.text.secondary]]);
+
+	const empty = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data: { rows: [] } }, render });
+	assert.equal(calls, 1, "a successful empty collection belongs to its feature renderer");
+	assert.deepEqual(empty.header, [[["Rows · 0", TOKEN.text.primary]]]);
+
+	const stale = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data: { rows: ["cached"] }, loading: true }, render });
+	assert.equal(calls, 2, "cached data remains renderable while a replacement is in flight");
+	assert.deepEqual(stale.header, [
+		[["↻ Refreshing atlas · showing cached data", TOKEN.text.secondary]],
+		[["Rows · 1", TOKEN.text.primary]],
+	]);
+	assert.equal(stale.items[0].key, "cached");
+
+	const cachedFailure = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data: { rows: ["cached"], issues: [{ message: "One source is unavailable." }] }, error: { message: "Refresh timed out." } }, render });
+	assert.equal(calls, 3, "a cached failure also keeps its known rows visible");
+	assert.deepEqual(cachedFailure.header.slice(0, 2), [
+		[["! Refresh timed out. · showing cached data", TOKEN.feedback.warning]],
+		[["! One source is unavailable.", TOKEN.feedback.warning]],
+	]);
+	assert.equal(cachedFailure.items[0].key, "cached");
+	assert.throws(() => renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: {}, render: undefined }), /needs a data renderer/);
 });
 
 test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
