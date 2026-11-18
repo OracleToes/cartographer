@@ -1,10 +1,11 @@
 // `carto`, run from a project folder.
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, contextWindowLimits, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
+import { ConfigError, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 import { forkCatalogNamespace } from "./catalog.mjs";
+import { LegacyCutoverError, migrateLegacyProducts } from "./legacy-cutover.mjs";
 import { traceFile } from "./trace.mjs";
 
 const HELP = `carto: Cartographer, run from a project folder.
@@ -13,7 +14,7 @@ const HELP = `carto: Cartographer, run from a project folder.
   carto -p "message"    send one message, print the answer, leave
   carto --where         show which folders it would use, and do nothing
 
-  --url URL             model server for this run (an OpenAI-compatible /v1 address)
+  --url URL             llama.cpp-compatible /v1 server for this run (native GBNF required)
   --model NAME          model name for this run
   --here                treat the current folder as the project, whatever is above it
   --fork-brain          mark this copied brain as an independent namespace and rebind its internal refs
@@ -55,32 +56,6 @@ function parse(argv) {
 	}
 	if (rest.length > 0) throw new ConfigError(`Unexpected "${rest[0]}". To send one message use: carto -p "your message"`);
 	return flags;
-}
-
-/**
- * Ask the server which models it has, so a wrong address or name fails here with a plain message.
- * @returns {Promise<{ context?: number, models?: string[] } | undefined>} the selected model's reported capacity and every served name
- */
-async function checkServer(config) {
-	let response;
-	try {
-		response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
-	} catch (error) {
-		throw new ConfigError(`The model server at ${config.server} does not answer (${error.cause?.code ?? error.message}). Is it running?`);
-	}
-	if (!response.ok) return undefined; // Not every server lists its models; the first request will tell.
-	const body = await response.json().catch(() => undefined);
-	const listed = (body?.data ?? []).filter((entry) => typeof entry?.id === "string");
-	const match = listed.find((entry) => entry.id === config.model);
-	// A llama-server run on its own lists its one model by file name and answers to any name.
-	const lone = listed.length === 1 && listed[0].owned_by === "llamacpp" ? listed[0] : undefined;
-	if (listed.length > 0 && match === undefined && lone === undefined) {
-		throw new ConfigError(`The model server has no model named "${config.model}". It has: ${listed.map((entry) => entry.id).join(", ")}.`);
-	}
-	const size = (match ?? lone)?.meta?.n_ctx;
-	// Every model the server serves, for /model and for resuming a session whose stored model is another one.
-	const models = listed.map((entry) => entry.id);
-	return { context: Number.isInteger(size) && size > 0 ? size : undefined, models: models.length > 0 ? models : undefined };
 }
 
 /** Ask one question on the terminal. Ctrl-C and Ctrl-D count as "no". */
@@ -128,17 +103,10 @@ export async function main(argv) {
 			return;
 		}
 		checkProject(project.root, { allowHome: flags.here === true });
-		// Settings and server are checked first, so a run that cannot start leaves nothing behind in the project.
+		// Opening Cartographer is local. The terminal and project brain remain available while its model server is
+		// stopped or unreachable; the first model turn validates the route and fails closed if native GBNF is absent.
 		const config = loadConfig({ brainDir: brainPath, flags });
-		// What the settings asked for; /model re-applies this cap and reserves its reply room for the new model.
 		const configuredContextWindow = config.contextWindow;
-		const served = await checkServer(config);
-		const contextLimits = contextWindowLimits(configuredContextWindow, config.maxTokens, served?.context);
-		let contextNote = "";
-		if (contextLimits.usableContextWindow !== configuredContextWindow) {
-			contextNote = ` · usable context ${contextLimits.usableContextWindow} tokens (server capacity ${contextLimits.serverContextWindow}; ${contextLimits.replyReserve} reserved for replies; settings cap ${configuredContextWindow})`;
-			config.contextWindow = contextLimits.usableContextWindow;
-		}
 		const interactive = flags.message === undefined && process.stdin.isTTY === true;
 		// A brain in the wrong folder is easy to make and annoying to notice later, so the first time is confirmed.
 		if (isNew && interactive) {
@@ -150,6 +118,9 @@ export async function main(argv) {
 		}
 		const { brainDir, created, migrated } = setUpBrain(project.root);
 		release = lockBrain(brainDir);
+		// C5 runs before any session/context reader opens retired surfaces. It is one-way: active or resumable
+		// Cases block startup until the pre-C5 runtime explicitly stops them.
+		const legacyCutover = migrateLegacyProducts(brainDir);
 		const forked = flags.forkBrain === true ? forkCatalogNamespace(brainDir) : undefined;
 		const { adoptOldLedger } = await import("./ledger.mjs");
 		const adopted = adoptOldLedger(brainDir);
@@ -166,7 +137,8 @@ export async function main(argv) {
 		const trace = traceFile({ root: project.root, brainDir: brainPath });
 		say(`Cartographer · ${project.root}`);
 		if (migrated) say(`the brain was renamed from .atlas to .brain, as it is called now`);
-		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
+		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}`);
+		if (legacyCutover.migrated) say(`C5 legacy archive ${legacyCutover.archive} · ${legacyCutover.inventory.storyteller} storyteller transcript(s), ${legacyCutover.inventory.cases} Case record(s), and ${legacyCutover.inventory.shelfPlacements} shelf snapshot(s) retired`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
 		const { YOLO_LINE } = await import("./plan.mjs");
 		const runner = createRunner({ off: flags.noBwrap === true || config.bwrap === false });
@@ -195,7 +167,7 @@ export async function main(argv) {
 		// Loaded here, so --help and a wrong setting answer at once.
 		const { openSession } = await import("./harness.mjs");
 		const { runTerminal } = await import("./terminal.mjs");
-		session = await openSession({ root: project.root, brainDir, config, runner, gate, servedModels: served?.models, servedContextWindow: served?.context, trace, configuredContextWindow });
+		session = await openSession({ root: project.root, brainDir, config, runner, gate, trace, configuredContextWindow });
 		const run = fullScreen ? async (given, options) => (await import("./screen/app.mjs")).runScreen(given, { ...options, intro }, runTerminal) : runTerminal;
 		const code = await run(session, {
 			input: process.stdin,
@@ -205,7 +177,6 @@ export async function main(argv) {
 			config,
 			root: project.root,
 			brainDir,
-			servedModels: served?.models,
 			runner,
 			gate,
 			initiation,
@@ -216,7 +187,7 @@ export async function main(argv) {
 		});
 		process.exitCode = code;
 	} catch (error) {
-		if (error instanceof ConfigError || error instanceof ProjectError) console.error(error.message);
+		if (error instanceof ConfigError || error instanceof ProjectError || error instanceof LegacyCutoverError) console.error(error.message);
 		else console.error(error);
 		process.exitCode = 1;
 	} finally {

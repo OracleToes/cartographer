@@ -22,6 +22,7 @@ import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { int, obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 import { describe, REFUSALS } from "../prompt.mjs";
 import { SandboxError } from "../sandbox.mjs";
+import { createStage, loadStage, StageError } from "../stage.mjs";
 import { ago, took } from "../time.mjs";
 import { WAIT_MAX, WindowError } from "../windows.mjs";
 import { USER_NAME } from "../user.mjs";
@@ -133,11 +134,11 @@ function recordCommand(brainDir, conversationId, entry, { started = false, windo
 }
 
 /**
- * @param {{ config: { shellWait: number }, brainDir: string, gate?: { yolo: boolean }, runner: ReturnType<typeof import("../sandbox.mjs").createRunner>, windows: ReturnType<typeof import("../windows.mjs").createWindows>, runOf: (conversationId: string) => { mode: string, network?: boolean, move?: string, revision?: number } | undefined }} input
+ * @param {{ root?: string, config: { shellWait: number }, brainDir: string, gate?: { yolo: boolean }, runner: ReturnType<typeof import("../sandbox.mjs").createRunner>, windows: ReturnType<typeof import("../windows.mjs").createWindows>, runOf: (conversationId: string) => { mode: string, network?: boolean, move?: string, revision?: number } | undefined }} input
  *   runner: how commands run in this session, read at each call because the user can change it
  *   runOf: what kind of task a conversation is, as the harness last found it
  */
-export function shellTool({ config, brainDir, gate, runner, windows, runOf }) {
+export function shellTool({ root, config, brainDir, gate, runner, windows, runOf }) {
 	return defineTool({
 		name: "shell",
 		description: describe("shell"),
@@ -201,6 +202,23 @@ export function shellTool({ config, brainDir, gate, runner, windows, runOf }) {
 				if (runner.mode === "none") return refuse(REFUSALS.noSandbox(runner.available?.why ?? "no sandbox"));
 				if (confined && !canReadOnly) return refuse(REFUSALS.mainReadOnlyOff(runner.available?.why));
 				if (typeof args.command !== "string" || args.command.trim() === "") return refuse("`command` is empty: give the command line to run.");
+				let stage;
+				// A normal change command receives one disposable candidate tree while bubblewrap is active. The task
+				// record holds only its receipt; direct mode intentionally retains the old detection-only lane.
+				if (!confined && runner.mode === "sandbox" && typeof root === "string") {
+					try {
+						stage = authority.task.stage === undefined ? createStage({ root }) : loadStage(authority.task.stage);
+						if (authority.task.stage === undefined) {
+							updateContext(brainDir, (store) => {
+								const task = taskState(store, api.conversationId);
+								task.stage = { id: stage.id, root: stage.root, work: stage.work, home: stage.home, tmp: stage.tmp, source: stage.source, mounts: stage.mounts };
+							});
+						}
+					} catch (error) {
+						if (error instanceof StageError) return refuse(`A disposable command stage could not be prepared: ${error.message}`);
+						throw error;
+					}
+				}
 				let result;
 				try {
 					result = await windows.run(name, args.command, {
@@ -208,6 +226,7 @@ export function shellTool({ config, brainDir, gate, runner, windows, runOf }) {
 						waitMs: waitOf(args.seconds, config.shellWait) * 1000,
 						signal: callContext.abortSignal,
 						readOnly: confined,
+						...(stage === undefined ? {} : { stage }),
 					});
 				} catch (error) {
 					if (error instanceof WindowError) return refuse(error.message);
@@ -220,16 +239,18 @@ export function shellTool({ config, brainDir, gate, runner, windows, runOf }) {
 						command: firstLine(args.command),
 						window: name,
 						reason: result.reason,
+						...(stage === undefined ? {} : { stage: stage.id }),
 						...(result.exit !== undefined ? { exit: result.exit } : {}),
 					}, { started: true, window: name });
 				}
 				const failed = ((result.reason === POLICY.enums.windowWaitReasons.done || result.reason === POLICY.enums.windowWaitReasons.closed) && result.exit !== 0) || result.reason === POLICY.enums.windowWaitReasons.stopped;
 				// A read-only window mounts the project read-only, so a command that must write there ends with an error; say so.
 				const hint = confined && failed ? "\n[this window is read-only: the project and the brain are mounted read-only, and it has no network. A command that must write runs in a declared change move.]" : "";
+				const stagedHint = stage === undefined ? "" : "\n[this command changed only a disposable candidate workspace. Its diff is checked and may be promoted only when this move closes through the ordinary approved checkpoint path.]";
 				return {
 					isError: failed,
-					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}${ignoredLine(args, action)}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]${hint}` }],
-					details: details(result, confined ? { readOnly: true } : { move: authority.live.move.id }),
+					output: [{ type: "text", text: `${result.text === "" ? "(no output)" : result.text}${ignoredLine(args, action)}\n[${statusLine(result, { noNetwork: result.sandbox && !result.network })}]${hint}${stagedHint}` }],
+					details: details(result, confined ? { readOnly: true } : { move: authority.live.move.id, ...(stage === undefined ? {} : { stage: stage.id }) }),
 				};
 			}
 			const name = typeof args.window === "string" && args.window.trim() !== "" ? args.window.trim() : "";

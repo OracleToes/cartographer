@@ -1,6 +1,6 @@
 # Cartographer — the pair-programmer design
 
-**Status:** source of Intent, 2026-11-15. The direction was settled in a direct alignment conversation with the user; it supersedes the working-design documents (deleted) and the phase plans, which lived there. Planning and staging for the implementation of any given intent lives in separate planning documents (the prompt rewrite: `docs/prompt-rewrite.md`) and in git history — not here. The README documents the harness as it is.
+**Status:** retained source of product intent, refreshed 2026-11-16. It is not the delivery plan: `docs/atlas-attention.md` records the verified Atlas baseline, `docs/consult-mode-proposal.md` specifies the approved consultation target, and `docs/plan.md` carries the active delivery sequence. The README documents the harness as it is; historical plans remain evidence in Git rather than active scope.
 
 Rules of evidence, same as everywhere in this project: no live claims until a live run exists; measurements are bytes or tokens stated as such; anything not yet verified is marked open.
 
@@ -82,7 +82,7 @@ The atlas graph is durable project knowledge. Its attention record is a bounded 
 - An observed active node is direct hot. Its inbound or outbound neighbours are warm for exactly one graph hop; warmth does not recurse. A touched project path that maps to no active node remains a visible mapping gap rather than causing a guessed node to be created.
 - Verification pressure is independent: staleness, missing fingerprints, broken graph links, and mapping gaps belong under `Needs checking` even when the related node is hot. The next action is re-read, verify, relink, or map — not an automatic factual rewrite.
 - Explicit focus is a durable lens on one existing node or confined project path, with a short reason and author. It persists until `focus` visibly replaces it or `unfocus` clears it. A running declared move adds only a temporary target overlay and never replaces the lens.
-- Cold isolated nodes can be explained archive candidates only. Active work shows their count, while idle/maintenance work may show their detail. Archive is reversible, confirmation re-heats, and removal requires deliberate verification; nothing decay-related auto-archives or auto-removes a claim.
+- Cold isolated nodes can be explained archive candidates only. Active work shows their count, while idle/maintenance work may show their detail. Archive is reversible, confirmation re-heats, and only fresh direct verification justifies permanent removal; that is deliberate operating practice, not a durable deletion-receipt subsystem. Nothing decay-related auto-archives or auto-removes a claim.
 - The request-tail local text map is the one projection for focus, active work, hot, nearby, mapping gaps, checking pressure, and candidates. It is freshly derived; the frozen top-of-context graph/tree remains structural and cache-friendly.
 
 ## 9. The shared brain — one engine, two doors
