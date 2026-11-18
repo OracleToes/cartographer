@@ -8,7 +8,9 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
+import { CONFIGURATION_SCHEMA, DEFAULTS, contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
+import { ConfigurationRepositoryError, createConfigurationRepository } from "../src/configuration/repository.mjs";
+import { CONFIGURATION_SOURCE, resolveConfigurationSources } from "../src/configuration/sources.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { CheckpointError } from "../src/checkpoints.mjs";
 import { WakeError } from "../src/wakes.mjs";
@@ -110,6 +112,146 @@ const fresh = (t) => {
 };
 const NOW = "2026-11-15T00:00:00.000Z";
 const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
+
+test("configuration: one schema routes and validates all thirty persisted settings", () => {
+	const keys = [
+		"server", "model", "user", "contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "windowTail", "wakeMin",
+		"wakesMax", "shellRead", "treeDepth", "screen", "colors", "theme", "initiate", "yolo", "bwrap", "repeatCut",
+		"prefill", "prefillTokens", "askMinutes", "thinking", "handoffQuestion", "chatWindow", "collapseTokens", "collapseMinutes", "collapseFull", "readAhead",
+	];
+	assert.deepEqual(CONFIGURATION_SCHEMA.keys, keys, "the Settings contract has one explicit row for every saved setting");
+	assert.deepEqual(CONFIGURATION_SCHEMA.details().map((detail) => detail.key), keys, "every saved setting has schema-derived presentation metadata");
+	assert.ok(CONFIGURATION_SCHEMA.details().every((detail) => detail.persistence === "project" && typeof detail.label === "string" && typeof detail.apply === "string" && typeof detail.risk === "string" && typeof detail.validation?.kind === "string"));
+	const configured = { ...DEFAULTS, server: "http://example.test/v1/", model: "model", user: "Ada" };
+	assert.equal(CONFIGURATION_SCHEMA.validate(configured, { requireProvider: true }).server, "http://example.test/v1", "shared validation retains startup URL normalization");
+	for (const key of keys) {
+		const raw = configured[key];
+		const formValue = Array.isArray(raw) ? raw.join("\n") : typeof raw === "boolean" ? String(raw) : String(raw);
+		assert.deepEqual(CONFIGURATION_SCHEMA.coerceSetting(key, formValue), raw, `${key} has a form-safe coercion path`);
+	}
+	const invalid = {
+		server: 4,
+		model: 4,
+		user: "one\ntwo",
+		contextWindow: 0,
+		maxTokens: 0,
+		mainTurns: 0,
+		taskTurns: POLICY.limits.plan.moveTurns.max + 1,
+		shellWait: 0,
+		windowTail: POLICY.validation.windowTailMax + 1,
+		wakeMin: 0,
+		wakesMax: 0,
+		shellRead: ["relative"],
+		treeDepth: POLICY.limits.tree.maxDepth + 1,
+		screen: 1,
+		colors: "neon",
+		theme: "neon",
+		initiate: 1,
+		yolo: 1,
+		bwrap: 1,
+		repeatCut: 1,
+		prefill: 1,
+		prefillTokens: -1,
+		askMinutes: -1,
+		thinking: 1,
+		handoffQuestion: 1,
+		chatWindow: configured.contextWindow / 2 + 1,
+		collapseTokens: POLICY.validation.minimumTokenSetting - 1,
+		collapseMinutes: -1,
+		collapseFull: POLICY.validation.collapsePercent.max + 1,
+		readAhead: 1,
+	};
+	for (const key of keys) assert.throws(() => CONFIGURATION_SCHEMA.validate({ ...configured, [key]: invalid[key] }, { requireProvider: true }), undefined, `${key} is still backend-validated after local coercion`);
+	assert.throws(() => CONFIGURATION_SCHEMA.coerceSetting("unknown", "value"), /not a known setting/);
+});
+
+test("configuration: precedence exposes saved overrides that environment and CLI currently shadow", (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	writeFileSync(install, JSON.stringify({ server: "http://install.test/v1", model: "install-model", colors: "dark", collapseFull: 70 }));
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ server: "http://project.test/v1", colors: "light", collapseFull: 75 }));
+	const env = { CARTO_CONFIG: install, CARTO_SERVER: "http://environment.test/v1", CARTO_MODEL: "environment-model", CARTO_USER: "Environment User" };
+	const flags = { url: "http://command-line.test/v1", model: "command-line-model" };
+	const resolved = resolveConfigurationSources({
+		defaults: DEFAULTS,
+		install: JSON.parse(readFileSync(install, "utf8")),
+		project: JSON.parse(readFileSync(join(brainDir, "config.json"), "utf8")),
+		env,
+		flags,
+		paths: { install, project: join(brainDir, "config.json") },
+		sourceDetails: { install: { writable: true, revision: "install-r1" }, project: { writable: true, revision: "project-r1" } },
+	});
+	assert.deepEqual(resolved.config, {
+		...DEFAULTS,
+		server: "http://command-line.test/v1",
+		model: "command-line-model",
+		user: "Environment User",
+		colors: "light",
+		collapseFull: 75,
+	}, "defaults, install, project, environment, and CLI use the documented precedence order");
+	const server = resolved.entries.find((entry) => entry.key === "server");
+	assert.deepEqual(server?.source, { layer: CONFIGURATION_SOURCE.commandLine, writable: false });
+	assert.deepEqual(server?.contributors.map((entry) => [entry.layer, entry.overriddenBy]), [
+		[CONFIGURATION_SOURCE.defaults, CONFIGURATION_SOURCE.install],
+		[CONFIGURATION_SOURCE.install, CONFIGURATION_SOURCE.project],
+		[CONFIGURATION_SOURCE.project, CONFIGURATION_SOURCE.environment],
+		[CONFIGURATION_SOURCE.environment, CONFIGURATION_SOURCE.commandLine],
+		[CONFIGURATION_SOURCE.commandLine, undefined],
+	], "provenance tells Settings why a saved endpoint is not effective for this invocation");
+	assert.deepEqual(resolved.revisions, { install: "install-r1", project: "project-r1" });
+	const startup = loadConfig({ brainDir, flags, env });
+	assert.equal(startup.server, "http://command-line.test/v1", "the compatibility startup resolver shares the new precedence rules");
+	assert.equal(startup.model, "command-line-model");
+	assert.equal(startup.colors, "light");
+});
+
+test("configuration repository: source permissions, revisions, atomic writes, and write failures are typed", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	const project = join(brainDir, "config.json");
+	writeFileSync(install, JSON.stringify({ colors: "dark" }));
+	const repository = createConfigurationRepository({ paths: { install, project } });
+	const absent = await repository.read("project");
+	assert.equal(absent.revision, "absent");
+	assert.equal(absent.writable, true);
+	const written = await repository.update({
+		scope: "project",
+		expectedRevision: absent.revision,
+		transform: (values) => ({ ...values, colors: "light" }),
+	});
+	assert.match(written.revision, /^sha256:/);
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" }, "the completed rename leaves a whole JSON object, never a partial file");
+	await assert.rejects(
+		repository.update({ scope: "project", expectedRevision: absent.revision, transform: (values) => ({ ...values, theme: "dark" }) }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "revision-conflict",
+		"a stale Settings editor cannot replace a newer saved source",
+	);
+	await assert.rejects(
+		repository.update({ scope: "environment", expectedRevision: written.revision, transform: (values) => values }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "invalid-source",
+		"environment and CLI are inspectable but never config-file write targets",
+	);
+	const denied = createConfigurationRepository({
+		paths: { install, project },
+		fs: { access: async () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); } },
+	});
+	await assert.rejects(
+		denied.update({ scope: "project", expectedRevision: written.revision, transform: (values) => values }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "source-read-only",
+		"a selected saved source has an explicit permission failure before any write",
+	);
+	const broken = createConfigurationRepository({
+		paths: { install, project },
+		fs: { rename: async () => { throw Object.assign(new Error("disk full"), { code: "EIO" }); } },
+	});
+	await assert.rejects(
+		broken.update({ scope: "project", expectedRevision: written.revision, transform: (values) => ({ ...values, theme: "dark" }) }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "write-failed",
+		"failed atomic persistence is a typed result rather than a partially-written config",
+	);
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" }, "a failed replacement preserves the previous project configuration");
+});
+
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
