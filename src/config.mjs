@@ -123,7 +123,7 @@ export const POLICY = freezeTree({
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
 		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8, handoffChars: 1200, evidenceItems: 8, evidenceChars: 32_000 },
 		// Consult-local caps. A conference is advisory and isolated from project/shell/shared-brain authority.
-		conference: { questionChars: 2400, personaChars: 3200, contextChars: 64_000, sourceChars: 32_000, bookChars: 32_000, selectorChars: 24_000, files: 8, turns: 12, debateTurns: 2, debateParticipants: 2, runtimeMs: 300_000, returnChars: 12_000, returnItems: 16, sourceSearchHits: 80, sourceResultChars: 24_000, activityChars: 24_000, activities: 96, toolReceipts: 96, requestPlans: 64, childLookup: 8, childEntryLookup: 8 },
+		conference: { questionChars: 2400, personaChars: 3200, contextChars: 64_000, sourceChars: 32_000, bookChars: 32_000, selectorChars: 24_000, files: 8, turns: 12, debateTurns: 2, debateParticipants: 2, runtimeMs: 30_000_000, returnChars: 12_000, returnItems: 16, sourceSearchHits: 80, sourceResultChars: 24_000, activityChars: 24_000, activities: 96, toolReceipts: 96, requestPlans: 64, childLookup: 8, childEntryLookup: 8 },
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
