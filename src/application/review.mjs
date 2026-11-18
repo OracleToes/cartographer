@@ -3,10 +3,10 @@
 // Checkpoint storage and the plan's move-revision rules remain authoritative in their existing domain modules. This
 // adapter makes the user-facing undo path one typed action, so terminal and future Review controls never infer a
 // partially completed recovery from printed command text.
-import { CheckpointError, undo, windowStep } from "../checkpoints.mjs";
+import { CheckpointError, lastChange, undo, windowStep } from "../checkpoints.mjs";
 import { loadPlan, savePlan, undoMove } from "../plan.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
-import { UI_ACTION_INTENT, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
+import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
 import { yieldToUi } from "./defer.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
 
@@ -16,7 +16,7 @@ export const REVIEW_ACTION = Object.freeze({
 });
 
 export const REVIEW_CAPABILITY_DEFINITIONS = Object.freeze([
-	{ id: REVIEW_ACTION.undo, label: "Undo last checkpoint change", category: "review", intent: UI_ACTION_INTENT.mutate },
+	{ id: REVIEW_ACTION.undo, label: "Undo last checkpoint change", category: "review", intent: UI_ACTION_INTENT.destructive, confirmation: UI_CONFIRMATION.acknowledge },
 	{
 		id: REVIEW_ACTION.recordWindows,
 		label: "Record shell window changes",
@@ -28,7 +28,7 @@ export const REVIEW_CAPABILITY_DEFINITIONS = Object.freeze([
 
 export const REVIEW_CAPABILITIES = createCapabilityRegistry(REVIEW_CAPABILITY_DEFINITIONS);
 
-const DEFAULT_OPERATIONS = Object.freeze({ loadPlan, savePlan, undo, undoMove, windowStep });
+const DEFAULT_OPERATIONS = Object.freeze({ lastChange, loadPlan, savePlan, undo, undoMove, windowStep });
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 const metadata = (options, now) => ({
@@ -43,18 +43,31 @@ const invalidInput = (message, meta, field) => uiFailure(uiError({
 	retryable: false,
 }), { meta });
 
+const undoTarget = (change) => change.item ?? (change.windows?.length > 0 ? `window ${change.windows.join(", ")}` : "last checkpoint change");
+const undoScope = (change) => change.finished === false
+	? "This task was cut off. Undo restores the project to its earlier checkpoint and can replace later uncheckpointed changes."
+	: "This restores the files changed by this checkpoint.";
+const undoConfirmation = (capability, change) => ({
+	actionId: capability.id,
+	target: undoTarget(change),
+	summary: `Undo ${undoTarget(change)} · ${change.text}. ${undoScope(change)}${change.item === undefined ? "" : " It also reopens the move as an unapproved revision."}`,
+	strength: capability.confirmation,
+});
+const confirmed = (confirmation, request) => confirmation?.acknowledged === true && confirmation.actionId === request.actionId && confirmation.target === request.target;
+
 /**
  * @param {{
  *   root: string,
  *   brainDir: string,
  *   windows?: { takeActive?: () => string[] },
- *   operations?: typeof DEFAULT_OPERATIONS,
+ *   operations?: Partial<typeof DEFAULT_OPERATIONS>,
  *   now?: () => number,
  * }} options
  */
 export function createReviewApplication({ root, brainDir, windows, operations = DEFAULT_OPERATIONS, now = () => Date.now() }) {
 	if (nonEmpty(root) === undefined) throw new TypeError("A review application needs a project root.");
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("A review application needs a brain directory.");
+	const operation = { ...DEFAULT_OPERATIONS, ...operations };
 
 	const execute = async (action, input = {}, options = {}) => {
 		const meta = metadata(options, now);
@@ -78,14 +91,31 @@ export function createReviewApplication({ root, brainDir, windows, operations = 
 		if (!isRecord(input)) return invalidInput("This review action does not take a command input.", meta);
 		try {
 			if (action === REVIEW_ACTION.recordWindows) {
-				const step = operations.windowStep(root, brainDir, windows.takeActive());
+				const step = operation.windowStep(root, brainDir, windows.takeActive());
 				const line = step === undefined ? "No shell window changes need a checkpoint." : "Recorded shell window changes as a checkpoint.";
 				return uiSuccess({ action, step, line }, {
 					meta,
 					notices: step === undefined ? [] : [{ level: "success", message: line }],
 				});
 			}
-			const undone = operations.undo(root, brainDir);
+			const current = operation.lastChange(root, brainDir);
+			if (current === undefined) {
+				const line = "There is no change task left to undo.";
+				return uiSuccess({ action, undone: undefined, line }, {
+					meta,
+					notices: [{ level: "info", message: line }],
+				});
+			}
+			if (capability.confirmation !== UI_CONFIRMATION.none) {
+				const request = undoConfirmation(capability, current);
+				if (!confirmed(options.confirmation, request)) return uiFailure(uiError({
+					code: UI_ERROR_CODE.confirmationRequired,
+					kind: UI_ERROR_KIND.policy,
+					message: request.summary,
+					retryable: false,
+				}), { meta, confirmation: request });
+			}
+			const undone = operation.undo(root, brainDir);
 			if (undone === undefined) {
 				const line = "There is no change task left to undo.";
 				return uiSuccess({ action, undone, line }, {
@@ -94,13 +124,13 @@ export function createReviewApplication({ root, brainDir, windows, operations = 
 				});
 			}
 			let plan;
-			const loaded = operations.loadPlan(brainDir);
+			const loaded = operation.loadPlan(brainDir);
 			if (loaded.plan === undefined) {
 				plan = { state: "unavailable", message: "The plan file cannot be read, so the undo is not noted in it. Tell the agent which move you took back." };
 			} else if (undone.item !== undefined) {
 				try {
-					const changed = operations.undoMove(loaded.plan, undone.item, new Date(now()).toISOString());
-					operations.savePlan(brainDir, loaded.plan);
+					const changed = operation.undoMove(loaded.plan, undone.item, new Date(now()).toISOString());
+					operation.savePlan(brainDir, loaded.plan);
 					plan = { state: "updated", line: changed.line, stale: changed.stale };
 				} catch (error) {
 					plan = { state: "failed", message: `The files were undone, but ${undone.item} could not be updated in the plan: ${error?.message ?? error}. Tell the agent before any further change.` };

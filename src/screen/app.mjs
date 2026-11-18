@@ -33,6 +33,7 @@ import { createChatPresentation } from "../application/chat.mjs";
 import { createReviewPresentation } from "../application/review-presentation.mjs";
 import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
+import { REVIEW_ACTION } from "../application/review.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
@@ -121,7 +122,7 @@ const paletteDestinationFor = (id) => {
 	if (id.startsWith("talk.")) return { tab: "chat", view: "conversation", name: "Chat · Conversation", hint: "Choose kept talk, then use its contextual action." };
 	if (id.startsWith("workspace.")) return { tab: "carto", view: "atlas", name: "Carto", hint: "Choose the relevant record, then use its contextual action." };
 	if (id.startsWith("request.")) return { tab: "carto", view: "requests", name: "Carto · Requests", hint: "Choose a request, then approve, deny, answer, or forget it." };
-	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Use the Review command surface for the selected recovery action." };
+	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Inspect the latest checkpoint change, then use its contextual recovery action." };
 	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
 	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
 	if (id.startsWith("runtime.model.")) return { tab: "context", view: "preview", name: "Model · Next preview", hint: "Inspect the route before changing it." };
@@ -200,6 +201,7 @@ export const KEYS_HELP = [
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
 	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
 	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d opens a confirmation before it deletes for good, and in Requests before it forgets without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  u                in Diff, asks before taking the latest checkpoint change back and reopening its move for approval when it has one",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -589,9 +591,9 @@ export async function runScreen(session, options, runTerminal) {
 				{ text: "x unshelve", capability: WORKSPACE_ACTION.unshelve },
 				"e edit",
 			],
-			"diff.last": ["Enter open", "y copy", "e edit"],
-			"diff.session": ["Enter open", "y copy", "e edit"],
-			"diff.git": ["Enter open", "y copy", "e edit"],
+			"diff.last": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
+			"diff.session": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
+			"diff.git": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
 			"shells.list": ["Enter output", "y copy"],
 			"shells.out": ["Enter back"],
 			"context.window": ["Enter open", "y copy"],
@@ -638,6 +640,7 @@ export async function runScreen(session, options, runTerminal) {
 	// or render pass. The registered capability remains its single metadata source, including disabled reasons.
 	const paletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
+	const review = Object.freeze({ execute: application.execute });
 	const talk = Object.freeze({ execute: application.execute });
 	/** Consult records are loaded only through the application facade and stay in Chat · Consult's private cache. */
 	const refreshConsultProjection = (force = false) => {
@@ -728,8 +731,10 @@ export async function runScreen(session, options, runTerminal) {
 	const stopApplicationEvents = application.events.subscribe((event) => {
 		if (event.type !== "projection.invalidated") return;
 		const scopes = event.payload.scopes ?? [];
-		if (!scopes.some((scope) => ["workspace", "context", "requests"].includes(scope))) return;
-		invalidateBrain();
+		const brainChanged = scopes.some((scope) => ["workspace", "context", "requests"].includes(scope));
+		const projectionChanged = brainChanged || scopes.includes("review");
+		if (!projectionChanged) return;
+		if (brainChanged) invalidateBrain();
 		invalidateProjections();
 		refresh(viewId(), true);
 	});
@@ -813,6 +818,29 @@ export async function runScreen(session, options, runTerminal) {
 				});
 			})
 			.catch((error) => flash(`could not prepare that deletion: ${error?.message ?? error}`));
+	};
+	/** Undo crosses the same typed boundary as /undo; Screen schedules ingress and owns only the acknowledgement overlay. */
+	const presentReviewResult = (result, id = viewId()) => {
+		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+		if (!result.ok) refresh(id, true);
+		draw();
+		return result.ok;
+	};
+	const requestReviewUndo = () => {
+		if (core.busy()) return flash("The agent is working. Stop it first, then undo its checkpoint change.");
+		const route = viewId();
+		void (async () => {
+			// Match /undo: active shell changes become their own latest checkpoint before this recovery is named.
+			if (application.capabilities.availability(REVIEW_ACTION.recordWindows)?.enabled === true) {
+				const recorded = await review.execute(REVIEW_ACTION.recordWindows);
+				if (!recorded.ok) return presentReviewResult(recorded, route);
+			}
+			const asked = await review.execute(REVIEW_ACTION.undo);
+			if (asked.confirmation === undefined) return presentReviewResult(asked, route);
+			openConfirmation(asked.confirmation, () => review.execute(REVIEW_ACTION.undo, {}, {
+				confirmation: { ...asked.confirmation, acknowledged: true },
+			}).then((result) => presentReviewResult(result, route)), { title: "Undo checkpoint change?" });
+		})().catch((error) => flash(`could not prepare that recovery: ${error?.message ?? error}`));
 	};
 	/** A reported move needs its evidence review in the composer; every other row can settle immediately. */
 	const settleWorkspaceRow = async (rowKey, id) => {
@@ -1415,6 +1443,7 @@ export async function runScreen(session, options, runTerminal) {
 		// They stand on a report or shelved file in Current shared brain, a graph node, a ledger entry, a plan envelope
 		// or move, or a request. Model rows are frozen or prospective and have no mutable-record action.
 		if (!inChat) {
+			if (key === "u" && viewId().startsWith("diff.")) return void requestReviewUndo();
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
@@ -1777,7 +1806,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pasted = createPasteWatch();
 	const watchInput = (chunk) => pasted.read(chunk);
 	/** The keys the commands mode takes that the editor has no use for with Alt held. */
-	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazR+-[]HL?/: "]);
+	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazuR+-[]HL?/: "]);
 	tui.addInputListener((data) => {
 		if (state.closed || isKeyRelease(data)) return undefined;
 		// A sheet lies over the screen: the keys are its own.

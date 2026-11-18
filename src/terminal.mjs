@@ -186,7 +186,14 @@ export async function runTerminal(session, options) {
 	};
 	const contextAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
 	const requestAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	const reviewAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
 	const runtimeAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	/** A named terminal command is the user's acknowledgement for its own destructive Review recovery. */
+	const acknowledgedReviewAction = async (action, input = {}) => {
+		const asked = await reviewAction(action, input);
+		if (asked.ok || asked.confirmation === undefined) return asked;
+		return reviewAction(action, input, { confirmation: { ...asked.confirmation, acknowledged: true } });
+	};
 	/** A named terminal command is the user's acknowledgement for its own destructive runtime control. */
 	const acknowledgedRuntimeAction = (action, target, input) => runtimeAction(action, input, {
 		confirmation: { actionId: action, target, acknowledged: true },
@@ -1659,7 +1666,7 @@ export async function runTerminal(session, options) {
 				}
 				try {
 					await recordWindows();
-					const outcome = await application.execute(REVIEW_ACTION.undo);
+					const outcome = await acknowledgedReviewAction(REVIEW_ACTION.undo);
 					if (!outcome.ok) {
 						line(`! ${outcome.error.message}`);
 						return true;

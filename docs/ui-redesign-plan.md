@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration in progress — Chat and Workspace are complete; Review is in progress.
+**Status:** Phase 5 view migration in progress — Chat, Workspace, and Review are complete; Runtime is next.
 
 **Date:** 2026-11-16
 
@@ -438,6 +438,8 @@ Migrate capability groups in this order:
 **Chat completion record (2026-11-16).** Chat now receives activity labels, context-collapse recognition, and roster data through an application presentation adapter. Consult records enter only through the composition-owned settled projection lifecycle; line rendering starts no audit read or state transition. Conversation and Work remain free of conference material, while Consult names loading, empty, error, and cached-stale states. The existing kept-talk removal path remains confirmation-gated.
 
 **Workspace completion record (2026-11-16).** Atlas, Ledger, Plan, Requests, Tree, and Current shared brain now render settled application projections through the Workspace presentation adapter. Query projections carry file or project-location data, while the adapter supplies target formatting; no Workspace renderer imports a domain book or builds a durable path. The shared async boundary owns first-load, failure, and cached-stale state, while feature renderers retain their successful empty states. Existing typed workspace actions and their destructive confirmation route remain unchanged.
+
+**Review completion record (2026-11-16).** Diff now renders settled checkpoint and Git projections through the Review presentation adapter; its renderer owns no checkpoint/Git read or durable path construction. The shared async boundary owns first-load, failure, and cached-stale states while Diff retains its successful empty states. `review.undo` is a destructive, capability-gated action shared by `/undo` and Diff's `u` control: it previews the current checkpoint, asks for a scoped acknowledgement before files change, warns when a cut-off task returns the project to its earlier checkpoint, and reopens a move revision only after recovery. Diff's recovery control records active shell changes through the typed Review ingress when a window manager is available before it names a recovery.
 
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 

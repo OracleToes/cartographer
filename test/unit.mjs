@@ -1264,15 +1264,17 @@ test("application: review queries defer checkpoint and Git projections", async (
 	assert.equal(view.items.find((item) => item.key === "last:task")?.copy, "write the report", "the complete task text stays reachable when its Review header does not fit");
 });
 
-test("application: review undo defers checkpoint recovery and returns its plan revision outcome", async (t) => {
+test("application: review undo previews, acknowledges, and defers checkpoint recovery", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const calls = [];
 	const undone = { item: "m1", text: "restore the original file", changes: [{ path: "src/main.mjs", status: "changed", added: 0, removed: 1 }] };
+	let checkpoint = undone;
 	const app = createReviewApplication({
 		root,
 		brainDir,
 		now: () => Date.parse(NOW),
 		operations: {
+			lastChange: () => { calls.push("last"); return checkpoint; },
 			undo: () => { calls.push("undo"); return undone; },
 			loadPlan: () => { calls.push("plan"); return { plan: { moves: [] } }; },
 			undoMove: (plan, id, at) => {
@@ -1284,13 +1286,31 @@ test("application: review undo defers checkpoint recovery and returns its plan r
 	});
 	const pending = app.execute(REVIEW_ACTION.undo, {}, { requestId: "undo-1" });
 	assert.deepEqual(calls, [], "checkpoint recovery leaves the command/render stack before its synchronous domain seam runs");
-	const result = await pending;
+	const asked = await pending;
+	assert.equal(asked.ok, false);
+	if (asked.ok || asked.confirmation === undefined) throw new Error("undo must ask for its scoped acknowledgement before recovery");
+	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.deepEqual(asked.confirmation, {
+		actionId: REVIEW_ACTION.undo,
+		target: "m1",
+		summary: "Undo m1 · restore the original file. This restores the files changed by this checkpoint. It also reopens the move as an unapproved revision.",
+		strength: "acknowledge",
+	});
+	assert.deepEqual(calls, ["last"], "the confirmation previews the current checkpoint but does not recover it");
+	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.intent, "destructive");
+	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.confirmation, "acknowledge");
+	const result = await app.execute(REVIEW_ACTION.undo, {}, {
+		requestId: "undo-2",
+		confirmation: { ...asked.confirmation, acknowledged: true },
+	});
 	assert.equal(result.ok, true);
 	if (!result.ok) throw new Error(result.error.message);
-	assert.equal(result.meta.requestId, "undo-1");
+	assert.equal(result.meta.requestId, "undo-2");
 	assert.equal(result.data.undone, undone);
 	assert.deepEqual(result.data.plan, { state: "updated", line: "m1 is open again and needs approval.", stale: 0 });
 	assert.deepEqual(calls, [
+		"last",
+		"last",
 		"undo",
 		"plan",
 		{ action: "undo-move", plan: { moves: [] }, id: "m1", at: NOW },
@@ -1299,18 +1319,34 @@ test("application: review undo defers checkpoint recovery and returns its plan r
 	const none = createReviewApplication({
 		root,
 		brainDir,
-		operations: { undo: () => undefined },
+		operations: { lastChange: () => undefined, undo: () => { throw new Error("an empty Review recovery must not call undo"); } },
 	});
 	const empty = await none.execute(REVIEW_ACTION.undo);
 	assert.equal(empty.ok, true);
 	if (!empty.ok) throw new Error(empty.error.message);
 	assert.equal(empty.data.undone, undefined, "no checkpoint left is an empty successful recovery outcome");
+	checkpoint = { windows: ["build"], text: "restore the shell window checkpoint" };
+	const stale = await app.execute(REVIEW_ACTION.undo, {}, { confirmation: { ...asked.confirmation, acknowledged: true } });
+	assert.equal(stale.ok, false);
+	if (stale.ok) throw new Error("a changed checkpoint must reject stale confirmation");
+	assert.equal(stale.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.equal(stale.confirmation.target, "window build");
+	assert.deepEqual(calls.slice(-1), ["last"]);
+	checkpoint = { item: "m2", text: "partially write the migration", finished: false };
+	const cutOff = await app.execute(REVIEW_ACTION.undo);
+	assert.equal(cutOff.ok, false);
+	if (cutOff.ok || cutOff.confirmation === undefined) throw new Error("a cut-off checkpoint still needs acknowledgement");
+	assert.match(cutOff.confirmation.summary, /cut off/i);
+	assert.match(cutOff.confirmation.summary, /later uncheckpointed changes/i, "the acknowledgement names the broader recovery scope of a cut-off task");
 	const unavailable = createReviewApplication({
 		root,
 		brainDir,
-		operations: { undo: () => { throw new CheckpointError("git is not installed"); } },
+		operations: { lastChange: () => undone, undo: () => { throw new CheckpointError("git is not installed"); } },
 	});
-	const failed = await unavailable.execute(REVIEW_ACTION.undo);
+	const unavailableAsked = await unavailable.execute(REVIEW_ACTION.undo);
+	assert.equal(unavailableAsked.ok, false);
+	if (unavailableAsked.ok || unavailableAsked.confirmation === undefined) throw new Error("unavailable recovery still asks before it changes files");
+	const failed = await unavailable.execute(REVIEW_ACTION.undo, {}, { confirmation: { ...unavailableAsked.confirmation, acknowledged: true } });
 	assert.equal(failed.ok, false);
 	if (failed.ok) throw new Error("checkpoint trouble must remain a typed unavailable result");
 	assert.equal(failed.error.kind, UI_ERROR_KIND.unavailable);
@@ -2009,7 +2045,7 @@ test("application: composed facade dispatches actions and publishes cache-invali
 			foldReports: () => "",
 			shelveForUser: () => "",
 		} },
-		review: { operations: { undo: () => undefined } },
+		review: { operations: { lastChange: () => undefined, undo: () => undefined } },
 		runtime: {
 			windows: { send: async () => ({ reason: "quiet" }), close: () => ({ name: "main" }), closeAll: () => ["main"] },
 			wakes: { remove: () => [{ id: "w1" }] },
