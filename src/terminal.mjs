@@ -18,28 +18,37 @@
 // when something happens in a shell window while the agent is not working.
 import { POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
-import { assessmentPath, loadAssessment } from "./assessment.mjs";
-import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
-import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
-import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
+import { atlasSummary, attentionSummary, renderAttention, renderOutline } from "./atlas.mjs";
+import { changeRecord, changeSummary } from "./checkpoints.mjs";
+import { bindTalkSource, contextPath, FLOOR, isFront, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
+import { createApplication } from "./application/app.mjs";
+import { consultMessageFingerprint } from "./application/queries.mjs";
+import { describeCall, describeResult } from "./application/activity.mjs";
+export { describeCall, describeResult } from "./application/activity.mjs";
+import { CONTEXT_ACTION } from "./application/context.mjs";
+import { WORKSPACE_ACTION } from "./application/workspace.mjs";
+import { REQUEST_ACTION } from "./application/requests.mjs";
+import { REVIEW_ACTION } from "./application/review.mjs";
+import { RUNTIME_ACTION } from "./application/runtime-actions.mjs";
+import { conferenceStatusLine, renderConference } from "./conference.mjs";
+import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
-import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { authorize, awaitsApproval, loadPlan, planPath, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
-import { listRequests, approveRequests, denyRequest, answerQuestion, approvalWords } from "./requests.mjs";
-import { stateBlock, splitState, windowLines } from "./state.mjs";
+import { open, openCounts, renderLedger } from "./ledger.mjs";
+import { awaitsApproval, planSummary, planWaits, renderPlan, runnableMoves, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { approvalWordTargets, isApprovalWords } from "./requests.mjs";
+import { splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
-import { loadTop, pin, sinceTop, splitTop } from "./top.mjs";
+import { splitTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
 import { eventLine, isNote, isNoChat, startNote, wakeNote, withoutQuietWakes } from "./wake.mjs";
 import { questionText, spanOf } from "./tools/ask.mjs";
 import { repeats } from "./screen/text.mjs";
 import { REPEAT_NOTE } from "./wake.mjs";
 import { createStreamFreeze } from "./stream.mjs";
-import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
+import { WAKE_MIN, wakeAbout, wakesPath } from "./wakes.mjs";
 import { USER_NAME } from "./user.mjs";
 import { planRequest, withoutAdditions } from "./request.mjs";
 import { bridgeRequestSources } from "./request-sources.mjs";
@@ -75,126 +84,6 @@ const count = (n) => (n >= POLICY.limits.format.countTenThousands ? `${Math.roun
 /** A harness message without its wrapping. */
 const plain = (text) => text.replace(/<\/?harness>/g, "").replace(/\[error\] (Tool call blocked: )?|^Tool call blocked: /, "").trim();
 
-/** One line that says what a tool call is doing. `describeRef`, when given, names a ref instead of showing its bare id. */
-export function describeCall(call, describeRef) {
-	const args = call.arguments ?? {};
-	switch (call.name) {
-		case "task":
-			return `task${typeof args.item === "string" && args.item !== "" ? ` ${args.item}` : ""}  ${oneLine(args.brief, POLICY.limits.terminal.callSummary.taskBrief)}`;
-		case "shell": {
-			// A command typed into a window, or one of the window actions; run is the default and needs no name of its own.
-			if (args.action !== undefined && args.action !== POLICY.enums.shellAction.run) {
-				const more = args.action === POLICY.enums.shellAction.send ? `  ${oneLine(JSON.stringify(args.text ?? ""), POLICY.limits.terminal.callSummary.sendText)}` : args.action === POLICY.enums.shellAction.wait && typeof args.until === "string" && args.until !== "" ? `  until ${oneLine(JSON.stringify(args.until), POLICY.limits.terminal.callSummary.waitUntil)}` : "";
-				return `window ${oneLine(args.window, POLICY.limits.terminal.callSummary.windowName)}  ${args.action}${more}`;
-			}
-			return `$ ${oneLine(args.command, POLICY.limits.terminal.callSummary.shellCommand)}${typeof args.window === "string" && args.window !== "" && args.window !== POLICY.sentinels.mainWindow ? `  (window ${oneLine(args.window, POLICY.limits.terminal.callSummary.windowName)})` : ""}`;
-		}
-		case "write":
-			return `write ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
-		case "edit":
-			return `edit ${oneLine(args.path, POLICY.limits.terminal.callSummary.writePath)}`;
-		case "book": {
-			const target = typeof args.target === "string" && args.target !== "" ? args.target : "";
-			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
-			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== "" ? args.ref : (typeof args.id === "string" && args.id !== "" ? { ...(target !== "" && target !== "shelf" ? { kind: target } : {}), id: args.id } : undefined);
-			const refText = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : undefined;
-			const what = refText ?? args.path ?? args.name ?? args.kind ?? args.mode ?? args.text ?? args.gist ?? "";
-			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
-		}
-		case "read": {
-			// Older stored calls can have plural `paths`; new public reads are one-file `path` calls.
-			if (args.paths !== undefined) {
-				const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
-				const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
-				return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
-			}
-			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
-				? args.ref
-				: (typeof args.id === "string" && args.id !== "" ? { kind: "file", id: args.id } : undefined);
-			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
-			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
-			return `read ${oneLine(String(target), POLICY.limits.terminal.callSummary.readPaths)}${range}`.trim();
-		}
-		case "shelf": {
-			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
-			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
-				? args.ref
-				: (typeof args.id === "string" && args.id !== "" ? { ...(/^f\d+$/.test(args.id) ? { kind: "file" } : /^c\d+$/.test(args.id) ? { kind: "atlas" } : {}), id: args.id } : undefined);
-			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
-			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
-			return `shelf ${[action, oneLine(String(target), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}${range}`.trim();
-		}
-		case "search":
-			return `search /${oneLine(args.pattern, POLICY.limits.terminal.callSummary.searchPattern)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
-		case "list":
-			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
-
-		case "consult":
-			return `the storyteller  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
-		case "wake":
-			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
-		case "sleep":
-			return "sleep";
-		default:
-			return `${call.name} ${oneLine(JSON.stringify(args), POLICY.limits.terminal.callSummary.genericCall)}`;
-	}
-}
-
-/** A few words on what a tool result holds. */
-export function describeResult(message) {
-	const text = textOf(message);
-	// A command that ran: how it ended, how long it took, and the last thing it printed.
-	if (message.toolName === "shell" && message.details?.seconds !== undefined) {
-		const { exit, running, asks, stopped, closed, seconds, last, sandbox, action, lines } = message.details;
-		const time = `${seconds < POLICY.limits.format.elapsedSecondPrecisionBelow ? seconds.toFixed(1) : Math.round(seconds)} s`;
-		const how = closed
-			? `${exit !== undefined ? `exit ${exit} · ` : ""}the window closed`
-			: action === "read"
-				? `${count(lines)} lines${running ? " · still running" : ""}`
-				: running
-					? `${asks ? "may be waiting for input" : stopped ? "did not stop" : "still running"} after ${time}`
-					: exit !== undefined
-						? `${stopped ? "stopped · " : ""}exit ${exit} · ${time}`
-						: stopped
-							? "stopped"
-							: "nothing is running there";
-		return `${how}${sandbox === false ? " · no sandbox" : ""}${last ? ` · ${oneLine(last, POLICY.limits.terminal.resultSummary.shellLast)}` : ""}`;
-	}
-	if (message.details?.window !== undefined && message.details?.closed) return "closed";
-	// What a task did about its own context, in the tool's own words.
-	if (message.toolName === "book" && (message.details?.target === "context" || message.details?.book === "context") && !message.isError && Array.isArray(message.details?.shown)) return oneLine(message.details.shown.join(" · "), POLICY.limits.terminal.resultSummary.context);
-	// The harness's own words for a call the user stopped, or one that a restart cut off.
-	if (message.isError && /^Tool \w+ was aborted/.test(plain(text))) return "stopped";
-	if (message.isError && /^Tool \w+ was interrupted/.test(plain(text))) return "cut off by a restart, and not run again";
-	if (message.isError) return `refused: ${oneLine(plain(text).replace(/^Refused: /, ""), POLICY.limits.terminal.resultSummary.refusal)}`;
-	// What was written to the graph (through `book` with target=atlas); for a call that only read, the first line of what it got.
-	if (message.toolName === "book" && message.details?.target === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
-	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
-	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
-	if (message.toolName === "shelf") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.context);
-	// The storyteller: how long it took, how much it wrote — in the receipt's own words. Where the answer stands is said in the opened row.
-	if (message.toolName === "consult" && !message.isError) {
-		const tokens = typeof message.details?.tokens === "number" && Number.isFinite(message.details.tokens) ? `${Math.round(message.details.tokens).toLocaleString("en-US")} tokens` : "";
-		const seconds = typeof message.details?.seconds === "number" && Number.isFinite(message.details.seconds)
-			? `${Math.floor(message.details.seconds / 60)} m ${String(Math.round(message.details.seconds % 60)).padStart(2, "0")} s`
-			: "";
-		const ended = message.details?.finish === "length" ? " · cut off at consultMaxTokens" : "";
-		const parts = [seconds, tokens].filter((part) => part !== "");
-		return `${parts.join(" · ")}${ended}`;
-	}
-	// "Wrote roll.py: 34 lines, a new file." / "Edited roll.py: …" / "Removed roll.py."
-	if (message.toolName === "write" || message.toolName === "edit" || (message.toolName === "book" && message.details?.target === "file" && message.details?.change === true)) {
-		// A direct-file result may follow its receipt with the focus-local surface accounting. The terminal's one-line
-		// summary names the mutation; the full result still carries the visible allowance facts.
-		const first = text.split("\n")[0];
-		const colon = first.indexOf(": ");
-		const summary = colon >= 0 ? first.slice(colon + 2).replace(/\s+File id:.*$/, "").replace(/\.$/, "") : first.replace(/\.$/, "");
-		return oneLine(summary, POLICY.limits.terminal.resultSummary.write);
-	}
-	const lines = text.split("\n").length;
-	return `${count(lines)} lines`;
-}
-
 /**
  * @param {{ harness: any, main: any, context: any, windows?: ReturnType<typeof import("./windows.mjs").createWindows>, wakes?: ReturnType<typeof import("./wakes.mjs").createWakes> }} session
  * @param {{ input: NodeJS.ReadableStream, output: NodeJS.WritableStream, interactive: boolean, contextWindow: number, root: string, brainDir: string, oneShot?: string, gate?: { yolo: boolean }, initiation?: { on: boolean }, wakeMin?: number }} options
@@ -211,6 +100,40 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
+	// Modern sessions expose one model-management port. Keep an adapter only for narrow test/integration sessions that
+	// still provide the former aliases; all terminal behavior below reaches it through the application boundary.
+	const modelManager = session.models ?? Object.freeze({
+		current: typeof session.model === "function" ? session.model.bind(session) : undefined,
+		inspect: typeof session.checkServer === "function" ? session.checkServer.bind(session) : undefined,
+		ensure: typeof session.ensureModelReady === "function" ? session.ensureModelReady.bind(session) : undefined,
+		ready: typeof session.isModelReady === "function" ? session.isModelReady.bind(session) : undefined,
+		known: () => Array.isArray(session.servedModels) ? session.servedModels : [config.model].filter((id) => typeof id === "string" && id !== ""),
+		select: typeof session.setModel === "function" ? async (modelId, limits = {}) => await session.setModel(modelId, context, limits) : undefined,
+	});
+	// The task message port has the same compatibility shape: old test sessions retain their aliases, while normal
+	// terminal and Screen paths route their durable task steering through the application action below.
+	const workMessenger = session.work ?? Object.freeze({
+		tell: typeof session.tellWork === "function" ? session.tellWork.bind(session) : typeof session.tellTask === "function" ? session.tellTask.bind(session) : undefined,
+	});
+	const application = options.application ?? createApplication({
+		brainDir: options.brainDir,
+		root: options.root,
+		config,
+		runtime: {
+			main,
+			context,
+			engine,
+			windows,
+			wakes,
+			work: workMessenger,
+			model: modelManager.current,
+			models: modelManager,
+			preview: session.preview,
+			runner: options.runner,
+			contextWindow: () => options.contextWindow,
+		},
+	});
+	const queries = application.queries;
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -255,6 +178,65 @@ export async function runTerminal(session, options) {
 		if (midNotes) endLine();
 		out.write(text);
 		midLine = !text.endsWith("\n");
+	};
+	/** The terminal adds its marker; application services provide the typed outcome and its safe message. */
+	const workspaceLine = async (action, input, actionOptions = {}) => {
+		const result = await application.execute(action, input, actionOptions);
+		return result.ok ? result.data.line : `! ${result.error.message}`;
+	};
+	const contextAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	const requestAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	const reviewAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	const runtimeAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	/** A named terminal command is the user's acknowledgement for its own destructive Review recovery. */
+	const acknowledgedReviewAction = async (action, input = {}) => {
+		const asked = await reviewAction(action, input);
+		if (asked.ok || asked.confirmation === undefined) return asked;
+		return reviewAction(action, input, { confirmation: { ...asked.confirmation, acknowledged: true } });
+	};
+	/** A named terminal command is the user's acknowledgement for its own destructive runtime control. */
+	const acknowledgedRuntimeAction = (action, target, input) => runtimeAction(action, input, {
+		confirmation: { actionId: action, target, acknowledged: true },
+	});
+	/** Run durable row mutations in order: each operation reads and writes the same book. */
+	const workspaceLines = async (action, ids, actionOptions = () => ({})) => {
+		const lines = [];
+		for (const id of ids) lines.push(await workspaceLine(action, { id }, actionOptions(id)));
+		return lines.join("\n  ");
+	};
+	// A server is optional while Cartographer opens: local commands remain available, and a later model turn retries
+	// this gate. Keep one clear failure on screen rather than making an unavailable endpoint look like a hung UI.
+	let lastModelError;
+	const applyModelLimits = (limits) => {
+		if (Number.isInteger(limits?.usableContextWindow) && limits.usableContextWindow > 0) options.contextWindow = limits.usableContextWindow;
+	};
+	const showModelError = (error) => {
+		const message = String(error?.message ?? error);
+		if (message === "" || message === lastModelError) return;
+		lastModelError = message;
+		// Chat output can scroll in the full-screen view. Keep this recoverable gate failure in that view's persistent
+		// status strip as well, so a stopped server is never mistaken for an idle or hung Cartographer session.
+		ui?.modelError?.(message);
+		line(`! ${message}`);
+	};
+	// Preserve the old read-ahead rule for transitional sessions without an explicit readiness probe while using the
+	// model port whenever one is available.
+	let modelRouteReady = typeof modelManager.ready === "function" ? modelManager.ready() === true : true;
+	const ensureModelReady = async () => {
+		const availability = application.capabilities.availability(RUNTIME_ACTION.ensureModel);
+		// Compatibility sessions that have no model manager let their own submit implementation decide readiness.
+		if (availability?.enabled !== true) return true;
+		if (!modelRouteReady) line(dim("  connecting to the model server and checking native GBNF; a stopped model may start now"));
+		const result = await runtimeAction(RUNTIME_ACTION.ensureModel);
+		if (!result.ok) {
+			showModelError(result.error);
+			return false;
+		}
+		applyModelLimits(result.data.limits);
+		modelRouteReady = true;
+		lastModelError = undefined;
+		ui?.modelReady?.();
+		return true;
 	};
 	/** The agent's own text: dim, each line behind the gutter. */
 	const streamNotes = (text) => {
@@ -340,13 +322,16 @@ export async function runTerminal(session, options) {
 	const pendingCalls = new Map(); // call id -> { depth, text } waiting for its result
 	const attached = new Set();
 	const watches = [];
+	// Conference child ids are supplied by a deliberately narrow, deferred Consult routing projection. It carries
+	// identity, state, and opaque message keys only; full conference material stays in the isolated Consult surface.
+	const conferenceRoutes = new Map();
 
 	// The call for which Cartographer last said that it ended a turn, per depth: several results of one reply carry it.
 	const saidLoop = [];
 	/** Print what one new entry of a conversation means. depth 0 is the main agent, 1 a task. */
-	const showEntry = (depth, entry) => {
+	const showEntry = (depth, entry, consult) => {
 		if ((entry.model ?? []).some((message) => message.role === "assistant")) saidLoop[depth] = undefined;
-		showOne(depth, entry);
+		showOne(depth, entry, consult);
 		// A call that failed the same way again and again (src/harness.mjs): said after the call's own line.
 		for (const message of entry.model ?? []) {
 			const loop = message.role === "toolResult" ? message.details?.loop : undefined;
@@ -367,7 +352,7 @@ export async function runTerminal(session, options) {
 			bindTalkSource(options.brainDir, { kind: "chat-call", conversationId: String(source.conversationId), callId: String(part.id) }, { ...source, callId: String(part.id) });
 		}
 	};
-	const showOne = (depth, entry) => {
+	const showOne = (depth, entry, consult) => {
 		// `chat` records its tool call before Durable commits the assistant entry on some paths. Promote that
 		// provisional call correlation to the admitted entry id before the screen exposes an edit handle.
 		if (entry?.id !== undefined && entry?.conversationId !== undefined) for (const [position, message] of (entry.model ?? []).entries()) {
@@ -385,7 +370,7 @@ export async function runTerminal(session, options) {
 				capture = undefined;
 			}
 			for (const message of entry.model ?? []) if (message.role === "assistant") finished.add(message.timestamp);
-			ui.entry(depth, entry, printed);
+			ui.entry(depth, entry, printed, consult);
 		}
 		if (depth === 0 && (entry.model ?? []).some((message) => message.role === "assistant")) for (const print of afterReply.splice(0)) print();
 		for (const message of entry.model ?? []) {
@@ -558,14 +543,15 @@ export async function runTerminal(session, options) {
 	}
 
 	/** Print the main agent's reply as it is generated. */
-	const showLive = (live, depth = 0) => {
+	const showLive = (live, depth = 0, consult) => {
 		const message = live?.generation?.message;
 		const writing = message === undefined || finished.has(message.timestamp) ? undefined : message;
 		checkRepeat(writing, depth);
 		if (ui !== undefined) {
-			ui.live(depth, writing);
-			// What the tools are saying while they run: the storyteller's draft, as far as the harness keeps it.
-			ui.liveTools?.(depth, live?.tools);
+			ui.live(depth, writing, consult);
+			// A conference child stays isolated from ordinary Work, but its live reasoning and local tools still need
+			// to reach the dedicated Consult projection as they grow.
+			ui.liveTools?.(depth, live?.tools, consult);
 			return;
 		}
 		if (writing === undefined || depth > 0) return;
@@ -650,23 +636,32 @@ export async function runTerminal(session, options) {
 		if (windows !== undefined) ui.block("the shell windows as they stand", windows);
 		if (tail !== undefined) ui.block("the current read batch — its contents stand at the end of the request", tail);
 	};
+	const isCollapsedFront = (depth, message, body = undefined) => {
+		if (depth !== 0 || message.role !== "user") return false;
+		let visible = body;
+		if (visible === undefined) {
+			const { text: afterTail } = splitReadTail(textOf(message));
+			const { text: afterState } = splitState(afterTail);
+			visible = splitTop(afterState).text;
+		}
+		return isFront({ role: "user", content: [{ type: "text", text: visible }] });
+	};
 	/**
 	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in
 	 * between, the blocks the message carries after it. The screen only; the plain terminal has its own behavior.
 	 */
-	const renderDressed = (depth, message, source) => {
+	const renderDressed = (depth, message, source, consult, collapseStore = {}) => {
 		promoteChatSources(message, source);
 		const original = textOf(message);
 		const { text: afterTail, tail } = splitReadTail(original);
 		const { text: afterState, state, windows } = splitState(afterTail);
 		const { text: afterTop, top } = splitTop(afterState);
 		const body = afterTop;
-		const front = depth === 0 && message.role === "user" && isFront({ role: "user", content: [{ type: "text", text: body }] });
+		const front = isCollapsedFront(depth, message, body);
 		if (front) {
 			// The front block of a collapse: everything before it is gone from the agent's view, so the tab shows
 			// only the marker (the collapse leaves the intro alone), and then what stands in its place.
-			const store = loadContext(options.brainDir);
-			ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`);
+			ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(collapseStore.last ?? {}), kept: collapseStore.last?.kept ?? collapseStore.front?.kept, left: collapseStore.front?.left })}`, consult);
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
 		} else {
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
@@ -680,11 +675,11 @@ export async function runTerminal(session, options) {
 				} else if (isNote({ role: "user", content: [{ type: "text", text: cleaned }] })) {
 					ui.print(`◆ a note Cartographer left itself: ${oneLine(cleaned.replace(/\n/g, " "), POLICY.limits.terminal.messageSummaryChars)}\n`);
 				} else {
-					ui.entry(depth, { model: [{ ...message, content: [{ type: "text", text: cleaned }] }], source }, "");
+						ui.entry(depth, { model: [{ ...message, content: [{ type: "text", text: cleaned }] }], source }, "", consult);
 				}
 			} else {
 				const cleaned = message.role === "toolResult" ? withoutAdditions(body).trim() : undefined;
-				ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "");
+					ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "", consult);
 			}
 		}
 		if (state !== undefined || windows !== undefined || tail !== undefined) printBlocks(state, windows, tail);
@@ -694,7 +689,7 @@ export async function runTerminal(session, options) {
 	 * plain terminal prints nothing of the past; the screen shows it. A task's replay begins at its brief (the
 	 * fork point is the main conversation's story, shown at depth 0).
 	 */
-	const replayHistory = async (conversation, id, depth, fallback = []) => {
+	const replayHistory = async (conversation, id, depth, fallback = [], consult) => {
 		if (ui === undefined) return;
 		// What the agent keeps in view is the current stretch of the conversation since its last restart, exactly as
 		// the request sees it — not a window of the newest entries. The brief of a task's fork is in it, unless the task
@@ -709,6 +704,17 @@ export async function runTerminal(session, options) {
 		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.sibling");
 		const at = found < 0 ? 0 : found;
 		const own = depth === 0 ? entries : entries.slice(at);
+		if (consult !== undefined) {
+			// A conference child has its own consult-local projection. Do not dress its replay through the ordinary
+			// request/block renderer: that could surface private child state as a Work block before chat.mjs routes its
+			// attributed messages to Consult. The durable co<N> audit remains the historic source of truth. Replay uses
+			// only a durable message match for attribution; a later active speaker must not relabel old pruned activity.
+			for (const entry of own) {
+				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
+				ui.entry(depth, entry, "", consultScope(id, message, { activeFallback: false }) ?? consult);
+			}
+			return;
+		}
 		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
 		const briefIds = new Set();
 		for (const entry of own) for (const message of entry.model ?? []) if (message.role === "toolResult" && message.toolName === "task") briefIds.add(message.toolCallId);
@@ -760,10 +766,49 @@ export async function runTerminal(session, options) {
 			ui.print(`! the stored conversation could not be shown as the agent sees it (${error?.message ?? error}); it is stored safely\n`);
 			dressed = raw;
 		}
+		// This lifecycle replay resolves durable collapse metadata before it hands the matching row to the synchronous screen renderer.
+		const contextProjection = dressed.some((message) => isCollapsedFront(depth, message)) ? await queries.context() : undefined;
+		const collapseStore = contextProjection?.ok ? contextProjection.data.store : {};
 		for (const [index, message] of dressed.entries()) {
 			if (message.role === "toolResult" && briefIds.has(message.toolCallId)) continue;
-			renderDressed(depth, message, dressedSources?.get(index));
+			renderDressed(depth, message, dressedSources?.get(index), consult, collapseStore);
 		}
+	};
+
+	/** Refresh the narrow routing cache before a child replay or live frame is classified. A failed refresh leaves the
+	 * last safe route in place; it never falls back to opening a full conference record in ordinary Work lifecycle code. */
+	const refreshConsultRouting = async () => {
+		const projection = await queries.consult.routing();
+		if (!projection.ok) return false;
+		conferenceRoutes.clear();
+		for (const route of projection.data.routes) {
+			if (typeof route?.childConversationId === "string" && route.childConversationId !== "") conferenceRoutes.set(route.childConversationId, route);
+		}
+		return true;
+	};
+	/**
+	 * Conference children are ordinary Durable conversations for scheduling, but not ordinary parent/focus work for
+	 * presentation. The cached route carries only its co<N> identity, state, and opaque attribution keys; Consult
+	 * itself owns the full audit record.
+	 */
+	const consultScope = (id, message, { activeFallback = true } = {}) => {
+		const route = conferenceRoutes.get(String(id ?? ""));
+		if (route === undefined) return undefined;
+		let participant;
+		if (message?.role === "assistant") {
+			const calls = callsOf(message);
+			const callIds = new Set(calls.map((call) => call.id).filter((callId) => typeof callId === "string"));
+			const messageHash = callIds.size === 0 ? consultMessageFingerprint(textOf(message)) : undefined;
+			const activity = route.activity?.findLast?.((entry) => entry?.participant && (
+				(callIds.size > 0 && Array.isArray(entry.callIds) && entry.callIds.some((callId) => callIds.has(callId))) ||
+				(callIds.size === 0 && entry.proseHash === messageHash)
+			));
+			participant = activity?.participant;
+			if (participant === undefined && calls.some((call) => call.name === "consult_return")) participant = route.finalParticipant;
+			if (participant === undefined && calls.length === 0) participant = route.turns?.findLast?.((turn) => turn.textHash === messageHash)?.participant;
+		}
+		if (activeFallback) participant ??= route.activeParticipant ?? route.finalParticipant;
+		return { conference: route.conference, ...(participant === undefined ? {} : { participant }), ...(route.status === undefined ? {} : { status: route.status }) };
 	};
 
 	const follow = async (id, depth) => {
@@ -771,8 +816,11 @@ export async function runTerminal(session, options) {
 		if (conversation === undefined) return;
 		const watch = await conversation.watch(context);
 		watches.push(watch);
+		// A conference child is classified from the deferred minimal route before its synchronous replay renderer runs.
+		if (depth > 0) await refreshConsultRouting();
 		// Awaited: entries that come in while the replay is built are handed in after it, in order.
-		await replayHistory(conversation, id, depth, watch.value.entries ?? []);
+		const replayConsult = consultScope(id);
+		await replayHistory(conversation, id, depth, watch.value.entries ?? [], replayConsult === undefined ? undefined : { conference: replayConsult.conference, status: replayConsult.status });
 		if (depth === 0 && watch.value.docs["pi.live"]?.run !== undefined) line(dim("Continuing unfinished work from the last session…"));
 		// The main agent's history is not replayed. A task is shown from its brief on.
 		let newest = watch.value.entries.at(-1)?.id ?? 0;
@@ -782,12 +830,19 @@ export async function runTerminal(session, options) {
 		}
 		const handle = async (value) => {
 			if (stopped) return;
-			for (const entry of value.entries) if (entry.id > newest) showEntry(depth, entry);
+			// Participant state can advance independently of the Durable child entry. Refresh its opaque routing keys
+			// before the synchronous renderer assigns this frame to Consult.
+			if (depth > 0) await refreshConsultRouting();
+			for (const entry of value.entries) if (entry.id > newest) {
+				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
+				showEntry(depth, entry, consultScope(id, message));
+			}
 			newest = Math.max(newest, value.entries.at(-1)?.id ?? 0);
 			const live = value.docs["pi.live"];
-			if (depth > 0) showLive(live, depth);
+			const writing = live?.generation?.message;
+			if (depth > 0) showLive(live, depth, consultScope(id, writing));
 			if (depth === 0) {
-				showLive(live);
+				showLive(live, 0, consultScope(id, writing));
 				if (live?.runFailure !== undefined && live.runFailure.taskId !== lastFailure) {
 					lastFailure = live.runFailure.taskId;
 					const { reason, detail } = live.runFailure;
@@ -841,14 +896,8 @@ export async function runTerminal(session, options) {
 	/** A reason as the engine words it for a task ("My context held …"), worded for the user. */
 	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^My context/, "its context").replace(/^I asked/, "it asked");
 	/** The question before a collapse and what came back. */
-	let saidFallback = false;
 	const askedLine = (event) => {
 		const who = event.task ? dim("│ ") : "";
-		// Said once: the server would not take the form of the answer, so the question is asked without it from here on.
-		if (event.fallback !== undefined && !saidFallback) {
-			saidFallback = true;
-			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, POLICY.limits.terminal.resultSummary.handoffFallback)}). From here on the question before a collapse is asked without it.`)}`);
-		}
 		if (event.skipped) line(`${who}${dim("◆ not asked before collapsing: carto has only just started, and the question would make the server read the whole context first")}`);
 		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, POLICY.limits.terminal.messageSummaryChars)}). The context is collapsed without it.`);
 		else line(`${who}${dim(`◆ asked before collapsing (${event.task ? ofTask(event.reason) : event.reason}): does it need to write something down first? ${event.handoff ? "yes" : "no"} · ${(event.ms / 1000).toFixed(1)} s`)}`);
@@ -918,7 +967,9 @@ export async function runTerminal(session, options) {
 		// In the line-by-line terminal the marker is said here; in the full screen it is said by the
 		// conversation's front-block entry, so that it is said after everything before it is wiped.
 		if (ui === undefined) collapsedLine();
-		if (config.readAhead !== false && !final) {
+		// Read-ahead is optional performance work, never a reason to wake or require a model while Cartographer is
+		// opening offline. Once the first actual model turn has proven its route, it resumes its usual behavior.
+		if (config.readAhead !== false && !final && modelRouteReady) {
 			const ahead = engine.readAhead(text, info.at);
 			if (ahead !== undefined) {
 				readingAhead = ahead;
@@ -977,7 +1028,19 @@ export async function runTerminal(session, options) {
 	});
 	session.on?.((event) => {
 		enqueue(async () => {
-			if (stopped || event.main !== true) return;
+			if (stopped) return;
+			if (event.type === "model-ready") {
+				applyModelLimits(event.limits);
+				modelRouteReady = true;
+				lastModelError = undefined;
+				ui?.modelReady?.();
+				return;
+			}
+			if (event.type === "model-error") {
+				showModelError(event.error);
+				return;
+			}
+			if (event.main !== true) return;
 			// Said after the reply it is about, which comes in a moment later.
 			if (event.type === "limit") afterReply.push(() => line(`! The agent made ${event.replies} replies in this turn without calling \`sleep\`, so Cartographer ended the turn. Say "continue" to let it go on.`));
 			else if (event.type === "same-note") afterReply.push(() => line(`! Cartographer ended the turn: the agent wrote ${event.empty ? `nothing and called nothing, ${event.times} times in a row` : `the same note ${event.times} times in a row and called nothing`}.`));
@@ -1024,30 +1087,32 @@ export async function runTerminal(session, options) {
 	};
 
 	/** One line on the ledger; a file that cannot be read is said loudly, because the agent cannot use it either. */
-	const ledgerLine = () => {
-		const { ledger, error } = loadLedger(options.brainDir);
-		if (ledger === undefined) return line(`! The ledger cannot be read: ${error}. Repair the file; until then the agent works without it.`);
+	const renderLedgerLine = (projection) => {
+		if (!projection.ok) return line(`! ${projection.error.message}. Repair the file; until then the agent works without it.`);
+		const { ledger } = projection.data;
 		if (open(ledger, POLICY.enums.ledgerKind.goal).length === 0) line(dim(`ledger: ${openCounts(ledger)} · no goal yet: say what you want to achieve`));
 		else line(dim(`ledger: ${openCounts(ledger)} · /ledger shows them`));
 	};
+	const ledgerLine = async () => renderLedgerLine(await queries.ledger());
 
 	/** One line on the plan, when there is one. */
-	const planLine = () => {
-		const { plan, error } = loadPlan(options.brainDir);
-		if (plan === undefined) return line(`! The plan cannot be read: ${error}. Repair the file; until then no declared move can run.`);
+	const planLine = async () => {
+		const projection = await queries.plan();
+		if (!projection.ok) return line(`! ${projection.error.message}. Repair the file; until then no declared move can run.`);
+		const plan = projection.data.plan;
 		if (plan.items.length === 0) return;
-			line(dim(`plan: ${planSummary(plan)} · /plan shows envelopes and moves${awaitsApproval(plan) && !gate.yolo ? ", /approve snapshots current move revisions" : ""}`));
+		line(dim(`plan: ${planSummary(plan)} · /plan shows envelopes and moves${awaitsApproval(plan) && !gate.yolo ? ", /approve snapshots current move revisions" : ""}`));
 	};
 
 	/** Said once for each state of the plan that waits for the user, when the agent has stopped. */
 	let reminded;
-	const approvalLine = () => {
-		const { plan } = loadPlan(options.brainDir);
-		if (plan === undefined || !planWaits(plan) || gate.yolo) {
+	const approvalLine = async () => {
+		const projection = await queries.plan();
+		if (!projection.ok || !planWaits(projection.data.plan) || gate.yolo) {
 			reminded = undefined;
 			return;
 		}
-		const waiting = waitingItems(plan);
+		const waiting = waitingItems(projection.data.plan);
 		const mark = JSON.stringify(waiting.map((move) => [move.id, move.action ?? move.text, move.capabilities?.network === true]));
 		const online = waiting.filter((move) => move.capabilities?.network === true).length;
 		const notes = [online > 0 ? `${online} with network access` : ""].filter((note) => note !== "");
@@ -1059,7 +1124,11 @@ export async function runTerminal(session, options) {
 	const submit = async (content) => {
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
-		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
+		const ledgerProjection = await queries.ledger();
+		if (!ledgerProjection.ok) renderLedgerLine(ledgerProjection);
+		// This runs after the terminal has opened. A cold llama-swap route may now load, but an absent server leaves
+		// the local Cartographer session open and the user's message is not admitted into an unserviceable run.
+		if (!(await ensureModelReady())) return undefined;
 		busy = true;
 		try {
 			// While the agent is working, a message joins the current run after its current tool round.
@@ -1077,24 +1146,23 @@ export async function runTerminal(session, options) {
 		await waitFor(submission);
 		await settle();
 		usageLine();
-		approvalLine();
+		await approvalLine();
 	};
 
 	/**
 	 * Record what the windows changed since the last checkpoint as a step of its own. Only while no task runs: during
 	 * a change task the changes are the task's.
 	 */
-	const recordWindows = () => {
+	const recordWindows = async () => {
 		if (windows === undefined || busy) return undefined;
-		try {
-			const step = windowStep(options.root, options.brainDir, windows.takeActive());
-			if (step !== undefined) windowStepLine(step);
-			return step;
-		} catch (error) {
-			if (!(error instanceof CheckpointError)) throw error;
-			line(`! ${error.message}`);
+		const outcome = await application.execute(REVIEW_ACTION.recordWindows);
+		if (!outcome.ok) {
+			line(`! ${outcome.error.message}`);
 			return undefined;
 		}
+		const step = outcome.data.step;
+		if (step !== undefined) windowStepLine(step);
+		return step;
 	};
 
 	// A wake the agent set has fired while it works: it finds the firing in the state block of its next request. If
@@ -1135,7 +1203,7 @@ export async function runTerminal(session, options) {
 		}
 		const events = [...(windows?.takeNews() ?? []), ...(wakes?.takeNews() ?? [])];
 		for (const event of events) line(`${bold("◆")} ${eventLine(event)}`);
-		const step = recordWindows();
+		const step = await recordWindows();
 		if (step !== undefined) events.push({ type: "changed", names: step.names, summary: changeSummary(step.changes) });
 		if (credit === WAKE_BURST) creditAt = Date.now();
 		credit--;
@@ -1153,7 +1221,7 @@ export async function runTerminal(session, options) {
 			await waitFor(submission);
 			await settle();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 		}
 	};
 
@@ -1176,6 +1244,7 @@ export async function runTerminal(session, options) {
 					[
 						"  /thinking  show or hide what the agent thinks and notes for itself (/thinking on, /thinking off; Ctrl-T does the same)",
 						"  /report   the last task's report in full; /report t12 shows a kept one",
+						"  /consult  consultation conference audits; /consult co1 shows its immutable packet, participant/selector trail, receipts, and final or incomplete outcome; /consult probe [PATH] writes a no-project llama.cpp native-grammar selector diagnostic",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
 						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
@@ -1185,7 +1254,7 @@ export async function runTerminal(session, options) {
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
 						"  /requests what waits for you: declared move revisions and questions of taste",
 						"  /approve  /approve ID ... approves those requests; /approve alone snapshots every current waiting move revision",
-						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
+						"  /deny     /deny ID [why] turns a request down; /delete ID --yes forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
 						"  /pause    hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream",
 						"  /yolo     /yolo on lets declared change moves run without /approve while you watch; /yolo off ends that",
@@ -1202,8 +1271,8 @@ export async function runTerminal(session, options) {
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
 					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph; the row stays on disk either way",
-					"  /done ID …  settle a row the way the agent does: a ledger entry closes, a reported move is accepted after review, a completed envelope closes, a node confirms",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
+					"  /done ID …  settle rows; a reported move needs /done mN -- REVIEW saying why its proof witnesses its done-when",
+					"  /delete ID … --yes  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1213,34 +1282,83 @@ export async function runTerminal(session, options) {
 				);
 				return true;
 			case "requests": {
-				const all = listRequests(options.brainDir, { yolo: gate.yolo });
-				if (all.length === 0) line("  Nothing waits for you. /plan, /ledger and /requests show what the agent has written.");
+				const result = await queries.requests({ yolo: gate.yolo });
+				if (!result.ok) line(`! ${result.error.message}`);
 				else {
-					line(`  ${bold("Requests")}  ${plural(all.length, "request")} wait${all.length === 1 ? "s" : ""} for you:`);
-					for (const request of all) {
-						line(`    ${request.id}  [${request.kind}]  ${request.text}`);
-						for (const detail of request.detail ?? []) line(dim(`      ${detail}`));
+					const all = result.data.items;
+					for (const issue of result.data.issues) line(`! ${issue.message}`);
+					if (all.length === 0) line("  Nothing waits for you. /plan, /ledger and /requests show what the agent has written.");
+					else {
+						line(`  ${bold("Requests")}  ${plural(all.length, "request")} wait${all.length === 1 ? "s" : ""} for you:`);
+						for (const request of all) line(`    ${request.id}  [${request.kind}]  ${request.text}`);
+						line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
 					}
-					line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
 				}
 				return true;
 			}
 			case "report": {
 				if (argument !== undefined) {
-					const kept = loadReport(options.brainDir, argument);
-					line(kept ?? `  There is no report ${argument}. /context lists the kept ones.`);
+					const result = await queries.report(argument);
+					line(result.ok ? result.data.text : result.error.kind === "not-found" ? `  ${result.error.message} /context lists the kept ones.` : `! ${result.error.message}`);
 				} else line(lastReport === undefined ? "  No task has reported in this run of carto." : lastReport);
+				return true;
+			}
+			case "consult": {
+				if (argument === "probe") {
+					if (args.length > 2) {
+						line("  /consult probe [PATH] accepts at most one project-relative JSON log path (paths with spaces are not supported).");
+						return true;
+					}
+					if (busy) {
+						line("  The agent is working. /stop first, then /consult probe, so the raw native-grammar check does not compete with a live request.");
+						return true;
+					}
+					try {
+						if (!(await ensureModelReady())) return true;
+						const models = await queries.runtime.models();
+						const modelId = models.ok ? models.data.currentId ?? config.model : config.model;
+						const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path: args[1] });
+						line(dim("  Running two synthetic, selector-only llama.cpp GBNF requests. They send no project files, chat, tools, or conference capture."));
+						const record = await runLlamaCppSelectorProbe({ server: config.server, modelId });
+						const written = writeSelectorProbeLog(logPath, record);
+						line(renderLlamaCppSelectorProbe(record));
+						const shown = relative(options.root, written) || written;
+						line(`  JSON log: ${shown}${args[1] === undefined ? "  (ignored under .brain/export; pass a project-relative PATH to commit one)" : ""}`);
+						line(dim("  A PASS is inspectable evidence for Cartographer's required native-grammar boundary on this endpoint; it does not establish calibrated or semantically correct routing."));
+					} catch (error) {
+						const message = error instanceof ConsultProbeError ? error.message : error?.message ?? String(error);
+						line(`! Native llama.cpp selector probe could not run: ${message}`);
+					}
+					return true;
+				}
+				if (argument !== undefined) {
+					const result = await queries.consult.get(argument);
+					line(result.ok ? renderConference(result.data.conference) : `! ${result.error.message}`);
+					return true;
+				}
+				const result = await queries.consult.list();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else if (result.data.conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook. /consult probe checks a llama.cpp native GBNF selector without creating a conference.");
+				else {
+					line(`  ${bold("Consult conferences")}`);
+					for (const entry of result.data.conferences) line(entry.error === undefined ? `    ${conferenceStatusLine(entry.conference)}` : `    ${entry.id} · unreadable: ${entry.error}`);
+					line(dim("  /consult co1 shows immutable sources, roster snapshots, participant turns, selector grammar events, tool receipts, and the returned or incomplete outcome. /consult probe [PATH] writes a standalone native-grammar diagnostic. /stop cancels an active outer call."));
+				}
 				return true;
 			}
 			case "context": {
 				if (engine === undefined) return true;
-				const view = await main.context(context);
-				const block = stateBlock(options.brainDir, options.runner, { root: options.root, config });
-				const sizes = engine.sizes(view.messages, block);
+				const projection = await queries.runtime.context();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const { messages, sizes } = projection.data;
+				const contextWindow = projection.data.contextWindow ?? options.contextWindow;
 				const row = (name, n, what) => line(`    ${name.padEnd(8)}${tokens(n).padStart(7)}   ${what}`);
 				const known = [sizes.fixed, sizes.top, sizes.front?.total, sizes.work, sizes.state].reduce((sum, n) => sum + (n ?? 0), 0);
-				if (sizes.fixed === undefined) line(`  The agent's context: of ${tokens(options.contextWindow)} tokens, not measured yet (nothing has been sent in this run of carto yet; the parts below are estimates, without the prompt and the tools)`);
-				else line(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(options.contextWindow)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (measured, as the server counted it; the parts below are estimates)"}`);
+				if (sizes.fixed === undefined) line(`  The agent's context: of ${tokens(contextWindow)} tokens, not measured yet (nothing has been sent in this run of carto yet; the parts below are estimates, without the prompt and the tools)`);
+				else line(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(contextWindow)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (measured, as the server counted it; the parts below are estimates)"}`);
 				row("fixed", sizes.fixed, "the prompt and the tools; never changes");
 				row("top", sizes.top, "the assessment and the graph, as copied at the last collapse");
 				if (sizes.front === undefined) row("kept", 0, "nothing yet: the context has not been collapsed");
@@ -1250,7 +1368,7 @@ export async function runTerminal(session, options) {
 					row("shelf", t.shelf, (sizes.front.shelf ?? []).length === 0 ? "empty" : (sizes.front.shelf ?? []).map((item) => `${shelfLabel(item)} [${item.id}]`).join(", "));
 					row("talk", t.talk, `${plural(sizes.front.kept?.talk ?? 0, "message")} between you and the agent, of at most ${tokens(config.chatWindow)} tokens`);
 				}
-				const since = view.messages.filter((message) => !isFront(message)).length;
+				const since = messages.filter((message) => !isFront(message)).length;
 				const from = sizes.front === undefined ? "the start" : "the last collapse";
 				row("work", sizes.work, since === 0 ? `nothing since ${from}` : `${plural(since, "message")} since ${from}; a collapse frees about ${tokens(sizes.frees)}`);
 				row("state", sizes.state, "the state block, written anew for every request");
@@ -1281,17 +1399,17 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "ledger": {
-				const { ledger, error } = loadLedger(options.brainDir);
-				if (ledger === undefined) line(`! The ledger cannot be read: ${error}`);
-				else line(renderLedger(ledger, { closed: true }));
-				line(dim(`  ${join(options.brainDir, "carto-ledger.json")} · edit it by hand, or tell the agent what to change`));
+				const result = await queries.ledger();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else line(renderLedger(result.data.ledger, { closed: true }));
+				line(dim(`  ${queries.paths.ledger} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "plan": {
-				const { plan, error } = loadPlan(options.brainDir);
-				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
-				else line(renderPlan(plan, { done: true, yolo: gate.yolo }));
-				line(dim(`  ${planPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
+				const result = await queries.plan();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else line(renderPlan(result.data.plan, { done: true, yolo: gate.yolo }));
+				line(dim(`  ${queries.paths.plan} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "focus": {
@@ -1299,62 +1417,46 @@ export async function runTerminal(session, options) {
 					line("  /focus needs a node id/name or project path, then a short reason. Example: /focus c3 trace the request path");
 					return true;
 				}
-				const { atlas, error } = loadAtlas(options.brainDir);
-				if (atlas === undefined) {
-					line(`! The atlas cannot be read: ${error}`);
-					return true;
-				}
-				try {
-					const node = findNode(atlas, argument);
-					const result = applyAtlasOp(atlas, node === undefined ? { action: POLICY.enums.atlasActions.focus, path: argument, reason: tail } : { action: POLICY.enums.atlasActions.focus, name: node.id, reason: tail }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
-					if (result.changed) saveAtlas(options.brainDir, atlas);
-					line(result.line);
-				} catch (error) {
-					if (error instanceof AtlasError) line(`! ${error.message}`);
-					else throw error;
-				}
+				line(await workspaceLine(WORKSPACE_ACTION.focusAtlas, { target: argument, reason: tail }));
 				return true;
 			}
-			case "unfocus": {
-				const { atlas, error } = loadAtlas(options.brainDir);
-				if (atlas === undefined) {
-					line(`! The atlas cannot be read: ${error}`);
-					return true;
-				}
-				try {
-					const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.unfocus }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
-					if (result.changed) saveAtlas(options.brainDir, atlas);
-					line(result.line);
-				} catch (error) {
-					if (error instanceof AtlasError) line(`! ${error.message}`);
-					else throw error;
-				}
+			case "unfocus":
+				line(await workspaceLine(WORKSPACE_ACTION.unfocusAtlas));
 				return true;
-			}
 			case "atlas": {
-				const { atlas, error } = loadAtlas(options.brainDir);
+				const [result, tree] = await Promise.all([queries.atlas(), queries.tree()]);
+				const atlas = result.ok ? result.data.atlas : undefined;
 				line(bold("Tree"));
-				line(treeSection(options.root, atlas?.view, { marks: atlas ? fileMarks(atlas) : undefined, depth: options.treeDepth }).text);
-				if (atlas === undefined) line(`! The graph cannot be read: ${error}`);
+				if (!tree.ok) line(`! ${tree.error.message}`);
 				else {
+					if (result.ok) for (const issue of tree.data.issues) line(`! ${issue.message}`);
+					line(treeSection(options.root, atlas?.view, {
+						marks: new Map(Object.entries(tree.data.marks)),
+						files: tree.data.files.map((file) => file.path),
+						depth: options.treeDepth,
+					}).text);
+				}
+				if (!result.ok) line(`! ${result.error.message}`);
+				else {
+					for (const issue of result.data.issues) line(`! ${issue.message}`);
 					line(bold(`Graph: ${atlasSummary(atlas)}`));
-					const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
-					const local = renderAttention(attentionSnapshot(options.root, atlas, { active: overlays }), { idle: !busy && overlays.length === 0 });
+					const local = renderAttention(result.data.attention, { idle: !busy && result.data.attention.active.length === 0 });
 					if (local !== "") line(local);
 					if (atlas.nodes.length > 0) line(renderOutline(atlas, Number.POSITIVE_INFINITY));
 				}
-				line(dim(`  ${atlasPath(options.brainDir)} · /focus TARGET reason sets a lens; /unfocus clears it; edit it by hand, or tell the agent what to change`));
+				line(dim(`  ${queries.paths.atlas} · /focus TARGET reason sets a lens; /unfocus clears it; edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "assessment": {
-				const assessment = loadAssessment(options.brainDir);
-				line(assessment.text === "" ? "  No assessment yet. The agent writes one when it knows the project." : assessment.text);
-				const top = loadTop(options.brainDir);
-				const { atlas } = loadAtlas(options.brainDir);
-				const behind = atlas !== undefined && top !== undefined ? sinceTop(options.brainDir, atlas, assessment.text) : undefined;
-				const lag = behind !== undefined && (behind.assessment || behind.written.length > 0 || behind.removed.length > 0);
-				if (top !== undefined) line(dim(`  The copy at the top of the agent's context is from ${stamp(Date.parse(top.at))} (${top.reason})${lag ? "; the assessment or the graph changed since. It is rewritten when a goal closes, on /new, or with /pin" : " and is current"}.`));
-				line(dim(`  ${assessmentPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
+				const result = await queries.runtime.assessment();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else {
+					const { assessment, top, changes } = result.data;
+					line(assessment.text === "" ? "  No assessment yet. The agent writes one when it knows the project." : assessment.text);
+					const lag = changes !== undefined && (changes.assessment || changes.written.length > 0 || changes.removed.length > 0);
+					if (top !== undefined) line(dim(`  The copy at the top of the agent's context is from ${stamp(Date.parse(top.at))} (${top.reason})${lag ? "; the assessment or the graph changed since. It is rewritten when a goal closes, on /new, or with /pin" : " and is current"}.`));
+				}
+				line(dim(`  ${queries.paths.assessment} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "pin": {
@@ -1362,9 +1464,9 @@ export async function runTerminal(session, options) {
 					line("  The agent is working. /stop first, then /pin.");
 					return true;
 				}
-				const result = pin(options.brainDir, { reason: `${USER_NAME} asked for it` });
-				if (result.error !== undefined) line(`! The graph cannot be read, so the copy stays as it is: ${result.error}`);
-				else if (result.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
+				const result = await contextAction(CONTEXT_ACTION.pinTop, { reason: `${USER_NAME} asked for it` });
+				if (!result.ok) line(`! ${result.error.message}`);
+				else if (result.data.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
 				else line("  The copy at the top of the context is already current.");
 				return true;
 			}
@@ -1377,29 +1479,36 @@ export async function runTerminal(session, options) {
 				// `/approve p7` expands only to p7's waiting child moves now. `/approve` snapshots every
 				// waiting move at this moment; adding another move later never inherits this decision.
 				if (args.length > 0) {
-					const done = approveRequests(options.brainDir, args);
-					const names = done.items;
+					const result = await requestAction(REQUEST_ACTION.approve, { ids: args });
+					if (!result.ok) {
+						line(`! ${result.error.message}`);
+						return true;
+					}
+					const names = result.data.approved;
 					if (names.length === 0) line(`  None of ${args.join(", ")} names a move revision that waits. /requests lists them.`);
 					else {
 						line(`${bold("●")} moves  approved ${names.join(", ")}`);
 						await send(`I approved the current revisions of ${names.join(", ")}. Only those declared moves may now run; later moves still need their own approval.`);
 					}
-					for (const id of done.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
+					for (const id of result.data.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
 					return true;
 				}
-				const { plan, error } = loadPlan(options.brainDir);
-				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
+				const projection = await queries.plan();
+				if (!projection.ok) line(`! ${projection.error.message}`);
 				else {
-					const pending = waitingItems(plan);
-					if (pending.length === 0) {
+					const pending = waitingItems(projection.data.plan);
+					const result = await requestAction(REQUEST_ACTION.approve, { ids: [] });
+					if (!result.ok) line(`! ${result.error.message}`);
+					else if (pending.length === 0) {
 						line("  The plan has no declared change move waiting for approval. /plan shows envelopes and moves. The agent is told.");
 						await send(NOTHING_TO_APPROVE);
+					} else if (result.data.approved.length === 0) {
+						line("  No declared change move was still waiting for approval. /plan shows envelopes and moves.");
 					} else {
-						const covered = authorize(plan, new Date().toISOString());
-						savePlan(options.brainDir, plan);
-						line(`${bold("●")} moves  approved by you: ${plural(covered, "change move")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
+						const names = result.data.approved;
+						line(`${bold("●")} moves  approved by you: ${plural(names.length, "change move")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
 						for (const move of pending) line(dim(`  ${move.id} ${move.action ?? move.text}${move.capabilities?.network === true ? "  · its commands reach the network" : ""}`));
-						await send(`I approve the current declared move revisions: ${pending.map((move) => move.id).join(", ")}. Carry out only one move per focus and review each report before accepting it.`);
+						await send(`I approve the current declared move revisions: ${names.join(", ")}. Carry out only one move per focus and review each report before accepting it.`);
 					}
 				}
 				return true;
@@ -1409,9 +1518,10 @@ export async function runTerminal(session, options) {
 					line("  /deny ID [why] turns down one request. /requests lists the ids.");
 					return true;
 				}
-				const turned = denyRequest(options.brainDir, argument, tail);
-				if (turned === undefined) line(`  ${argument} is not a request that waits. /requests lists them.`);
+				const result = await requestAction(REQUEST_ACTION.deny, { id: argument, reason: tail });
+				if (!result.ok) line(result.error.kind === "not-found" ? `  ${argument} is not a request that waits. /requests lists them.` : `! ${result.error.message}`);
 				else {
+					const turned = result.data.request;
 					line(`${bold("●")} requests  ${argument} turned down${tail === "" ? "" : `: ${tail}`}`);
 					await send(`I turned down ${argument}: ${turned.text}. Do not carry it out${tail === "" ? "" : `; my reason was: ${tail}`}. Go on with whatever does not depend on it.`);
 				}
@@ -1422,16 +1532,18 @@ export async function runTerminal(session, options) {
 					line("  /answer ID words answers a question of taste. /requests lists the ids.");
 					return true;
 				}
-				const answered = answerQuestion(options.brainDir, argument, tail);
-				if (answered === undefined) line(`  ${argument} is not an open question. /requests lists them.`);
+				const result = await requestAction(REQUEST_ACTION.answer, { id: argument, text: tail });
+				if (!result.ok) line(result.error.kind === "not-found" ? `  ${argument} is not an open question. /requests lists them.` : `! ${result.error.message}`);
 				else {
+					const answered = result.data.request;
 					line(`${bold("●")} requests  ${argument} answered: ${tail}`);
 					await send(`My answer to ${argument} (${answered.text}) is: ${tail}. Use it and go on with whatever does not depend on it.`);
 				}
 				return true;
 			}
 			case "yolo": {
-				const { plan } = loadPlan(options.brainDir);
+				const projection = await queries.plan();
+				const plan = projection.ok ? projection.data.plan : undefined;
 				const waiting = plan === undefined ? [] : waitingItems(plan);
 				if (argument === undefined) {
 					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · declared change moves wait for /approve"}`);
@@ -1454,7 +1566,7 @@ export async function runTerminal(session, options) {
 						line(`${bold("●")} approval: on · declared change moves wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
 						setPrompt();
 						reminded = undefined;
-						if (!busy) approvalLine();
+						if (!busy) await approvalLine();
 					}
 				} else line("  /yolo shows the setting, /yolo on switches approval off, /yolo off switches it back on.");
 				return true;
@@ -1492,19 +1604,24 @@ export async function runTerminal(session, options) {
 				if (wakes === undefined) return true;
 				const [, , id] = text.slice(1).trim().split(/\s+/);
 				if (argument === "remove") {
-					try {
-						for (const gone of wakes.remove(id ?? "")) line(`${bold("●")} wake  - ${gone.id} ${wakeAbout(gone)} · removed by you`);
-					} catch (error) {
-						if (!(error instanceof WakeError)) throw error;
-						line(`  ${error.message}`);
+					const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.removeWake, id ?? "", { id: id ?? "" });
+					if (!outcome.ok) {
+						line(outcome.error.kind === "not-found" || outcome.error.kind === "validation" ? `  ${outcome.error.message}` : `! ${outcome.error.message}`);
+						return true;
 					}
+					for (const gone of outcome.data.removed) line(`${bold("●")} wake  - ${gone.id} ${wakeAbout(gone)} · removed by you`);
 					return true;
 				}
 				if (argument !== undefined) {
 					line("  /wakes lists them; /wakes remove ID takes one away, /wakes remove all every one.");
 					return true;
 				}
-				const lines = wakes.lines();
+				const projection = await queries.runtime.wakes();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const lines = projection.data.lines;
 				if (lines.length === 0) line("  The agent has set no wake.");
 				else for (const text of lines) line(`  ${text}`);
 				const held = heldFor();
@@ -1514,8 +1631,13 @@ export async function runTerminal(session, options) {
 			}
 			case "diff": {
 				try {
-					recordWindows();
-					const last = lastChange(options.root, options.brainDir);
+					await recordWindows();
+					const projection = await queries.review.last();
+					if (!projection.ok) {
+						line(`! ${projection.error.message}`);
+						return true;
+					}
+					const last = projection.data.last;
 					if (last === undefined) {
 						line("  No change task has run that is still in effect.");
 						return true;
@@ -1533,8 +1655,7 @@ export async function runTerminal(session, options) {
 					}
 					if (rows.length < patch.length) line(dim(`  ${patch.length - rows.length} more lines; /diff all shows everything`));
 				} catch (error) {
-					if (!(error instanceof CheckpointError)) throw error;
-					line(`! ${error.message}`);
+					line(`! ${error?.message ?? error}`);
 				}
 				return true;
 			}
@@ -1544,10 +1665,15 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				try {
-					recordWindows();
-					const result = undo(options.root, options.brainDir);
+					await recordWindows();
+					const outcome = await acknowledgedReviewAction(REVIEW_ACTION.undo);
+					if (!outcome.ok) {
+						line(`! ${outcome.error.message}`);
+						return true;
+					}
+					const result = outcome.data.undone;
 					if (result === undefined) {
-						line("  There is no change task left to undo.");
+						line(`  ${outcome.data.line}`);
 						return true;
 					}
 					line(`${bold("●")} undone  ${result.item ?? (result.windows ? `window ${result.windows.join(", ")}` : "change task")} · ${result.text}`);
@@ -1555,24 +1681,12 @@ export async function runTerminal(session, options) {
 					for (const text of changeRecord(result.changes)) line(dim(text));
 					// A checkpoint belongs to one move. Undoing it makes that exact move a new, unapproved
 					// revision; later accepted siblings are blocked for deliberate review.
-					const { plan } = loadPlan(options.brainDir);
-					if (plan === undefined) {
-						line("! The plan file cannot be read, so the undo is not noted in it. Tell the agent which move you took back.");
-					} else if (result.item !== undefined) {
-						const now = new Date().toISOString();
-						try {
-							const changed = undoMove(plan, result.item, now);
-							savePlan(options.brainDir, plan);
-							line(dim(`  ${changed.line} ${gate.yolo ? "Approval is off, but the new revision still has to stay within its move contract." : "Its new revision needs /approve before another focus can run it."}`));
-						} catch (error) {
-							line(`! The files were undone, but ${result.item} could not be updated in the plan: ${error.message}. Tell the agent before any further change.`);
-						}
-					}
+					if (outcome.data.plan?.state === "unavailable" || outcome.data.plan?.state === "failed") line(`! ${outcome.data.plan.message}`);
+					else if (outcome.data.plan?.state === "updated") line(dim(`  ${outcome.data.plan.line} ${gate.yolo ? "Approval is off, but the new revision still has to stay within its move contract." : "Its new revision needs /approve before another focus can run it."}`));
 					if (result.windows !== undefined) line(dim("  The plan is as it was, and the window may still be running: /shells shows it. Tell the agent what you took back."));
 					line(dim("  /undo again takes back the change task before this one."));
 				} catch (error) {
-					if (!(error instanceof CheckpointError)) throw error;
-					line(`! ${error.message}`);
+					line(`! ${error?.message ?? error}`);
 				}
 				return true;
 			}
@@ -1597,20 +1711,20 @@ export async function runTerminal(session, options) {
 				if (want === "off") {
 					if (runner.off) line("  The sandbox is already off.");
 					else {
+						if (!(await closeForSwitch("off"))) return true;
 						runner.off = true;
-						closeForSwitch("off");
 						line(`${bold("!")} sandbox OFF. The commands of change tasks now run directly on this machine, as you.`);
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
-						const { plan } = loadPlan(options.brainDir);
-						const open = plan === undefined ? 0 : runnableMoves(plan).length;
+						const projection = await queries.plan();
+						const open = projection.ok ? runnableMoves(projection.data.plan).length : 0;
 						if (open > 0) line(`  The plan has ${plural(open, "approved move")} ready to run without the sandbox.`);
 						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
 					}
 				} else if (!runner.off) line(runner.mode === "sandbox" ? "  The sandbox is already on." : `  ${sandboxLine(runner)}`);
 				else {
+					if (!(await closeForSwitch("on"))) return true;
 					runner.off = false;
-					closeForSwitch("on");
 					line(runner.mode === "sandbox" ? `${bold("●")} ${sandboxLine(runner)}` : `  ${sandboxLine(runner)}`);
 				}
 				setPrompt();
@@ -1624,7 +1738,7 @@ export async function runTerminal(session, options) {
 				streamFreeze.abandon();
 				await main.abort(context);
 				line(dim("  stopped"));
-				runningLine();
+				await runningLine();
 				return true;
 			}
 			case "pause": {
@@ -1661,7 +1775,12 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "shells": {
-				const all = windows?.list(POLICY.limits.terminal.shellListTail) ?? [];
+				const projection = await queries.runtime.shells();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const all = projection.data.windows;
 				if (all.length === 0) line("  No shell window is open. A change task opens one when it runs a command.");
 				else {
 					for (const text of windowLines(all, { busy: POLICY.limits.terminal.shellBusyTail, free: POLICY.limits.terminal.shellFreeTail })) line(text.replace(/ `window` close clears this line\.$/, " The agent is told."));
@@ -1671,7 +1790,12 @@ export async function runTerminal(session, options) {
 			}
 			case "kill": {
 				// Only windows that are open. A line about one that is gone is the agent's to read and clear.
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+				const projection = await queries.runtime.shells();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const all = projection.data.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (argument === undefined || argument === "") {
 					line(all.length === 0 ? "  No shell window is open." : `  /kill NAME closes one window, /kill all every one. Open: ${all.map((win) => win.name).join(", ")}.`);
 					return true;
@@ -1681,11 +1805,18 @@ export async function runTerminal(session, options) {
 					line(argument === "all" || all.length === 0 ? "  No shell window is open." : `  There is no window ${JSON.stringify(argument)}. Open: ${all.map((win) => win.name).join(", ")}.`);
 					return true;
 				}
+				let closed = false;
 				for (const win of chosen) {
-					windows.close(win.name, { why: KILLED });
-					line(`${bold("●")} closed window ${win.name}${win.state === POLICY.enums.windowStates.busy ? `, and \`${oneLine(win.command, POLICY.limits.terminal.resultSummary.windowCommand)}\` ended with it` : ""}`);
+					const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.closeShell, win.name, { name: win.name, reason: KILLED });
+					if (!outcome.ok) {
+						line(`! ${outcome.error.message}`);
+						continue;
+					}
+					closed = true;
+					const command = outcome.data.closed.running;
+					line(`${bold("●")} closed window ${win.name}${command === undefined ? "" : `, and \`${oneLine(command, POLICY.limits.terminal.resultSummary.windowCommand)}\` ended with it`}`);
 				}
-				if (!busy) line(dim("  The agent sees this the next time it works. Tell it why, if it matters."));
+				if (closed && !busy) line(dim("  The agent sees this the next time it works. Tell it why, if it matters."));
 				return true;
 			}
 			case "wait": {
@@ -1713,51 +1844,51 @@ export async function runTerminal(session, options) {
 				engine?.forget();
 				await main.reset(undefined, context);
 				// Nothing is carried over: not the talk, not the record of tasks, not the shelf. Reports stay on disk.
-				clearFront(options.brainDir);
+				const cleared = await contextAction(CONTEXT_ACTION.clearKept);
+				if (!cleared.ok) line(`! ${cleared.error.message}`);
 				// Everything is read again anyway: the moment to bring the top of the context up to date.
-				pin(options.brainDir, { reason: "a fresh context" });
+				const refreshed = await contextAction(CONTEXT_ACTION.pinTop, { reason: "a fresh context" });
+				if (!refreshed.ok) line(`! ${refreshed.error.message}`);
 				line(dim("  fresh context; earlier messages are no longer in view, and nothing was kept of them (/collapse keeps the talk, the task records and the shelf)"));
 				return true;
 			case "status": {
-				const view = await main.context(context);
-				const last = view.messages.filter((message) => message.role === "assistant").at(-1);
+				const projection = await queries.runtime.status();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const snapshot = projection.data;
+				const last = snapshot.messages.filter((message) => message.role === "assistant").at(-1);
 				const size = last?.usage ? (last.usage.input ?? 0) + (last.usage.cacheRead ?? 0) + (last.usage.output ?? 0) : 0;
-				const on = await session.model?.();
-				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${on?.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
+				line(`  ${withoutQuietWakes(snapshot.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${snapshot.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
 				if (options.runner !== undefined) line(`  ${sandboxLine(options.runner)}`);
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+				const all = snapshot.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === POLICY.enums.windowStates.busy).length} busy · /shells shows them`);
 				if (gate.yolo) line(`  ${YOLO_LINE}`);
 				line(initiation.on ? dim("  the agent starts on its own (/initiate off keeps it waiting)") : dim("  the agent waits for you (/initiate on lets it start on its own)"));
-				const set = wakes?.list() ?? [];
-				if (set.length > 0) {
-					const due = wakes.nextDue();
-					line(`  ${plural(set.length, "wake")} set${due === undefined ? "" : `, the next in ${took(due)}`} · /wakes shows them`);
-				}
+				if (snapshot.wakes.length > 0) line(`  ${plural(snapshot.wakes.length, "wake")} set${snapshot.nextWakeDue === undefined ? "" : `, the next in ${took(snapshot.nextWakeDue)}`} · /wakes shows them`);
 				return true;
 			}
 			case "model": {
-				// The list comes from the server each time: llama-swap serves what is loaded now.
-				let served = session.servedModels ?? [config.model];
-				// The entries as listed: meta.n_ctx is total server capacity; Cartographer reserves reply room from it on a switch.
-				let entries = [];
-				try {
-					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
-					const body = await response.json().catch(() => undefined);
-					const listed = (body?.data ?? []).filter((entry) => typeof entry?.id === "string");
-					if (listed.length > 0) { entries = listed; served = listed.map((entry) => entry.id); }
-				} catch {
-					// The server did not answer: the names from the start are shown.
+				// Model discovery belongs to the deferred Runtime facade. An offline server leaves already-known routes
+				// visible and reports its typed issue without reaching session transport helpers from this adapter.
+				const projection = await queries.runtime.models();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
 				}
-				const on = await session.model?.();
-				const current = on?.modelId ?? config.model;
+				const snapshot = projection.data;
+				if (snapshot.issue !== undefined) showModelError(snapshot.issue);
+				applyModelLimits(snapshot.limits);
+				const entries = snapshot.models;
+				const served = entries.map((entry) => entry.id);
+				const current = snapshot.currentId ?? config.model;
 				if (argument === undefined) {
 					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
-					served.forEach((id, index) => {
-						const ctx = entries.find((entry) => entry.id === id)?.meta?.n_ctx;
-						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${Number.isInteger(ctx) && ctx > 0 ? dim(`  · server capacity ${count(ctx)} tokens`) : ""}`);
+					entries.forEach((entry, index) => {
+						line(`    ${index + 1}  ${entry.id}${entry.id === current ? "  ← on" : ""}${entry.contextWindow === undefined ? "" : dim(`  · server capacity ${count(entry.contextWindow)} tokens`)}`);
 					});
-					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer leaves room for replies below each reported server capacity."));
+					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer uses each reported capacity as its full context limit."));
 					return true;
 				}
 				const byNumber = /^\d+$/.test(argument) ? served[Number(argument) - 1] : undefined;
@@ -1770,19 +1901,22 @@ export async function runTerminal(session, options) {
 					line(`  Already on ${wanted}.`);
 					return true;
 				}
-				const reported = entries.find((entry) => entry.id === wanted)?.meta?.n_ctx;
-				const effective = await session.setModel(wanted, undefined, Number.isInteger(reported) && reported > 0 ? { contextWindow: reported } : {});
-				if (effective === false) {
-					line(`  ${wanted} is not a model of this session. /model lists what the server serves.`);
+				const reported = entries.find((entry) => entry.id === wanted)?.contextWindow;
+				// The application action owns the required native-grammar gate so every programmatic and terminal switch shares it.
+				const selected = await runtimeAction(RUNTIME_ACTION.selectModel, { modelId: wanted, ...(reported === undefined ? {} : { contextWindow: reported }) });
+				if (!selected.ok) {
+					line(`  ${wanted} was not selected: ${selected.error.message}`);
 					return true;
 				}
+				const effective = selected.data.limits;
+				modelRouteReady = true;
 				const was = options.contextWindow;
 				options.contextWindow = effective.usableContextWindow;
-				const context = effective.serverContextWindow !== undefined
-					? ` · usable context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; ${count(effective.replyReserve)} reserved for replies; settings cap ${count(effective.configuredContextWindow)})`
-					: effective.usableContextWindow !== was ? ` · usable context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · usable context ${count(effective.usableContextWindow)} tokens`;
-				line(`${bold("●")} model  ${current} → ${wanted}${context}${busy ? " · the answer being written finishes on the old one" : ""}`);
-				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.reservedContextDivisor)
+				const contextMessage = effective.serverContextWindow !== undefined
+					? ` · context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; settings cap ${count(effective.configuredContextWindow)})`
+					: effective.usableContextWindow !== was ? ` · context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · context ${count(effective.usableContextWindow)} tokens`;
+				line(`${bold("●")} model  ${current} → ${wanted}${contextMessage}${busy ? " · the answer being written finishes on the old one" : ""}`);
+				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.chatWindowDivisor)
 					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective.usableContextWindow)}. It stays as set; chatWindow in the settings is the setting to lower.`));
 				return true;
 			}
@@ -1792,8 +1926,7 @@ export async function runTerminal(session, options) {
 					line("  /fold ID takes a report out of view, leaving its one line: the same `fold` the agent does with `context`. /context lists what is in view.");
 					return true;
 				}
-				const said = foldReports(options.brainDir, ids);
-				line(`  ${said}`);
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.fold, ids)}`);
 				return true;
 			}
 			case "recall": {
@@ -1802,10 +1935,7 @@ export async function runTerminal(session, options) {
 					line("  /recall ID brings a kept report back in full, into view. /context lists the kept ones.");
 					return true;
 				}
-				for (const id of ids) {
-					const said = recallReport(options.brainDir, id);
-					line(said === undefined ? `  There is no report ${id}. /context lists the kept ones.` : `  ${said}`);
-				}
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.recall, ids)}`);
 				return true;
 			}
 			case "shelve":
@@ -1814,12 +1944,8 @@ export async function runTerminal(session, options) {
 					line(`  /${name} PATH [lines] ${name === "shelve" ? "saves a full backing snapshot and carries selected content through collapse" : "takes a shelf item off by path or stable ID (all takes every one)"}.`);
 					return true;
 				}
-				try {
-					const said = name === "shelve" ? shelveForUser(options.root, options.brainDir, config, argument, tail) : unshelveForUser(options.brainDir, argument);
-					line(`  ${said}`);
-				} catch (error) {
-					line(`! ${error.message}`);
-				}
+				if (name === "unshelve") line(`  ${await workspaceLine(WORKSPACE_ACTION.unshelve, { id: argument })}`);
+				else line(`  ${await workspaceLine(WORKSPACE_ACTION.shelve, { path: argument, lines: tail })}`);
 				return true;
 			}
 			case "archive":
@@ -1829,24 +1955,37 @@ export async function runTerminal(session, options) {
 					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
-				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
+				line(`  ${await workspaceLines(name === "archive" ? WORKSPACE_ACTION.archive : WORKSPACE_ACTION.unarchive, ids)}`);
 				return true;
 			}
 			case "done": {
 				if (argument === undefined || args.length === 0) {
-					line("  /done ID …  settles a row the way the agent does: a ledger entry closes, a reported move is accepted after review, a completed envelope closes, a node confirms.");
+					line("  /done ID … settles rows. To accept a reported move, write /done mN -- REVIEW, saying how its reported proof witnesses its done-when.");
 					return true;
 				}
-				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);
+				const reviewAt = parts.indexOf("--");
+				if (reviewAt >= 0) {
+					if (reviewAt !== 1 || parts.length < 3) {
+						line("  /done mN -- REVIEW accepts one reported move. Put the exact evidence review after --.");
+						return true;
+					}
+					line(`  ${await workspaceLine(WORKSPACE_ACTION.settle, { id: argument, review: parts.slice(2).join(" ") })}`);
+					return true;
+				}
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.settle, args)}`);
 				return true;
 			}
 			case "delete": {
-				const ids = args;
+				const ids = args.filter((id) => id !== "--yes");
 				if (ids.length === 0) {
-					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan envelope or move, a node of the graph. /archive hides a row and keeps it.");
+					line("  /delete ID … --yes removes a row for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan envelope or move, a node of the graph. /archive hides a row and keeps it.");
 					return true;
 				}
-				line(`  ${dropRows(options.brainDir, ids)}`);
+				if (!args.includes("--yes")) {
+					line(`  /delete is permanent. To remove ${ids.join(", ")}, run: /delete ${ids.join(" ")} --yes`);
+					return true;
+				}
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.delete, ids, (id) => ({ confirmation: { actionId: WORKSPACE_ACTION.delete, target: id, acknowledged: true } }))}`);
 				return true;
 			}
 			case "send": {
@@ -1854,13 +1993,9 @@ export async function runTerminal(session, options) {
 					line("  /send NAME line types a line into a shell window, as you. /shells lists the windows.");
 					return true;
 				}
-				if (windows === undefined) return true;
-				try {
-					await windows.send(argument, tail, { waitMs: POLICY.timing.terminal.shellSendWaitMs });
-					line(dim(`  typed into ${argument}: ${tail}`));
-				} catch (error) {
-					line(`! ${error.message}`);
-				}
+				const outcome = await runtimeAction(RUNTIME_ACTION.sendShell, { name: argument, line: tail });
+				if (!outcome.ok) line(`! ${outcome.error.message}`);
+				else line(dim(`  typed into ${argument}: ${tail}`));
 				return true;
 			}
 			case "quit":
@@ -1873,37 +2008,69 @@ export async function runTerminal(session, options) {
 	};
 
 	/** A window keeps the way it was opened, so a switch of the sandbox closes every one. */
-	function closeForSwitch(to) {
-		const were = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
-		if (were.length === 0) return;
-		recordWindows();
-		windows.closeAll({ why: `${USER_NAME} switched the sandbox ${to}, which closes every window` });
+	async function closeForSwitch(to) {
+		const projection = await queries.runtime.shells();
+		if (!projection.ok) {
+			line(`! ${projection.error.message}`);
+			return false;
+		}
+		const were = projection.data.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
+		if (were.length === 0) return true;
+		await recordWindows();
+		const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.closeAllShells, "all", {
+			reason: `${USER_NAME} switched the sandbox ${to}, which closes every window`,
+		});
+		if (!outcome.ok) {
+			line(`! ${outcome.error.message}`);
+			return false;
+		}
 		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
+		return true;
 	}
 
 	/** Which windows are still at work, said after the agent was stopped. */
-	function runningLine() {
-		const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
+	async function runningLine() {
+		const projection = await queries.runtime.shells();
+		if (!projection.ok) return void line(`! ${projection.error.message}`);
+		const running = projection.data.windows.filter((win) => win.state === POLICY.enums.windowStates.busy);
 		if (running.length > 0) line(dim(`  still running: ${running.map((win) => `window ${win.name}`).join(", ")} · /shells shows them, /kill NAME ends one, /kill all every one`));
 	}
 
 	/** One line on the atlas and the assessment. */
-	const atlasLine = () => {
-		const { atlas, error } = loadAtlas(options.brainDir);
-		if (atlas === undefined) return line(`! The atlas cannot be read: ${error}. Repair the file; until then the agent cannot use its graph.`);
-		const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
-		const attention = attentionSummary(attentionSnapshot(options.root, atlas, { active: overlays }));
-		const assessment = loadAssessment(options.brainDir);
+	const atlasLine = async () => {
+		const atlasProjection = await queries.atlas();
+		if (!atlasProjection.ok) {
+			const detail = atlasProjection.error.detail ?? atlasProjection.error.message;
+			return line(`! The atlas cannot be read: ${detail}. Repair the file; until then the agent cannot use its graph.`);
+		}
+		const assessmentProjection = await queries.assessment();
+		const { atlas, attention: snapshot } = atlasProjection.data;
+		const assessment = assessmentProjection.ok ? assessmentProjection.data.assessment : { text: "" };
+		const attention = attentionSummary(snapshot);
 		line(dim(`atlas: ${atlasSummary(atlas)}${attention === "" ? "" : ` · ${attention}`} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
 	};
 
 	// ─── Start ──────────────────────────────────────────────────────────────
-	ledgerLine();
-	planLine();
-	atlasLine();
-	const lost = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.gone);
-	if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
+	await ledgerLine();
+	await planLine();
+	await atlasLine();
+	const shellSnapshot = await queries.runtime.shells();
+	if (!shellSnapshot.ok) line(`! ${shellSnapshot.error.message}`);
+	else {
+		const lost = shellSnapshot.data.windows.filter((win) => win.state === POLICY.enums.windowStates.gone);
+		if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
+	}
 	await follow(main.id, 0);
+	// A restarted outer tool normally names its child in a live slot, but a settled/recovered watch can arrive
+	// without that transient slot. Follow any still-running co<N> child directly from the minimal routing projection
+	// so Consult continues to show its live participant stream without loading audit material into Work lifecycle code.
+	await refreshConsultRouting();
+	for (const route of conferenceRoutes.values()) {
+		const child = route.status === "running" ? route.childConversationId : undefined;
+		if (typeof child !== "string" || child === "" || attached.has(child)) continue;
+		attached.add(child);
+		await follow(child, 1);
+	}
 	harness.resume();
 	if (busy) {
 		// The work that was going on when carto last went away goes on. The screen and the prompt must come up
@@ -1912,7 +2079,7 @@ export async function runTerminal(session, options) {
 		const finishing = async () => {
 			await settle();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 		};
 		if (options.oneShot !== undefined || !options.interactive) await finishing();
 		else finishing().catch((error) => line(`! display error: ${error?.message ?? error}`));
@@ -1954,12 +2121,12 @@ export async function runTerminal(session, options) {
 			await waitFor(submission);
 			await settle();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 			await woken();
 			// The agent rests until the next line: the moment to collapse its context when that is due.
 			await rest({ final: piped.length === 0 });
 		}
-		recordWindows();
+		await recordWindows();
 		await stop();
 		return failed ? 1 : 0;
 	}
@@ -1973,21 +2140,7 @@ export async function runTerminal(session, options) {
 		busy: () => busy,
 		paused: () => paused,
 		thinking: () => thinking,
-		// What the server counted for the newest reply, also in the middle of a turn.
-		contextSize: () => engine?.usedBy(main.id) ?? contextSize,
 		lastReport: () => lastReport,
-		/** What a command prints, as text, without printing it: the tabs are filled from this. */
-		capture: (text) =>
-			enqueue(async () => {
-				capture = [];
-				try {
-					await command(text);
-					endLine();
-					return capture.join("");
-				} finally {
-					capture = undefined;
-				}
-			}),
 	});
 	for (const listener of out.listeners?.("resize") ?? []) {
 		if (resizeBefore.has(listener)) continue;
@@ -2010,7 +2163,7 @@ export async function runTerminal(session, options) {
 			for (const print of [...afterResult.splice(0), ...afterReply.splice(0)]) print();
 			endLine();
 			usageLine();
-			approvalLine();
+			await approvalLine();
 			// Something may have happened in a window while the agent was finishing.
 			if (closing || (await wake()) !== undefined) return;
 			// The agent rests: the moment to collapse its context when that is due.
@@ -2065,9 +2218,13 @@ export async function runTerminal(session, options) {
 			reader.close();
 			unlisten?.();
 			if (busy) line(dim("Leaving. Unfinished work continues the next time carto starts here."));
-			else recordWindows();
-			const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
-			if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
+			else await recordWindows();
+			const shellSnapshot = await queries.runtime.shells();
+			if (!shellSnapshot.ok) line(`! ${shellSnapshot.error.message}`);
+			else {
+				const running = shellSnapshot.data.windows.filter((win) => win.state === POLICY.enums.windowStates.busy);
+				if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
+			}
 			await stop();
 			resolve(0);
 		};
@@ -2088,22 +2245,37 @@ export async function runTerminal(session, options) {
 					asks.answer(text);
 					return;
 				}
-				// Their words carry an exact current move approval; a bare yes never sweeps a batch (the gate reads it, not the agent).
-				if (gate.yolo !== true) {
-					const approved = approvalWords(options.brainDir, text);
-					if (approved !== undefined) {
-						// An item marked network is never approved by bare words — say so when that is what is left.
-							const named = /[pm]\d+/i.test(text);
-						let held = [];
-							if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((move) => move.capabilities?.network === true).map((move) => move.id); } catch { held = []; }
-							line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+				// Their words carry an exact current move approval; a bare yes never sweeps a batch. The query resolves
+				// the current target IDs, while the request action—not this terminal handler—makes the durable decision.
+				if (gate.yolo !== true && isApprovalWords(text)) {
+					const projection = await queries.plan();
+					if (projection.ok) {
+						const targets = approvalWordTargets(projection.data.plan, text);
+						if (targets !== undefined) {
+							const approval = await requestAction(REQUEST_ACTION.approve, { ids: targets });
+							if (!approval.ok) line(`! ${approval.error.message}`);
+							else if (approval.data.approved.length > 0) {
+								// A named target may deliberately include a network move. Unnamed words never do, so the
+								// pre-action projection truthfully names the network work that still waits.
+								const named = /[pm]\d+/i.test(text);
+								const held = named ? [] : waitingItems(projection.data.plan).filter((move) => move.capabilities?.network === true).map((move) => move.id);
+								line(`${bold("●")} approved from your words: ${approval.data.approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+							}
+						}
 					}
 				}
 				const wasBusy = busy;
 				userSpoke();
-				// A task runs: the line is for it, and it reads it with its next result.
-				if (wasBusy && session.tellTask?.(text)) {
-					// A call that only waits for a window returns, so that the task reads this sooner.
+				// A private task owns its input while it runs and receives this line with its next result. The action records
+				// that durable steering after leaving the input handler; a task that completed in the meantime falls through
+				// to the ordinary main-agent interruption below.
+				const routeAvailable = application.capabilities.availability(RUNTIME_ACTION.routeTaskMessage)?.enabled === true;
+				const routed = wasBusy && routeAvailable ? await runtimeAction(RUNTIME_ACTION.routeTaskMessage, { text }) : undefined;
+				if (routed !== undefined && !routed.ok) {
+					line(`! ${routed.error.message}`);
+					return;
+				}
+				if (routed?.data.routed === true) {
 					windows?.nudge();
 					line(dim("  (sent to the running task: it reads it at its next step, and the main agent is told with the report)"));
 					return;
@@ -2155,6 +2327,16 @@ export async function runTerminal(session, options) {
 			});
 		});
 		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue; Ctrl-T hides and shows its thinking."));
+		// Check connectivity only after the terminal exists. This does not load a model; an unavailable server becomes a
+		// recoverable on-screen status instead of preventing Cartographer from opening.
+		if (application.capabilities.availability(RUNTIME_ACTION.ensureModel).enabled) {
+			void queries.runtime.models().then((projection) => enqueue(async () => {
+				if (stopped || closing) return;
+				if (!projection.ok) return showModelError(projection.error);
+				applyModelLimits(projection.data.limits);
+				if (projection.data.issue !== undefined) showModelError(projection.data.issue);
+			}));
+		}
 		// A context left large by the last session is collapsed before the first message has to carry it. Then,
 		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.
 		enqueue(async () => {

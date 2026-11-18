@@ -1,5 +1,6 @@
 import { POLICY } from "../config.mjs";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { TOKEN, withCompatibilityAliases } from "./tokens.mjs";
 
 // Text on a grid of terminal cells: how wide a string is, how it wraps, and lines made of styled spans.
 //
@@ -51,7 +52,7 @@ const FALLBACK = {
 	bgSel: "7",
 	bgTab: "7",
 	chip: "7",
-	// The parts of a context (src/screen/views.mjs).
+	// The parts of a sent provider request (src/screen/runtime.mjs).
 	catSystem: "33",
 	catTools: "36",
 	catTop: "32",
@@ -63,12 +64,74 @@ const FALLBACK = {
 	catState: "92",
 	catWindows: "96",
 };
-export const STYLES = { ...FALLBACK };
+const SEMANTIC_FALLBACK = {
+	[TOKEN.surface.canvas]: "",
+	[TOKEN.surface.content]: "",
+	[TOKEN.surface.raised]: "",
+	[TOKEN.surface.input]: "",
+	[TOKEN.surface.overlay]: "",
+	[TOKEN.text.primary]: "",
+	[TOKEN.text.secondary]: FALLBACK.muted,
+	[TOKEN.text.muted]: FALLBACK.faint,
+	[TOKEN.text.inverse]: "",
+	[TOKEN.text.link]: FALLBACK.link,
+	[TOKEN.text.heading]: FALLBACK.heading,
+	[TOKEN.text.code]: FALLBACK.code,
+	[TOKEN.border.subtle]: FALLBACK.faint,
+	[TOKEN.border.strong]: FALLBACK.muted,
+	[TOKEN.border.focus]: FALLBACK.user,
+	[TOKEN.interaction.focus]: FALLBACK.bgSel,
+	[TOKEN.interaction.selected]: FALLBACK.bgSel,
+	[TOKEN.interaction.active]: FALLBACK.bgTab,
+	[TOKEN.interaction.disabled]: FALLBACK.faint,
+	[TOKEN.interaction.loading]: FALLBACK.warn,
+	[TOKEN.interaction.stale]: FALLBACK.muted,
+	[TOKEN.interaction.chip]: FALLBACK.chip,
+	[TOKEN.feedback.success]: FALLBACK.ok,
+	[TOKEN.feedback.warning]: FALLBACK.warn,
+	[TOKEN.feedback.danger]: FALLBACK.err,
+	[TOKEN.feedback.info]: FALLBACK.tool,
+	[TOKEN.activity.user]: FALLBACK.user,
+	[TOKEN.activity.agent]: FALLBACK.carto,
+	[TOKEN.activity.shell]: FALLBACK.tool,
+	[TOKEN.activity.note]: FALLBACK.note,
+	[TOKEN.activity.userSurface]: undefined,
+	[TOKEN.activity.shellSurface]: undefined,
+	[TOKEN.activity.noteSurface]: undefined,
+	[TOKEN.domain.diff.added]: FALLBACK.green,
+	[TOKEN.domain.diff.removed]: FALLBACK.red,
+	[TOKEN.domain.diff.changed]: FALLBACK.yellow,
+	[TOKEN.domain.context.system]: FALLBACK.catSystem,
+	[TOKEN.domain.context.tools]: FALLBACK.catTools,
+	[TOKEN.domain.context.top]: FALLBACK.catTop,
+	[TOKEN.domain.context.kept]: FALLBACK.catKept,
+	[TOKEN.domain.context.user]: FALLBACK.catYou,
+	[TOKEN.domain.context.cartographer]: FALLBACK.catCarto,
+	[TOKEN.domain.context.agent]: FALLBACK.catAgent,
+	[TOKEN.domain.context.result]: FALLBACK.catResult,
+	[TOKEN.domain.context.state]: FALLBACK.catState,
+	[TOKEN.domain.context.windows]: FALLBACK.catWindows,
+	[TOKEN.emphasis.dim]: FALLBACK.dim,
+	[TOKEN.emphasis.strong]: FALLBACK.bold,
+	[TOKEN.emphasis.italic]: FALLBACK.italic,
+	[TOKEN.emphasis.underline]: FALLBACK.under,
+	[TOKEN.emphasis.inverse]: FALLBACK.inverse,
+};
 
-/** Replace the colours: `styles` maps style names to SGR codes. undefined goes back to the fallback. */
+export const STYLES = { ...FALLBACK, ...withCompatibilityAliases(SEMANTIC_FALLBACK) };
+
+/**
+ * Replace semantic colours and rebuild compatibility aliases. `styles` may contain either the semantic names a
+ * theme owns or former feature names, so plugins and the old renderer continue to work during the migration.
+ * undefined goes back to terminal-safe no-colour fallbacks.
+ */
 export function applyTheme(styles) {
 	for (const key of Object.keys(STYLES)) delete STYLES[key];
-	Object.assign(STYLES, FALLBACK, styles ?? {});
+	const themed = styles ?? {};
+	const semantic = withCompatibilityAliases(themed);
+	// A transitional caller may still supply one old name. It overrides that name only, while the semantic token
+	// remains the canonical theme value for new shell components.
+	Object.assign(STYLES, FALLBACK, withCompatibilityAliases({ ...SEMANTIC_FALLBACK, ...semantic }), themed);
 }
 
 /** A string without what a terminal would act on: escape sequences and control characters; a tab becomes spaces. */

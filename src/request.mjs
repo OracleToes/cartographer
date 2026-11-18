@@ -25,7 +25,7 @@ import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } fro
 import { STAMP, stamp, took } from "./time.mjs";
 import { loadTop, withoutTop, withTop } from "./top.mjs";
 import { USER_NAME } from "./user.mjs";
-import { TASK_HEADER } from "./prompt.mjs";
+import { FOCUS_START, TASK_HEADER } from "./prompt.mjs";
 
 const USER_SPEAKER = `${USER_NAME}: `;
 
@@ -166,6 +166,17 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 		requestMessages = [...requestMessages, taskNote];
 		keptSources.push({ id: `task-note:${conversationId ?? "unknown"}`, kind: "task-note", conversationId: String(conversationId ?? "unknown") });
 	}
+	if (!main) {
+		// A Durable fork's prepared brief is a tool result. Some provider chat templates reject a tool-only prefix,
+		// so give it one explicit request-only user turn without restoring the parent conversation.
+		const capsuleAt = requestMessages.findIndex((message) => message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER));
+		if (capsuleAt >= 0) {
+			const start = { role: "user", content: [{ type: "text", text: FOCUS_START }] };
+			const source = { id: `focus-start:${conversationId ?? "unknown"}`, kind: "focus-start", conversationId: String(conversationId ?? "unknown") };
+			requestMessages = [...requestMessages.slice(0, capsuleAt), start, ...requestMessages.slice(capsuleAt)];
+			keptSources = [...keptSources.slice(0, capsuleAt), source, ...keptSources.slice(capsuleAt)];
+		}
+	}
 	// The frozen project-top copy is main working memory. A focus begins from its prepared capsule instead of replaying
 	// that broad orientation; Durable lineage still retains the parent fork.
 	const top = main ? loadTop(brainDir) : undefined;
@@ -181,7 +192,8 @@ export function planRequest(messages, { brainDir, root, runner, config, gate, ma
 	for (const [index, message] of dressed.entries()) {
 		const source = keptSources[index] ?? { id: `planned:${conversationId ?? "unknown"}:${index}`, kind: "planned", conversationId: String(conversationId ?? "unknown") };
 		const capsule = !main && message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER);
-		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: capsule ? "focus-capsule" : "active-message", source: source.id, sourceRef: source, lifecycle: "planned", message: index, role: message.role, fragment: message });
+		const focusStart = !main && source.kind === "focus-start";
+		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: focusStart ? "focus-start" : capsule ? "focus-capsule" : "active-message", source: source.id, sourceRef: source, lifecycle: "planned", message: index, role: message.role, fragment: message });
 	}
 	let state;
 	if (main) {
