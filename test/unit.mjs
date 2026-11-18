@@ -333,10 +333,19 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 });
 
 test("application: workspace queries defer readers and return typed empty, unavailable, and cancelled outcomes", async (t) => {
-	const { brainDir } = fresh(t);
+	const { root, brainDir } = fresh(t);
 	let ledgerReads = 0;
+	let contextReads = 0;
+	mkdirSync(join(brainDir, "reports"), { recursive: true });
+	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
+	const contextStore = {
+		rows: [{ id: "t1", species: "composed", mode: "look", at: 0, brief: "Inspect", outcome: "Done." }],
+		shelf: [{ id: "sh1", path: "README.md", snapshot: "Shelf snapshot." }],
+		dropped: [],
+	};
 	const queries = createWorkspaceQueries({
 		brainDir,
+		root,
 		now: () => Date.parse(NOW),
 		readers: {
 			loadAtlas: () => ({ atlas: { nodes: [] } }),
@@ -345,6 +354,10 @@ test("application: workspace queries defer readers and return typed empty, unava
 				return { ledger: { items: [] } };
 			},
 			loadPlan: () => ({ plan: { items: [], moves: [] } }),
+			loadContext: () => {
+				contextReads++;
+				return contextStore;
+			},
 		},
 	});
 	const pending = queries.ledger({ requestId: "ledger-query" });
@@ -355,6 +368,18 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(ledgerReads, 1);
 	assert.deepEqual(empty.data.ledger.items, []);
 	assert.equal(empty.meta.requestId, "ledger-query");
+	const current = queries.context({ requestId: "context-query" });
+	assert.equal(contextReads, 0, "the shared-brain reader also waits until after the current UI stack");
+	const shared = await current;
+	assert.equal(shared.ok, true);
+	if (!shared.ok) throw new Error(shared.error.message);
+	assert.equal(contextReads, 1);
+	assert.equal(shared.data.shelf[0].text, "Shelf snapshot.");
+	assert.equal(shared.data.standing[0].text, "The report body.");
+	assert.equal(shared.meta.requestId, "context-query");
+	const { handsView } = await import("../src/screen/views.mjs");
+	const sharedView = handsView({ root, brainDir, context: shared.data, deferred: true });
+	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
 	const absent = await queries.entry({ book: "ledger", id: "g1" });
 	assert.equal(absent.ok, false);
 	if (absent.ok) throw new Error("a missing entry must be explicit");

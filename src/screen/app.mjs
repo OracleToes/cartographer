@@ -548,18 +548,99 @@ export async function runScreen(session, options, runTerminal) {
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
 	const workspace = createWorkspaceApplication({ brainDir, root, config });
-	const queries = createWorkspaceQueries({ brainDir });
+	const queries = createWorkspaceQueries({ brainDir, root });
 	const talk = createTalkApplication({ brainDir });
+	/** Cached deferred Carto projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
+	const CARTO_PROJECTION = Object.freeze({
+		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
+		"carto.ledger": ({ signal }) => queries.ledger({ signal }),
+		"carto.plan": ({ signal }) => queries.plan({ signal }),
+		"carto.requests": ({ signal }) => queries.requests({ yolo: options.gate?.yolo === true, signal }),
+		"carto.hands": ({ signal }) => queries.context({ signal }),
+	});
+	const PROJECTION_NAME = Object.freeze({
+		"carto.atlas": "Atlas",
+		"carto.ledger": "Ledger",
+		"carto.plan": "Plan",
+		"carto.requests": "Requests",
+		"carto.hands": "Current shared brain",
+	});
+	const projections = new Map();
+	const projectionFor = (id) => projections.get(id) ?? { generation: 0, loading: false };
+	const projectionMessage = (projection) => projection?.error?.message ?? "Cartographer could not refresh this view.";
+	const projectionView = (id, render) => {
+		const projection = projectionFor(id);
+		const name = PROJECTION_NAME[id] ?? "view";
+		if (projection.data === undefined) {
+			if (projection.error !== undefined) return {
+				header: [[[`! ${projectionMessage(projection)}`, "warn"]]],
+				items: [{ key: `projection:${id}:error`, plain: true, head: [[`  ${name} could not be loaded. Press r to retry.`, "muted"]] }],
+			};
+			return {
+				header: [[[`${name} is loading…`, "muted"]]],
+				items: [{ key: `projection:${id}:loading`, plain: true, head: [["  Reading the current durable view without blocking input…", "faint"]] }],
+			};
+		}
+		const view = render(projection.data);
+		const notices = [];
+		if (projection.loading) notices.push([[`↻ Refreshing ${name.toLowerCase()} · showing cached data`, "muted"]]);
+		else if (projection.error !== undefined) notices.push([[`! ${projectionMessage(projection)} · showing cached data`, "warn"]]);
+		if (Array.isArray(projection.data.issues) && projection.data.issues.length > 0) notices.push([[`! ${projection.data.issues.map((issue) => issue.message).join(" · ")}`, "warn"]]);
+		return notices.length === 0 ? view : { ...view, header: [...notices, ...view.header] };
+	};
+	const refreshProjection = (id, force = false) => {
+		const query = CARTO_PROJECTION[id];
+		if (query === undefined) return;
+		const prior = projectionFor(id);
+		if (prior.loading && !force) return;
+		prior.controller?.abort();
+		const generation = prior.generation + 1;
+		const controller = new AbortController();
+		projections.set(id, { ...prior, generation, loading: true, error: undefined, controller });
+		void query({ signal: controller.signal })
+			.then((result) => {
+				const current = projections.get(id);
+				if (current?.generation !== generation) return;
+				if (result.ok) projections.set(id, { generation, loading: false, data: result.data, updatedAt: Date.now() });
+				else if (result.error.kind === "cancelled") projections.set(id, { ...current, loading: false, controller: undefined });
+				else projections.set(id, { ...current, loading: false, controller: undefined, error: result.error });
+				if (!state.closed) {
+					rebuild(id);
+					if (viewId() === id) draw();
+				}
+			})
+			.catch((error) => {
+				const current = projections.get(id);
+				if (current?.generation !== generation) return;
+				projections.set(id, { ...current, loading: false, controller: undefined, error: { message: error?.message ?? String(error) } });
+				if (!state.closed) {
+					rebuild(id);
+					if (viewId() === id) draw();
+				}
+			});
+	};
+	const cancelProjection = (id) => {
+		const projection = projections.get(id);
+		if (projection?.loading !== true) return;
+		projection.controller?.abort();
+		projections.set(id, { ...projection, generation: projection.generation + 1, loading: false, controller: undefined });
+	};
+	const invalidateProjections = () => {
+		for (const [id, projection] of projections) {
+			projection.controller?.abort();
+			projections.set(id, { ...projection, generation: projection.generation + 1, loading: false, controller: undefined, error: undefined });
+		}
+	};
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
 	const build = (id, isOpen, cols) => {
-		if (id === "carto.atlas") return atlasView(env);
-		if (id === "carto.ledger") return ledgerView(env);
-		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
-		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
+		if (id === "carto.atlas") return projectionView(id, (data) => atlasView({ ...env, atlas: data.atlas, attention: data.attention, lines: data.lines, deferred: true }));
+		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ brainDir, ledger: data.ledger, lines: data.lines, deferred: true }));
+		if (id === "carto.plan") return projectionView(id, (data) => planView({ ...env, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, deferred: true }));
+		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ brainDir, yolo: options.gate?.yolo === true, requests: data.items, deferred: true }));
 		if (id === "carto.tree") return treeView(env, isOpen);
-		if (id === "carto.hands") return handsView({ root, brainDir });
+		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, brainDir, context: data, deferred: true }));
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
 		if (id === "shells.list") return shellsView(env);
 		if (id === "shells.out") return shellsOutView(env, state.shell);
@@ -587,6 +668,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (page === undefined) return;
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
+		refreshProjection(id, force);
 		if (id === "context.preview" && page.loading !== true) {
 			page.loading = true;
 			Promise.resolve(session.preview?.())
@@ -623,7 +705,10 @@ export async function runScreen(session, options, runTerminal) {
 	/** Present one typed workspace outcome, then redraw the projection that started the action. */
 	const presentWorkspaceResult = (result, id = viewId()) => {
 		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
-		if (result.ok) invalidateBrain();
+		if (result.ok) {
+			invalidateBrain();
+			invalidateProjections();
+		}
 		refresh(id, true);
 		draw();
 		return result.ok;
@@ -683,7 +768,9 @@ export async function runScreen(session, options, runTerminal) {
 	const scrollOf = () => (chatTab() ? chatScroll : pageOf().scroll);
 	const setTab = (id) => {
 		if (!TABS.some((tab) => tab.id === id)) return;
+		const previous = viewId();
 		state.tab = id;
+		if (previous !== viewId()) cancelProjection(previous);
 		tui.resetTextSelection();
 		refresh(viewId(), true);
 		draw();
@@ -691,7 +778,9 @@ export async function runScreen(session, options, runTerminal) {
 	const stepTab = (by) => setTab(TABS[(TABS.findIndex((tab) => tab.id === state.tab) + by + TABS.length) % TABS.length].id);
 	const setView = (id) => {
 		if (VIEWS[state.tab] === undefined) return;
+		const previous = viewId();
 		state.view[state.tab] = id;
+		if (previous !== viewId()) cancelProjection(previous);
 		tui.resetTextSelection();
 		refresh(viewId(), true);
 		draw();
@@ -1614,6 +1703,7 @@ export async function runScreen(session, options, runTerminal) {
 	const stop = ({ farewell = false } = {}) => {
 		if (stopped) return;
 		stopped = true;
+		for (const id of projections.keys()) cancelProjection(id);
 		clearInterval(tick);
 		process.stdin.off("data", watchInput);
 		// What stays on the terminal: the conversation, as it stood. A process that is going down in a hurry
