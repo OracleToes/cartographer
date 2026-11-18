@@ -2024,7 +2024,7 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
 });
 
-test("screen: consult rows fetch only conference audits and render old rows as static archive notices", async () => {
+test("screen: only Consult loads a conference audit; parent rows remain private pointers", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	const record = {
 		id: "co7",
@@ -2035,36 +2035,102 @@ test("screen: consult rows fetch only conference audits and render old rows as s
 		roster: { version: 1 },
 		bookSources: {},
 		myPersona: { digest: "a".repeat(64) },
-		turns: [], selectorEvents: [], requestPlans: [], sources: [],
+		turns: [], selectorEvents: [], requestPlans: [], sources: [], toolReceipts: [], activities: [],
 		final: { participant: "atlas", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
 	};
 	let reads = 0;
-	const chat = createChat({ now: () => 1_000, readConference: (id) => { reads += 1; return id === "co7" ? record : undefined; } });
+	const chat = createChat({ now: () => 1_000, readConference: (id) => { reads++; return id === "co7" ? record : undefined; } });
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
-	const text = () => chat.lines(100).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const text = (projection) => chat.lines(100, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	chat.entry(0, reply([call("c1", "consult", { question: "What must the parent verify?", myPersona: "Audit the source boundary." })], 1));
 	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from atlas.", { details: { consult: true, conference: "co7" } }));
-	assert.equal(reads, 0, "the private notebook is not loaded into ordinary Chat");
-	chat.toggle(chat.lines(100).find((line) => line.kind === "group").item);
-	const row = chat.lines(100).find((line) => line.kind === "call");
-	chat.toggleRow(row.item, row.row);
-	const opened = text(); // Rendering the deliberately opened row is the on-demand audit read.
-	assert.equal(reads, 1, "opening the row deliberately reads its co<N> audit");
-	has(opened, "consult conference co7 · private audit notebook", "the opened row names the conference record");
-	has(opened, "Verify the current source before acting.", "the selected audit renders on demand");
-	has(chat.textOf(row.item, row.row), "Consult conference co7", "copy reads the same conference audit");
+	assert.equal(reads, 0, "the private notebook is not loaded into Conversation or Work");
+	hasNot(text("work"), "What must the parent verify?", "the parent consult call is absent from Work");
+	// A child replay without terminal-supplied persona metadata must not synchronously open co<N> just to guess one
+	// while the user is still in another Chat subview. Consult will reconstruct it from its durable audit on demand.
+	let childReads = 0;
+	const child = createChat({ readConference: () => { childReads++; return record; } });
+	child.entry(1, reply([{ type: "text", text: "Private child replay words." }], 2), "", { conference: "co7" });
+	child.live(1, { timestamp: 3, content: [{ type: "thinking", thinking: "Private child live reasoning." }] }, { conference: "co7" });
+	assert.equal(childReads, 0, "unattributed child replay/live state never loads a private audit outside Consult");
+	hasNot(child.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "Private child", "child state cannot become an ordinary Work row while attribution is unavailable");
+	const group = chat.items.find((item) => item.type === "group");
+	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot load or export the audit");
+	const consult = text("consult");
+	assert.equal(reads, 1, "Consult deliberately reads its co<N> audit");
+	has(consult, "Consultation co7 · returned", "the dedicated view names the conference record");
+	has(consult, "Verify the current source before acting.", "the durable advisory renders only in Consult");
 
 	const historical = createChat({ readConference: () => { throw new Error("a historical row must not load an archive"); } });
 	historical.entry(0, reply([call("c2", "consult", { question: "Old question", thread: "st1" })], 1));
 	historical.entry(0, result("c2", "consult", "Legacy row", { details: { consult: true, thread: "st1" } }));
-	historical.toggle(historical.lines(100).find((line) => line.kind === "group").item);
-	const oldRow = historical.lines(100).find((line) => line.kind === "call");
-	historical.toggleRow(oldRow.item, oldRow.row);
-	const oldText = historical.lines(100).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	has(oldText, "historical consult row predates the C5 conference audit", "old Durable rows are notices, not parser-backed conversations");
-	hasNot(oldText, "Legacy row\nLegacy row", "the static notice avoids fabricating a transcript");
+	const historicalWork = historical.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	hasNot(historicalWork, "Legacy row", "an old parent receipt is never rendered as ordinary Work");
+	const historicalConsult = historical.lines(100, "consult").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	has(historicalConsult, "Legacy row", "the isolated Consult view can name the compact historic parent receipt without parsing an archive");
+});
+
+test("screen: Consult is a separate persona-attributed conference timeline with durable and live activity", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const record = {
+		id: "co18",
+		status: "returned",
+		question: "Which migration boundary remains advisory?",
+		model: { provider: "local", modelId: "fixture" },
+		roster: { version: 1 },
+		activities: [{
+			index: 1,
+			participant: "cartographer",
+			at: "2026-11-16T12:00:00.000Z",
+			reasoning: "First separate the parent context from the private audit.",
+			prose: "I will inspect only the frozen packet.",
+			calls: [{ id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } }],
+		}],
+		turns: [{ index: 1, participant: "cartographer", at: "2026-11-16T12:00:00.000Z", text: "I will inspect only the frozen packet." }],
+		selectorEvents: [{ index: 1, at: "2026-11-16T12:00:01.000Z", after: "cartographer", participant: "atlas", eligible: ["atlas", "ledger", "plan", "assessment", "context"], grammarEnforced: true }],
+		toolReceipts: [{ id: "source-1", callId: "source-1", participant: "cartographer", action: "read", source: "s1", result: "== s1\n1 immutable evidence", at: "2026-11-16T12:00:00.500Z" }],
+		final: { participant: "atlas", outcome: "answered", at: "2026-11-16T12:00:02.000Z", synthesis: "Keep the conference audit isolated from parent context.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] },
+	};
+	let reads = 0;
+	const chat = createChat({
+		readConference: (id) => { reads++; return id === record.id ? record : undefined; },
+		listConferences: () => [{ id: record.id, conference: record }],
+	});
+	const text = (projection) => chat.lines(110, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+
+	// A parent call creates only a private Consult pointer. Ordinary Work does not fetch or echo the co<N> audit.
+	chat.entry(0, { model: [{ role: "assistant", content: [call("outer-consult", "consult", { question: record.question, myPersona: "Keep the boundary explicit." })] }] });
+	chat.liveTools(0, [{ callId: "outer-consult", status: "running", details: { consult: true, conference: record.id } }]);
+	assert.equal(reads, 0, "the parent Work projection does not read a consult audit");
+	hasNot(text("work"), record.question, "the parent consult call is not mixed into ordinary Work");
+
+	const consult = text("consult");
+	assert.equal(reads, 0, "Consult uses the durable conference listing supplied for this paint instead of redundantly rereading its record");
+	for (const name of ["Cartographer", "Atlas", "Ledger", "Plan", "Assessment", "Context"]) has(consult, `${name} ·`, `the roster visibly labels ${name}`);
+	has(consult, "Cartographer · reasoning", "a participant's reasoning is its own named block");
+	has(consult, "Cartographer · chat / prose", "participant prose is distinct from reasoning");
+	has(consult, "Cartographer · tool call · consult_source · read s1", "local tool calls name their participant and action");
+	has(consult, "Cartographer · tool result · consult_source · read s1 · completed", "local tool results stay with the same participant");
+	has(consult, "Conference host · native GBNF routing", "host routing is visibly distinguished from participant prose");
+	has(consult, "Atlas · final advisory · answered", "the final advisory result names its returning persona");
+	has(consult, "Keep the conference audit isolated from parent context.", "the durable final synthesis stays readable in Consult");
+
+	// Child streaming comes through the same separate projection and never creates a generic focus/Work row.
+	chat.live(1, { timestamp: 9, content: [{ type: "thinking", thinking: "Check what the ledger snapshot actually supports." }, { type: "text", text: "I am checking the retained claim." }, call("source-live", "consult_source", { action: "search", id: "s1", pattern: "claim" })] }, { conference: record.id, participant: "ledger" });
+	chat.liveTools(1, [{ callId: "source-live", status: "running", output: "s1:4: claim is bounded" }], { conference: record.id, participant: "ledger" });
+	const live = text("consult");
+	has(live, "Ledger · reasoning · writing", "live consultation reasoning keeps its persona label");
+	has(live, "Ledger · chat / prose · writing", "live consultation prose keeps its persona label");
+	has(live, "Ledger · tool call · consult_source · search s1", "a live local call names the active persona");
+	has(live, "Ledger · tool result · consult_source · search s1 · \"claim\" · running", "a live local result is visibly separate from its call");
+	hasNot(text("work"), "Check what the ledger snapshot", "live child reasoning does not leak into parent Work");
+
+	const conferenceLine = chat.lines(110, "consult").find((line) => line.kind === "consult");
+	assert.ok(conferenceLine, "the conference header is selectable for folding/copying");
+	assert.match(chat.textOf(conferenceLine.item), /# Consultation co18/, "copying the header exports the private consult timeline, not parent history");
 });
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
@@ -2389,7 +2455,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 		import("../src/screen/views.mjs"),
 	]);
 	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model"], "the top-level tabs group speech and private activity under Chat before the project and provider views");
-	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }], "Chat keeps user-directed exchange and private case or focus activity as adjacent subtabs");
+	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }, { id: "consult", name: "Consult" }], "Chat gives isolated consultation activity its own adjacent subtab, rather than hiding it in parent Work");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
 	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");

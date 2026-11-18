@@ -34,7 +34,7 @@ import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { createConferenceExtension } from "../src/conference-extension.mjs";
-import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, renderConference, restrictParticipantPayload, selectorMessages, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
+import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantActivity, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, recordToolReceipt, renderConference, restrictParticipantPayload, selectorMessages, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
 import { chooseNativeGrammar, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
@@ -2376,6 +2376,58 @@ test("conference C4: request-plan audit retention stays bounded with monotonic p
 	assert.match(renderConference(bounded), new RegExp(`${total} total`));
 });
 
+test("conference C4: private activity and receipt retention use durable event identities and bounded monotonic indexes", (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Can the audit remain bounded?", myPersona: "Keep every retained response attributable.", model: {}, caller: {}, at: 1 });
+	attachChildConference(brainDir, conference.id, "retention-child", 2);
+	const repeated = { stopReason: "toolUse", content: [{ type: "text", text: "The same short local observation." }, { type: "toolCall", id: "same-local-call", name: "consult_source", arguments: { action: "list" } }] };
+	const totalActivities = POLICY.limits.conference.activities + 3;
+	for (let index = 1; index <= totalActivities; index++) recordParticipantActivity(brainDir, conference.id, "cartographer", repeated, index + 1, `generation-${index}`);
+	// A restart of one generation must not create another activity, but identical words from another generation do.
+	recordParticipantActivity(brainDir, conference.id, "cartographer", repeated, totalActivities + 2, `generation-${totalActivities}`);
+	let bounded = loadConference(brainDir, conference.id).conference;
+	assert.equal(bounded.activities.length, POLICY.limits.conference.activities);
+	assert.equal(bounded.activityCount, totalActivities);
+	assert.equal(bounded.activities[0].index, totalActivities - POLICY.limits.conference.activities + 1);
+	assert.equal(bounded.activities.at(-1).index, totalActivities);
+	assert.equal(bounded.activities.at(-1).eventId, `generation-${totalActivities}`);
+
+	const totalReceipts = POLICY.limits.conference.toolReceipts + 3;
+	for (let index = 1; index <= totalReceipts; index++) {
+		recordToolReceipt(brainDir, conference.id, { id: `source-${index}`, callId: `call-${index}`, participant: "cartographer", action: "list", result: `listed source snapshot ${index}`, at: new Date(index).toISOString() });
+	}
+	// A replay of the most recent tool call keeps the original receipt rather than duplicating it.
+	recordToolReceipt(brainDir, conference.id, { id: `source-${totalReceipts}`, callId: `call-${totalReceipts}`, participant: "cartographer", action: "list", result: "replayed", at: new Date(totalReceipts).toISOString() });
+	bounded = loadConference(brainDir, conference.id).conference;
+	assert.equal(bounded.toolReceipts.length, POLICY.limits.conference.toolReceipts);
+	assert.equal(bounded.toolReceiptCount, totalReceipts);
+	assert.equal(bounded.toolReceipts[0].index, totalReceipts - POLICY.limits.conference.toolReceipts + 1);
+	assert.equal(bounded.toolReceipts.at(-1).index, totalReceipts);
+	assert.match(renderConference(bounded), new RegExp(`${totalActivities} total`));
+	assert.match(renderConference(bounded), new RegExp(`${totalReceipts} total`));
+});
+
+test("conference C4: a recovered completed turn is idempotent after the selector has advanced", (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Can recovered turns replay safely?", myPersona: "Keep audit provenance stable.", model: {}, caller: {}, at: 1 });
+	attachChildConference(brainDir, conference.id, "replay-child", 2);
+	const response = { id: "durable-generation-7", content: [{ type: "text", text: "The first member completed this contribution." }] };
+	recordParticipantTurn(brainDir, conference.id, "cartographer", response, 3, "durable-generation-7");
+	recordSelectorChoice(brainDir, conference.id, "atlas", { at: 4 });
+	const before = loadConference(brainDir, conference.id).conference;
+	assert.equal(before.active.participant, "atlas");
+	// Durable may replay its afterResponse hook after the selector has moved on. This must be an idempotent no-op,
+	// not an active-speaker failure and not a second activity/turn.
+	const replayed = recordParticipantTurn(brainDir, conference.id, "cartographer", response, 5, "durable-generation-7");
+	assert.equal(replayed.active.participant, "atlas");
+	const after = loadConference(brainDir, conference.id).conference;
+	assert.equal(after.activities.length, 1);
+	assert.equal(after.turns.length, 1);
+	assert.equal(after.selectorEvents.length, 1);
+	assert.equal(after.activities[0].eventId, "durable-generation-7");
+	assert.equal(after.turns[0].eventId, "durable-generation-7");
+});
+
 test("conference C4: tool activity keeps its speaker, malformed returns and limits preserve an auditable incomplete state, and a valid return carries provenance", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const server = await startStandIn({ tokenDelayMs: 0 });
@@ -2404,11 +2456,14 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 		{ type: "text", text: "I will inspect the packet before I hand off." },
 		{ type: "toolCall", id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } },
 	] }, api);
-	assert.deepEqual(loadConference(brainDir, captured.id).conference.active, { kind: "participant", participant: "cartographer", opening: true }, "text plus a tool call does not trigger a selector handoff");
+	const afterToolResponse = loadConference(brainDir, captured.id).conference;
+	assert.deepEqual(afterToolResponse.active, { kind: "participant", participant: "cartographer", opening: true }, "text plus a tool call does not trigger a selector handoff");
+	assert.deepEqual(afterToolResponse.activities.map((activity) => [activity.participant, activity.reasoning, activity.prose, activity.calls?.[0]?.name]), [["cartographer", undefined, "I will inspect the packet before I hand off.", "consult_source"]], "the private co<N> audit retains a persona-attributed response and local call without placing it in parent context");
 	const read = await source.execute({ action: "read", id: "s1" }, api);
 	assert.equal(read.isError, undefined);
 	assert.match(read.output[0].text, /captured evidence/);
 	assert.equal(loadConference(brainDir, captured.id).conference.toolReceipts.length, 1);
+	assert.match(loadConference(brainDir, captured.id).conference.toolReceipts[0].result, /captured evidence/, "a consult-local tool receipt retains its bounded result for the separate audit view");
 
 	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "My completed contribution." }] }, api);
 	let running = loadConference(brainDir, captured.id).conference;
@@ -2465,18 +2520,21 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 		{ role: "toolResult", toolCallId: "consult-call", toolName: "consult", isError: false, details: { conference: captured.id }, content: [{ type: "text", text: "Only the compact parent receipt." }] },
 	] });
 	const group = chat.items.find((item) => item.type === "group");
-	assert.match(chat.textOf(group.key, 0), /Consult conference co1/, "opening a Work consult row reads the audit record on demand instead of copying its private notebook into parent chat");
+	const viewText = (instance, projection) => instance.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
+	assert.doesNotMatch(viewText(chat, "work"), /Consult conference|Only the compact parent receipt/, "the parent Work projection has no conference notebook or receipt");
+	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot export conference activity");
+	assert.match(viewText(chat, "consult"), /Consultation co1/, "only Consult reads the local co<N> notebook");
 
-	let liveAudit = { ...returnedRecord, status: "running", active: { kind: "participant", participant: "cartographer" } };
+	let liveAudit = { ...returnedRecord, status: "running", final: undefined, ended: undefined, active: { kind: "participant", participant: "cartographer" } };
 	const liveChat = createChat({ readConference: () => liveAudit });
 	liveChat.entry(0, { id: "entry-live", conversationId: "parent", model: [
 		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-live", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
 	] });
 	liveChat.liveTools(0, [{ callId: "consult-live", status: "running", details: { conference: captured.id } }]);
-	const liveGroup = liveChat.items.find((item) => item.type === "group");
-	assert.match(liveChat.textOf(liveGroup.key, 0), /Current participant: cartographer/, "api.details exposes only co<N> metadata while the outer tool remains pending");
+	assert.match(viewText(liveChat, "consult"), /Cartographer · active/, "Consult reads live conference status without exposing it through parent Work");
 	liveAudit = { ...liveAudit, active: { kind: "participant", participant: "atlas" } };
-	assert.match(liveChat.textOf(liveGroup.key, 0), /Current participant: atlas/, "an open Work audit refreshes its durable record while the conference progresses");
+	assert.match(viewText(liveChat, "consult"), /Atlas · active/, "Consult refreshes its private audit while the conference progresses");
+	assert.doesNotMatch(viewText(liveChat, "work"), /Cartographer · active|Atlas · active/, "Work remains isolated from private conference activity");
 });
 
 test("conference C4: recovery resumes the captured child and captured model rather than allocating or adopting a later model", async (t) => {

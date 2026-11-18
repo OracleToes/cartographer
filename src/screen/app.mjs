@@ -1,6 +1,6 @@
 // The full screen: tabs, a status strip that is always there, and a place to type.
 //
-//   1 Chat     Conversation is user-directed exchange; Work is private shared-brain activity (src/screen/chat.mjs)
+//   1 Chat     Conversation is user-directed exchange; Work is private shared-brain activity; Consult is its isolated conference audit (src/screen/chat.mjs)
 //   2 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
 //   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   4 Shells   the shell windows, live
@@ -29,7 +29,7 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
-import { loadConference } from "../conference.mjs";
+import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
@@ -61,6 +61,7 @@ export const VIEWS = {
 	chat: [
 		{ id: "conversation", name: "Conversation" },
 		{ id: "work", name: "Work" },
+		{ id: "consult", name: "Consult" },
 	],
 	carto: [
 		{ id: "atlas", name: "Atlas" },
@@ -87,7 +88,7 @@ export const VIEWS = {
 		{ id: "parts", name: "Current accounting" },
 	],
 };
-/** Every list-backed view; Chat's Conversation and Work share the chat projection instead. */
+/** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
 const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
@@ -157,10 +158,10 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 5           go to a tab (Chat holds Conversation and private Work)",
+	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
 	"  [ and ]          the previous and the next view inside Chat, Carto, Diff and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
@@ -281,9 +282,11 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// Consult rows open only their private co<N> audit notebook on demand; it is never copied into parent chat history.
+	// The Consult subview reads co<N> audit records directly and separately from parent talk/work. Discovering them
+	// never adds their private material to the parent conversation or its next request.
 	const readConferenceRaw = (id) => loadConference(brainDir, id).conference;
-	const chat = createChat({ markdown, describeRef, readConference: readConferenceRaw });
+	const listConferenceRaw = () => listConferences(brainDir);
+	const chat = createChat({ markdown, describeRef, readConference: readConferenceRaw, listConferences: listConferenceRaw });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -306,7 +309,7 @@ export async function runScreen(session, options, runTerminal) {
 		shell: undefined, // the shell window whose output the Output view shows
 		deleteArm: undefined, // a report or Talk source marked for its second d
 		mode: "type",
-		selected: undefined, // a stop of the Talk or Work projection
+		selected: undefined, // a stop of the Conversation, Work, or Consult projection
 		pending: "", // the first key of a command of two (z, then R)
 		prompt: "› ",
 		busySince: undefined,
@@ -365,17 +368,17 @@ export async function runScreen(session, options, runTerminal) {
 			chat.block(label, text);
 			draw();
 		},
-		entry(depth, entry, printed) {
+		entry(depth, entry, printed, consult) {
 			chat.seal();
-			chat.entry(depth, entry, printed);
+			chat.entry(depth, entry, printed, consult);
 			draw();
 		},
-		live(depth, message) {
-			chat.live(depth, message);
+		live(depth, message, consult) {
+			chat.live(depth, message, consult);
 			draw();
 		},
-		liveTools(depth, slots) {
-			chat.liveTools(depth, slots);
+		liveTools(depth, slots, consult) {
+			chat.liveTools(depth, slots, consult);
 			draw();
 		},
 		attach(given) {
@@ -513,6 +516,7 @@ export async function runScreen(session, options, runTerminal) {
 	const LEGEND = {
 		"chat.conversation": "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
 		"chat.work": "j k move · Enter open · y copy",
+		"chat.consult": "j k move · Enter open · + all · y copy",
 		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
 		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
 		"carto.plan": "t done/review · n new · v archive · d delete · e edit",
@@ -744,11 +748,11 @@ export async function runScreen(session, options, runTerminal) {
 		writeFileSync(file, `${text}\n`);
 		return file;
 	};
-	/** e in Conversation changes only a row that names the source it changes. Work is private and read-only. */
+	/** e in Conversation changes only a row that names the source it changes. Work and Consult are private/read-only. */
 	const editChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (chatProjection() === "work") return flash("private work cannot be edited");
+		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be edited");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
 		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
@@ -765,7 +769,7 @@ export async function runScreen(session, options, runTerminal) {
 	const removeChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (chatProjection() === "work") return flash("private work cannot be removed from future kept talk");
+		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be removed from future kept talk");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
 		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
@@ -1152,8 +1156,8 @@ export async function runScreen(session, options, runTerminal) {
 		change();
 		reveal(chatScroll, selectedRow() + chatBody.leadNow());
 	};
-	/** The shared chat model shown in Chat's Conversation or Work subtab. */
-	const chatProjection = () => (state.view.chat === "work" ? "work" : "talk");
+	/** The shared chat model shown in Chat's Conversation, Work, or isolated Consult subtab. */
+	const chatProjection = () => (state.view.chat === "work" ? "work" : state.view.chat === "consult" ? "consult" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
 		if (all.length === 0) return;
@@ -1173,7 +1177,8 @@ export async function runScreen(session, options, runTerminal) {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
 		if (line.kind === "live") return void inPlace(() => chat.toggleLive(line.liveDepth, to));
-		else if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
+		else if (line.kind === "group" || line.kind === "block" || line.kind === "consult") inPlace(() => chat.toggle(line.item, to));
+		else if (line.kind === "consult-event") inPlace(() => chat.toggleRow(line.item, line.row, to));
 		else if (line.kind === "call" || line.kind === "note" || line.kind === "reasoning" || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
@@ -1196,7 +1201,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		copy(chat.textOf(line.item, line.row), "message", line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : line.kind === "live" ? "that live reasoning" : "that message");
+		copy(chat.textOf(line.item, line.row), "message", line.kind === "consult" ? "that consultation" : line.kind === "consult-event" ? "that consultation activity" : line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : line.kind === "live" ? "that live reasoning" : "that message");
 	};
 
 	// ─── The commands mode ───────────────────────────────────────────────────
@@ -1604,6 +1609,7 @@ export async function runScreen(session, options, runTerminal) {
 		measure();
 		syncThinking();
 		if (!chatTab()) refresh();
+		else if (state.view.chat === "consult" && chat.refreshConsult()) draw();
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();

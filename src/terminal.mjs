@@ -25,7 +25,7 @@ import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, 
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
-import { conferenceStatusLine, listConferences, loadConference, renderConference } from "./conference.mjs";
+import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
@@ -365,13 +365,17 @@ export async function runTerminal(session, options) {
 	const pendingCalls = new Map(); // call id -> { depth, text } waiting for its result
 	const attached = new Set();
 	const watches = [];
+	// Conference child ids never change ownership. Cache that one narrow association so ordinary task live frames
+	// do not repeatedly scan consult records merely to prove that they are not a conference.
+	const conferenceChildren = new Map();
+	const ordinaryConversations = new Set();
 
 	// The call for which Cartographer last said that it ended a turn, per depth: several results of one reply carry it.
 	const saidLoop = [];
 	/** Print what one new entry of a conversation means. depth 0 is the main agent, 1 a task. */
-	const showEntry = (depth, entry) => {
+	const showEntry = (depth, entry, consult) => {
 		if ((entry.model ?? []).some((message) => message.role === "assistant")) saidLoop[depth] = undefined;
-		showOne(depth, entry);
+		showOne(depth, entry, consult);
 		// A call that failed the same way again and again (src/harness.mjs): said after the call's own line.
 		for (const message of entry.model ?? []) {
 			const loop = message.role === "toolResult" ? message.details?.loop : undefined;
@@ -392,7 +396,7 @@ export async function runTerminal(session, options) {
 			bindTalkSource(options.brainDir, { kind: "chat-call", conversationId: String(source.conversationId), callId: String(part.id) }, { ...source, callId: String(part.id) });
 		}
 	};
-	const showOne = (depth, entry) => {
+	const showOne = (depth, entry, consult) => {
 		// `chat` records its tool call before Durable commits the assistant entry on some paths. Promote that
 		// provisional call correlation to the admitted entry id before the screen exposes an edit handle.
 		if (entry?.id !== undefined && entry?.conversationId !== undefined) for (const [position, message] of (entry.model ?? []).entries()) {
@@ -410,7 +414,7 @@ export async function runTerminal(session, options) {
 				capture = undefined;
 			}
 			for (const message of entry.model ?? []) if (message.role === "assistant") finished.add(message.timestamp);
-			ui.entry(depth, entry, printed);
+			ui.entry(depth, entry, printed, consult);
 		}
 		if (depth === 0 && (entry.model ?? []).some((message) => message.role === "assistant")) for (const print of afterReply.splice(0)) print();
 		for (const message of entry.model ?? []) {
@@ -583,14 +587,15 @@ export async function runTerminal(session, options) {
 	}
 
 	/** Print the main agent's reply as it is generated. */
-	const showLive = (live, depth = 0) => {
+	const showLive = (live, depth = 0, consult) => {
 		const message = live?.generation?.message;
 		const writing = message === undefined || finished.has(message.timestamp) ? undefined : message;
 		checkRepeat(writing, depth);
 		if (ui !== undefined) {
-			ui.live(depth, writing);
-			// What the tools are saying while they run: a consultation draft, as far as the harness keeps it.
-			ui.liveTools?.(depth, live?.tools);
+			ui.live(depth, writing, consult);
+			// A conference child stays isolated from ordinary Work, but its live reasoning and local tools still need
+			// to reach the dedicated Consult projection as they grow.
+			ui.liveTools?.(depth, live?.tools, consult);
 			return;
 		}
 		if (writing === undefined || depth > 0) return;
@@ -679,7 +684,7 @@ export async function runTerminal(session, options) {
 	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in
 	 * between, the blocks the message carries after it. The screen only; the plain terminal has its own behavior.
 	 */
-	const renderDressed = (depth, message, source) => {
+	const renderDressed = (depth, message, source, consult) => {
 		promoteChatSources(message, source);
 		const original = textOf(message);
 		const { text: afterTail, tail } = splitReadTail(original);
@@ -691,7 +696,7 @@ export async function runTerminal(session, options) {
 			// The front block of a collapse: everything before it is gone from the agent's view, so the tab shows
 			// only the marker (the collapse leaves the intro alone), and then what stands in its place.
 			const store = loadContext(options.brainDir);
-			ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`);
+				ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`, consult);
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
 		} else {
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
@@ -705,11 +710,11 @@ export async function runTerminal(session, options) {
 				} else if (isNote({ role: "user", content: [{ type: "text", text: cleaned }] })) {
 					ui.print(`◆ a note Cartographer left itself: ${oneLine(cleaned.replace(/\n/g, " "), POLICY.limits.terminal.messageSummaryChars)}\n`);
 				} else {
-					ui.entry(depth, { model: [{ ...message, content: [{ type: "text", text: cleaned }] }], source }, "");
+						ui.entry(depth, { model: [{ ...message, content: [{ type: "text", text: cleaned }] }], source }, "", consult);
 				}
 			} else {
 				const cleaned = message.role === "toolResult" ? withoutAdditions(body).trim() : undefined;
-				ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "");
+					ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "", consult);
 			}
 		}
 		if (state !== undefined || windows !== undefined || tail !== undefined) printBlocks(state, windows, tail);
@@ -719,7 +724,7 @@ export async function runTerminal(session, options) {
 	 * plain terminal prints nothing of the past; the screen shows it. A task's replay begins at its brief (the
 	 * fork point is the main conversation's story, shown at depth 0).
 	 */
-	const replayHistory = async (conversation, id, depth, fallback = []) => {
+	const replayHistory = async (conversation, id, depth, fallback = [], consult) => {
 		if (ui === undefined) return;
 		// What the agent keeps in view is the current stretch of the conversation since its last restart, exactly as
 		// the request sees it — not a window of the newest entries. The brief of a task's fork is in it, unless the task
@@ -734,6 +739,17 @@ export async function runTerminal(session, options) {
 		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.sibling");
 		const at = found < 0 ? 0 : found;
 		const own = depth === 0 ? entries : entries.slice(at);
+		if (consult !== undefined) {
+			// A conference child has its own consult-local projection. Do not dress its replay through the ordinary
+			// request/block renderer: that could surface private child state as a Work block before chat.mjs routes its
+			// attributed messages to Consult. The durable co<N> audit remains the historic source of truth. Replay uses
+			// only a durable message match for attribution; a later active speaker must not relabel old pruned activity.
+			for (const entry of own) {
+				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
+				ui.entry(depth, entry, "", consultScope(id, message, { activeFallback: false }) ?? consult);
+			}
+			return;
+		}
 		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
 		const briefIds = new Set();
 		for (const entry of own) for (const message of entry.model ?? []) if (message.role === "toolResult" && message.toolName === "task") briefIds.add(message.toolCallId);
@@ -787,8 +803,42 @@ export async function runTerminal(session, options) {
 		}
 		for (const [index, message] of dressed.entries()) {
 			if (message.role === "toolResult" && briefIds.has(message.toolCallId)) continue;
-			renderDressed(depth, message, dressedSources?.get(index));
+			renderDressed(depth, message, dressedSources?.get(index), consult);
 		}
+	};
+
+	/**
+	 * Conference children are ordinary Durable conversations for scheduling, but not ordinary parent/focus work for
+	 * presentation. Carry only their co<N> identity and the best known active speaker to the screen; the screen
+	 * reads its own consult-local audit rather than receiving any child material in the parent conversation.
+	 */
+	const consultScope = (id, message, { activeFallback = true } = {}) => {
+		const conversationId = String(id ?? "");
+		let record;
+		try {
+			const known = conferenceChildren.get(conversationId);
+			if (known !== undefined) record = loadConference(options.brainDir, known).conference;
+			else if (!ordinaryConversations.has(conversationId)) {
+				record = findConferenceByChild(options.brainDir, conversationId);
+				if (record === undefined) ordinaryConversations.add(conversationId);
+				else conferenceChildren.set(conversationId, record.id);
+			}
+		} catch { record = undefined; }
+		if (record === undefined) return undefined;
+		let participant;
+		if (message?.role === "assistant") {
+			const calls = callsOf(message);
+			const callIds = new Set(calls.map((call) => call.id).filter((callId) => typeof callId === "string"));
+			const activity = record.activities?.findLast?.((entry) => entry?.participant && (
+				(callIds.size > 0 && Array.isArray(entry.calls) && entry.calls.some((call) => callIds.has(call.id))) ||
+				(callIds.size === 0 && entry.prose === textOf(message))
+			));
+			participant = activity?.participant;
+			if (participant === undefined && calls.some((call) => call.name === "consult_return")) participant = record.final?.participant;
+			if (participant === undefined && calls.length === 0) participant = record.turns?.findLast?.((turn) => turn.text === textOf(message))?.participant;
+		}
+		if (activeFallback) participant ??= record.active?.participant ?? record.final?.participant;
+		return { conference: record.id, ...(participant === undefined ? {} : { participant }), status: record.status };
 	};
 
 	const follow = async (id, depth) => {
@@ -797,7 +847,8 @@ export async function runTerminal(session, options) {
 		const watch = await conversation.watch(context);
 		watches.push(watch);
 		// Awaited: entries that come in while the replay is built are handed in after it, in order.
-		await replayHistory(conversation, id, depth, watch.value.entries ?? []);
+		const replayConsult = consultScope(id);
+		await replayHistory(conversation, id, depth, watch.value.entries ?? [], replayConsult === undefined ? undefined : { conference: replayConsult.conference, status: replayConsult.status });
 		if (depth === 0 && watch.value.docs["pi.live"]?.run !== undefined) line(dim("Continuing unfinished work from the last session…"));
 		// The main agent's history is not replayed. A task is shown from its brief on.
 		let newest = watch.value.entries.at(-1)?.id ?? 0;
@@ -807,12 +858,16 @@ export async function runTerminal(session, options) {
 		}
 		const handle = async (value) => {
 			if (stopped) return;
-			for (const entry of value.entries) if (entry.id > newest) showEntry(depth, entry);
+			for (const entry of value.entries) if (entry.id > newest) {
+				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
+				showEntry(depth, entry, consultScope(id, message));
+			}
 			newest = Math.max(newest, value.entries.at(-1)?.id ?? 0);
 			const live = value.docs["pi.live"];
-			if (depth > 0) showLive(live, depth);
+			const writing = live?.generation?.message;
+			if (depth > 0) showLive(live, depth, consultScope(id, writing));
 			if (depth === 0) {
-				showLive(live);
+				showLive(live, 0, consultScope(id, writing));
 				if (live?.runFailure !== undefined && live.runFailure.taskId !== lastFailure) {
 					lastFailure = live.runFailure.taskId;
 					const { reason, detail } = live.runFailure;
@@ -1998,6 +2053,15 @@ export async function runTerminal(session, options) {
 	const lost = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.gone);
 	if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
 	await follow(main.id, 0);
+	// A restarted outer tool normally names its child in a live slot, but a settled/recovered watch can arrive
+	// without that transient slot. Follow any still-running co<N> child directly so Consult continues to show its
+	// live participant stream; this does not attach it to parent context or grant it parent authority.
+	for (const { conference } of listConferences(options.brainDir)) {
+		const child = conference?.status === "running" ? conference.childConversationId : undefined;
+		if (typeof child !== "string" || child === "" || attached.has(child)) continue;
+		attached.add(child);
+		await follow(child, 1);
+	}
 	harness.resume();
 	if (busy) {
 		// The work that was going on when carto last went away goes on. The screen and the prompt must come up

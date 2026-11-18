@@ -17,6 +17,7 @@ import {
 	findConferenceByChild,
 	participantTail,
 	readConferenceSource,
+	recordParticipantActivity,
 	recordParticipantTurn,
 	recordRequestPlan,
 	recordSelectorChoice,
@@ -115,23 +116,49 @@ function sourceTool({ brainDir }) {
 		execute: async (args, api) => {
 			const conference = findConferenceByChild(brainDir, api.conversationId);
 			if (conference === undefined || conference.status !== "running") return fail("consult_source is available only inside an active consultation conference.");
+			const receipt = (facts, output, isError = false) => {
+				// This remains in co<N>, not the parent result. Keep enough of a local result for a later Consult view
+				// to explain what the named participant saw, without allowing a source read to make the audit unbounded.
+				const full = String(output ?? "");
+				const max = POLICY.limits.conference.activityChars;
+				const shown = full.slice(0, max);
+					recordToolReceipt(brainDir, conference.id, {
+					id: `source-${(conference.toolReceiptCount ?? conference.toolReceipts?.length ?? 0) + 1}`,
+					...(typeof api.callId === "string" ? { callId: api.callId } : {}),
+					participant: conference.active?.participant,
+					...facts,
+					result: shown,
+					...(shown.length < full.length ? { resultClipped: true, resultChars: full.length } : {}),
+					...(isError ? { isError: true } : {}),
+					at: new Date(api.now()).toISOString(),
+				});
+			};
 			try {
 				if (args.action === "list") {
 					const rows = conference.sources.map((source) => `${source.id} · ${source.kind} · ${source.label}${source.path ? ` (${source.path}${source.from ? ` captured lines ${source.from}-${source.to}` : ""})` : ""} · sha256 ${source.digest}${source.clipped ? " · clipped at capture" : ""}`);
-					recordToolReceipt(brainDir, conference.id, { id: `source-${(conference.toolReceipts?.length ?? 0) + 1}`, action: "list", participant: conference.active?.participant, sources: conference.sources.map((source) => source.id), at: new Date(api.now()).toISOString() });
-					return text(rows.length === 0 ? "No caller-attached common sources were captured." : rows.join("\n"), { conference: conference.id, sourceAction: "list" });
+					const output = rows.length === 0 ? "No caller-attached common sources were captured." : rows.join("\n");
+					receipt({ action: "list", sources: conference.sources.map((source) => source.id) }, output);
+					return text(output, { conference: conference.id, sourceAction: "list" });
 				}
 				const id = String(args.id ?? "").trim();
-				if (id === "") return fail(`consult_source ${args.action} needs a captured source id.`);
+				if (id === "") {
+					const output = `consult_source ${args.action} needs a captured source id.`;
+					receipt({ action: String(args.action ?? "unknown") }, output, true);
+					return fail(output);
+				}
 				const { source, text: body } = readConferenceSource(brainDir, conference, id);
 				if (args.action === "read") {
 					const output = renderSource(id, source, body, args.range);
-					recordToolReceipt(brainDir, conference.id, { id: `source-${(conference.toolReceipts?.length ?? 0) + 1}`, action: "read", source: id, range: args.range, participant: conference.active?.participant, at: new Date(api.now()).toISOString() });
+					receipt({ action: "read", source: id, range: args.range }, output);
 					return text(output, { conference: conference.id, sourceAction: "read", source: id });
 				}
 				if (args.action === "search") {
 					const pattern = String(args.pattern ?? "");
-					if (pattern.trim() === "") return fail("consult_source search needs a non-empty pattern.");
+					if (pattern.trim() === "") {
+						const output = "consult_source search needs a non-empty pattern.";
+						receipt({ action: "search", source: id }, output, true);
+						return fail(output);
+					}
 					let expression;
 					try { expression = new RegExp(pattern, "i"); }
 					catch { expression = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"); }
@@ -141,12 +168,17 @@ function sourceTool({ brainDir }) {
 						if (expression.test(selected.lines[index] ?? "")) hits.push(`${id}:${index + 1}: ${(selected.lines[index] ?? "").slice(0, 500)}`);
 						if (hits.length >= POLICY.limits.conference.sourceSearchHits) break;
 					}
-					recordToolReceipt(brainDir, conference.id, { id: `source-${(conference.toolReceipts?.length ?? 0) + 1}`, action: "search", source: id, range: args.range, pattern, hits: hits.length, participant: conference.active?.participant, at: new Date(api.now()).toISOString() });
-					return text(hits.length === 0 ? `No match for ${JSON.stringify(pattern)} in immutable source ${id}.` : hits.join("\n"), { conference: conference.id, sourceAction: "search", source: id, hits: hits.length });
+					const output = hits.length === 0 ? `No match for ${JSON.stringify(pattern)} in immutable source ${id}.` : hits.join("\n");
+					receipt({ action: "search", source: id, range: args.range, pattern, hits: hits.length }, output);
+					return text(output, { conference: conference.id, sourceAction: "search", source: id, hits: hits.length });
 				}
-				return fail(`Unknown consult_source action ${JSON.stringify(args.action)}.`);
+				const output = `Unknown consult_source action ${JSON.stringify(args.action)}.`;
+				receipt({ action: String(args.action ?? "unknown"), source: id }, output, true);
+				return fail(output);
 			} catch (error) {
-				return fail(`consult_source refused: ${error.message ?? error}`);
+				const output = `consult_source refused: ${error.message ?? error}`;
+				try { receipt({ action: String(args.action ?? "unknown"), ...(args.id === undefined ? {} : { source: String(args.id) }), ...(args.range === undefined ? {} : { range: args.range }), ...(args.pattern === undefined ? {} : { pattern: args.pattern }) }, output, true); } catch { /* Preserve the tool refusal if an audit write also fails. */ }
+				return fail(output);
 			}
 		},
 	});
@@ -173,6 +205,20 @@ function returnTool({ brainDir }) {
 			if (conference === undefined) return fail("consult_return is available only inside an active consultation conference.");
 			const participant = conference.active?.participant;
 			if (conference.status !== "running" || conference.active?.kind !== "participant" || typeof participant !== "string") return fail(`Conference ${conference.id} is ${conference.status}; no active participant can return it.`);
+			const receipt = (output, isError = false) => {
+				const full = String(output ?? "");
+				const shown = full.slice(0, POLICY.limits.conference.activityChars);
+				recordToolReceipt(brainDir, conference.id, {
+					id: `return-${(conference.toolReceiptCount ?? conference.toolReceipts?.length ?? 0) + 1}`,
+					...(typeof api.callId === "string" ? { callId: api.callId } : {}),
+					action: "return",
+					participant,
+					result: shown,
+					...(shown.length < full.length ? { resultClipped: true, resultChars: full.length } : {}),
+					...(isError ? { isError: true } : {}),
+					at: new Date(api.now()).toISOString(),
+				});
+			};
 			try {
 					const sourceIds = [
 						...(conference.sources ?? []).map((source) => source.id),
@@ -180,13 +226,17 @@ function returnTool({ brainDir }) {
 					];
 					const result = validateConsultReturn(args, { sourceIds });
 					const completed = completeConference(brainDir, conference.id, participant, result, api.now());
-				return {
-					...text(`Conference ${conference.id} is returned as ${result.outcome}. The host will deliver only this final advisory result to the caller.`, { conference: conference.id, returned: true, outcome: result.outcome, digest: completed.final?.digest }),
-					control: { terminate: true },
-				};
-			} catch (error) {
-				return fail(`consult_return is invalid: ${error.message ?? error}. I remain the active participant and may correct it.`, { conference: conference.id, malformedReturn: true });
-			}
+					const output = `Conference ${conference.id} is returned as ${result.outcome}. The host will deliver only this final advisory result to the caller.`;
+					receipt(output);
+					return {
+						...text(output, { conference: conference.id, returned: true, outcome: result.outcome, digest: completed.final?.digest }),
+						control: { terminate: true },
+					};
+				} catch (error) {
+					const output = `consult_return is invalid: ${error.message ?? error}. I remain the active participant and may correct it.`;
+					try { receipt(output, true); } catch { /* Preserve the tool refusal if an audit write also fails. */ }
+					return fail(output, { conference: conference.id, malformedReturn: true });
+				}
 		},
 	});
 }
@@ -252,6 +302,14 @@ export function createConferenceExtension({ brainDir, server }) {
 						endConference(brainDir, conference.id, "failed", "The conference received a provider response without an active participant.", Date.now());
 						return;
 					}
+					try {
+						// Persist the participant-attributed private trace before a no-tool response advances host routing.
+						// It is consult-local audit material, not a parent message or authority grant.
+						recordParticipantActivity(brainDir, conference.id, conference.active.participant, message, api.now(), api.taskId);
+					} catch (error) {
+						endConference(brainDir, conference.id, "failed", `Could not record an isolated participant activity: ${error.message ?? error}`, api.now());
+						return;
+					}
 					const calls = callsOf(message);
 					if (calls.length > 0) return; // Tool-plus-text remains this same participant's turn.
 					if (message.stopReason === "length") {
@@ -260,7 +318,7 @@ export function createConferenceExtension({ brainDir, server }) {
 					}
 					if (message.stopReason !== "stop") return;
 					try {
-						const selectorState = recordParticipantTurn(brainDir, conference.id, conference.active.participant, message, api.now());
+						const selectorState = recordParticipantTurn(brainDir, conference.id, conference.active.participant, message, api.now(), api.taskId);
 						if (turnLimitReached(selectorState)) {
 							endConference(brainDir, selectorState.id, "interrupted", turnLimitReason(selectorState), api.now());
 							return;

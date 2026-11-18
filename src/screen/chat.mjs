@@ -1,8 +1,9 @@
-// Conversation and Work are two subtabs of the same local Chat event feed.
+// Conversation, Work, and Consult are three subtabs of the same local Chat event feed.
 //
 // Conversation holds only the user's submitted speech and an agent `chat` call while it is sending or after its result says
 // it was delivered. Work holds private reasoning, ordinary agent notes, calls/results, failures, harness notices,
-// and request blocks. A failed `chat` call leaves Conversation and stands in Work as a failed speech attempt. Work keeps the
+// and request blocks. Consult is a separate local projection of private co<N> conference records and child streams;
+// its material never enters Conversation or Work. A failed `chat` call leaves Conversation and stands in Work as a failed speech attempt. Work keeps the
 // old useful grouping: a run is one line, "▸ 20 calls · 1m 12s"; opening it shows its calls and results, or leads
 // to the tab where that work lives (a write to Diff, a command to Shells, the plan to Carto).
 //
@@ -21,7 +22,7 @@ import { POLICY } from "../config.mjs";
 import { describeCall, describeResult } from "../terminal.mjs";
 import { isFront } from "../context.mjs";
 import { splitTop } from "../top.mjs";
-import { renderConference } from "../conference.mjs";
+import { CONSULT_ROSTER } from "../conference.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
@@ -94,18 +95,48 @@ function previewTail(text, cols, rows) {
 	return { lines: wrapped.slice(omitted), omitted };
 }
 
+const CONSULT_MEMBERS = new Map(CONSULT_ROSTER.map((member) => [member.id, member]));
+const personaName = (id) => CONSULT_MEMBERS.get(id)?.name ?? (typeof id === "string" && id !== "" ? `${id.slice(0, 1).toUpperCase()}${id.slice(1)}` : "Conference host");
+const consultCall = (call) => {
+	const args = call?.arguments ?? call?.args ?? {};
+	if (call?.name === "consult_source" || call?.action !== undefined) {
+		const action = args.action ?? call.action ?? "inspect";
+		const source = args.id ?? call.source;
+		const range = args.range ?? call.range;
+		const pattern = args.pattern ?? call.pattern;
+		return `consult_source · ${action}${source === undefined ? "" : ` ${source}`}${range === undefined || range === "" ? "" : ` · lines ${range}`}${pattern === undefined || pattern === "" ? "" : ` · ${JSON.stringify(pattern)}`}`;
+	}
+	if (call?.name === "consult_return" || call?.action === "return") return "consult_return · advisory synthesis";
+	return `${call?.name ?? call?.action ?? "consult tool"}${Object.keys(args).length === 0 ? "" : ` · ${cut(JSON.stringify(args), 120)}`}`;
+};
+const consultResult = (receipt) => {
+	if (typeof receipt?.result === "string" && receipt.result !== "") return receipt.result;
+	if (receipt?.action === "search") return `${receipt.hits ?? 0} ${receipt.hits === 1 ? "match" : "matches"}${receipt.source === undefined ? "" : ` in ${receipt.source}`}.`;
+	if (receipt?.action === "list") return `Listed ${(receipt.sources ?? []).length} immutable common ${(receipt.sources ?? []).length === 1 ? "source" : "sources"}.`;
+	if (receipt?.action === "read") return `Read immutable source ${receipt.source ?? "(unknown)"}${receipt.range === undefined ? "" : ` · lines ${receipt.range}`}.`;
+	return "No retained result text.";
+};
+const resultSignature = (record) => {
+	try { return JSON.stringify(record); } catch { return String(record?.id ?? ""); }
+};
+
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readConference?: (id: string) => object | undefined }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readConference?: (id: string) => object | undefined, listConferences?: () => { id: string, conference?: object }[] }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readConference: reads the consult-local co<N> audit record. It is only fetched when the Work row opens; no
- *   private conference notebook is copied into the parent session or ordinary conversation projection.
+ *   readConference/listConferences: read consult-local co<N> audit records only for the dedicated Consult
+ *   projection. Their private material is never copied into a parent conversation or ordinary Work projection.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef, readConference } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readConference, listConferences } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
 	const live = new Map(); // depth -> the reply being written there
 	const toolTails = new Map(); // call id -> the tail of a running tool's output, as the harness keeps it
+	// Consultations have their own local projection. Nothing in this map is an ordinary parent Chat item or becomes
+	// parent context: ids point only at co<N> audit records and transient child-conversation display events.
+	const consultations = new Map(); // co<N> (or provisional parent-call key) -> session
+	const consultByCall = new Map(); // parent/child tool call id -> session key
+	const consultLive = new Map(); // child depth -> currently-streaming participant reply
 	let thinking = true;
 	// Counted up when the colours change: what was rendered with the old ones is made again.
 	let styleRev = 0;
@@ -140,18 +171,400 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		return push({ at: now(), ...item });
 	};
 
-	/** The new conference notebook is a separate durable record, never a parent-chat payload. */
-	const conferenceOf = (row) => {
-		// A Work row can stay open while its private child progresses. Refresh that audit record while the outer call
-		// runs, then freeze the completed view just like every other settled tool result.
-		if (row.conference !== undefined && row.state !== "running") return row.conference;
-		const id = typeof row.details?.conference === "string" && /^co\d+$/.test(row.details.conference) ? row.details.conference : undefined;
-		let record;
-		if (id !== undefined && typeof readConference === "function") {
-			try { record = readConference(id); } catch { /* An unreadable audit is rendered explicitly below. */ }
+
+	const consultKey = (id, callId) => (typeof id === "string" && /^co\d+$/.test(id) ? `consult:${id}` : `consult:pending:${String(callId ?? ++serial)}`);
+	const mergeConsult = (target, source) => {
+		if (target === source) return target;
+		for (const [key, event] of source.events) if (!target.events.has(key)) target.events.set(key, event);
+		target.eventOpen ??= new Map();
+		for (const [key, open] of source.eventOpen ?? []) if (!target.eventOpen.has(key)) target.eventOpen.set(key, open);
+		for (const [id, call] of source.calls) if (!target.calls.has(id)) target.calls.set(id, call);
+		for (const [id, tool] of source.liveTools) if (!target.liveTools.has(id)) target.liveTools.set(id, tool);
+		target.question ??= source.question;
+		target.receipt ??= source.receipt;
+		target.outerState ??= source.outerState;
+		if (source.record !== undefined && target.record === undefined) {
+			target.record = source.record;
+			target.recordSign = source.recordSign;
 		}
-		row.conference = { id, record, missing: id !== undefined && record === undefined };
-		return row.conference;
+		for (const [callId, key] of consultByCall) if (key === source.key) consultByCall.set(callId, target.key);
+		for (const [depth, current] of consultLive) if (current.key === source.key) current.key = target.key;
+		consultations.delete(source.key);
+		return target;
+	};
+	const ensureConsult = ({ id, callId, question, depth } = {}) => {
+		const wanted = consultKey(id, callId);
+		const known = callId === undefined ? undefined : consultations.get(consultByCall.get(callId));
+		let session = consultations.get(wanted);
+		if (session === undefined && known !== undefined) {
+			if (wanted !== known.key) {
+				const oldKey = known.key;
+				consultations.delete(oldKey);
+				known.key = wanted;
+				known.id = typeof id === "string" && /^co\d+$/.test(id) ? id : known.id;
+				consultations.set(wanted, known);
+				for (const [knownCall, key] of consultByCall) if (key === oldKey) consultByCall.set(knownCall, wanted);
+			}
+			session = known;
+		} else if (session !== undefined && known !== undefined && session !== known) session = mergeConsult(session, known);
+		if (session === undefined) {
+			session = {
+				key: wanted,
+				id: typeof id === "string" && /^co\d+$/.test(id) ? id : undefined,
+				question: typeof question === "string" && question.trim() !== "" ? question : undefined,
+				open: true,
+				events: new Map(),
+				eventOpen: new Map(),
+				calls: new Map(),
+				liveTools: new Map(),
+			};
+			consultations.set(wanted, session);
+		}
+		if (typeof id === "string" && /^co\d+$/.test(id)) session.id = id;
+		if (typeof question === "string" && question.trim() !== "") session.question = question;
+		if (callId !== undefined) consultByCall.set(callId, session.key);
+		if (depth !== undefined) session.depth = depth;
+		return session;
+	};
+	const updateConsultRecord = (session, record) => {
+		if (record === undefined || record === null || typeof record !== "object") return false;
+		const sign = resultSignature(record);
+		const changed = session.recordSign !== sign;
+		session.record = record;
+		session.recordSign = sign;
+		session.id ??= typeof record.id === "string" ? record.id : undefined;
+		session.question ??= typeof record.question === "string" ? record.question : undefined;
+		return changed;
+	};
+	const readConsult = (session) => {
+		if (session.id === undefined || typeof readConference !== "function") return session.record;
+		try { updateConsultRecord(session, readConference(session.id)); } catch { /* An unreadable private audit is named in Consult rather than copied elsewhere. */ }
+		return session.record;
+	};
+	const syncConsults = ({ discover = false } = {}) => {
+		let changed = false;
+		const loaded = new Set();
+		if (discover && typeof listConferences === "function") {
+			try {
+				for (const listed of listConferences() ?? []) {
+					const id = typeof listed?.id === "string" ? listed.id : listed?.conference?.id;
+					if (id === undefined || !/^co\d+$/.test(id)) continue;
+					const session = ensureConsult({ id, question: listed?.conference?.question });
+					if (listed?.conference !== undefined) {
+						changed = updateConsultRecord(session, listed.conference) || changed;
+						loaded.add(session.key);
+					}
+				}
+			} catch { /* A broken consult directory is rendered as an empty/unavailable view, never as parent work. */ }
+		}
+		for (const session of consultations.values()) {
+			if (loaded.has(session.key)) continue;
+			const before = session.recordSign;
+			readConsult(session);
+			if (before !== session.recordSign) changed = true;
+		}
+		return changed;
+	};
+	const activityParticipant = (session, message, fallback) => {
+		// Terminal ownership propagation carries the active persona for a current child response. Never synchronously
+		// read co<N> merely to guess a historic one: only a deliberate Consult paint may load that private audit.
+		if (fallback !== undefined) return fallback;
+		const record = session.record;
+		const calls = callsOf(message);
+		const prose = textOf(message).trim();
+		const ids = new Set(calls.map((call) => call.id).filter((id) => typeof id === "string"));
+		const activity = record?.activities?.findLast?.((entry) => entry?.participant && (
+			(ids.size > 0 && Array.isArray(entry.calls) && entry.calls.some((call) => ids.has(call.id))) ||
+			(ids.size === 0 && typeof entry.prose === "string" && entry.prose === prose)
+		));
+		const turn = ids.size === 0 && prose !== "" ? record?.turns?.findLast?.((entry) => entry?.participant && entry.text === prose) : undefined;
+		return activity?.participant ?? turn?.participant ?? (calls.some((call) => call.name === "consult_return") ? record?.final?.participant : undefined);
+	};
+	const addConsultEvent = (session, event) => {
+		const old = session.events.get(event.key);
+		if (old === undefined || resultSignature(old) !== resultSignature(event)) session.events.set(event.key, { ...old, ...event });
+	};
+	const consultEntry = (depth, entry, consult) => {
+		const session = ensureConsult({ id: consult?.conference, depth });
+		if (consult?.status !== undefined) session.status = consult.status;
+		for (const [position, message] of (entry.model ?? []).entries()) {
+			const source = `${entry?.id ?? message.timestamp ?? `replay-${(session.eventSerial = (session.eventSerial ?? 0) + 1)}`}:${position}`;
+			if (message.role === "assistant") {
+				const participant = activityParticipant(session, message, consult?.participant);
+				if (participant === undefined) continue;
+				const reasoning = thinkingOf(message).trim();
+				const prose = textOf(message).trim();
+				if (reasoning !== "") addConsultEvent(session, { key: `stream:${source}:reasoning`, at: message.timestamp, participant, type: "reasoning", text: reasoning, live: false });
+				if (prose !== "") addConsultEvent(session, { key: `stream:${source}:prose`, at: message.timestamp, participant, type: "prose", text: prose, live: false });
+				for (const call of callsOf(message)) {
+					const callId = typeof call.id === "string" ? call.id : `${source}:${call.name}`;
+					session.calls.set(callId, { participant, call, at: message.timestamp });
+					consultByCall.set(callId, session.key);
+					addConsultEvent(session, { key: `stream:${source}:call:${callId}`, at: message.timestamp, participant, type: "tool-call", call, callId, live: false });
+				}
+				consultLive.delete(depth);
+			} else if (message.role === "toolResult") {
+				const known = session.calls.get(message.toolCallId);
+				const participant = known?.participant ?? consult?.participant ?? session.record?.active?.participant ?? session.record?.final?.participant;
+				if (participant === undefined) continue;
+				const body = textOf(message);
+				addConsultEvent(session, { key: `stream:${source}:result:${message.toolCallId}`, at: message.timestamp, participant, type: "tool-result", call: known?.call, callId: message.toolCallId, text: body, isError: message.isError === true, live: false });
+				session.liveTools.delete(message.toolCallId);
+			}
+		}
+		return session;
+	};
+
+	const eventTime = (at, fallback) => {
+		if (typeof at === "number" && Number.isFinite(at)) return at;
+		const parsed = Date.parse(String(at ?? ""));
+		return Number.isFinite(parsed) ? parsed : fallback;
+	};
+	const consultEvents = (session, record) => {
+		const events = [];
+		let order = 0;
+		const add = (event) => events.push({ ...event, order: ++order });
+		const activities = Array.isArray(record?.activities) ? record.activities : [];
+		const durableCallIds = new Set();
+		const durableResults = new Set();
+		const matchedReceiptCalls = new Set();
+		// A digest-less replay event can only be paired with durable prose by content. Keep a count rather than a
+		// boolean: repeated identical contributions are distinct events and must not erase one another from Consult.
+		const durableTextEvents = new Map();
+		const textKey = (participant, type, text) => `${participant ?? ""}\u0000${type}\u0000${text ?? ""}`;
+		const noteDurableText = (participant, type, text) => {
+			const key = textKey(participant, type, text);
+			durableTextEvents.set(key, (durableTextEvents.get(key) ?? 0) + 1);
+		};
+		for (const activity of activities) {
+			const base = `audit:activity:${activity.index ?? activity.digest ?? ++order}`;
+			if (typeof activity.reasoning === "string" && activity.reasoning !== "") {
+				noteDurableText(activity.participant, "reasoning", activity.reasoning);
+				add({ key: `${base}:reasoning`, at: activity.at, participant: activity.participant, type: "reasoning", text: activity.reasoning, clipped: activity.reasoningClipped === true, chars: activity.reasoningChars });
+			}
+			if (typeof activity.prose === "string" && activity.prose !== "") {
+				noteDurableText(activity.participant, "prose", activity.prose);
+				add({ key: `${base}:prose`, at: activity.at, participant: activity.participant, type: "prose", text: activity.prose, clipped: activity.proseClipped === true, chars: activity.proseChars });
+			}
+			for (const [index, call] of (activity.calls ?? []).entries()) {
+				const callId = typeof call?.id === "string" ? call.id : undefined;
+				if (callId !== undefined) {
+					durableCallIds.add(callId);
+					session.calls.set(callId, { participant: activity.participant, call, at: activity.at });
+					consultByCall.set(callId, session.key);
+				}
+				add({ key: `${base}:call:${callId ?? index}`, at: activity.at, participant: activity.participant, type: "tool-call", call, callId });
+			}
+		}
+		// Older co<N> records predate the activity timeline. Their completed prose remains attributable rather than
+		// disappearing merely because the UI learned a richer schema later.
+		if (activities.length === 0) for (const turn of record?.turns ?? []) {
+			if (typeof turn?.text !== "string" || turn.text === "") continue;
+			noteDurableText(turn.participant, "prose", turn.text);
+			add({ key: `audit:turn:${turn.index ?? ++order}`, at: turn.at, participant: turn.participant, type: "prose", text: turn.text });
+		}
+		for (const receipt of record?.toolReceipts ?? []) {
+			let callId = typeof receipt.callId === "string" ? receipt.callId : undefined;
+			let known = callId === undefined ? undefined : session.calls.get(callId);
+			// Very old/local direct callers may not retain a Durable call id on their receipt. Pair that receipt with an
+			// unclaimed matching activity call before synthesizing a historic one, so one source read stays one call/result.
+			if (known === undefined && callId === undefined) {
+				const match = [...session.calls.entries()].findLast(([knownId, entry]) => {
+					if (matchedReceiptCalls.has(knownId) || entry.participant !== receipt.participant) return false;
+					const args = entry.call?.arguments ?? entry.call?.args ?? {};
+					if (receipt.action === "return") return entry.call?.name === "consult_return" || args.action === "return";
+					return (entry.call?.name === "consult_source" || args.action !== undefined)
+						&& (receipt.action === undefined || String(args.action ?? entry.call?.action ?? "") === String(receipt.action))
+						&& (receipt.source === undefined || String(args.id ?? entry.call?.source ?? "") === String(receipt.source))
+						&& (receipt.range === undefined || String(args.range ?? entry.call?.range ?? "") === String(receipt.range))
+						&& (receipt.pattern === undefined || String(args.pattern ?? entry.call?.pattern ?? "") === String(receipt.pattern));
+				});
+				if (match !== undefined) {
+					[callId, known] = match;
+					matchedReceiptCalls.add(callId);
+				}
+			}
+			if (callId !== undefined) durableResults.add(callId);
+			const call = known?.call ?? {
+				name: receipt.action === "return" ? "consult_return" : "consult_source",
+				arguments: {
+					...(receipt.action === undefined ? {} : { action: receipt.action }),
+					...(receipt.source === undefined ? {} : { id: receipt.source }),
+					...(receipt.range === undefined ? {} : { range: receipt.range }),
+					...(receipt.pattern === undefined ? {} : { pattern: receipt.pattern }),
+				},
+			};
+			// Pre-activity audits retained only a receipt. Give that historic receipt an explicit inferred call block so
+			// the Consult view still distinguishes what the persona asked from what it received.
+			const receiptKey = receipt.index ?? receipt.callId ?? receipt.id ?? ++order;
+			if (known === undefined) add({ key: `audit:receipt-call:${receiptKey}`, at: receipt.at, participant: receipt.participant, type: "tool-call", call, callId });
+			add({ key: `audit:result:${receiptKey}`, at: receipt.at, participant: receipt.participant ?? known?.participant, type: "tool-result", call, callId, text: consultResult(receipt), isError: receipt.isError === true, clipped: receipt.resultClipped === true, chars: receipt.resultChars });
+		}
+		for (const selection of record?.selectorEvents ?? []) {
+			add({
+				key: `audit:selector:${selection.index ?? ++order}`,
+				at: selection.at,
+				type: "selector",
+				participant: selection.participant,
+				text: `After ${personaName(selection.after)} → ${personaName(selection.participant)}. Eligible: ${(selection.eligible ?? []).map(personaName).join(", ") || "none"}. Native GBNF routing${selection.grammarEnforced === true ? " · grammar enforced" : ""}${selection.native?.status === undefined ? "" : ` · HTTP ${selection.native.status}`}.`,
+			});
+		}
+		if (record?.final !== undefined) {
+			const final = record.final;
+			const sections = [String(final.synthesis ?? "")];
+			if (final.recommendation) sections.push(`Recommendation: ${final.recommendation}`);
+			for (const [label, values] of [["Evidence", final.evidence], ["Assumptions", final.assumptions], ["Uncertainties", final.uncertainties], ["Alternatives", final.alternatives], ["Next checks", final.next_checks]]) {
+				if (!Array.isArray(values) || values.length === 0) continue;
+				sections.push(`${label}:\n${values.map((value) => `- ${typeof value === "object" ? `${value.source ?? value.option ?? ""}${value.claim ? ` · ${value.claim}` : value.tradeoff ? ` — ${value.tradeoff}` : ""}` : value}`).join("\n")}`);
+			}
+			if (final.blocking_question) sections.push(`Blocking question: ${final.blocking_question}`);
+			add({ key: "audit:final", at: final.at, participant: final.participant, type: "final", outcome: final.outcome, text: sections.filter((section) => section.trim() !== "").join("\n\n") });
+		} else if (record?.ended !== undefined) {
+			add({ key: "audit:ended", at: record.ended.at, type: "status", text: `The conference ended ${record.status}: ${record.ended.reason}` , isError: record.status === "failed" || record.status === "blocked" });
+		}
+		for (const event of session.events.values()) {
+			let duplicate = event.type === "tool-call"
+				? event.callId !== undefined && durableCallIds.has(event.callId)
+				: event.type === "tool-result"
+					? event.callId !== undefined && durableResults.has(event.callId)
+					: false;
+			if (!duplicate && (event.type === "prose" || event.type === "reasoning")) {
+				const key = textKey(event.participant, event.type, event.text);
+				const matches = durableTextEvents.get(key) ?? 0;
+				if (matches > 0) {
+					durableTextEvents.set(key, matches - 1);
+					duplicate = true;
+				}
+			}
+			if (!duplicate) add(event);
+		}
+		for (const [depth, current] of consultLive) {
+			if (current.key !== session.key || current.message === undefined) continue;
+			const participant = current.participant ?? record?.active?.participant;
+			if (participant === undefined) continue;
+			const reasoning = thinkingOf(current.message).trim();
+			const prose = textOf(current.message).trim();
+			if (reasoning !== "") add({ key: `live:${depth}:reasoning`, at: now(), participant, type: "reasoning", text: reasoning, live: true });
+			if (prose !== "") add({ key: `live:${depth}:prose`, at: now(), participant, type: "prose", text: prose, live: true });
+			for (const call of callsOf(current.message)) {
+				const callId = typeof call.id === "string" ? call.id : `live:${depth}:${call.name}`;
+				session.calls.set(callId, { participant, call, at: now() });
+				add({ key: `live:${depth}:call:${callId}`, at: now(), participant, type: "tool-call", call, callId, live: true });
+			}
+		}
+		for (const [callId, tool] of session.liveTools) {
+			const known = session.calls.get(callId);
+			const participant = tool.participant ?? known?.participant ?? record?.active?.participant;
+			if (participant === undefined) continue;
+			add({ key: `live:tool:${callId}`, at: now(), participant, type: "tool-result", call: tool.call ?? known?.call, callId, text: tool.text === "" ? "Waiting for the consult-local tool result…" : tool.text, isError: false, clipped: tool.clipped, live: true });
+		}
+		return events.sort((left, right) => eventTime(left.at, left.order) - eventTime(right.at, right.order) || left.order - right.order);
+	};
+	const consultMemberStatus = (member, record, events) => {
+		const id = member.id;
+		const activity = events.filter((event) => event.participant === id && event.type !== "selector" && event.type !== "status");
+		const active = record?.active?.kind === "participant" && record.active.participant === id;
+		const final = record?.final?.participant === id;
+		if (final) return `final advisory · ${record.final.outcome}`;
+		if (active) return activity.some((event) => event.live) ? "speaking now" : "active · awaiting contribution";
+		if (activity.length > 0) return `${activity.filter((event) => event.type === "prose").length} contribution${activity.filter((event) => event.type === "prose").length === 1 ? "" : "s"} · standing by`;
+		if (record?.active?.kind === "selector" && (record.selectorEvents ?? []).at(-1)?.eligible?.includes(id)) return "eligible for host routing";
+		return "ready · no contribution yet";
+	};
+	const consultExport = (session, eventKey) => {
+		const record = readConsult(session);
+		const events = consultEvents(session, record);
+		const heading = `# Consultation ${session.id ?? "starting"}\n\n`;
+		if (eventKey !== undefined) {
+			const event = events.find((candidate) => candidate.key === String(eventKey));
+			if (event === undefined) return "";
+			const label = event.type === "selector" ? "Conference host · native routing" : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
+			return `${label}\n\n${event.type === "tool-call" ? `${consultCall(event.call)}\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}` : event.text ?? ""}\n`;
+		}
+		const rows = [heading, `Status: ${record?.status ?? session.outerState ?? "starting"}`, `Question: ${record?.question ?? session.question ?? "(not available yet)"}`, "", "## Roster", ""];
+		for (const member of CONSULT_ROSTER) rows.push(`- ${member.name}: ${consultMemberStatus(member, record, events)}`);
+		for (const event of events) {
+			const label = event.type === "selector" ? "Conference host · native routing" : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
+			rows.push("", `## ${label}`, "", event.type === "tool-call" ? `${consultCall(event.call)}\n\n\`\`\`json\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}\n\`\`\`` : event.text ?? "");
+		}
+		return `${rows.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+	};
+	const consultLines = (cols) => {
+		syncConsults({ discover: true });
+		const out = [];
+		const inner = cols - 2;
+		const add = (spans, ref = {}) => out.push({ spans, ...ref, ...(ref.bg !== undefined ? { pad: 1 } : {}) });
+		const blank = () => { if (out.length > 0 && out.at(-1).spans.length > 0) out.push(BLANK); };
+		if (consultations.size === 0) {
+			add([["No consultation conferences yet", "muted"]], { kind: "consult-empty", bg: "bgTool" });
+			add([["When Cartographer runs consult, its isolated member activity appears here — never in parent Conversation or Work.", "faint"]], { kind: "consult-empty", bg: "bgTool" });
+			return out;
+		}
+		for (const session of consultations.values()) {
+			// syncConsults just refreshed this local audit. Reuse that snapshot for this render so Consult does one read
+			// per conference per paint, while still refreshing on every deliberate Consult view/refresh.
+			const record = session.record ?? readConsult(session);
+			const events = consultEvents(session, record);
+			const id = session.id ?? "starting";
+			const status = record?.status ?? session.outerState ?? session.status ?? "starting";
+			const ref = { item: session.key, kind: "consult", bg: "bgTool" };
+			blank();
+			add([[session.open ? "▾ " : "▸ ", status === "failed" || status === "blocked" ? "err" : status === "running" ? "warn" : "tool"], [`Consultation ${id} · ${status}`, status === "returned" ? "ok bold" : status === "failed" || status === "blocked" ? "err bold" : "bold"]], ref);
+			const question = record?.question ?? session.question ?? "Waiting for the parent consult call to publish its immutable conference id.";
+			for (const piece of wrap(`Question · ${question}`, inner - 2)) add([["  ", "faint"], [piece, "muted"]], ref);
+			const model = record?.model?.provider && record?.model?.modelId ? ` · same model ${record.model.provider}/${record.model.modelId}` : "";
+			add([[`  Isolated private co<N> audit${model} · it is advisory and never enters parent context`, "faint"]], ref);
+			const retained = [];
+			if ((record?.activityCount ?? record?.activities?.length ?? 0) > (record?.activities?.length ?? 0)) retained.push(`${record?.activities?.length ?? 0}/${record.activityCount} participant activities`);
+			if ((record?.toolReceiptCount ?? record?.toolReceipts?.length ?? 0) > (record?.toolReceipts?.length ?? 0)) retained.push(`${record?.toolReceipts?.length ?? 0}/${record.toolReceiptCount} local tool results`);
+			if (retained.length > 0) add([[`  Retention · durable audit keeps newest ${retained.join(" · ")}`, "faint"]], ref);
+			if (!session.open) continue;
+			add([["  Members", "carto bold"]], ref);
+			for (const member of CONSULT_ROSTER) {
+				const memberStatus = consultMemberStatus(member, record, events);
+				const active = record?.active?.kind === "participant" && record.active.participant === member.id;
+				add([["  ○ ", active ? "warn" : "faint"], [`${member.name} · ${memberStatus}`, active ? "bold" : "muted"]], ref);
+			}
+			if (record === undefined && session.id !== undefined) add([["  ! The private conference record cannot be read yet; the parent receipt below is all that is available.", "err"]], ref);
+			if (events.length === 0) {
+				const pending = record?.active?.kind === "selector" ? `The host is choosing after ${personaName(record.active.previousSpeaker)} with native GBNF.` : record?.active?.participant ? `${personaName(record.active.participant)} has the active consult turn.` : "No member activity has been recorded yet.";
+				add([["  ", "faint"], [pending, "faint"]], ref);
+			}
+			for (const event of events) {
+				if (event.type === "reasoning" && !thinking) continue;
+				blank();
+				event.open = session.eventOpen?.get(event.key) ?? event.open ?? (session.openAllEvents === true);
+				const eventRef = { item: session.key, row: event.key, kind: "consult-event", bg: event.type === "reasoning" ? "bgNote" : "bgTool" };
+				const label = event.type === "selector"
+					? "Conference host · native GBNF routing"
+					: event.type === "tool-call"
+						? `${personaName(event.participant)} · tool call · ${consultCall(event.call)}`
+						: event.type === "tool-result"
+							? `${personaName(event.participant)} · tool result${event.call ? ` · ${consultCall(event.call)}` : ""}${event.live ? " · running" : event.isError ? " · refused" : " · completed"}`
+							: event.type === "final"
+								? `${personaName(event.participant)} · final advisory · ${event.outcome}`
+								: event.type === "status"
+									? "Conference host · status"
+									: `${personaName(event.participant)} · ${event.type === "reasoning" ? "reasoning" : "chat / prose"}${event.live ? " · writing" : ""}`;
+				const detail = event.type === "tool-call"
+					? JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)
+					: event.text ?? "";
+				const room = Math.max(8, inner - 4);
+				const body = detail === "" ? [] : wrap(detail, room);
+				const preview = event.type === "reasoning" ? LIVE_NOTE_ROWS : event.type === "tool-result" ? LIVE_TEXT_ROWS : DETAIL_ROWS;
+				const expandable = body.length > preview;
+				add([[expandable ? (event.open ? "  ▾ " : "  ▸ ") : "  · ", "faint"], [cut(label, inner - 4), event.isError ? "err" : event.type === "final" ? "ok bold" : event.type === "reasoning" ? "faint" : "bold"]], eventRef);
+				for (const piece of (event.open ? body : body.slice(0, preview))) add([["    ", "faint"], [piece, event.isError ? "err" : event.type === "reasoning" ? "note italic" : "muted"]], eventRef);
+				if (!event.open && body.length > preview) add([["    ", "faint"], [`… ${body.length - preview} more lines · Enter opens`, "faint"]], eventRef);
+				if (event.clipped) add([["    ", "faint"], [`… retained result was clipped from ${event.chars ?? "a longer"} characters`, "faint"]], eventRef);
+			}
+			if (session.receipt !== undefined && record?.final === undefined && record?.ended === undefined) {
+				blank();
+				add([["  Parent receipt · the conference is still being read from its private audit", "faint"]], ref);
+				for (const piece of wrap(plain(session.receipt), inner - 4)) add([["    ", "faint"], [piece, "muted"]], ref);
+			}
+		}
+		return out;
 	};
 
 	const api = {
@@ -159,6 +572,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			return version;
 		},
 		items,
+		/** Refresh consult-local audit files only while the caller deliberately asks for Consult. */
+		refreshConsult() {
+			const changed = syncConsults({ discover: true });
+			if (changed) touch();
+			return changed;
+		},
 		setThinking(on) {
 			thinking = on;
 			touch();
@@ -217,7 +636,14 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		 * One new entry of a conversation: depth 0 is the main agent, 1 a task. `printed` is what the plain
 		 * terminal says about it, used for the outcome of a task and for a collapse.
 		 */
-		entry(depth, entry, printed = "") {
+		entry(depth, entry, printed = "", consult) {
+			// Conference-child messages bypass ordinary Work altogether. They are still durable and selectable, but only
+			// in Chat · Consult, preserving the consult/parent boundary while keeping live activity legible.
+			if (consult?.conference !== undefined) {
+				consultEntry(depth, entry, consult);
+				touch();
+				return;
+			}
 			const entrySource = (position, callId) => {
 				const carried = entry.source?.kind === "durable-message" ? entry.source : undefined;
 				const base = carried ?? (entry?.id === undefined || entry?.conversationId === undefined ? undefined : { kind: "durable-message", conversationId: String(entry.conversationId), entryId: String(entry.id), position });
@@ -245,7 +671,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 							rows.set(call.id, { quiet: true, name: "chat", speech });
 							continue;
 						}
-						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}) };
+						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}), ...(call.name === "consult" ? { hiddenInAll: true, hiddenInWork: true } : {}) };
+						if (call.name === "consult") {
+							const conference = ensureConsult({ callId: call.id, question: call.arguments?.question, depth });
+							row.consultKey = conference.key;
+							conference.outerState = "running";
+						}
 						rows.set(call.id, row);
 						group().rows.push(row);
 					}
@@ -271,6 +702,13 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					row.receipt = row.name === "consult" ? text : undefined;
 					row.detail = row.name === "consult" ? undefined : text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
 					row.details = message.details;
+					if (row.name === "consult") {
+						const conference = ensureConsult({ id: message.details?.conference, callId: row.id, question: row.args?.question, depth: row.depth });
+						row.consultKey = conference.key;
+						conference.outerState = row.state;
+						conference.receipt = text;
+						if (message.details?.conference !== undefined) delete row.conference;
+					}
 					// What a task leaves behind is said in full: the report line, changed files and declared move.
 					if (depth === 0 && row.name === "task" && printed.trim() !== "") {
 						const outcome = printed.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
@@ -293,7 +731,19 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			}
 		},
 		/** The reply that is being written at this depth, as far as it has come; undefined when none is. */
-		live(depth, message) {
+		live(depth, message, consult) {
+			if (consult?.conference !== undefined) {
+				if (message === undefined) {
+					if (consultLive.delete(depth)) touch();
+					return;
+				}
+				const session = ensureConsult({ id: consult.conference, depth });
+				const before = consultLive.get(depth);
+				const sameReply = before?.message?.timestamp === message.timestamp;
+				consultLive.set(depth, { key: session.key, depth, message, participant: consult.participant ?? activityParticipant(session, message), since: sameReply ? before.since : now(), open: sameReply && before.open === true });
+				touch();
+				return;
+			}
 			if (message === undefined) {
 				if (live.delete(depth)) touch();
 				return;
@@ -311,41 +761,64 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			touch();
 			return true;
 		},
-		/** What the running tools at this depth are saying, as far as the harness keeps it: a bounded tail of each. */
-			liveTools(depth, slots) {
-				void depth;
-				const next = new Map();
-				let detailsChanged = false;
+		/** What running tools at this depth are saying, as far as the harness keeps it: bounded tails only. */
+		liveTools(depth, slots, consult) {
+			if (consult?.conference !== undefined) {
+				const session = ensureConsult({ id: consult.conference, depth });
+				let changed = false;
+				const seen = new Set();
 				for (const slot of slots ?? []) {
 					if (slot?.callId === undefined || slot?.status !== "running") continue;
-					// api.details() arrives before a long tool settles. A consult publishes only co<N> metadata there;
-					// that lets an explicitly opened Work row read its private audit notebook as it progresses without
-					// injecting that notebook into the parent conversation or waiting for the final receipt.
-					const row = rows.get(slot.callId);
-					if (row?.name === "consult" && slot.details !== undefined) {
-						const sign = JSON.stringify(slot.details);
-						if (row.liveDetailsSign !== sign) {
-							row.liveDetailsSign = sign;
-							row.details = slot.details;
-							delete row.conference;
-							detailsChanged = true;
-						}
-					}
-					if (typeof slot.output !== "string" || slot.output === "") continue;
-					next.set(slot.callId, { text: slot.output, clipped: (slot.droppedBytes ?? 0) > 0 });
-				}
-				let same = next.size === toolTails.size;
-				if (same) for (const [id, entry] of next) {
-					const previous = toolTails.get(id);
-					if (previous === undefined || previous.text !== entry.text || previous.clipped !== entry.clipped) {
-						same = false;
-						break;
+					seen.add(slot.callId);
+					const known = session.calls.get(slot.callId);
+					const participant = known?.participant ?? consult.participant ?? session.record?.active?.participant ?? session.record?.final?.participant;
+					const next = { participant, call: known?.call, text: typeof slot.output === "string" ? slot.output : "", clipped: (slot.droppedBytes ?? 0) > 0, status: slot.status };
+					if (resultSignature(session.liveTools.get(slot.callId)) !== resultSignature(next)) {
+						session.liveTools.set(slot.callId, next);
+						changed = true;
 					}
 				}
-				toolTails.clear();
-				for (const [id, entry] of next) toolTails.set(id, entry);
-				if (!same || detailsChanged) touch();
-			},
+				for (const callId of [...session.liveTools.keys()]) if (!seen.has(callId)) {
+					session.liveTools.delete(callId);
+					changed = true;
+				}
+				if (changed) touch();
+				return;
+			}
+			const next = new Map();
+			let detailsChanged = false;
+			for (const slot of slots ?? []) {
+				if (slot?.callId === undefined || slot?.status !== "running") continue;
+				// The parent-facing call carries only co<N> metadata. Link that outer call to its separate Consult
+				// session; do not render its private notebook in Work.
+				const row = rows.get(slot.callId);
+				if (row?.name === "consult" && slot.details !== undefined) {
+					const sign = JSON.stringify(slot.details);
+					if (row.liveDetailsSign !== sign) {
+						row.liveDetailsSign = sign;
+						row.details = slot.details;
+						const session = ensureConsult({ id: slot.details?.conference, callId: row.id, question: row.args?.question, depth: row.depth });
+						row.consultKey = session.key;
+						session.outerState = "running";
+						delete row.conference;
+						detailsChanged = true;
+					}
+				}
+				if (typeof slot.output !== "string" || slot.output === "") continue;
+				next.set(slot.callId, { text: slot.output, clipped: (slot.droppedBytes ?? 0) > 0 });
+			}
+			let same = next.size === toolTails.size;
+			if (same) for (const [id, entry] of next) {
+				const previous = toolTails.get(id);
+				if (previous === undefined || previous.text !== entry.text || previous.clipped !== entry.clipped) {
+					same = false;
+					break;
+				}
+			}
+			toolTails.clear();
+			for (const [id, entry] of next) toolTails.set(id, entry);
+			if (!same || detailsChanged) touch();
+		},
 		/** Whether the end of what is being written is the same thing over and over (src/screen/text.mjs). */
 		stuck() {
 			for (const { message } of live.values()) {
@@ -361,6 +834,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		liveSize() {
 			let size = 0;
 			for (const { message } of live.values()) size += thinkingOf(message).length + textOf(message).length + callsOf(message).reduce((sum, call) => sum + JSON.stringify(call.arguments ?? {}).length, 0);
+			for (const { message } of consultLive.values()) size += thinkingOf(message).length + textOf(message).length + callsOf(message).reduce((sum, call) => sum + JSON.stringify(call.arguments ?? {}).length, 0);
 			return size;
 		},
 		/** What the agent is doing now, in a few words, and where: { what, depth, task? }. */
@@ -378,6 +852,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				if (textOf(message).trim() !== "") return { what: "writing a note", depth: deepest, task };
 				return { what: "thinking", depth: deepest, task };
 			}
+			const liveConference = [...consultLive.values()].at(-1);
+			if (liveConference !== undefined) {
+				const participant = personaName(liveConference.participant);
+				const call = callsOf(liveConference.message).at(-1);
+				return { what: call === undefined ? `${participant} is thinking in consultation` : `${participant} is ${consultCall(call)}`, depth: liveConference.depth, task };
+			}
 			// The call that runs now: inside a task, the task's own call and not the task.
 			const row = running.filter((entry) => entry !== taskRow).at(-1);
 			if (row?.name === "consult") return { what: "the consultation conference is running", depth: row.depth, task };
@@ -388,8 +868,12 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		/** The last agent speech whose chat result says it was delivered. */
 		lastAgent: () => items.findLast((item) => item.type === "agent" && item.delivery === "delivered")?.text,
 		toggle(key, to) {
-			const item = items.find((entry) => entry.key === key);
-			if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
+			const consultation = consultations.get(String(key));
+			if (consultation !== undefined) consultation.open = to ?? !consultation.open;
+			else {
+				const item = items.find((entry) => entry.key === key);
+				if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
+			}
 			touch();
 		},
 		/** Open every run of calls and the live reasoning stream, or fold them all with what was opened inside them. */
@@ -401,6 +885,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				item.rev = (item.rev ?? 0) + 1;
 			}
 			for (const entry of live.values()) entry.open = open;
+			for (const consultation of consultations.values()) {
+				consultation.open = open;
+				consultation.openAllEvents = open;
+				for (const event of consultation.events.values()) event.open = open;
+			}
 			touch();
 		},
 		/** The colours have changed: what was rendered with the old ones is rendered again. */
@@ -440,11 +929,21 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		return true;
 	},
 		toggleRow(key, index, to) {
-			const item = items.find((entry) => entry.key === key);
-			const row = item?.rows?.[index];
-			if (row !== undefined) {
-				row.open = to ?? !row.open;
-				item.rev = (item.rev ?? 0) + 1;
+			const consultation = consultations.get(String(key));
+			if (consultation !== undefined) {
+				const event = consultation.events.get(String(index));
+				const prior = event?.open ?? consultation.eventOpen?.get(String(index)) ?? (consultation.openAllEvents === true);
+				const next = to ?? !prior;
+				consultation.eventOpen ??= new Map();
+				consultation.eventOpen.set(String(index), next);
+				if (event !== undefined) event.open = next;
+			} else {
+				const item = items.find((entry) => entry.key === key);
+				const row = item?.rows?.[index];
+				if (row !== undefined) {
+					row.open = to ?? !row.open;
+					item.rev = (item.rev ?? 0) + 1;
+				}
 			}
 			touch();
 		},
@@ -453,8 +952,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		 * The tab as lines of `cols` cells. Each line says what it belongs to, so that a selection or a click can
 		 * act on it: { spans, item, row?, kind }.
 		 */
-		// `all` keeps the old mixed projection for direct callers during the migration; the screen always names Conversation or Work.
+		// `all` keeps the old mixed projection for direct callers during the migration; the screen names Conversation, Work, or Consult.
 		lines(cols, projection = "all") {
+			if (projection === "consult") return consultLines(cols);
 			const out = [];
 			// Where the lines being made go: the lines of one item while it is made, else the tab's.
 			let sink = out;
@@ -508,34 +1008,9 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					return;
 				}
 				if (row.name === "consult") {
-					// C5 has one consult surface: the private same-model conference audit. Historical storyteller rows
-					// may still appear in an old Durable session, but this UI deliberately never reads or parses them.
+					// Parent calls are only correlation pointers. The dedicated Consult projection is the sole screen surface
+					// allowed to read or render a co<N> notebook, including its compact outer receipt.
 					add(callLine(row), { ...ref, kind: "call" });
-					if (row.state === "running") {
-						const tail = toolTails.get(row.id);
-						if (tail !== undefined) {
-							const indentLive = row.depth > 0 ? "  │   " : "    ";
-							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the conference receipt is retained privately", "faint"]], { ...ref, kind: "detail" });
-							const shown = wrap(tail.text.replace(/\s+$/, ""), inner - width(indentLive));
-							for (const piece of shown.slice(-POLICY.limits.screen.chatLiveTextRows)) add([[indentLive, "faint"], [piece, "muted"]], { ...ref, kind: "detail" });
-						}
-					}
-					if (row.open) {
-						const indent = row.depth > 0 ? "  │   " : "    ";
-						const section = (title) => add([[indent, "faint"], [title, "faint"]], { ...ref, kind: "detail" });
-						const body = (text, style = "muted") => {
-							for (const piece of wrap(text, inner - width(indent))) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : style]], { ...ref, kind: "detail" });
-						};
-						const conference = conferenceOf(row);
-						if (conference.id !== undefined) {
-							section(`consult conference ${conference.id} · private audit notebook`);
-							if (conference.record === undefined) body(`(The conference record ${conference.id} cannot be read; the outer receipt remains: ${plain(row.receipt ?? "no receipt")})`, row.state === "failed" ? "err" : "faint");
-							else body(renderConference(conference.record));
-						} else {
-							section("consult conference");
-							body("(This historical consult row predates the C5 conference audit. C5 keeps any storyteller bytes only as static files under .brain/legacy/; this screen does not parse or resume them.)", "faint");
-						}
-					}
 					return;
 				}
 				add(callLine(row), { ...ref, kind: "call" });
@@ -595,7 +1070,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						for (const part of rows.slice(1)) add([[part, head.at(-1)[1]]], { item: item.key, kind: "console" });
 					}
 				} else if (item.type === "group") {
-					const indexes = item.rows.map((_row, index) => index).filter((index) => projection !== "all" || item.rows[index].hiddenInAll !== true);
+					const indexes = item.rows.map((_row, index) => index).filter((index) => (projection !== "all" || item.rows[index].hiddenInAll !== true) && !(projection === "work" && item.rows[index].hiddenInWork === true));
 					const shownRows = indexes.map((index) => item.rows[index]);
 					const calls = shownRows.filter((row) => row.kind === "call");
 					const privateRows = shownRows.filter((row) => row.kind === "note" || row.kind === "reasoning");
@@ -711,6 +1186,8 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 
 		/** The text of one item, for copying. */
 		textOf(key, rowIndex) {
+			const consultation = consultations.get(String(key));
+			if (consultation !== undefined) return consultExport(consultation, rowIndex);
 			const liveKey = /^live:(\d+)$/.exec(String(key));
 			if (liveKey !== null) {
 				const message = live.get(Number(liveKey[1]))?.message;
@@ -722,11 +1199,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note" || row?.kind === "reasoning") return row.text;
-					if (row?.name === "consult") {
-							const conference = conferenceOf(row);
-							if (conference.id !== undefined) return `${row.label}\n\n${conference.record === undefined ? `(The conference record ${conference.id} cannot be read; outer receipt: ${plain(row.receipt ?? "none")})` : renderConference(conference.record)}`;
-							return `${row.label}\n\nThis historical consult row predates the C5 conference audit. Any migrated storyteller material is a static archive under .brain/legacy/ and is not read or parsed by the runtime.`;
-						}
+						if (row?.name === "consult") return "Private consultation activity is available only in Chat · Consult.";
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
 				return item.rows.map((entry) => ((entry.kind === "note" || entry.kind === "reasoning") ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
 			}

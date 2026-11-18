@@ -433,8 +433,9 @@ Records use new `co<N>` IDs, never legacy `st<N>` IDs, and retain at least:
 - question, `myPersona` digest/metadata, supplied context/files, and all snapshot
   digests/clipping/refusal facts;
 - roster version and participant-to-book mapping;
-- participant-labelled turns, tool receipts, selector events, eligibility facts, and
-  termination/budget facts;
+- participant-labelled activity (reasoning, chat/prose, and local tool calls), completed
+  turns, bounded tool receipts, selector events, eligibility facts, and termination/budget
+  facts;
 - final `consult_return` object and artifact digest when present; and
 - interruption/cancellation/failure facts when no final return exists.
 
@@ -491,29 +492,34 @@ promotion. Normal sandbox arguments and session windows are not consultation scr
 
 ### UI
 
-The Work view renders conference audits on demand from their `co<N>` records. It has no
-live storyteller or Case renderer; historical consultation rows are labelled as static
-archive notices. Conference rows show:
+Chat has a dedicated **Consult** subview. It is the only screen projection allowed to
+read or render a `co<N>` notebook: Conversation and Work retain no conference row,
+private receipt, child reasoning, or audit expansion. A parent `consult` call is only a
+correlation pointer, never a path by which private material reaches parent history or
+project authority. Historical pre-cutover rows remain compact isolated notices rather
+than a revived storyteller/Case renderer.
+
+A conference timeline shows:
 
 - `co<N>`, captured model, lifecycle state, elapsed/budget facts, and native-grammar
   selection evidence;
-- current speaker, completed turns, selector history, and no-consecutive-speaker
-  enforcement;
-- roster and each participant's role/book snapshot status, including an explicit
-  empty-book state;
+- the full fixed roster—Cartographer, Atlas, Ledger, Plan, Assessment, and Context—with
+  active/ready/final status;
+- persona-attributed, independently foldable blocks for reasoning, chat/prose, local
+  tool calls, local tool results, host-native-routing events, and the final advisory;
+- local durable activity plus the current child stream/tool output while a conference is
+  running, without adding either to parent Work or context;
 - supplied-file and book-source manifests with digests, ranges, clipping, and citations;
-- tool receipts, final return, or explicit incomplete reason; and
+  and
 - the scratch declaration: structured conference notebook only; no filesystem or
   command scratch.
 
-While a conference runs, the Work view reads the durable record named in the outer
-call's details. It can show speaker/selector progress without streaming every private
-assistant thought into the parent chat. Expanding the row is an explicit audit action.
-
-Snapshots and artifacts are retained with the consultation record under the brain's
-lifecycle, subject to policy caps. A future purge/export policy must leave visible
-provenance (for example, “sources purged”) rather than a dangling apparently
-reproducible result.
+Copying a conference or one of its blocks exports only that Consult projection. Durable
+participant activities and tool receipts use stable event/call identities for restart
+idempotence, while bounded retention keeps an unbounded tool loop from making the
+conference record grow indefinitely. A future purge/export policy must leave visible
+provenance (for example, “sources purged”) rather than a dangling apparently reproducible
+result.
 
 ## C5 delivered cutover
 

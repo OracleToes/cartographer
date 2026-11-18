@@ -41,6 +41,23 @@ const clip = (value, max) => {
 	return text.length <= max ? { text, clipped: false, originalChars: text.length } : { text: text.slice(0, max), clipped: true, originalChars: text.length };
 };
 const textOf = (message) => (message?.content ?? []).flatMap((part) => (part?.type === "text" ? [String(part.text ?? "")] : [])).join("").trim();
+const thinkingOf = (message) => (message?.content ?? []).flatMap((part) => (part?.type === "thinking" ? [String(part.thinking ?? "")] : [])).join("\n").trim();
+/** Keep the private conference audit inspectable without letting one generated field make its durable record unbounded. */
+const auditText = (value) => clip(value, POLICY.limits.conference.activityChars);
+const auditValue = (value, depth = 0) => {
+	if (typeof value === "string") return auditText(value).text;
+	if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+	if (Array.isArray(value)) return value.slice(0, 32).map((entry) => auditValue(entry, depth + 1));
+	if (value !== null && typeof value === "object" && depth < 4) {
+		return Object.fromEntries(Object.entries(value).slice(0, 32).map(([key, entry]) => [key, auditValue(entry, depth + 1)]));
+	}
+	return String(value ?? "");
+};
+/** Prefer Durable's generation task id; direct callers can still supply a message id/timestamp as a stable response key. */
+const responseEventId = (eventId, message) => {
+	const value = eventId ?? message?.id ?? message?.timestamp;
+	return value === undefined || value === null || String(value) === "" ? undefined : String(value);
+};
 const nowIso = (at = Date.now()) => new Date(at).toISOString();
 const sourcePath = (brainDir, id, sourceId) => join(conferenceDir(brainDir, id), "sources", `${sourceId}.txt`);
 
@@ -337,9 +354,14 @@ export function createConferenceCapture({ root, brainDir, question, context, fil
 		roster: { version: ROSTER_VERSION, members: CONSULT_ROSTER.map(({ id, book }) => ({ id, book })) },
 		sources,
 		bookSources,
+		// A private, bounded participant timeline powers the Consult view. It remains in this consult-local record;
+		// none of it becomes parent conversation/context material.
+		activities: [],
+		activityCount: 0,
 		turns: [],
 		selectorEvents: [],
 		toolReceipts: [],
+		toolReceiptCount: 0,
 		requestPlans: [],
 		requestPlanCount: 0,
 		limits: { turns: POLICY.limits.conference.turns, runtimeMs: POLICY.limits.conference.runtimeMs },
@@ -501,20 +523,88 @@ export function withConferenceBrain(conference, brainDir) {
 	return { ...conference, __brainDir: brainDir };
 }
 
+/**
+ * Record one private participant response, including reasoning and local-tool calls, exactly once.
+ *
+ * This is intentionally distinct from `turns`: a turn closes only when no tool call was made and becomes eligible
+ * for host routing. The activity timeline is the Consult-view audit and never crosses into the caller's context.
+ */
+export function recordParticipantActivity(brainDir, id, participant, message, at = Date.now(), eventId) {
+	if (!PARTICIPANT_IDS.includes(participant)) throw new ConferenceError(`Conference ${id} cannot record an unrecognized participant ${JSON.stringify(String(participant))}.`);
+	const content = Array.isArray(message?.content) ? message.content : [];
+	const digest = sha256(JSON.stringify(content));
+	// A Durable generation task is the stable identity of one terminal provider response. Do not use generated words
+	// as the identity: two genuine rounds may say exactly the same thing, while a restarted hook must remain idempotent.
+	const responseId = responseEventId(eventId, message);
+	const reasoning = auditText(thinkingOf(message));
+	const prose = auditText(textOf(message));
+	const calls = content
+		.filter((part) => part?.type === "toolCall")
+		.map((call) => ({
+			id: typeof call.id === "string" ? call.id : undefined,
+			name: String(call.name ?? "unknown"),
+			arguments: auditValue(call.arguments ?? {}),
+		}))
+		.map((call) => Object.fromEntries(Object.entries(call).filter(([, value]) => value !== undefined)));
+	return updateConference(brainDir, id, (record) => {
+		record.activities ??= [];
+		// Check the durable identity before status/speaker state. A recovered afterResponse hook may arrive after
+		// routing advanced; it is then an idempotent replay, not an unauthorized new contribution.
+		const existing = responseId === undefined
+			? record.activities.find((activity) => activity.digest === digest && activity.participant === participant)
+			: record.activities.find((activity) => activity.eventId === responseId);
+		if (existing !== undefined) return record;
+		if (record.status !== "running") throw new ConferenceError(`Conference ${id} is ${record.status}, not running.`);
+		if (record.active?.kind !== "participant" || record.active.participant !== participant) {
+			throw new ConferenceError(`Conference ${id} cannot record a ${participant} activity while ${record.active?.kind === "participant" ? record.active.participant : record.active?.kind ?? "nobody"} is active.`);
+		}
+		const activity = {
+			index: (record.activityCount ?? record.activities.length) + 1,
+			participant,
+			at: nowIso(at),
+			digest,
+			...(responseId === undefined ? {} : { eventId: responseId }),
+			...(reasoning.text === "" ? {} : { reasoning: reasoning.text, ...(reasoning.clipped ? { reasoningClipped: true, reasoningChars: reasoning.originalChars } : {}) }),
+			...(prose.text === "" ? {} : { prose: prose.text, ...(prose.clipped ? { proseClipped: true, proseChars: prose.originalChars } : {}) }),
+			...(calls.length === 0 ? {} : { calls }),
+			...(typeof message?.stopReason === "string" ? { stopReason: message.stopReason } : {}),
+		};
+		record.activityCount = activity.index;
+		record.activities.push(activity);
+		const cap = POLICY.limits.conference.activities;
+		if (record.activities.length > cap) record.activities.splice(0, record.activities.length - cap);
+		return record;
+	});
+}
+
 /** Record one completed no-tool participant turn exactly once. */
-export function recordParticipantTurn(brainDir, id, participant, message, at = Date.now()) {
+export function recordParticipantTurn(brainDir, id, participant, message, at = Date.now(), eventId) {
 	if (!PARTICIPANT_IDS.includes(participant)) throw new ConferenceError(`Conference ${id} cannot record an unrecognized participant ${JSON.stringify(String(participant))}.`);
 	const spoken = textOf(message);
 	const digest = sha256(JSON.stringify(message?.content ?? []));
+	const responseId = responseEventId(eventId, message);
+	const loaded = loadConference(brainDir, id);
+	if (loaded.conference === undefined) throw new ConferenceError(loaded.error);
+	// Recovery can replay the afterResponse hook after selector state has advanced. Once the durable turn exists,
+	// return before activity's active-speaker guard instead of rejecting an idempotent replay.
+	const recordedTurn = responseId === undefined
+		? loaded.conference.turns?.findLast?.((turn) => turn.digest === digest && turn.participant === participant)
+		: loaded.conference.turns?.findLast?.((turn) => turn.eventId === responseId);
+	if (recordedTurn !== undefined) return loaded.conference;
+	// Keep direct recovery/manual callers as rich as the normal extension path. A preceding afterResponse activity
+	// with this Durable response identity is deliberately a no-op here.
+	recordParticipantActivity(brainDir, id, participant, message, at, eventId);
 	return updateConference(brainDir, id, (record) => {
-		const existing = record.turns?.findLast?.((turn) => turn.digest === digest && turn.participant === participant);
+		const existing = responseId === undefined
+			? record.turns?.findLast?.((turn) => turn.digest === digest && turn.participant === participant)
+			: record.turns?.findLast?.((turn) => turn.eventId === responseId);
 		if (existing !== undefined) return record;
 		if (record.status !== "running") throw new ConferenceError(`Conference ${id} is ${record.status}, not running.`);
 		if (record.active?.kind !== "participant" || record.active.participant !== participant) {
 			throw new ConferenceError(`Conference ${id} cannot record a completed ${participant} turn while ${record.active?.kind === "participant" ? record.active.participant : record.active?.kind ?? "nobody"} is active.`);
 		}
 		record.turns ??= [];
-		record.turns.push({ index: record.turns.length + 1, participant, at: nowIso(at), digest, text: spoken });
+		record.turns.push({ index: record.turns.length + 1, participant, at: nowIso(at), digest, ...(responseId === undefined ? {} : { eventId: responseId }), text: spoken });
 		record.active = { kind: "selector", previousSpeaker: participant };
 		return record;
 	});
@@ -598,8 +688,16 @@ export function recordToolReceipt(brainDir, id, receipt) {
 	return updateConference(brainDir, id, (record) => {
 		record.toolReceipts ??= [];
 		const digest = sha256(JSON.stringify(receipt));
-		if (record.toolReceipts.some((entry) => entry.digest === digest)) return record;
-		record.toolReceipts.push({ ...receipt, digest, at: receipt.at ?? nowIso() });
+		// Durable may replay a safe local tool after a process interruption. A known call id is the stable identity
+		// of that attempted tool/result pair; do not turn replay into a second visible result.
+		if ((typeof receipt?.callId === "string" && record.toolReceipts.some((entry) => entry.callId === receipt.callId)) || record.toolReceipts.some((entry) => entry.digest === digest)) return record;
+		const index = (record.toolReceiptCount ?? record.toolReceipts.length) + 1;
+		record.toolReceiptCount = index;
+		// Preserve a receipt id when supplied, but assign a monotonic local fallback after pruning so receipt-to-call
+		// display pairing remains unambiguous for callers that do not provide a tool-call id.
+		record.toolReceipts.push({ ...receipt, id: receipt.id ?? `receipt-${index}`, index, digest, at: receipt.at ?? nowIso() });
+		const cap = POLICY.limits.conference.toolReceipts;
+		if (record.toolReceipts.length > cap) record.toolReceipts.splice(0, record.toolReceipts.length - cap);
 		return record;
 	});
 }
@@ -684,6 +782,7 @@ export function conferenceStatusLine(record) {
 export function renderConference(record, { audit = true } = {}) {
 	const limits = record.limits ?? {};
 	const turns = record.turns ?? [];
+	const activities = record.activities ?? [];
 	const selections = record.selectorEvents ?? [];
 	const plans = record.requestPlans ?? [];
 	const sources = record.sources ?? [];
@@ -709,7 +808,7 @@ export function renderConference(record, { audit = true } = {}) {
 		`Question: ${record.question}`,
 		"Structured notebook only: immutable snapshots, labelled turns, selector events, and tool receipts; no filesystem or command scratch.",
 		`Lifecycle: captured ${record.createdAt ?? "unknown"}${record.startedAt === undefined ? "" : ` · child started ${record.startedAt}`}${duration === undefined ? "" : ` · elapsed ${duration}`}.`,
-		`Budget: ${turns.length}/${limits.turns ?? POLICY.limits.conference.turns} completed participant turns · ${selections.length} selector events · ${plans.length}/${POLICY.limits.conference.requestPlans} retained request-plan audits${record.requestPlanCount === undefined || record.requestPlanCount === plans.length ? "" : ` (${record.requestPlanCount} total)`} · runtime cap ${Math.round((limits.runtimeMs ?? POLICY.limits.conference.runtimeMs) / 1000)}s.`,
+		`Budget: ${turns.length}/${limits.turns ?? POLICY.limits.conference.turns} completed participant turns · ${activities.length}/${POLICY.limits.conference.activities} retained participant activities${record.activityCount === undefined || record.activityCount === activities.length ? "" : ` (${record.activityCount} total)`} · ${selections.length} selector events · ${(record.toolReceipts ?? []).length}/${POLICY.limits.conference.toolReceipts} retained local tool receipts${record.toolReceiptCount === undefined || record.toolReceiptCount === (record.toolReceipts ?? []).length ? "" : ` (${record.toolReceiptCount} total)`} · ${plans.length}/${POLICY.limits.conference.requestPlans} retained request-plan audits${record.requestPlanCount === undefined || record.requestPlanCount === plans.length ? "" : ` (${record.requestPlanCount} total)`} · runtime cap ${Math.round((limits.runtimeMs ?? POLICY.limits.conference.runtimeMs) / 1000)}s.`,  
 		"Routing: each selector event is a host-owned llama.cpp native-GBNF choice from a host-computed eligible set; the immediately prior speaker is excluded.",
 	];
 	if (record.active?.kind === "participant") lines.push(`Current participant: ${record.active.participant}.`);
@@ -740,6 +839,17 @@ export function renderConference(record, { audit = true } = {}) {
 			}
 		}
 	}
+	if (activities.length > 0) {
+		lines.push("Participant activity timeline:");
+		for (const activity of activities) {
+			const kinds = [
+				activity.reasoning ? `reasoning${activity.reasoningClipped ? " (clipped)" : ""}` : undefined,
+				activity.prose ? `prose${activity.proseClipped ? " (clipped)" : ""}` : undefined,
+				Array.isArray(activity.calls) && activity.calls.length > 0 ? `tools ${activity.calls.map((call) => call.name).join(", ")}` : undefined,
+			].filter((kind) => kind !== undefined);
+			lines.push(`  ${activity.index}. ${activity.participant} · ${activity.at} · ${kinds.join(" · ") || "empty response"}.`);
+		}
+	}
 	if (turns.length > 0) {
 		lines.push("Participant turns:");
 		for (const turn of turns) lines.push(`  ${turn.index}. ${turn.participant} · ${turn.at}${turn.text ? ` · ${flat(turn.text).slice(0, 240)}` : " · (no prose)"}`);
@@ -756,7 +866,7 @@ export function renderConference(record, { audit = true } = {}) {
 	if ((record.toolReceipts ?? []).length > 0) {
 		lines.push("Consult-local tool receipts:");
 		for (const receipt of record.toolReceipts) {
-			const facts = [receipt.id ?? receipt.action ?? "receipt", receipt.participant, receipt.action, receipt.source, receipt.range === undefined ? undefined : `range ${receipt.range}`, receipt.pattern === undefined ? undefined : `pattern ${JSON.stringify(receipt.pattern)}`, receipt.hits === undefined ? undefined : `${receipt.hits} hits`, receipt.at, receipt.digest === undefined ? undefined : `sha256 ${receipt.digest}`].filter((value) => value !== undefined);
+			const facts = [receipt.id ?? receipt.action ?? "receipt", receipt.participant, receipt.action, receipt.source, receipt.range === undefined ? undefined : `range ${receipt.range}`, receipt.pattern === undefined ? undefined : `pattern ${JSON.stringify(receipt.pattern)}`, receipt.hits === undefined ? undefined : `${receipt.hits} hits`, receipt.isError ? "refused" : undefined, typeof receipt.result === "string" && receipt.result !== "" ? `result ${flat(receipt.result).slice(0, 240)}${receipt.resultClipped ? " (clipped)" : ""}` : undefined, receipt.at, receipt.digest === undefined ? undefined : `sha256 ${receipt.digest}`].filter((value) => value !== undefined);
 			lines.push(`  ${facts.join(" · ")}.`);
 		}
 	}
