@@ -13,7 +13,7 @@ import { loadPlan, savePlan, applyPlanOp, PlanError } from "./plan.mjs";
 import { pin } from "./top.mjs";
 
 /** Where each id belongs, in the words for them in a line of refusal. */
-export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan item p1, a node of the graph its name`;
+export const BOOKS = `a report is t1, a ledger entry g1, q2 or n3, a plan envelope p1, a plan move m1, a node of the graph its name`;
 const contextAction = (brainDir, id, action) => {
 	try {
 		return applyContextRowAction(brainDir, id, action);
@@ -37,7 +37,9 @@ function row(brainDir, id) {
 	if (entry !== undefined) return { what: "ledger entry", archived: entry.archived === true, kind: entry.kind, found: entry };
 	const { plan } = loadPlan(brainDir);
 	const item = plan?.items.find((entry) => entry.id === id);
-	if (item !== undefined) return { what: "plan item", archived: item.archived === true, kind: item.mode, found: item };
+	if (item !== undefined) return { what: "plan envelope", archived: item.archived === true, kind: item.mode, found: item };
+	const move = plan?.moves.find((entry) => entry.id === id);
+	if (move !== undefined) return { what: "plan move", archived: move.archived === true, kind: "move", found: move };
 	const { atlas } = loadAtlas(brainDir);
 	const node = atlas?.nodes.find((entry) => entry.name === id);
 	if (node !== undefined) return { what: "node", archived: node.archived === true, kind: node.kind ?? "node", found: node };
@@ -46,7 +48,7 @@ function row(brainDir, id) {
 
 /**
  * Take a row out of what the agent reads, keeping it on disk where the book keeps it: a report's record line is
- * archived, a ledger entry, a plan item or a node is marked archived and left out of what is built from the book.
+ * archived, a ledger entry, a plan envelope or move, or a node is marked archived and left out of what is built from the book.
  * @returns the line to show
  */
 export function archiveRow(brainDir, id) {
@@ -61,18 +63,24 @@ export function archiveRow(brainDir, id) {
 		saveLedger(brainDir, ledger);
 		return `${id} archived: the ${entry.kind} leaves the ledger as the agent reads it, and waits in the file; /unarchive brings it back.`;
 	}
-	if (found.what === "plan item") {
+	if (found.what === "plan envelope" || found.what === "plan move") {
 		const { plan } = loadPlan(brainDir);
-		const item = plan.items.find((entry) => entry.id === id);
+		const item = found.what === "plan envelope" ? plan.items.find((entry) => entry.id === id) : plan.moves.find((entry) => entry.id === id);
+		if (item.status === "running") return `${id} is running and cannot be archived.`;
 		item.archived = true;
 		savePlan(brainDir, plan);
-		return `${id} archived: the item leaves the plan as the agent reads it, and waits in the file; /unarchive brings it back.`;
+		return `${id} archived: the ${found.what === "plan move" ? "move" : "envelope"} leaves the plan as the agent reads it, and waits in the file; /unarchive brings it back.`;
 	}
-	const { atlas } = loadAtlas(brainDir);
-	const node = atlas.nodes.find((entry) => entry.name === id);
-	node.archived = true;
-	saveAtlas(brainDir, atlas);
-	return `${id} archived: the node leaves the outline as the agent reads it, and waits in the file; /unarchive brings it back.`;
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.archive, name: id }, { now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error) {
+		if (error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
 }
 
 /** The reverse of `archiveRow`: the row stands in what the agent reads again. @returns the line to show */
@@ -88,22 +96,27 @@ export function unarchiveRow(brainDir, id) {
 		saveLedger(brainDir, ledger);
 		return `${id} is back in the ledger as the agent reads it.`;
 	}
-	if (found.what === "plan item") {
+	if (found.what === "plan envelope" || found.what === "plan move") {
 		const { plan } = loadPlan(brainDir);
-		const item = plan.items.find((entry) => entry.id === id);
+		const item = found.what === "plan envelope" ? plan.items.find((entry) => entry.id === id) : plan.moves.find((entry) => entry.id === id);
 		delete item.archived;
 		savePlan(brainDir, plan);
 		return `${id} is back in the plan as the agent reads it.`;
 	}
-	const { atlas } = loadAtlas(brainDir);
-	const node = atlas.nodes.find((entry) => entry.name === id);
-	delete node.archived;
-	saveAtlas(brainDir, atlas);
-	return `${id} is back in the outline as the agent reads it.`;
+	const { atlas, error } = loadAtlas(brainDir);
+	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.restore, name: id }, { now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return result.line;
+	} catch (error) {
+		if (error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
 }
 
 /**
- * A row is gone for good: a report's record line and file are dropped, a ledger entry, a plan item or a node is
+ * A row is gone for good: a report's record line and file are dropped, a ledger entry, a plan envelope or move, or a node is
  * taken out of its book. Nothing is said to the agent: this
  * is how the user makes the agent forget a thing it wrote down. @returns the line to show
  */
@@ -119,23 +132,27 @@ export function dropRow(brainDir, id) {
 		saveLedger(brainDir, ledger);
 		return `${id} is gone for good: the ${found.found.kind} is out of the ledger, and nothing of it is said to the agent.`;
 	}
-	if (found.what === "plan item") {
+	if (found.what === "plan envelope" || found.what === "plan move") {
 		const { plan } = loadPlan(brainDir);
-		const at = plan.items.findIndex((item) => item.id === id);
-		if (at < 0) return `There is no ${id}. ${BOOKS}.`;
-		plan.items.splice(at, 1);
-		savePlan(brainDir, plan);
-		return `${id} is gone for good: the item is out of the plan, and nothing of it is said to the agent.`;
+		try {
+			const result = applyPlanOp(plan, { action: POLICY.enums.actions.remove, id }, new Date().toISOString());
+			savePlan(brainDir, plan);
+			return `${id} is gone for good: ${result.line}`;
+		} catch (error) {
+			if (error instanceof PlanError) return `! ${error.message}`;
+			throw error;
+		}
 	}
 	const { atlas, error } = loadAtlas(brainDir);
 	if (atlas === undefined) return `! The graph cannot be read: ${error}`;
-	const at = atlas.nodes.findIndex((entry) => entry.name === id);
-	if (at < 0) return `There is no node ${id}. /atlas lists the nodes.`;
-	atlas.nodes.splice(at, 1);
-	let links = 0;
-	for (const other of atlas.nodes) if (other.links.includes(id)) { other.links = other.links.filter((link) => link !== id); links++; }
-	saveAtlas(brainDir, atlas);
-	return `${id} is gone for good: the node is out of the graph${links > 0 ? `, and ${links === 1 ? "1 link" : `${links} links`} to it went with it` : ""}, and nothing of it is said to the agent.`;
+	try {
+		const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.remove, name: id }, { now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+		if (result.changed) saveAtlas(brainDir, atlas);
+		return `${id} is gone for good: ${result.line} Nothing of it is said to the agent.`;
+	} catch (error) {
+		if (error instanceof AtlasError) return `! ${error.message}`;
+		throw error;
+	}
 }
 
 /**
@@ -168,10 +185,10 @@ export const dropRows = (brainDir, ids) => rows(brainDir, ids, dropRow);
 
 /**
  * Mark a row of a view settled, with the same operations the agent uses: a ledger entry is closed (with the
- * outcome line the agent would give), a plan item is done, a node of the graph is confirmed (the node's own
- * "still true"). @returns the line to show
+ * outcome line the agent would give), a reported plan move is accepted with a user-written evidence review or a
+ * plan envelope is closed, and a node of the graph is confirmed (the node's own "still true"). @returns the line to show
  */
-export function settleRow(brainDir, id, root) {
+export function settleRow(brainDir, id, root, review) {
 	const found = row(brainDir, id);
 	if (found === undefined) return `There is no ${id}. ${BOOKS}.`;
 	const now = new Date().toISOString();
@@ -190,10 +207,19 @@ export function settleRow(brainDir, id, root) {
 			}
 			return result.line;
 		}
-		if (found.what === "plan item") {
+		if (found.what === "plan envelope" || found.what === "plan move") {
 			const { plan, error } = loadPlan(brainDir);
 			if (plan === undefined) return `! The plan cannot be read: ${error}`;
-			const result = applyPlanOp(plan, { action: POLICY.enums.actions.done, id }, now);
+			const move = found.what === "plan move" ? plan.moves.find((entry) => entry.id === id) : undefined;
+			const acceptedReview = typeof review === "string" ? review.replace(/\s+/g, " ").trim() : "";
+			if (move?.status === POLICY.enums.moveStatus.reported && acceptedReview === "") {
+				return `! ${id} needs an acceptance review: say how its reported proof witnesses “${move.doneWhen}”. Use /done ${id} -- YOUR REVIEW, or plan acceptMove with review.`;
+			}
+			const result = applyPlanOp(plan, {
+				action: POLICY.enums.actions.done,
+				id,
+				...(move !== undefined && acceptedReview !== "" ? { review: acceptedReview } : {}),
+			}, now);
 			savePlan(brainDir, plan);
 			return result.line;
 		}
@@ -212,7 +238,7 @@ export function settleRow(brainDir, id, root) {
 /** The scaffold a new row of a book starts from, and how the book applies it. */
 const ADD_TEMPLATES = {
 	ledger: { label: "ledger entry", text: () => `${JSON.stringify({ kind: "note", text: "", salient: false, done_when: "" }, null, "\t")}\n` },
-	plan: { label: "plan item", text: () => `${JSON.stringify({ mode: "look", text: "", network: false, standing: false }, null, "\t")}\n` },
+	plan: { label: "authorization envelope", text: () => `${JSON.stringify({ mode: "change", text: "", done_when: "", network: false }, null, "\t")}\n` },
 	atlas: { label: "node", text: () => `${JSON.stringify({ name: "", gist: "", kind: "", detail: "" }, null, "\t")}\n` },
 };
 
@@ -287,15 +313,31 @@ export function editRow(brainDir, id, changes, root) {
 			saveLedger(brainDir, ledger);
 			return result.line;
 		}
-		if (found.what === "plan item") {
+		if (found.what === "plan envelope" || found.what === "plan move") {
 			const { plan, error } = loadPlan(brainDir);
 			if (plan === undefined) return `! The plan cannot be read: ${error}`;
-			const op = {
-				action: POLICY.enums.actions.edit,
-				id,
-				...(changes.text !== undefined ? { text: changes.text } : {}),
-				...(changes.outcome !== undefined ? { outcome: changes.outcome } : {}),
-			};
+			const op = found.what === "plan move"
+				? {
+					action: "editMove",
+					id,
+					...(changes.text !== undefined ? { text: changes.text } : {}),
+					...(changes.doneWhen !== undefined ? { done_when: changes.doneWhen } : {}),
+					...(changes.proof !== undefined ? { proof: changes.proof } : {}),
+					...(changes.targets !== undefined ? { targets: changes.targets } : {}),
+					...(changes.turns !== undefined ? { turns: changes.turns } : {}),
+					...(changes.capabilities !== undefined ? { capabilities: changes.capabilities } : {}),
+					...(changes.budget !== undefined ? { budget: changes.budget } : {}),
+				}
+				: {
+					action: POLICY.enums.actions.edit,
+					id,
+					...(changes.text !== undefined ? { text: changes.text } : {}),
+					...(changes.doneWhen !== undefined ? { done_when: changes.doneWhen } : {}),
+					...(changes.outcome !== undefined ? { outcome: changes.outcome } : {}),
+					...(changes.mode !== undefined ? { mode: changes.mode } : {}),
+					...(changes.network !== undefined ? { network: changes.network } : {}),
+					...(changes.standing !== undefined ? { standing: changes.standing } : {}),
+				};
 			const result = applyPlanOp(plan, op, now);
 			savePlan(brainDir, plan);
 			return result.line;

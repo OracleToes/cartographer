@@ -1,22 +1,27 @@
-// The `book` tool is the single interface to the agent's durable surfaces — ledger, plan, atlas, assessment,
-// context, Durable records, referenced entities and the shelf. Focused contexts may update the shared brain; only
-// the orchestrating context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs,
-// src/atlas.mjs, src/assessment.mjs and src/context.mjs; this file routes target/action calls to them. One flat
-// declaration (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
+// The `book` tool is the single interface to the agent's durable brain surfaces — ledger, plan, atlas, assessment,
+// context, reports, Durable records, and project-file mutations. Project-file reading and working-memory shelving live
+// in the top-level `read` and `shelf` tools. Focused contexts may update the shared brain; only the orchestrating
+// context can change the plan. Domain operations live in src/ledger.mjs, src/plan.mjs, src/atlas.mjs,
+// src/assessment.mjs and src/context.mjs; this file routes target/action calls to them. One flat declaration
+// (llama.cpp-safe at the root) plus one capability table drive what is offered, validated and dispatched.
 import { POLICY } from "../config.mjs";
 import { projectFiles } from "./look.mjs";
+import { ChangeError, confineWrite } from "./change.mjs";
+import { noFileRecord, runFileRead } from "./read.mjs";
+import { readBatchAllowance } from "../read-batch.mjs";
+import { runShelf } from "./shelf.mjs";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { defineTool, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { bool, compile, obj, opt, str, unknown } from "@earendil-works/pi-schema";
+import { arr, bool, compile, int, obj, opt, str } from "@earendil-works/pi-schema";
 import { describe, REFUSALS, STILL_TASK } from "../prompt.mjs";
 import { applyOp, LedgerError, loadLedger, open, openCounts, prune, saveLedger } from "../ledger.mjs";
-import { applyPlanOp, authorizationLine, isAuthorized, loadPlan, PlanError, savePlan } from "../plan.mjs";
-import { applyAtlasOp, AtlasError, loadAtlas, saveAtlas } from "../atlas.mjs";
+import { applyPlanOp, authorizationLine, liveMove, loadPlan, PlanError, savePlan, targetAllows } from "../plan.mjs";
+import { applyAtlasOp, AtlasError, findNode, loadAtlas, saveAtlas } from "../atlas.mjs";
 import { ASSESSMENT_MAX, assessmentPath, saveAssessment } from "../assessment.mjs";
 import { noteAssessed, pin } from "../top.mjs";
-import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfReferenceItem, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
-import { charsPerTokenNow } from "../calibrate.mjs";
-import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, retainReferenceVersion, validateReference, contentVersion } from "../catalog.mjs";
+import { loadContext, loadReport, messageTokens, recordLine, reportsInView, ShelfError, shelfItem, shelfLabel, shelfText, estimate, stepsOf, taskState, updateContext, persistShelfSnapshot, RECALLED, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, cleanupShelfSnapshots, recordSoftForgetPending } from "../context.mjs";
+import { ensureCatalog, fileReference, nativeReference, readReferenceVersion, rebindFile, resolveFile, validateReference, contentVersion } from "../catalog.mjs";
 import { durableSummaries, durableRecordFor, scanAll } from "../index.mjs";
 import { USER_NAME } from "../user.mjs";
 import { clipNote, takeWarnings, warn } from "../warnings.mjs";
@@ -34,41 +39,36 @@ const normalizeRef = (brainDir, ref, target) => {
 	if (out.kind === undefined && target !== "shelf") out.kind = target;
 	return out;
 };
-/**
- * A shelf ref given an ID alone: find what kind of thing it is. Files and reports are cheap to check; the tool
- * registry and the durable index are tried after, and the durable index is the slow path, so it is tried last.
- * Returns the ref with its kind filled in, or undefined when nothing by that ID exists.
- */
-const inferShelfRef = async (ref, root, brainDir, api, callContext) => {
-	let namespace;
-	try { namespace = ensureCatalog(brainDir).namespace; } catch { return undefined; }
-	const filled = { ...ref, namespace };
-	if (resolveFile(root, brainDir, { ...filled, kind: "file" }).status === "live") return { ...filled, kind: "file" };
-	if (loadReport(brainDir, ref.id) !== undefined) return { ...filled, kind: "report" };
-	for (const kind of ["schema", "message", "toolResult", "toolCall"]) {
-		try {
-			const found = await durableRecordFor(kind, ref.id, brainDir, api, callContext);
-			if (found !== undefined) return { ...filled, kind };
-		} catch { /* not this kind */ }
-	}
-	return undefined;
+/** Lift a top-level `id` into the normalized internal `ref` envelope when `ref` was not given directly, without mutating frozen inputs. */
+const normalizeArgs = (brainDir, given) => {
+	if (given === null || given === undefined || typeof given !== "object") return given;
+	const trimmedId = typeof given.id === "string" && given.id.trim() !== "" ? given.id.trim() : undefined;
+	const rawRef = given.ref !== undefined ? given.ref : (trimmedId !== undefined ? { id: trimmedId } : undefined);
+	const ref = normalizeRef(brainDir, rawRef, given.target);
+	const id = trimmedId ?? (typeof ref?.id === "string" && ref.id.trim() !== "" ? ref.id.trim() : undefined);
+	const out = { ...given };
+	if (id !== undefined) out.id = id;
+	if (ref !== undefined) out.ref = ref;
+	return out;
 };
+const isCatalogFileId = (id) => /^f(\d+|-[0-9a-f]{8}-)/i.test(String(id ?? ""));
 /**
  * One source of truth for what exists: target → action → validation spec. The provider declaration (enums), the
  * local validator and the executor's dispatch all derive from this table; the tool description's capability
  * matrix is written to match it. Spec fields:
- *   ref: "required" → needs a ref with an `id`; the namespace and kind are inferred, the live version is used
- *   pathOk: a ref OR an explicit project-relative path locates the thing (file read; shelf add)
- *   operation: "required" → needs the target-specific payload object; operationFields lists required non-empty
- *             string fields inside it; hint overrides the "an operation payload" wording
+ *   ref: "required" → needs `id` (or `ref` when pinning `version`); namespace and kind are inferred
+ *   pathOk: `id` (or `ref`) OR an explicit project-relative `path` locates the thing
+ *   confirmOk: `id` (or `ref`), `name`, or `names` locates the atlas node(s) to confirm
+ *   lookOk: `id` (or `ref`), `name`, or `path` locates the atlas node or file to inspect
  *   fields: required non-empty string arguments on the call itself
+ *   exactFields: required non-empty string arguments preserved verbatim (including whitespace)
+ *   stringFields: required string arguments that may be empty ("")
  */
 const CAPABILITIES = {
 	file: {
-		read: { pathOk: true },
-		create: { fields: ["path", "content"] },
-		edit: { ref: "required", fields: ["oldText", "newText"] },
-		remove: { ref: "required" },
+		create: { fields: ["path"], stringFields: ["content"] },
+		edit: { pathOk: true, exactFields: ["oldText"], stringFields: ["newText"] },
+		remove: { pathOk: true },
 		rebind: { ref: "required", fields: ["expectedVersion", "path"] },
 	},
 	report: {
@@ -82,43 +82,52 @@ const CAPABILITIES = {
 	ledger: {
 		list: {},
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		done: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
+		add: { fields: ["kind", "text"] },
+		edit: { ref: "required" },
+		done: { ref: "required" },
+		remove: { ref: "required" },
 	},
 	plan: {
 		list: {},
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		done: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
-		before: { ref: "required", operation: "required" },
+		add: { fields: ["mode", "text"] },
+		edit: { ref: "required" },
+		done: { ref: "required" },
+		remove: { ref: "required" },
+		before: { ref: "required" },
+		clear: {},
+		addMove: { fields: ["parent", "text", "done_when"] },
+		editMove: { ref: "required" },
+		acceptMove: { ref: "required", fields: ["review"] },
 	},
 	atlas: {
 		list: {},
 		read: { ref: "required" },
-		add: { operation: "required" },
-		edit: { ref: "required", operation: "required" },
-		link: { ref: "required", operation: "required" },
-		unlink: { ref: "required", operation: "required" },
-		confirm: { ref: "required", operation: "required" },
-		remove: { ref: "required", operation: "required" },
-		rename: { ref: "required", operation: "required", operationFields: ["to"] },
-		look: { operation: "required", operationFields: ["name"] },
+		add: { fields: ["name", "gist"] },
+		edit: { ref: "required", fields: ["gist"] },
+		link: { ref: "required" },
+		unlink: { ref: "required" },
+		confirm: { confirmOk: true },
+		focus: { focusOk: true, fields: ["reason"] },
+		unfocus: {},
+		archive: { ref: "required" },
+		restore: { ref: "required" },
+		remove: { ref: "required" },
+		rename: { ref: "required", fields: ["to"] },
+		look: { lookOk: true },
 		tree: {},
 	},
 	assessment: {
-		write: { operation: "required", operationFields: ["text"], hint: "operation { text }: the whole assessment; it replaces the current one" },
+		write: { fields: ["text"] },
 	},
 	context: {
 		list: {},
 		read: { ref: "required" },
+		recall: { ref: "required" },
 		archive: { ref: "required" },
 		restore: { ref: "required" },
-		fold: { operation: "required", operationFields: ["id"], hint: "operation { id }: the report to drop from view, like t12, or the task-step result ids" },
-		note: { operation: "required", operationFields: ["text"], hint: "operation { text }: what to keep, with file paths and line numbers" },
+		fold: { ref: "required" },
+		note: { fields: ["text"] },
 		collapse: {},
 	},
 	conversation: { list: {}, read: { ref: "required" } },
@@ -128,26 +137,17 @@ const CAPABILITIES = {
 	prompt: { list: {}, read: { ref: "required" } },
 	tool: { list: {}, read: { ref: "required" } },
 	schema: { list: {}, read: { ref: "required" } },
-	shelf: {
-		list: {},
-		// The namespace and the kind are inferred from the ID alone (src/tools/book.mjs, inferShelfRef); a full reference is not needed.
-		add: { pathOk: true, refAlternative: "a ref or path", refInfer: true },
-		remove: { fields: ["placementId"] },
-	},
 };
 const UNIVERSAL_TARGETS = Object.keys(CAPABILITIES);
 const UNIVERSAL_ACTIONS = [...new Set(Object.values(CAPABILITIES).flatMap((actions) => Object.keys(actions)))];
 const capabilityFor = (target, action) => CAPABILITIES[target]?.[action];
 const REFERENCE_SCHEMA = obj({
-	id: str({ minLength: 1, maxLength: 256, description: "The stable ID of the entity, alone and always enough: it points at the live version. A file's ID comes from any `file read`; a record's ID from any `list`. Never a path — for a file whose ID you do not have yet, pass `path`." }),
+	id: str({ minLength: 1, maxLength: 256, description: "Stable ID of the entity. Pass top-level `id` instead unless pinning `version`." }),
 	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
-	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred when omitted: from the target, or for target=shelf from what the ID is." })),
+	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind. Inferred from the target when omitted." })),
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
-/** A file's id is not its name; tell the agent where the real one comes from. */
-const fileIdHint = (id) => `An id is not a file's name (${JSON.stringify(String(id ?? ""))} is not one). A file's ID comes from the book file create result ("File id: f1") or from a \`book file read\` of the path (the read header says "· file f1 @<64 hex>"). To read a file whose ID you do not have yet, pass \`path\` (project-relative) for the read — the header gives you the ID.`;
-const noFileRecord = (id) => `There is no file record for ID ${JSON.stringify(String(id ?? ""))}. ${fileIdHint(id)}`;
 const textResult = (text, details = {}) => ({ output: [{ type: "text", text }], details });
 /** Append any "this was clipped for you" notes raised while the call ran. Every tool call drains, once. */
 const withNotes = (result) => {
@@ -155,87 +155,59 @@ const withNotes = (result) => {
 	if (notes.length === 0) return result;
 	return { ...result, output: [...(result?.output ?? []), { type: "text", text: notes.map((note) => `note: ${note}`).join("\n") }] };
 };
-function renderReadSelection(bytes, path, range, id, version) {
-	let text;
-	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); }
-	catch { throw new Error("file is not valid UTF-8 text"); }
-	const lines = text.split("\n");
-	if (lines.at(-1) === "") lines.pop();
-	let from = 1;
-	let to = Math.min(lines.length, POLICY.limits.look.readDefaultLines);
-	if (range !== undefined && String(range).trim() !== "") {
-		const match = /^(\d+)\s*(?:-|to|\.\.)\s*(\d+)$/.exec(String(range).trim());
-		if (!match) throw new Error('range must look like "10-80"');
-		from = Number(match[1]);
-		to = Number(match[2]);
-		if (from < 1 || to < from || to - from + 1 > POLICY.limits.look.readMaxLines) throw new Error(`range must be ${POLICY.limits.look.readMaxLines} lines or fewer, starting at line 1 or later`);
-		if (from > lines.length && lines.length > 0) throw new Error(`file has ${lines.length} lines; line ${from} does not exist`);
-		to = Math.min(to, lines.length);
-	}
-	const clip = POLICY.limits.look.lineChars;
-	// A read returns at most about READ_TOKEN_CEILING tokens: a huge file is read in window-sized reads, not in one.
-	const ceiling = POLICY.limits.look.readTokenCeiling;
-	let ceilingHit = false;
-	let taken = 0;
-	const body = [];
-	for (const line of lines.slice(Math.max(0, from - 1), to)) {
-		const shown = line.length > clip ? `${line.slice(0, clip)} …[line cut: ${line.length} characters]` : line;
-		const cost = Math.ceil(shown.length / charsPerTokenNow()) + 1;
-		if (body.length > 0 && taken + cost > ceiling) { ceilingHit = true; break; }
-		taken += cost;
-		body.push(shown);
-	}
-	const last = from + body.length - 1;
-	// The bytes as they are, so what is seen is what `edit` matches. A pathologically long line is cut and says so.
-	const more = last < lines.length ? `\n${ceilingHit ? `(stopped at the ~${ceiling}-token read ceiling; ` : "("}${lines.length - last} more lines; ask for range ${last + 1}-${Math.min(lines.length, last + POLICY.limits.look.readDefaultLines)})` : "";
-	return `== ${path} (lines ${from}-${Math.max(from - 1, last)} of ${lines.length}) · file ${id}${version === undefined ? "" : ` @${version}`}\n${body.join("\n")}${more}`;
-}
 const unsupported = (target, action) => fail(`Unsupported book operation: target=${JSON.stringify(target)}, action=${JSON.stringify(action)}. No target content was resolved.${guideFor(target, action) === undefined && CAPABILITIES[target] !== undefined ? ` Supported actions for ${target}: ${Object.keys(CAPABILITIES[target]).join(", ")}.` : ""}`);
 
 // ─── Error-attached guidance (Q3, 2026-11-15) ───────────────────────────────
-// One line per action, appended ONLY to local failures, only for brain targets whose operation payloads are
-// opaque to the declaration. Durable/report/file failures are already precise; the happy path never pays for this.
+// One line per action, appended ONLY to local failures; the happy path never pays for this.
 const ACTION_GUIDE = {
 	ledger: {
 		add: "kind (goal | question | note) and text — a goal also needs done_when; a note may take salient: true",
-		edit: "id, plus text, done_when (done_when only on a goal), or salient: true/false (only on a note)",
+		edit: "id, plus text, done_when (only on a goal), salient: true/false (only on a note), or outcome (when closed)",
 		done: "id, plus an optional text outcome",
 		remove: "id",
 	},
 	plan: {
-		add: "mode (look | change) and text — before, network and standing optional (network/standing only with change)",
-		edit: "id, plus text, mode, network or standing",
-		done: "id, plus an optional text outcome",
+		add: "mode (look | change), text, and for change done_when — this adds an authorization envelope, not runnable work",
+		edit: "id, plus text, mode, done_when, network, standing, or outcome (when done)",
+		addMove: "parent (p<N>), text (one concrete action), done_when, and for a change move proof plus targets (one or more project-relative paths); optional turns, capabilities and budget narrow its fixed limits",
+		editMove: "id (m<N>), plus text, done_when, proof, targets, turns, capabilities or budget; changing it needs approval again",
+		acceptMove: "id (m<N>) and review (how the reported proof witnesses its done-when), after its focus reported completion and evidence",
+		done: "id (m<N> accepts a reported move; p<N> completes an envelope only after every move is accepted)",
 		remove: "id",
-		before: "id and before",
+		before: "id, plus optional before (omit to move an envelope to the end)",
+		clear: "no other fields — clears envelopes and moves",
 	},
 	assessment: {
-		write: "operation { text }: the whole assessment; it replaces the current one",
+		write: "text (the whole assessment; it replaces the current one)",
 	},
 	file: {
-		create: "path and content — a new file keeps at most the line cap (see the session's `writeLines`); the rest is not written and the result says so. The result names the new file's `File id:`",
-		read: "a path, or the file `ref` ({ id }) from a create/read header — the header of a path read shows `· file f1`; range optional",
-		edit: "the file `ref` ({ id }), oldText and newText — an `id` alone names the live version",
-		remove: "the file `ref` ({ id })",
-		rebind: "the file `ref` ({ id }), `path` and `expectedVersion` — a `file read` header shows `· file f1 @<64 hex>`: the id and the digest",
+		create: "path and content — the whole proposed file is measured against this focus's remaining changed-surface allowance and either lands whole or is refused. The result names the new file's `File id:`",
+		edit: "id or path, oldText and newText",
+		remove: "id or path",
+		rebind: "id, path and expectedVersion — a `read` header shows `· file f1 @<64 hex>`: the id and the digest",
 	},
 	atlas: {
 		add: "name and gist — detail, files and links optional; the node comes back with its `c<N>` id",
-		edit: "the node `ref` names: gist and optional kind/detail/files/links — the name stays (`rename` moves it)",
-		rename: "the node `ref` names, and `to` (its new name); what links to it is rewritten",
-		confirm: "the node `ref` names — or several via operation `names`",
-		link: "for the node `ref` names: files (paths) and/or links (node names or ids) — { files: [\"src/x.js\"], links: [\"other_node\"] }; the ref is the node, no `name` in the operation",
-		unlink: "for the node `ref` names: files (paths) and/or links (node names or ids) to take off; the ref is the node, no `name` in the operation",
-		remove: "the node `ref` names",
-		look: "name (a node name, a node id such as c3, or a project path)",
-		tree: "anchor and depth (folder of the project; anchor '.' is the root)",
+		edit: "id (or node name) and gist — detail, files and links optional; `rename` changes the name",
+		rename: "id (or node name) and `to` (its new name); what links to it is rewritten",
+		confirm: "id (or node name) — or several via `names`",
+		link: "id (or node name), plus `files` (paths) and/or `links` (node names or ids)",
+		unlink: "id (or node name), plus `files` (paths) and/or `links` (node names or ids) to take off",
+		focus: "id or name for a node, or path for a project file/folder, plus a short reason; it stays until focus is replaced or unfocus clears it",
+		unfocus: "no other fields — clears only the explicit atlas focus, not a running move's temporary targets",
+		archive: "id (or node name) — keeps it reversibly outside the active map",
+		restore: "id (or node name) — returns an archived node to the active map",
+		remove: "id (or node name)",
+		look: "id, name, or path (a node id such as c3, a node name, or a project path)",
+		tree: "anchor and/or depth (folder of the project; anchor '.' is the root)",
 	},
 	context: {
+		recall: "id (a report id like t12)",
 		archive: "id",
 		restore: "id",
-		fold: "{ id } (an id like t12)",
-		note: "{ text }",
-		collapse: "{ text } optional",
+		fold: "id (a report id like t12, or task-step result ids like s3)",
+		note: "text (what to keep, with file paths and line numbers)",
+		collapse: "optional text",
 	},
 };
 const guideFor = (target, action) => ACTION_GUIDE[target]?.[action];
@@ -255,13 +227,7 @@ const withGuide = (target, action, result) => {
 	}) };
 };
 
-function currentShelf(brainDir, conversationId, main) {
-	const store = loadContext(brainDir);
-	return main ? store.shelf : (store.tasks[conversationId]?.shelf ?? []);
-}
-
 const reportVersion = (body) => createHash("sha256").update(body).digest("hex");
-const DURABLE_REF_KINDS = new Set(["message", "toolCall", "toolResult"]);
 const DURABLE_TARGETS = new Set(["conversation", "message", "toolCall", "toolResult", "prompt", "tool", "schema"]);
 // Lists are hard-capped and paged with an opaque cursor; the cap is policy, the cursor is base64url JSON.
 const LIST_CURSOR_MAX_BYTES = POLICY.limits.book.listCursorTokens * 4;
@@ -288,319 +254,401 @@ const listRef = (namespace, kind, id, version) => ({ namespace, kind, id, ...(ve
 const BRAIN_TARGETS = new Set(["ledger", "plan", "atlas", "context"]);
 const BRAIN_MUTATIONS = {
 	ledger: new Set(["add", "edit", "done", "remove"]),
-	plan: new Set(["add", "edit", "done", "remove", "before"]),
-	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "remove", "rename"]),
+	plan: new Set(["add", "edit", "done", "remove", "before", "clear", "addMove", "editMove", "acceptMove"]),
+	atlas: new Set(["add", "edit", "link", "unlink", "confirm", "focus", "unfocus", "archive", "restore", "remove", "rename"]),
 	context: new Set(["archive", "restore"]),
 };
 function listBrainRecords(target, brainDir) {
 	if (target === "ledger") { const loaded = loadLedger(brainDir); if (!loaded.ledger) throw new Error(`The ledger cannot be read: ${loaded.error}`); return loaded.ledger.items; }
-	if (target === "plan") { const loaded = loadPlan(brainDir); if (!loaded.plan) throw new Error(`The plan cannot be read: ${loaded.error}`); return loaded.plan.items; }
+	if (target === "plan") { const loaded = loadPlan(brainDir); if (!loaded.plan) throw new Error(`The plan cannot be read: ${loaded.error}`); return [...loaded.plan.items, ...loaded.plan.moves]; }
 	if (target === "atlas") { const loaded = loadAtlas(brainDir); if (!loaded.atlas) throw new Error(`The atlas cannot be read: ${loaded.error}`); return loaded.atlas.nodes; }
 	if (target === "context") return composedRows(loadContext(brainDir));
 	return [];
 }
 function brainRecord(target, brainDir, id) {
+	if (target === "atlas") {
+		const loaded = loadAtlas(brainDir);
+		if (!loaded.atlas) throw new Error(`The atlas cannot be read: ${loaded.error}`);
+		const record = findNode(loaded.atlas, id);
+		return record === undefined ? undefined : { record, version: contentVersion(record) };
+	}
 	const items = listBrainRecords(target, brainDir);
 	const record = items.find((item) => item.id === id);
 	return record === undefined ? undefined : { record, version: contentVersion(record) };
 }
 
-async function runUniversal({ root, brainDir, config, engine, gate }, given, api, callContext) {
-	const main = api.conversationId === ROOT_CONVERSATION_ID;
-	// Tool callers may reach here without prepareArguments: normalizing again is harmless.
-	const args = { ...given, ref: normalizeRef(brainDir, given.ref, given.target) };
-	const target = args.target;
-	const action = args.action;
-	if (target === "file" && action === "rebind") {
-		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file rebind needs a stable file reference.");
+/** File operations retain their focused-move gate and legacy replay read fallback. */
+async function runFileBookOperation({ root, brainDir, gate, main }, args, api, callContext) {
+	const { action } = args;
+	if (action === "rebind") {
+		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail("file rebind needs a stable file `id`.");
 		if (typeof args.path !== "string" || typeof args.expectedVersion !== "string") return fail("file rebind needs a new confined path and the current expectedVersion.");
 		try {
 			const rebound = rebindFile(root, brainDir, args.ref, args.path, args.expectedVersion);
 			return textResult(`Rebound the existing file identity to ${rebound.record.path}; content identity is preserved.`, { ref: rebound.ref, status: "live" });
 		} catch (error) { return fail(`File rebind refused: ${error.message}.`); }
 	}
-	if (target === "file" && ["create", "edit", "remove"].includes(action)) {
-		if (main) return fail("Project-file create/edit/remove must run in a focused change task for an authorized plan item.");
-		if (typeof args.planItem !== "string" || args.planItem.trim() === "") return fail("Project-file create/edit/remove requires the authorized planItem carried by this focus.");
-		// What this focus carries, recorded when it was created (src/tools/task.mjs) in the durable context store:
-		// the plan item it carries out and that it is a change. Cheap to read, and right after a restart.
-		// (An entry scan was tried; it cannot see an entry that sits after the first forty of a long conversation.)
+	if (["create", "edit", "remove"].includes(action)) {
+		if (main) return fail("Project-file create/edit/remove must run in a focused change move.");
+		// A focus carries a live move token. The plan is re-read for every mutation so an
+		// edit, revoked approval, or exhausted move cannot keep spending old authority.
 		const task = loadContext(brainDir).tasks[api.conversationId];
-		if (task?.mode !== POLICY.enums.planMode.change || task.item !== args.planItem) return fail("File mutation refused: this focus is not carrying that authorized change plan item.");
+		if (task?.mode !== POLICY.enums.planMode.change || typeof task.move !== "string" || !Number.isInteger(task.revision)) {
+			return fail("File mutation refused: this focus is not carrying a live authorized change move.");
+		}
+		if (args.planItem !== undefined) return fail("File mutation refused: planItem is no longer an authority field; this focus carries its move automatically.");
+		const { plan, error: planError } = loadPlan(brainDir);
+		if (plan === undefined) return fail(`File mutation refused: the plan cannot be read (${planError}).`);
+		const live = liveMove(plan, task.move, task.revision, { yolo: gate?.yolo === true });
+		if (live.error !== undefined) return fail(`File mutation refused: ${live.error}`);
+			if (live.move.capabilities?.files !== true) return fail(`File mutation refused: ${task.move} does not allow direct file operations.`);
+			const fileBudget = live.move.budget?.fileOps ?? POLICY.limits.plan.moveBudget.fileOps;
+			if ((task.fileOps ?? 0) >= fileBudget) return fail(`File mutation refused: ${task.move} already used all ${fileBudget} direct file mutations. Return blocked and plan a successor move.`);
+			const allow = (path) => targetAllows(live.move, path)
+			? undefined
+			: `File mutation refused: ${String(path).replace(/^\.\//, "")} is outside ${task.move}'s declared targets (${live.move.targets.join(", ")}). Return blocked and plan another move.`;
 		let filePath = args.path;
 		let expectedVersion;
 		if (action === "create") {
 			if (typeof filePath !== "string" || filePath.trim() === "" || typeof args.content !== "string") return fail("file create needs path and content.");
+			const refused = allow(filePath);
+			if (refused !== undefined) return fail(refused);
 			const nested = await api.executeTool("write", { path: filePath, content: args.content }, callContext, { key: "book-file-create" });
 			const output = nested.structuredOutput;
-			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, change: true } };
+			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, move: task.move, change: true } };
 		}
-		if (!validateReference(args.ref) || args.ref.kind !== "file") return fail(`file ${action} requires a stable file ref; paths alone are not mutation targets. An \`id\` alone is enough: { \"id\": \"f1\" }.`);
+		let ref = args.ref;
+		if (ref === undefined) {
+			if (typeof args.path !== "string" || args.path.trim() === "") return fail(`file ${action} needs \`id\` or project-relative \`path\`.`);
+			try {
+				const confined = confineWrite(root, brainDir, args.path);
+				if (!existsSync(confined.abs)) return fail(`File ${action} refused: ${confined.rel} does not exist.`);
+				ref = fileReference(root, brainDir, confined.rel);
+			} catch (error) { return fail(`File ${action} refused: ${error.message}.`); }
+		}
+		if (!validateReference(ref) || ref.kind !== "file") return fail(`file ${action} needs a file \`id\` or \`path\`.`);
 		if (args.expectedVersion !== undefined && (typeof args.expectedVersion !== "string" || !/^[0-9a-f]{64}$/.test(args.expectedVersion))) return fail("`expectedVersion` must be a 64-character SHA-256 digest, or be omitted: the file's ID always points at the live version.");
-		const resolved = resolveFile(root, brainDir, args.ref);
-		if (resolved.status !== "live") return fail(`File ${action} refused: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(args.ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`}`);
+		let resolved = resolveFile(root, brainDir, ref);
+		if (resolved.status !== "live" && resolved.error === "No catalog record exists for this file identity." && ref.version === undefined && !isCatalogFileId(ref.id)) {
+			try {
+				const confined = confineWrite(root, brainDir, ref.id);
+				if (existsSync(confined.abs)) {
+					ref = fileReference(root, brainDir, confined.rel);
+					resolved = resolveFile(root, brainDir, ref);
+				}
+			} catch (error) {
+				if (error instanceof ChangeError) return fail(`File ${action} refused: ${error.message}.`);
+			}
+		}
+		if (resolved.status !== "live") return fail(`File ${action} refused: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "Refresh the file reference."}`}`);
 		if (args.expectedVersion !== undefined && resolved.currentVersion !== args.expectedVersion) return fail(`Stale file ${action}: expected ${args.expectedVersion}, current ${resolved.currentVersion}. Nothing was ${action === "remove" ? "removed" : "changed"}.`);
 		filePath = resolved.record.path;
+		const refused = allow(filePath);
+		if (refused !== undefined) return fail(refused);
 		// The ID points at the live version; the version handed to the nested call is resolved here, never asked of the agent.
 		expectedVersion = resolved.currentVersion;
 		if (action === "remove") {
 			// Deletion goes through the same gate as write and edit: confined, checkpoint-recorded, undoable.
 			const nested = await api.executeTool("rm", { path: filePath, expectedVersion }, callContext, { key: "book-file-remove" });
 			const output = nested.structuredOutput;
-			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
+			return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, move: task.move, change: true } };
 		}
 		if (typeof args.oldText !== "string" || args.oldText === "" || typeof args.newText !== "string") return fail("file edit needs exact oldText and newText.");
 		const nested = await api.executeTool("edit", { path: filePath, old_text: args.oldText, new_text: args.newText, expectedVersion }, callContext, { key: "book-file-edit" });
 		const output = nested.structuredOutput;
-		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, change: true } };
+		return { isError: nested.isError, output: [{ type: "text", text: typeof output === "string" ? output : JSON.stringify(output ?? nested.diagnostics) }], details: { target: "file", action, path: filePath, expectedVersion, move: task.move, change: true } };
 	}
-	if (target === "file" && action === "read") {
-		let ref = args.ref;
-		try {
-			if (ref === undefined) {
-				if (typeof args.path !== "string" || args.path.trim() === "") return fail(`file ${action} needs a stable \`ref\` or explicit project-relative \`path\`.`);
-				ref = fileReference(root, brainDir, args.path);
-			}
-		} catch (error) { return fail(`Could not resolve the file reference: ${error.message}.`); }
-		if (!validateReference(ref) || ref.kind !== "file") return fail("Invalid file reference; expected at least an `id`.");
-		const result = resolveFile(root, brainDir, ref);
-		const readablePinned = ["stale", "deleted"].includes(result.status) && result.bytes !== undefined && ref.version !== undefined;
-		const record = result.record;
-		if (result.status !== "live" && !readablePinned) return fail(`${result.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `File resolution status: ${result.status}. ${result.error ?? `Requested ${result.requestedVersion ?? "current"}; current is ${result.currentVersion ?? "unavailable"}.`}`}`);
-		if (result.bytes.byteLength > POLICY.limits.look.fileBytes) return fail(`The file is ${count(result.bytes.byteLength)} bytes, over the ${count(POLICY.limits.look.fileBytes)}-byte read limit. Ask for a smaller range with shelf.add.`);
-		if (result.bytes.subarray(0, POLICY.limits.look.binaryProbeChars).includes(0)) return fail("This file appears to be binary and cannot be returned as text.");
-		let selected;
-		try { selected = renderReadSelection(result.bytes, record.path, args.range, ref.id, result.resolvedVersion ?? result.currentVersion); }
-		catch (error) { return fail(`Cannot read the requested selection: ${error.message}.`); }
-		return textResult(`${selected}${readablePinned ? `\n(a pinned historical version; the current content differs)` : ""}`, { ref: result.ref ?? ref, status: result.status, version: result.resolvedVersion ?? result.currentVersion });
+	// Unadvertised transcript-replay fallback: new calls go through the top-level `read` tool.
+	if (action === "read") {
+		const tokenCeiling = readBatchAllowance(api?.conversationId, api?.callId);
+		return runFileRead({ root, brainDir }, args, tokenCeiling === undefined ? undefined : { tokenCeiling });
 	}
-	if (DURABLE_TARGETS.has(target)) {
-		if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
-			let current;
-			try { current = nativeReference(brainDir, "schema", args.ref.id); }
-			catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
-			if (args.ref.namespace !== current.namespace) return fail("Schema reference belongs to another brain-store namespace.");
-			const retained = readReferenceVersion(brainDir, args.ref);
-			if (retained !== undefined) return textResult(JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
-		}
-		if (action === "list") {
-			let records;
-			try { records = await durableSummaries(target, brainDir, api, callContext); }
-			catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
-			if (records.length === 0) return textResult(`${target} is empty in this conversation.`, { target, count: 0 });
-			let namespace;
-			try { namespace = ensureCatalog(brainDir).namespace; }
-			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
-			const items = records.map((record) => ({ ref: listRef(namespace, target, record.id, record.version), summary: summaryLine(record), provenance: record.provenance }));
-			let paged;
-			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
-			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
-		}
-		if (action === "edit" && target === "message") {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail("message edit needs a stable message ref.");
-			const currentNamespace = nativeReference(brainDir, target, args.ref.id);
-			if (args.ref.namespace !== currentNamespace.namespace) return fail("Message reference belongs to another brain-store namespace.");
-			let item;
-			try { item = await durableRecordFor("message", args.ref.id, brainDir, api, callContext); }
-			catch (error) { return fail(`Could not resolve message records: ${error.message}.`); }
-			if (item === undefined) {
-				const forgotten = loadContext(brainDir).forgottenEntries ?? [];
-				if (forgotten.includes(args.ref.id)) return textResult("Message updated.", { status: "soft_forgotten", replay: true });
-				// Crash recovery: the forget marker may exist in the transcript even though this store lost the update.
-				let markerExists = false;
-				try {
-					markerExists = await api.commit(async (tx) => {
-						const conversations = await scanAll((cursor) => tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, cursor));
-						for (const conversation of conversations) {
-							const entries = await scanAll((cursor) => tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor));
-							if (entries.some((entry) => entry.kind === "carto.book.soft-forget" && String(entry.data?.target) === String(args.ref.id))) return true;
-						}
-						return false;
-					}, callContext);
-				} catch { markerExists = false; }
-				if (markerExists) {
-					updateContext(brainDir, (store) => {
-						store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(args.ref.id)])];
-						const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => !(placement?.target?.kind === "message" && placement.target.id === String(args.ref.id))) : shelf);
-						store.shelf = strip(store.shelf);
-						for (const task of Object.values(store.tasks ?? {})) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
-						if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
-					});
-					return textResult("Message updated.", { status: "soft_forgotten", replay: true });
-				}
-				return fail("Message is unavailable or already removed from ordinary recall.");
-			}
-			const expected = args.expectedVersion ?? args.ref.version ?? item.version;
-			if (expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
-			const owner = item.provenance.conversationId;
-			const entryId = item.provenance.entryId;
-			const timestamp = item.value.message.timestamp;
-			const text = typeof item.value.message.content === "string" ? item.value.message.content : (item.value.message.content ?? []).flatMap((part) => part?.type === "text" ? [part.text] : []).join("");
+	return unsupported("file", action);
+}
+
+/** Durable transcript records use their own live lookup and retained-version rules. */
+async function runDurableBookOperation({ brainDir }, args, api, callContext) {
+	const { target, action } = args;
+	if (target === "schema" && action === "read" && validateReference(args.ref) && args.ref.kind === "schema" && args.ref.version !== undefined) {
+		let current;
+		try { current = nativeReference(brainDir, "schema", args.ref.id); }
+		catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
+		if (args.ref.namespace !== current.namespace) return fail("Schema reference belongs to another brain-store namespace.");
+		const retained = readReferenceVersion(brainDir, args.ref);
+		if (retained !== undefined) return textResult(JSON.stringify(retained, null, 2), { ref: args.ref, status: "live", retained: true });
+	}
+	if (action === "list") {
+		let records;
+		try { records = await durableSummaries(target, brainDir, api, callContext); }
+		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+		if (records.length === 0) return textResult(`${target} is empty in this conversation.`, { target, count: 0 });
+		let namespace;
+		try { namespace = ensureCatalog(brainDir).namespace; }
+		catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
+		const items = records.map((record) => ({ ref: listRef(namespace, target, record.id, record.version), summary: summaryLine(record), provenance: record.provenance }));
+		let paged;
+		try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
+		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
+	}
+	if (action === "edit" && target === "message") {
+		if (!validateReference(args.ref) || args.ref.kind !== target) return fail("message edit needs a stable message ref.");
+		const currentNamespace = nativeReference(brainDir, target, args.ref.id);
+		if (args.ref.namespace !== currentNamespace.namespace) return fail("Message reference belongs to another brain-store namespace.");
+		let item;
+		try { item = await durableRecordFor("message", args.ref.id, brainDir, api, callContext); }
+		catch (error) { return fail(`Could not resolve message records: ${error.message}.`); }
+		if (item === undefined) {
+			const forgotten = loadContext(brainDir).forgottenEntries ?? [];
+			if (forgotten.includes(args.ref.id)) return textResult("Message updated.", { status: "soft_forgotten", replay: true });
+			// Crash recovery: the forget marker may exist in the transcript even though this store lost the update.
+			let markerExists = false;
 			try {
-				await api.commit(async (tx) => {
-					let cursor;
-					do {
-						const page = await tx.scanEntries({ conversationId: owner, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor);
-					if (page.items.some((entry) => entry.kind === "carto.book.soft-forget" && entry.data?.operationId === String(api.taskId))) return;
-					cursor = page.next;
-				} while (cursor !== undefined);
-					const original = await tx.entry(entryId);
-					if (original === undefined || original.conversationId !== owner || !original.model?.some((message) => ["user", "assistant"].includes(message.role))) throw new Error("The selected message is no longer visible in its conversation.");
-					await tx.appendEntry(owner, { kind: "carto.book.soft-forget", edits: [{ target: entryId, action: "omit" }], data: { operationId: String(api.taskId), target: String(entryId) } });
+				markerExists = await api.commit(async (tx) => {
+					const conversations = await scanAll((cursor) => tx.scanConversations({}, POLICY.limits.taskHistory.contextEntries, cursor));
+					for (const conversation of conversations) {
+						const entries = await scanAll((cursor) => tx.scanEntries({ conversationId: conversation.id, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor));
+						if (entries.some((entry) => entry.kind === "carto.book.soft-forget" && String(entry.data?.target) === String(args.ref.id))) return true;
+					}
+					return false;
 				}, callContext);
-				recordSoftForgetPending(brainDir, { operationId: String(api.taskId), entryId: String(entryId), timestamp, text });
-				const removedShelf = [];
+			} catch { markerExists = false; }
+			if (markerExists) {
 				updateContext(brainDir, (store) => {
-					store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(entryId)])];
-					store.chat = store.chat.filter((line) => !(line.at === timestamp && line.text === text));
-					const strip = (shelf) => shelf.filter((placement) => {
-						if (placement.target?.kind === "message" && placement.target.id === String(entryId)) { removedShelf.push(placement); return false; }
-						return true;
-					});
+					store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(args.ref.id)])];
+					const strip = (shelf) => (Array.isArray(shelf) ? shelf.filter((placement) => !(placement?.target?.kind === "message" && placement.target.id === String(args.ref.id))) : shelf);
 					store.shelf = strip(store.shelf);
-					for (const task of Object.values(store.tasks)) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
+					for (const task of Object.values(store.tasks ?? {})) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
 					if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
 				});
-				if (removedShelf.length) cleanupShelfSnapshots(brainDir, removedShelf);
-				return textResult("Message updated.", { status: "soft_forgotten" });
-			} catch (error) { return fail(`Message edit refused: ${error.message}.`); }
+				return textResult("Message updated.", { status: "soft_forgotten", replay: true });
+			}
+			return fail("Message is unavailable or already removed from ordinary recall.");
 		}
-		if (action !== "read") return unsupported(target, action);
-		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
-		let currentNamespace;
-		try { currentNamespace = nativeReference(brainDir, target, args.ref.id); }
+		const expected = args.expectedVersion ?? args.ref.version ?? item.version;
+		if (expected !== item.version) return fail(`Stale message edit: expectedVersion must match current version ${item.version}. Nothing was changed.`);
+		const owner = item.provenance.conversationId;
+		const entryId = item.provenance.entryId;
+		const timestamp = item.value.message.timestamp;
+		const text = typeof item.value.message.content === "string" ? item.value.message.content : (item.value.message.content ?? []).flatMap((part) => part?.type === "text" ? [part.text] : []).join("");
+		try {
+			await api.commit(async (tx) => {
+				let cursor;
+				do {
+					const page = await tx.scanEntries({ conversationId: owner, order: "ascending" }, POLICY.limits.taskHistory.contextEntries, cursor);
+				if (page.items.some((entry) => entry.kind === "carto.book.soft-forget" && entry.data?.operationId === String(api.taskId))) return;
+				cursor = page.next;
+			} while (cursor !== undefined);
+				const original = await tx.entry(entryId);
+				if (original === undefined || original.conversationId !== owner || !original.model?.some((message) => ["user", "assistant"].includes(message.role))) throw new Error("The selected message is no longer visible in its conversation.");
+				await tx.appendEntry(owner, { kind: "carto.book.soft-forget", edits: [{ target: entryId, action: "omit" }], data: { operationId: String(api.taskId), target: String(entryId) } });
+			}, callContext);
+			recordSoftForgetPending(brainDir, { operationId: String(api.taskId), entryId: String(entryId), timestamp, text });
+			const removedShelf = [];
+			updateContext(brainDir, (store) => {
+				store.forgottenEntries = [...new Set([...(store.forgottenEntries ?? []), String(entryId)])];
+				store.chat = store.chat.filter((line) => !(line.at === timestamp && line.text === text));
+				const strip = (shelf) => shelf.filter((placement) => {
+					if (placement.target?.kind === "message" && placement.target.id === String(entryId)) { removedShelf.push(placement); return false; }
+					return true;
+				});
+				store.shelf = strip(store.shelf);
+				for (const task of Object.values(store.tasks)) if (Array.isArray(task?.shelf)) task.shelf = strip(task.shelf);
+				if (store.front && Array.isArray(store.front.shelf)) store.front.shelf = strip(store.front.shelf);
+			});
+			if (removedShelf.length) cleanupShelfSnapshots(brainDir, removedShelf);
+			return textResult("Message updated.", { status: "soft_forgotten" });
+		} catch (error) { return fail(`Message edit refused: ${error.message}.`); }
+	}
+	if (action !== "read") return unsupported(target, action);
+	if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
+	let currentNamespace;
+	try { currentNamespace = nativeReference(brainDir, target, args.ref.id); }
+	catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
+	if (args.ref.namespace !== currentNamespace.namespace) return fail(`${target} reference belongs to another brain-store namespace.`);
+	let found;
+	try { found = await durableRecordFor(target, args.ref.id, brainDir, api, callContext); }
+	catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+	if (found === undefined) {
+		if (target === "message" && loadContext(brainDir).forgottenEntries?.includes(args.ref.id)) return fail("Message is no longer available through ordinary recall.");
+		const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
+		if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or inaccessible.`);
+		return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
+	}
+	if (args.ref.version !== undefined && args.ref.version !== found.version) {
+		const historical = readReferenceVersion(brainDir, args.ref);
+		if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; the requested immutable version is unavailable.`);
+		return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
+	}
+	const ref = nativeReference(brainDir, target, found.id, found.version);
+	return textResult(JSON.stringify(found.value, null, 2), { ref, status: "live" });
+}
+
+/** The assessment is one whole replace, with its existing clipping and top-copy update. */
+function runAssessmentBookOperation({ brainDir }, args) {
+	const { target, action } = args;
+	if (action !== "write") return unsupported(target, action);
+	let text = typeof args.text === "string" ? args.text.trim() : "";
+	if (text === "") return withGuide(target, action, fail("assessment write needs `text`: the whole assessment; it replaces the current one."));
+	if (text.length > ASSESSMENT_MAX) {
+		const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
+		warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
+		text = clipped;
+	}
+	saveAssessment(brainDir, text);
+	noteAssessed(brainDir, text);
+	return textResult(`Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`, { target, action, shown: [`assessment written, ${text.length} characters`] });
+}
+
+/** Shared-brain targets retain their target-specific reads, mutations, and authority checks. */
+function runBrainBookOperation({ root, brainDir, config, engine, gate, main }, args, api) {
+	const { target, action } = args;
+	if (action === "list") {
+		let records;
+		try { records = listBrainRecords(target, brainDir); }
+		catch (error) { return fail(error.message); }
+		if (records.length === 0) return textResult(`${target} is empty.`, { target, count: 0 });
+		let namespace;
+		try { namespace = ensureCatalog(brainDir).namespace; }
+		catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
+		const items = records.map((record) => {
+			const id = record.id;
+			return { ref: listRef(namespace, target, id, contentVersion(record)), summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
+		});
+		let paged;
+		try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
+		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
+	}
+	if (action === "read") {
+		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
+		let current;
+		try { current = nativeReference(brainDir, target, args.ref.id); }
 		catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
-		if (args.ref.namespace !== currentNamespace.namespace) return fail(`${target} reference belongs to another brain-store namespace.`);
+		if (args.ref.namespace !== current.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
 		let found;
-		try { found = await durableRecordFor(target, args.ref.id, brainDir, api, callContext); }
-		catch (error) { return fail(`Could not resolve ${target} records: ${error.message}.`); }
+		try { found = brainRecord(target, brainDir, args.ref.id); }
+		catch (error) { return fail(error.message); }
 		if (found === undefined) {
-			if (target === "message" && loadContext(brainDir).forgottenEntries?.includes(args.ref.id)) return fail("Message is no longer available through ordinary recall.");
 			const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
-			if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or inaccessible.`);
+			if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
 			return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
 		}
 		if (args.ref.version !== undefined && args.ref.version !== found.version) {
 			const historical = readReferenceVersion(brainDir, args.ref);
-			if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; the requested immutable version is unavailable.`);
+			if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; historical content is unavailable.`);
 			return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
 		}
-		const ref = nativeReference(brainDir, target, found.id, found.version);
-		return textResult(JSON.stringify(found.value, null, 2), { ref, status: "live" });
+		const ref = nativeReference(brainDir, target, found.record.id ?? args.ref.id, found.version);
+		return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
 	}
-	if (target === "assessment") {
-		if (action !== "write") return unsupported(target, action);
-		const payload = args.operation ?? {};
-		if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail("assessment write needs an operation object: { text }, the whole assessment.");
-		let text = typeof payload.text === "string" ? payload.text.trim() : "";
-		if (text === "") return fail("assessment write needs operation { text }: the whole assessment; it replaces the current one.");
-		if (text.length > ASSESSMENT_MAX) {
-			const clipped = `${text.slice(0, ASSESSMENT_MAX - 1).trimEnd()}…`;
-			warn(clipNote("The assessment", text, clipped, ASSESSMENT_MAX, { extra: "Keep what I would need first with an empty context, and put the details in nodes of the atlas.", remedy: "the same call again with the shorter text (there is no partial edit of the assessment)" }));
-			text = clipped;
-		}
-		saveAssessment(brainDir, text);
-		noteAssessed(brainDir, text);
-		return textResult(`Assessment saved (${text.length} characters) to ${assessmentPath(brainDir)}. The copy at the top of my context is replaced when a goal closes or a fresh context starts; until then this call is the text that counts.`, { target, action, shown: [`assessment written, ${text.length} characters`] });
+	if (target === "context" && (action === "fold" || action === "recall" || action === "note" || action === "collapse")) {
+		const contextOp = {
+			action,
+			...(args.id !== undefined ? { id: args.id } : {}),
+			...(args.text !== undefined ? { text: args.text } : {}),
+		};
+		return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [contextOp] }, api));
 	}
-	if (BRAIN_TARGETS.has(target)) {
-		if (action === "list") {
-			let records;
-			try { records = listBrainRecords(target, brainDir); }
-			catch (error) { return fail(error.message); }
-			if (records.length === 0) return textResult(`${target} is empty.`, { target, count: 0 });
-			let namespace;
-			try { namespace = ensureCatalog(brainDir).namespace; }
-			catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
-			const items = records.map((record) => {
-				const id = record.id;
-				return { ref: listRef(namespace, target, id, contentVersion(record)), summary: String(record.text ?? record.gist ?? record.brief ?? record.name ?? record.id ?? "").replace(/\s+/g, " ").slice(0, 240) };
-			});
-			let paged;
-			try { paged = listPage(items, args, target); } catch (error) { return fail(`Could not list ${target} records: ${error.message}.`); }
-			return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
-		}
-		if (action === "read") {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
-			let current;
-			try { current = nativeReference(brainDir, target, args.ref.id); }
-			catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
-			if (args.ref.namespace !== current.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
-			let found;
-			try { found = brainRecord(target, brainDir, args.ref.id); }
-			catch (error) { return fail(error.message); }
-			if (found === undefined) {
-				const historical = args.ref.version === undefined ? undefined : readReferenceVersion(brainDir, args.ref);
-				if (historical === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
-				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale" });
-			}
-			if (args.ref.version !== undefined && args.ref.version !== found.version) {
-				const historical = readReferenceVersion(brainDir, args.ref);
-				if (historical === undefined) return fail(`${target} reference is stale: requested ${args.ref.version}, current ${found.version}; historical content is unavailable.`);
-				return textResult(JSON.stringify(historical, null, 2), { ref: args.ref, status: "stale", currentVersion: found.version });
-			}
-			const ref = nativeReference(brainDir, target, args.ref.id, found.version);
-			return textResult(JSON.stringify(found.record, null, 2), { ref, status: "live" });
-		}
-		if (target === "context" && (action === "fold" || action === "note" || action === "collapse")) {
-			// No ref, no precondition: fold takes operation {id}, note takes operation {text}, collapse is free-form.
-			const payload = args.operation ?? {};
-			if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return fail(`context ${action} needs an operation object with the target-specific fields.`);
-			return runContext({ root, brainDir, config, engine }, { ops: [{ ...payload, action }] }, api);
-		}
-		if (target === "atlas" && (action === "look" || action === "tree")) {
-			if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`The atlas ${action} operation needs an object with the target-specific fields.`);
-			const { atlas, error } = loadAtlas(brainDir);
-			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
-			const { plan } = loadPlan(brainDir);
-			try {
-				const result = applyAtlasOp(atlas, { ...(args.operation ?? {}), action }, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
-				if (result.changed) saveAtlas(brainDir, atlas);
-				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
-			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
-		}
-		if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
-		const isAdd = action === "add";
-		if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
-		let current;
-		if (!isAdd) {
-			if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} reference.`);
-			try {
-				const namespace = nativeReference(brainDir, target, args.ref.id);
-				if (args.ref.namespace !== namespace.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
-			} catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
-			try { current = brainRecord(target, brainDir, args.ref.id); }
-			catch (error) { return fail(error.message); }
-			if (current === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
-			const expected = args.expectedVersion ?? args.ref.version ?? current.version;
-			if (expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
-		}
-		if (args.operation !== undefined && (args.operation === null || typeof args.operation !== "object" || Array.isArray(args.operation))) return fail(`${target} ${action} needs an operation object with the target-specific fields.`);
-		const operation = { ...(args.operation ?? {}), action };
-		if (!isAdd) operation.id = args.ref.id;
-		if (target === "atlas") {
-			const { atlas, error } = loadAtlas(brainDir);
-			if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
-			if (atlas.lastCall === api.taskId) return textResult("This atlas operation was already applied before a restart.", { replay: true });
-			const atlasOp = { ...operation, ...(isAdd ? {} : { name: args.ref.id }) };
-			const { plan } = loadPlan(brainDir);
-			try {
-				const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: gate?.yolo === true || (plan !== undefined && isAuthorized(plan)) });
-				if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
-				return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
-			} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
-		}
-		if (target === "ledger") return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [operation] }, api));
-		if (target === "plan") return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [operation] }, api));
-		if (target === "context") {
-			if (action === "archive" || action === "restore") {
-				try { return textResult(applyContextRowAction(brainDir, args.ref.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, args.operation?.when, api.taskId), { target, action, ref: args.ref }); }
-				catch (error) { return withGuide(target, action, fail(`Context row ${action} refused: ${error.message}.`)); }
-			}
-			return withGuide(target, action, runContext({ root, brainDir, config, engine }, { ops: [operation] }, api));
+	if (target === "atlas" && (action === "look" || action === "tree")) {
+		const { atlas, error } = loadAtlas(brainDir);
+		if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
+			const atlasOp = action === "look"
+			? { action, ...(args.name !== undefined || args.path !== undefined || args.id !== undefined ? { name: args.name ?? args.path ?? args.id } : {}) }
+			: { action, ...(args.anchor !== undefined ? { anchor: args.anchor } : {}), ...(args.depth !== undefined ? { depth: args.depth } : {}) };
+		try {
+			const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
+			if (result.changed) saveAtlas(brainDir, atlas);
+			return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
+		} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
+	}
+	if (!BRAIN_MUTATIONS[target]?.has(action)) return unsupported(target, action);
+	if (target === "plan" && !main) return fail(`Tool call blocked: ${TASK_REFUSALS.plan} ${STILL_TASK}`);
+	const atlasOwnTarget = target === "atlas" && (
+		(action === "confirm" && args.ref === undefined)
+		|| (action === "focus" && args.ref === undefined)
+		|| action === "unfocus"
+	);
+	const needsRef = action !== "add" && !(target === "plan" && (action === "clear" || action === "addMove")) && !atlasOwnTarget;
+	let current;
+	if (needsRef) {
+		if (!validateReference(args.ref) || args.ref.kind !== target) return fail(`${target} ${action} needs a ${target} \`id\`.`);
+		try {
+			const namespace = nativeReference(brainDir, target, args.ref.id);
+			if (args.ref.namespace !== namespace.namespace) return fail(`The ${target} reference belongs to another brain-store namespace.`);
+		} catch (error) { return fail(`Could not resolve ${target} reference: ${error.message}.`); }
+		try { current = brainRecord(target, brainDir, args.ref.id); }
+		catch (error) { return fail(error.message); }
+		if (current === undefined) return fail(`${target} ${args.ref.id} is deleted or unavailable.`);
+		const expected = args.expectedVersion ?? args.ref.version ?? current.version;
+		if (expected !== current.version) return fail(`Stale ${target} mutation: expectedVersion must match current version ${current.version}. Nothing was changed.`);
+	}
+	if (target === "atlas") {
+		const { atlas, error } = loadAtlas(brainDir);
+		if (atlas === undefined) return fail(`The atlas cannot be read: ${error}. Nothing was changed.`);
+		if (atlas.lastCall === api.taskId) return textResult("This atlas operation was already applied before a restart.", { replay: true });
+		const atlasOp = {
+			action,
+			...(needsRef ? { name: current.record.id } : args.name !== undefined ? { name: args.name } : {}),
+			...(args.path !== undefined ? { path: args.path } : {}),
+			...(args.reason !== undefined ? { reason: args.reason } : {}),
+			...(args.gist !== undefined ? { gist: args.gist } : {}),
+			...(args.detail !== undefined ? { detail: args.detail } : {}),
+			...(args.files !== undefined ? { files: args.files } : {}),
+			...(args.links !== undefined ? { links: args.links } : {}),
+			...(args.to !== undefined ? { to: args.to } : {}),
+			...(args.names !== undefined ? { names: args.names } : {}),
+		};
+		try {
+			const result = applyAtlasOp(atlas, atlasOp, { root, now: new Date(api.now()).toISOString(), by: main ? POLICY.enums.atlasAuthors.main : POLICY.enums.atlasAuthors.task, main, files: () => projectFiles(root), created: [], mayCreate: false });
+			if (result.changed) { atlas.lastCall = api.taskId; saveAtlas(brainDir, atlas); }
+			return textResult(result.line, { target, action, changed: result.changed, shown: result.shown });
+		} catch (error) { return error instanceof AtlasError ? withGuide("atlas", action, fail(`Atlas ${action} refused: ${error.message}.`)) : Promise.reject(error); }
+	}
+	if (target === "ledger") {
+		const ledgerOp = {
+			action,
+			...(needsRef ? { id: current.record.id } : {}),
+			...(args.kind !== undefined ? { kind: args.kind } : {}),
+			...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+			...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
+			...(args.salient !== undefined ? { salient: args.salient } : {}),
+			...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
+		};
+		return withGuide(target, action, runLedger({ brainDir, engine }, { ops: [ledgerOp] }, api));
+	}
+	if (target === "plan") {
+		const planOp = {
+			action,
+			...(needsRef ? { id: current.record.id } : {}),
+			...(args.parent !== undefined ? { parent: args.parent } : {}),
+			...(args.mode !== undefined ? { mode: args.mode } : {}),
+			...(args.text !== undefined ? { text: args.text } : action === "done" && args.outcome !== undefined ? { text: args.outcome } : {}),
+			...(args.done_when !== undefined ? { done_when: args.done_when } : {}),
+			...(args.targets !== undefined ? { targets: args.targets } : {}),
+			...(args.proof !== undefined ? { proof: args.proof } : {}),
+			...(args.review !== undefined ? { review: args.review } : {}),
+			...(args.turns !== undefined ? { turns: args.turns } : {}),
+			...(args.capabilities !== undefined ? { capabilities: args.capabilities } : {}),
+			...(args.budget !== undefined ? { budget: args.budget } : {}),
+			...(args.before !== undefined ? { before: args.before } : {}),
+			...(args.network !== undefined ? { network: args.network } : {}),
+			...(args.standing !== undefined ? { standing: args.standing } : {}),
+			...(args.outcome !== undefined ? { outcome: args.outcome } : {}),
+		};
+		return withGuide(target, action, runPlan({ brainDir, gate }, { ops: [planOp] }, api));
+	}
+	if (target === "context") {
+		if (action === "archive" || action === "restore") {
+			try { return textResult(applyContextRowAction(brainDir, current.record.id, action === "restore" ? POLICY.enums.actions.unarchive : POLICY.enums.actions.archive, undefined, api.taskId), { target, action, ref: args.ref }); }
+			catch (error) { return withGuide(target, action, fail(`Context row ${action} refused: ${error.message}.`)); }
 		}
 	}
-	if (target === "report" && action === "list") {
+	return unsupported(target, action);
+}
+
+/** Reports are a separate file-backed family, even though they use the same reference envelope. */
+function runReportBookOperation({ root, brainDir, config, engine }, args, api) {
+	const { target, action } = args;
+	if (action === "list") {
 		let reportNamespace;
 		try { reportNamespace = ensureCatalog(brainDir).namespace; } catch (error) { return fail(`The brain-store catalog cannot be read: ${error.message}.`); }
 		const reports = composedRows(loadContext(brainDir)).map((row) => {
@@ -613,7 +661,7 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 		try { paged = listPage(reports, args, "report"); } catch (error) { return fail(`Could not list reports: ${error.message}.`); }
 		return textResult(`${JSON.stringify(paged.page, null, 2)}${listFooter(paged)}`, { target, count: paged.total, shown: paged.shown, ...(paged.next ? { cursor: paged.next } : {}) });
 	}
-	if (target === "report" && ["read", "recall", "archive", "restore", "remove"].includes(action)) {
+	if (["read", "recall", "archive", "restore", "remove"].includes(action)) {
 		const ref = args.ref;
 		if (!validateReference(ref) || ref.kind !== "report") return fail("Invalid report reference; expected at least an `id`.");
 		let current;
@@ -636,89 +684,25 @@ async function runUniversal({ root, brainDir, config, engine, gate }, given, api
 			return textResult(applyContextRowAction(brainDir, ref.id, rowAction, undefined, api.taskId), { status: action === "remove" ? "deleted" : "live", ref: { ...current, version } });
 		} catch (error) { return fail(`Report ${action} refused: ${error.message}.`); }
 	}
-	if (target === "shelf" && action === "list") {
-		const items = currentShelf(brainDir, api.conversationId, main);
-		return textResult(items.length === 0 ? "Shelf is empty." : items.map((item) => `${shelfLabel(item)} [placement ${item.id}]${item.target ? ` → ${JSON.stringify(item.target)}` : ""}`).join("\n"), { placements: items.map((item) => item.id) });
+	return unsupported(target, action);
+}
+
+async function runUniversal({ root, brainDir, config, engine, gate }, given, api, callContext) {
+	const main = api.conversationId === ROOT_CONVERSATION_ID;
+	if (typeof given?.id === "string" && given.id.trim() !== "" && typeof given?.ref?.id === "string" && given.id.trim() !== given.ref.id.trim()) {
+		return fail("`id` and `ref.id` do not match; pass `id` alone unless pinning `ref.version`.");
 	}
-	if (target === "shelf" && action === "add") {
-		let ref = args.ref;
-		let path = args.path;
-		let pinnedDurable;
-		if (ref !== undefined) {
-			if (ref.kind === undefined) {
-				const inferred = await inferShelfRef(ref, root, brainDir, api, callContext);
-				if (inferred === undefined) return fail(`Nothing with the ID "${ref.id}" is a file, a report, a schema or a durable record; nothing was added. Give the ref a kind to say what it is.`);
-				ref = inferred;
-			}
-			if (!validateReference(ref)) return fail("Invalid shelf target reference.");
-			if (ref.kind === "file") {
-				const resolved = resolveFile(root, brainDir, ref);
-				if (resolved.status !== "live") return fail(`Cannot shelf file: ${resolved.error === "No catalog record exists for this file identity." ? noFileRecord(ref.id) : `resolver status ${resolved.status}. ${resolved.error ?? "The reference is not current."}`}`);
-				path = resolved.record.path;
-		} else if (ref.kind === "report") {
-			const verified = await runUniversal({ root, brainDir, config, engine, gate }, { target: "report", action: "read", ref }, api, callContext);
-			if (verified.isError) return verified;
-			path = `report:${ref.id}`;
-		} else if (ref.kind === "schema") {
-			if (typeof ref.version !== "string") return fail("A schema shelf placement needs an exact version-pinned schema reference.");
-			const retained = readReferenceVersion(brainDir, ref);
-			if (retained === undefined) {
-				// Explicit pin: retaining the current registry version here makes the pin self-sufficient.
-				let current;
-				try { current = await durableRecordFor("schema", ref.id, brainDir, api, callContext); }
-				catch (error) { return fail(`Could not resolve schema reference: ${error.message}.`); }
-				const currentNamespace = nativeReference(brainDir, "schema", ref.id).namespace;
-				if (ref.namespace !== currentNamespace) return fail("Schema reference belongs to another brain-store namespace.");
-				if (current === undefined || current.version !== ref.version) return fail("The pinned schema version is unavailable and is not the current one; no shelf placement was added.");
-				try { retainReferenceVersion(brainDir, ref, current.value); }
-				catch (error) { return fail(`The schema version could not be retained: ${error.message}.`); }
-			}
-		} else if (DURABLE_REF_KINDS.has(ref.kind)) {
-			// The render path cannot reach the Durable store, so the placement is backed by the verified content at add time.
-			const durable = await durableRecordFor(ref.kind, ref.id, brainDir, api, callContext);
-			if (durable === undefined) return fail(`${ref.kind} ${ref.id} is unavailable (missing or soft-forgotten); nothing was shelved.`);
-			if (ref.version !== undefined && ref.version !== durable.version) return fail(`Stale ${ref.kind} reference: requested ${ref.version}, current ${durable.version}. Re-list and pin the current version.`);
-			pinnedDurable = { record: durable, ref: { namespace: ref.namespace, kind: ref.kind, id: ref.id, version: ref.version ?? durable.version } };
-		} else return unsupported("shelf", "add for this reference kind");
-		}
-		if (ref?.kind !== "schema" && !DURABLE_REF_KINDS.has(ref?.kind ?? "") && (typeof path !== "string" || path.trim() === "")) return fail("shelf add needs a file reference or explicit project-relative path.");
-		const mine = currentShelf(brainDir, api.conversationId, main);
-		let picked;
-		if (pinnedDurable !== undefined) {
-			picked = shelfReferenceItem(pinnedDurable.ref, JSON.stringify(pinnedDurable.record.value, null, 2), brainDir, mine);
-		} else {
-			try { picked = shelfItem(root, ref?.kind === "schema" ? ref : path, args.range, brainDir, mine); }
-			catch (error) { return fail(`Cannot add to shelf: ${error.message}.`); }
-		}
-		const item = { ...picked.item, ...(ref ? { target: ref } : {}) };
-		persistShelfSnapshot(brainDir, item, picked.backing);
-		const handOn = !main && args.handOn === true;
-		updateContext(brainDir, (next) => {
-			const list = main ? next.shelf : (taskState(next, api.conversationId).shelf ??= []);
-			const at = list.findIndex((entry) => entry.id === item.id);
-			if (at < 0) list.push({ ...item, ...(handOn ? { handOn: true } : {}) });
-			else list[at] = { ...item, ...(handOn ? { handOn: true } : {}) };
-		});
-		return textResult(`Added ${shelfLabel(item)} to the shelf as placement ${item.id}; ${count(picked.tokens)} rendered tokens are in view now.\n\n${picked.item.snapshot}`, { placement: item.id, ref: item.target });
-	}
-	if (target === "shelf" && action === "remove") {
-		const placementId = String(args.placementId ?? "");
-		if (!placementId) return fail("shelf remove needs the exact shelf placementId, not the target ID.");
-		if (loadContext(brainDir).appliedOperations?.includes(String(api.taskId))) {
-			cleanupShelfSnapshots(brainDir, [{ id: placementId, type: "file" }]);
-			return textResult(`Removed shelf placement ${placementId}; the target identity remains unchanged.`, { removedPlacement: placementId, replay: true });
-		}
-		const mine = currentShelf(brainDir, api.conversationId, main);
-		const gone = mine.filter((item) => item.id === placementId);
-		if (gone.length === 0) return fail(`No shelf placement ${placementId} exists in this context.`);
-		updateContext(brainDir, (next) => {
-			if (main) next.shelf = next.shelf.filter((item) => item.id !== placementId);
-			else taskState(next, api.conversationId).shelf = mine.filter((item) => item.id !== placementId);
-			next.appliedOperations = [...new Set([...(next.appliedOperations ?? []), String(api.taskId)])].slice(-POLICY.limits.context.operationReplay);
-		});
-		cleanupShelfSnapshots(brainDir, gone);
-		return textResult(`Removed shelf placement ${placementId}; the target identity remains unchanged.`, { removedPlacement: placementId });
-	}
+	// Tool callers may reach here without prepareArguments: normalizing again is harmless.
+	const args = normalizeArgs(brainDir, given);
+	const target = args.target;
+	const action = args.action;
+	if (target === "file") return runFileBookOperation({ root, brainDir, gate, main }, args, api, callContext);
+	if (DURABLE_TARGETS.has(target)) return runDurableBookOperation({ brainDir }, args, api, callContext);
+	if (target === "assessment") return runAssessmentBookOperation({ brainDir }, args);
+	if (BRAIN_TARGETS.has(target)) return runBrainBookOperation({ root, brainDir, config, engine, gate, main }, args, api);
+	if (target === "report") return runReportBookOperation({ root, brainDir, config, engine }, args, api);
+	// Unadvertised transcript-replay fallback: new calls go through the top-level `shelf` tool.
+	if (target === "shelf") return runShelf({ root, brainDir, config }, action, args, api, callContext);
 	return unsupported(target, action);
 }
 
@@ -802,8 +786,8 @@ function runPlan({ brainDir, gate }, args, api) {
 			if (!(problem instanceof PlanError)) throw problem;
 			let message = problem.message;
 			if (op?.action === POLICY.enums.actions.add && (typeof op.text !== "string" || op.text.trim() === "")) {
-				const expected = { action: POLICY.enums.actions.add, mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "one-line description of what this item covers" };
-				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe item's wording belongs in \`text\`, not \`lines\`. Correct the call; do not repeat it unchanged.`;
+				const expected = { target: "plan", action: "add", mode: op.mode === POLICY.enums.planMode.look ? "look" : "change", text: "authorization-envelope intent", done_when: "observable envelope completion condition" };
+				message += `\n\nCall received (exact arguments):\n${JSON.stringify(args, null, 2)}\n\nExpected shape for a plan add:\n${JSON.stringify(expected, null, 2)}\nThe envelope wording belongs in \`text\`; add executable work separately with action=addMove. Correct the call; do not repeat it unchanged.`;
 			}
 			lines.push(`Op ${index + 1} (${opLabel(op, "mode")}) not applied: ${message}`);
 		}
@@ -811,13 +795,13 @@ function runPlan({ brainDir, gate }, args, api) {
 	if (applied === 0) return fail(lines.join("\n"));
 	if (applied < ops.length) lines.push(`${applied} of ${ops.length} applied and saved; send only the ones not applied again.`);
 	if (plan.items.length > 0) lines.push(authorizationLine(plan, { yolo: gate?.yolo === true }));
-	if (withdrawn) shown.push("authorization withdrawn: a change item was added or changed");
+	if (withdrawn) shown.push("authorization withdrawn: an incomplete move or its envelope changed");
 	plan.lastCall = api.taskId;
 	savePlan(brainDir, plan);
 	return { output: [{ type: "text", text: lines.join("\n") }], details: { shown } };
 }
 
-/** The context operations' run: see the `context` tool this replaces (src/tools/context.mjs in the last release). */
+/** The context operations' run, now carried by flat `book` target=context actions. */
 function runContext({ root, brainDir, config, engine }, args, api) {
 	const main = api.conversationId === ROOT_CONVERSATION_ID;
 	const ops = Array.isArray(args.ops) ? args.ops : [];
@@ -993,44 +977,66 @@ function runContext({ root, brainDir, config, engine }, args, api) {
 export function bookTool({ root, brainDir, config, engine, gate }) {
 	/** One flat declaration: the provider grammar stays a root-level object (llama.cpp/Qwen-safe), closed enums, everything optional except target and action. */
 	const validationSchema = obj({
-		target: str({ enum: UNIVERSAL_TARGETS, description: "The referenced entity family, or shelf." }),
-		action: str({ enum: UNIVERSAL_ACTIONS, description: "One target-specific operation. Unsupported target/action pairs fail closed." }),
+		target: str({ enum: UNIVERSAL_TARGETS, description: "The surface to act on: file (create/edit/remove/rebind), report, ledger, plan, atlas, assessment, context, or a Durable record family. Use top-level `read` and `shelf` to inspect or pin files." }),
+		action: str({ enum: UNIVERSAL_ACTIONS, description: "One action on that target. Unsupported target/action pairs fail closed." }),
+		id: opt(str({ minLength: 1, maxLength: 256, description: "Stable ID of the item to act on (plan p1, ledger g1/q1/n1, atlas c1 or node name, file f1, report t1, Durable record). Points at the live version." })),
 		ref: opt(REFERENCE_SCHEMA),
-		path: opt(str({ description: "Explicit project-relative locator for a file you have not read yet — pass it instead of `ref` (the read header then names the file's ID). Accepted for file reads and shelf add." })),
-		range: opt(str({ description: 'File selection such as "10-80"; omitted means the full text selection.' })),
-		placementId: opt(str({ description: "The exact temporary shelf placement ID, not its target ID." })),
+		path: opt(str({ description: "Project-relative file path for file create/edit/remove/rebind or atlas look." })),
 		cursor: opt(str({ description: "Opaque page token from a previous list result; omit for the first page." })),
-		planItem: opt(str({ description: "Required authorized change-plan item for file create/edit/remove." })),
-		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition; omit it — a ref's ID always points at the live version. Supplied, it is enforced as a precondition." })),
+		text: opt(str({ description: "Body text for ledger add/edit/done, plan add/edit/done, assessment write, or context note/collapse." })),
+		kind: opt(str({ enum: Object.values(POLICY.enums.ledgerKind), description: "Ledger entry kind on ledger add: goal, question, or note." })),
+		done_when: opt(str({ description: "Observable completion test: required on a ledger goal, a change plan envelope, and every plan move." })),
+		salient: opt(bool({ description: "Mark or unmark a ledger note as salient so it stands in every request and across collapses." })),
+		mode: opt(str({ enum: Object.values(POLICY.enums.planMode), description: "Plan envelope mode on plan add/edit: look or change." })),
+		parent: opt(str({ description: "Parent plan envelope ID for plan addMove (p<N>)." })),
+		targets: opt(arr(str(), { description: "Project-relative file paths a change move may change; addMove requires one or more under a change envelope." })),
+		proof: opt(str({ description: "Observable evidence a plan move must return, such as the named test and expected result." })),
+		review: opt(str({ maxLength: POLICY.limits.plan.proofChars, description: "On plan acceptMove: how the reported proof witnesses that move's declared done-when." })),
+		turns: opt(int({ minimum: 1, maximum: POLICY.limits.plan.moveTurns.max, description: `Reply limit for one plan move, 1 to ${POLICY.limits.plan.moveTurns.max}.` })),
+		capabilities: opt(obj({ files: opt(bool()), commands: opt(bool()), network: opt(bool()) }, { description: "Optional narrower move capability policy. A move cannot grant network unless its envelope grants it." })),
+		budget: opt(obj({ replies: opt(int({ minimum: 1, maximum: POLICY.limits.plan.moveTurns.max })), fileOps: opt(int({ minimum: 0, maximum: POLICY.limits.plan.moveBudget.fileOps })), commandStarts: opt(int({ minimum: 0, maximum: POLICY.limits.plan.moveBudget.commandStarts })) }, { description: "Optional narrower hard move budget; omitted fields use the fixed defaults." })),
+		before: opt(str({ description: "Plan envelope ID to insert or move this envelope before (omit on plan before to move to the end)." })),
+		network: opt(bool({ description: "Allow a change envelope to grant network access to narrowly declared child moves." })),
+		standing: opt(bool({ description: "Allow long-lived processes under a change envelope when a child move declares commands." })),
+		outcome: opt(str({ description: "Outcome wording when editing an already closed ledger entry or completed plan envelope." })),
+		name: opt(str({ description: "Atlas node name on atlas add, confirm, or look." })),
+		gist: opt(str({ description: "One-line summary of an atlas node on atlas add/edit." })),
+		detail: opt(str({ description: "Expanded body of an atlas node on atlas add/edit (empty string clears it)." })),
+		files: opt(arr(str(), { description: "Project-relative file paths linked to an atlas node on add/edit/link/unlink." })),
+		links: opt(arr(str(), { description: "Related atlas node names or IDs on add/edit/link/unlink." })),
+		to: opt(str({ description: "New node name on atlas rename." })),
+		names: opt(arr(str(), { description: "Multiple atlas node names or IDs on atlas confirm." })),
+		reason: opt(str({ description: "Short reason for an explicit atlas focus. Focus persists until another focus or atlas unfocus clears it." })),
+		anchor: opt(str({ description: 'Project folder to root the file tree at on atlas tree ("." resets to the project root).' })),
+		depth: opt(int({ minimum: 1, maximum: 6, description: "Directory levels (1-6) to draw on atlas tree." })),
 		content: opt(str({ description: "Whole UTF-8 text for file create." })),
 		oldText: opt(str({ description: "Exact passage to replace in file edit." })),
-		newText: opt(str({ description: "Replacement passage in file edit." })),
-		handOn: opt(bool({ description: "When adding from a focus, hand this placement to the shared shelf on return." })),
-		operation: opt(unknown({ description: "One target-specific operation payload for brain-record mutations. For `plan` and `ledger`: `done` names the item by its id — operation {id} (plus an optional `text` outcome). `assessment` takes write {text}: the whole assessment. `context` takes fold {id}, note {text} and collapse {text?} the same way." })),
+		newText: opt(str({ description: "Replacement passage in file edit (empty string deletes oldText)." })),
+		expectedVersion: opt(str({ description: "Optional SHA-256 content version precondition (required on file rebind; omit elsewhere for the live version)." })),
 	});
 	const validate = compile(validationSchema, { coerce: true });
 	const nonEmpty = (value) => typeof value === "string" && value.trim() !== "";
 	const joinList = (items) => (items.length <= 1 ? (items[0] ?? "") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`);
 	/** The generic interpreter over CAPABILITIES; the one place the call grammar is enforced. */
-	const checkCall = (target, action, args) => {
+	const checkCall = (target, action, args, rawArgs = args) => {
 		const spec = capabilityFor(target, action);
 		if (spec === undefined) return { unsupported: true };
+		if (nonEmpty(rawArgs?.id) && typeof rawArgs?.ref?.id === "string" && rawArgs.id.trim() !== rawArgs.ref.id.trim()) {
+			return { problems: ["matching `id` and `ref.id` (pass `id` alone unless pinning `ref.version`)"] };
+		}
 		const problems = [];
 		if (args.ref !== undefined && !validateReference(args.ref)) {
-			// Where the kind can be inferred (the shelf: from what the ID is), an id-carrying ref is enough;
-			// the executor resolves it and says precisely when it cannot.
-			const idOnly = spec.refInfer === true && typeof args.ref === "object" && args.ref !== null && typeof args.ref.id === "string" && args.ref.id.trim() !== "";
-			if (!idOnly) return { problems: [spec.refInfer === true ? "a ref with an `id` (the namespace and kind are inferred from it), or an explicit project-relative path" : "a ref with an `id`"] };
+			const idOnly = spec.refInfer === true && typeof args.ref === "object" && args.ref !== null && nonEmpty(args.ref.id);
+			if (!idOnly) return { problems: [spec.refInfer === true ? "id or path" : "`id` (or `ref` with `id`)"] };
 		}
-		const kind = spec.refKind ?? target;
-		const article = /^[aeiou]/i.test(kind) ? "an" : "a";
-		if (spec.ref === "required" && args.ref === undefined) problems.push(`${article} ${kind} reference ({ \"id\": … } is enough)`);
-		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "ref or path");
+		if (spec.ref === "required" && args.ref === undefined) problems.push("`id`");
+		if (spec.pathOk && args.ref === undefined && !nonEmpty(args.path)) problems.push(spec.refAlternative ?? "`id` or `path`");
+		if (spec.confirmOk && args.ref === undefined && !nonEmpty(args.name) && !(Array.isArray(args.names) && args.names.some(nonEmpty))) problems.push("`id` (or `names`)");
+		if (spec.focusOk && args.ref === undefined && !nonEmpty(args.name) && !nonEmpty(args.path)) problems.push("`id`, `name` or `path`");
+		if (spec.lookOk && args.ref === undefined && !nonEmpty(args.name) && !nonEmpty(args.path)) problems.push("`id`, `name` or `path`");
 		for (const field of spec.fields ?? []) if (!nonEmpty(args[field])) problems.push(field);
-		if (spec.operation === "required") {
-			if (args.operation === undefined) problems.push(spec.hint ?? "an operation payload");
-			else for (const field of spec.operationFields ?? []) if (!nonEmpty(args.operation?.[field])) problems.push(`operation.${field}`);
-		}
+		for (const field of spec.exactFields ?? []) if (typeof args[field] !== "string" || args[field] === "") problems.push(field);
+		for (const field of spec.stringFields ?? []) if (typeof args[field] !== "string") problems.push(field);
 		return { problems };
 	};
 	return defineTool({
@@ -1038,6 +1044,14 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		description: describe("book"),
 		parameters: validationSchema,
 		prepareArguments(args) {
+			if (args !== null && typeof args === "object") {
+				if (args.target === "shelf") {
+					throw new Error('Validation failed for tool "book": the shelf is now the top-level `shelf` tool — call `shelf` with action="add" | "remove" | "list", `id` or `path`, and optional `range`.');
+				}
+				if (args.target === "file" && args.action === "read") {
+					throw new Error('Validation failed for tool "book": reading project files is now the top-level `read` tool — call `read` with `path` or `id` and optional `range`, or `shelf` (action="add") to keep several files in view. Supported book actions for file: create, edit, remove, rebind.');
+				}
+			}
 			const result = validate.parse(args);
 			if (!result.ok) {
 				const path = (pointer) => pointer === "" ? "root" : pointer.slice(1).split("/").map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~")).join(".");
@@ -1047,10 +1061,9 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 			}
 			const value = result.value;
 			if (value.target === undefined || value.action === undefined) throw new Error('Validation failed for tool "book": target and action are both required.');
-			const ref = normalizeRef(brainDir, value.ref, value.target);
 			// The harness hands the call's arguments to tools deeply frozen; never mutate them, carry a new object.
-			const prepared = ref === undefined ? { ...value } : { ...value, ref };
-			const { unsupported, problems } = checkCall(value.target, value.action, prepared);
+			const prepared = normalizeArgs(brainDir, value);
+			const { unsupported, problems } = checkCall(value.target, value.action, prepared, value);
 			if (unsupported === true) throw new Error(`Unsupported book operation: target=${JSON.stringify(value.target)}, action=${JSON.stringify(value.action)}. No target content was resolved.${CAPABILITIES[value.target] === undefined ? "" : ` Supported actions for ${value.target}: ${Object.keys(CAPABILITIES[value.target]).join(", ")}.`}`);
 			if (problems.length > 0) {
 				const guide = guideFor(value.target, value.action);
@@ -1068,10 +1081,8 @@ export function bookTool({ root, brainDir, config, engine, gate }) {
 		execute: async (args, api, callContext) => {
 			if (args.target !== undefined) {
 				const main = api.conversationId === ROOT_CONVERSATION_ID;
-				const mutation = args.target === "file" && ["create", "edit", "remove"].includes(args.action);
-				if (main && mutation && (typeof args.planItem !== "string" || args.planItem.trim() === "")) return fail("file create/edit/remove needs an authorized change planItem; first get it approved in the plan.");
 				takeWarnings(); // drop any note raised before this call started, so a call reports only its own
-			if (main && args.target === "file" && args.action === "rebind") {
+				if (main && args.target === "file" && args.action === "rebind") {
 					const taskArgs = {
 						brief: `Perform exactly one bounded book operation, then return immediately. Call book once with these exact arguments: ${JSON.stringify(args)}. Do not broaden scope, do not make project changes, and return its result.`,
 					};

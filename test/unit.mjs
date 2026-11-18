@@ -1,39 +1,56 @@
 // Fast, self-contained unit checks. No model server, no terminal, no sandbox:
 // temp brain directories and direct calls to the operations. Runs in seconds.
 // Run with: npm test
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { POLICY } from "../src/config.mjs";
+import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
-import { applyPlanOp, loadPlan, savePlan } from "../src/plan.mjs";
-import { loadAtlas, saveAtlas } from "../src/atlas.mjs";
+import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
+import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
 import { createRefDescriber } from "../src/refs.mjs";
-import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate } from "../src/ops.mjs";
+import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate, editRow } from "../src/ops.mjs";
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { startStandIn } from "./stand-in.mjs";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
-import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine } from "../src/context.mjs";
+import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, bindTalkSource, dressMain, KEPT_AS, recordSoftForgetPending, removeTalkSource, reviseTalkSource } from "../src/context.mjs";
 import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
+import { readTool } from "../src/tools/read.mjs";
+import { shelfTool } from "../src/tools/shelf.mjs";
+import { taskTool } from "../src/tools/task.mjs";
+import { returnTool } from "../src/tools/return.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
 import { describeCall, describeResult } from "../src/terminal.mjs";
-import { changeTools, clipWriteContent, writeOne } from "../src/tools/change.mjs";
+import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
-import { dressRequest, withoutAdditions } from "../src/request.mjs";
-import { TOOLS, systemPrompt } from "../src/prompt.mjs";
+import { createConferenceExtension } from "../src/conference-extension.mjs";
+import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, debateStatus, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantActivity, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, recordToolReceipt, renderConference, restrictParticipantPayload, selectorGrammar, selectorMessages, selectorOptions, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
+import { chooseNativeGrammar, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
+import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
+import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
+import { createEngine } from "../src/engine.mjs";
+import { openSession, runFromBrief } from "../src/harness.mjs";
+import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
+import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
+import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
+import { createChat } from "../src/screen/chat.mjs";
+import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
+import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -43,12 +60,190 @@ const fresh = (t) => {
 	return { root, brainDir };
 };
 const NOW = "2026-11-15T00:00:00.000Z";
-
+const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
 	assert.ok(!prompt.includes("no user message waiting"));
 	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
+});
+
+test("C5: the only consult contract is same-model conference, and obsolete thread/config inputs are refused", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const prompt = systemPrompt({ root });
+	assert.equal(Object.hasOwn(TOOLS, "case"), false, "the retired Case tool is absent from the prompt registry");
+	assert.doesNotMatch(prompt, /evidence case|\bcase tool\b/i, "the active system prompt does not advertise a Case product");
+	assert.match(TOOLS.consult, /current resolved model/i);
+	assert.match(TOOLS.consult, /There is no `thread` follow-up/i);
+	const consult = consultTool({ root, brainDir });
+	const rejected = await consult.execute({ question: "Can an old transcript continue?", myPersona: "Audit the migration boundary.", thread: "st1" }, {}, undefined);
+	assert.equal(rejected.isError, true);
+	assert.match(rejected.output[0].text, /thread.*removed by the C5 cutover/i);
+	for (const retired of ["consultModel", "consultMaxTokens", "consultTemperature", "consultTimeoutSeconds"]) {
+		writeFileSync(join(brainDir, "config.json"), JSON.stringify({ [retired]: retired === "consultModel" ? "" : 1 }));
+		assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), new RegExp(`Removed external-consult setting\\(s\\): .*${retired}`));
+	}
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ consultGrammar: "openai" }));
+	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), /Removed native-grammar compatibility setting\(s\): .*consultGrammar/);
+	writeFileSync(join(brainDir, "config.json"), "{}");
+	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model", CARTO_CONSULT_MODEL: "" } }), /CARTO_CONSULT_MODEL was removed/i);
+});
+
+test("native llama.cpp selector probe uses no tools, records raw evidence, and fails closed when grammar is ignored", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const allowedFetch = async (_url, init) => {
+		const request = JSON.parse(init.body);
+		calls.push(request);
+		const output = /"([^"\\]+)"/.exec(request.grammar)?.[1];
+		return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: output }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
+	};
+	const record = await runLlamaCppSelectorProbe({ server: "http://selector.test/v1", modelId: "qwen-test", fetchImpl: allowedFetch, now: () => Date.parse(NOW) });
+	assert.equal(record.passed, true);
+	assert.equal(calls.length, 2, "the forced literal and finite-route checks are separate no-tool requests");
+	for (const request of calls) {
+		assert.equal(request.tools, undefined, "native grammar routing does not mix grammar with tools");
+		assert.equal(request.tool_choice, undefined);
+		assert.match(request.grammar, /^root ::= /);
+		assert.equal(request.chat_template_kwargs.enable_thinking, false);
+	}
+	assert.deepEqual(record.cases.map((entry) => entry.output), ["cartographer", "atlas"]);
+	const explicit = selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.json", at: Date.parse(NOW) });
+	writeSelectorProbeLog(explicit, record);
+	assert.deepEqual(JSON.parse(readFileSync(explicit, "utf8")), record, "the shareable log preserves raw synthetic requests and responses exactly");
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "../outside.json" }), /stay inside the project/i);
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "/tmp/outside.json" }), /relative to the project/i);
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.txt" }), /end in .json/i);
+	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.json" }), /already exists/i);
+
+	const ignored = await runLlamaCppSelectorProbe({
+		server: "http://selector.test/v1",
+		modelId: "qwen-test",
+		fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "outside-the-allowed-selector-set" }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } }),
+		now: () => Date.parse(NOW),
+	});
+	assert.equal(ignored.passed, false, "prompt obedience alone cannot make an ignored grammar look like a valid selector");
+	assert.equal(ignored.cases[0].passed, false);
+	assert.equal(ignored.cases[1].skipped, true, "the multi-choice request is not sent after enforcement has already failed");
+	assert.match(ignored.cases[0].reason, /outside the grammar/i);
+	assert.deepEqual(llamaCppSelectorProbePayload({ modelId: "qwen-test", ids: ["atlas"], instruction: "Choose atlas." }).grammar, 'root ::= "atlas"');
+});
+
+test("C5: stopped legacy data is byte-archived, shelf snapshots become inert, and exports recover", (t) => {
+	const { brainDir } = fresh(t);
+	const storyteller = join(brainDir, "storyteller");
+	const cases = join(brainDir, "cases");
+	mkdirSync(storyteller, { recursive: true });
+	mkdirSync(cases, { recursive: true });
+	const transcript = "<!-- storyteller v1 -->\nlegacy bytes stay exact\n";
+	const stoppedCase = `${JSON.stringify({ id: "c1", status: "stopped", note: "explicitly stopped before C5" }, null, "\t")}\n`;
+	writeFileSync(join(storyteller, "st1.md"), transcript);
+	writeFileSync(join(cases, "c1.json"), stoppedCase);
+	const originalContext = `${JSON.stringify({
+		version: 1,
+		shelf: [{ id: "sh1", ref: { type: "story", id: "st1" }, path: "story:st1" }],
+		front: { shelf: [{ id: "sh1", target: { kind: "story", id: "st1" }, path: "story:st1" }] },
+		tasks: { oldCase: { caseId: "c1", phase: "construct", shelf: [] }, ordinary: { mode: "look", shelf: [] } },
+	}, null, "\t")}\n`;
+	writeFileSync(join(brainDir, "carto-context.json"), originalContext);
+
+	const inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active, [], "a stopped Case task is retired, not treated as resumable");
+	const migrated = migrateLegacyProducts(brainDir, { at: Date.UTC(2026, 10, 17) });
+	assert.equal(migrated.migrated, true);
+	assert.equal(existsSync(storyteller), false);
+	assert.equal(existsSync(cases), false);
+	const rawStory = join(brainDir, "legacy", "raw", "storyteller", "st1.md");
+	const rawCase = join(brainDir, "legacy", "raw", "cases", "c1.json");
+	const rawContext = join(brainDir, "legacy", "raw", "context", "carto-context.json");
+	assert.equal(readFileSync(rawStory, "utf8"), transcript);
+	assert.equal(readFileSync(rawCase, "utf8"), stoppedCase);
+	assert.equal(readFileSync(rawContext, "utf8"), originalContext, "the pre-migration context bytes are retained before its pointers are rewritten");
+	const manifest = JSON.parse(readFileSync(join(brainDir, "legacy", "cutover-v1.json"), "utf8"));
+	assert.equal(manifest.state, "completed");
+	assert.match(manifest.storyteller[0].digest, /^[a-f0-9]{64}$/);
+	assert.match(manifest.cases[0].digest, /^[a-f0-9]{64}$/);
+	assert.match(manifest.context.digest, /^[a-f0-9]{64}$/);
+	assert.match(readFileSync(join(brainDir, "legacy", "exports", "storyteller", "st1.md"), "utf8"), /static C5 archive export/);
+	assert.match(readFileSync(join(brainDir, "legacy", "exports", "cases", "c1.md"), "utf8"), /explicitly stopped before C5/);
+	assert.match(readFileSync(join(brainDir, "legacy", "exports", "context", "carto-context.json.md"), "utf8"), /oldCase/);
+	const context = JSON.parse(readFileSync(join(brainDir, "carto-context.json"), "utf8"));
+	assert.equal(context.tasks.oldCase, undefined, "retired Case task metadata is removed from live context");
+	assert.ok(context.tasks.ordinary, "ordinary task state is retained");
+	for (const item of [context.shelf[0], context.front.shelf[0]]) {
+		assert.equal(item.ref, undefined);
+		assert.equal(item.target, undefined);
+		assert.equal(item.legacyArchive.kind, "storyteller");
+		assert.match(item.snapshot, /immutable C5 migration snapshot/);
+	}
+	const exportFile = join(brainDir, "legacy", "exports", "storyteller", "st1.md");
+	rmSync(exportFile);
+	assert.equal(migrateLegacyProducts(brainDir).migrated, true, "a missing static export is recreated from retained exact bytes");
+	assert.equal(existsSync(exportFile), true);
+	assert.equal(migrateLegacyProducts(brainDir).migrated, false, "a completed intact archive is a no-op");
+});
+
+test("C5: active, unreadable, or malformed legacy Cases block cutover without an override", (t) => {
+	const { brainDir } = fresh(t);
+	const cases = join(brainDir, "cases");
+	mkdirSync(cases, { recursive: true });
+	writeFileSync(join(cases, "c7.json"), JSON.stringify({ id: "c7", status: "running" }));
+	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ tasks: { phase: { caseId: "c7", phase: "construct" } } }));
+	let inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active.map((entry) => entry.id), ["c7"], "the record and task metadata produce one blocker, not duplicates");
+	assert.throws(() => migrateLegacyProducts(brainDir), (error) => error instanceof LegacyCutoverBlockedError && /explicitly stop each Case/i.test(error.message));
+	assert.equal(existsSync(join(cases, "c7.json")), true, "blocked cutover leaves the source record in place");
+
+	rmSync(join(cases, "c7.json"));
+	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ tasks: {} }));
+	writeFileSync(join(cases, "c8.json"), "{ not valid JSON");
+	inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active.map((entry) => [entry.id, entry.status]), [["c8", "unreadable"]], "unreadable bytes are treated as potentially resumable");
+	assert.throws(() => migrateLegacyProducts(brainDir), LegacyCutoverBlockedError);
+
+	writeFileSync(join(cases, "c8.json"), JSON.stringify({ id: "c99", status: "stopped" }));
+	inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active.map((entry) => [entry.id, entry.status]), [["c8", "malformed"]], "a mismatched stopped envelope cannot evade the blocker");
+	assert.throws(() => migrateLegacyProducts(brainDir), LegacyCutoverBlockedError);
+	assert.equal(existsSync(join(cases, "c8.json")), true, "malformed source bytes remain untouched while cutover is blocked");
+});
+
+test("harness: a cached inspect brief restores its look contract", () => {
+	assert.deepEqual(runFromBrief({ mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2 }), {
+		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
+	});
+	assert.deepEqual(runFromBrief({ mode: "change", network: false, move: "m3", revision: 4 }), { mode: "change", move: "m3", revision: 4 }, "only an explicit true carries network");
+	assert.deepEqual(runFromBrief({ mode: "look", turns: 3, caseId: "c1", phase: "falsify" }), { mode: "look", turns: 3 }, "retired Case metadata cannot revive a legacy phase route");
+	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
+});
+
+test("context window: a reported capacity is the whole active context without a reply reserve", () => {
+	assert.deepEqual(contextWindowLimits(100_000, 75_000), {
+		configuredContextWindow: 100_000,
+		usableContextWindow: 75_000,
+		serverContextWindow: 75_000,
+	});
+	assert.deepEqual(contextWindowLimits(40_000, 75_000), {
+		configuredContextWindow: 40_000,
+		usableContextWindow: 40_000,
+		serverContextWindow: 75_000,
+	}, "metadata never raises the configured cap");
+	assert.deepEqual(contextWindowLimits(100_000, 8_192), {
+		configuredContextWindow: 100_000,
+		usableContextWindow: 8_192,
+		serverContextWindow: 8_192,
+	}, "a small server exposes its full advertised window to the collapse engine");
+	assert.deepEqual(contextWindowLimits(100_000, undefined), {
+		configuredContextWindow: 100_000,
+		usableContextWindow: 100_000,
+	}, "without server metadata, the configured cap remains in force");
+});
+
+test("model listing: llama-swap context_length wins over legacy metadata", () => {
+	assert.equal(modelContextWindow({ context_length: 64_000, context_window: 64_000, meta: { n_ctx: 100_000 } }), 64_000);
+	assert.equal(modelContextWindow({ context_window: 65_536 }), 65_536, "the OpenAI-gateway mirror is accepted when context_length is absent");
+	assert.equal(modelContextWindow({ meta: { n_ctx: 32_768, n_ctx_train: 131_072 } }), 32_768, "legacy llama.cpp n_ctx is runtime capacity, unlike n_ctx_train");
+	assert.equal(modelContextWindow({ context_length: 0, meta: { n_ctx: "64k" } }), undefined, "only a positive integer is trustworthy server capacity");
 });
 
 // ─── The wake notes ──────────────────────────────────────────────────────────
@@ -113,14 +308,23 @@ test("ledger: a settled goal says so when settled again", (t) => {
 
 // ─── The plan ───────────────────────────────────────────────────────────────
 
-test("plan: an item added through the same op the agent uses is done by settleRow", (t) => {
+test("plan: an envelope is not runnable and closes only after a declared move is accepted", (t) => {
 	const { brainDir } = fresh(t);
-	const added = applyAdd(brainDir, "plan", JSON.stringify({ mode: "look", text: "Look at the files." }), null);
-	assert.equal(added, "p1 added.");
-	const settled = settleRow(brainDir, "p1", null);
-	assert.match(settled, /p1 done\./);
+	const added = applyAdd(brainDir, "plan", JSON.stringify({ mode: "look", text: "Inspect the entry point." }), null);
+	assert.match(added, /^p1 added as an authorization envelope/);
+	assert.match(settleRow(brainDir, "p1", null), /has no execution moves/);
 	const { plan } = loadPlan(brainDir);
-	assert.equal(plan.items[0].status, POLICY.enums.entryStatus.done);
+	const moved = applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Read src/index.mjs", done_when: "Its entry point is identified." }, NOW);
+	assert.match(moved.line, /^m1 added under p1/);
+	const started = startMove(plan, "m1", NOW);
+	assert.equal(started.move.status, "running");
+	reportMove(plan, "m1", 1, { done: true, report: "t1", proof: "src/index.mjs was read" }, NOW);
+	savePlan(brainDir, plan);
+	assert.match(settleRow(brainDir, "m1", null), /needs an acceptance review/);
+	assert.match(settleRow(brainDir, "m1", null, "The recorded source read identifies the entry point required by this move."), /m1 accepted\./);
+	assert.equal(loadPlan(brainDir).plan.moves[0].acceptedReview, "The recorded source read identifies the entry point required by this move.");
+	assert.match(settleRow(brainDir, "p1", null), /p1 is done\./);
+	assert.equal(loadPlan(brainDir).plan.items[0].status, POLICY.enums.entryStatus.done);
 });
 
 test("plan: dropRow removes the named item, never the last one", (t) => {
@@ -140,10 +344,71 @@ test("plan: archive and unarchive round-trip persists through the file", (t) => 
 	assert.equal(loadPlan(brainDir).plan.items[0].archived, undefined);
 });
 
-test("plan: a change item added by the user goes through the same withdrawal as the agent's", (t) => {
+test("plan: a change move persists its concrete contract and has no approval until a user grants its revision", (t) => {
 	const { brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Change the palette." }), null);
-	assert.equal(loadPlan(brainDir).plan.authorized, undefined);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Improve the palette.", done_when: "The requested palette is visible." }, NOW);
+	applyPlanOp(plan, {
+		action: "addMove",
+		parent: "p1",
+		text: "Edit src/theme.mjs",
+		done_when: "The new palette values are exported.",
+		targets: ["src/theme.mjs"],
+		proof: "The focused report names the palette check.",
+		capabilities: { files: true, commands: false },
+		budget: { replies: 3, fileOps: 2, commandStarts: 0 },
+	}, NOW);
+	const move = findMove(plan, "m1");
+	assert.deepEqual({ action: move.action, targets: move.targets, doneWhen: move.doneWhen, proof: move.proof, capabilities: move.capabilities, budget: move.budget, revision: move.revision, status: move.status }, {
+		action: "Edit src/theme.mjs",
+		targets: ["src/theme.mjs"],
+		doneWhen: "The new palette values are exported.",
+		proof: "The focused report names the palette check.",
+		capabilities: { files: true, commands: false, network: false },
+		budget: { replies: 3, fileOps: 2, commandStarts: 0 },
+		revision: 1,
+		status: "open",
+	});
+	assert.equal(mayRun(plan, move), false, "the envelope is intent, not authority");
+	approve(plan, NOW, ["p1"]);
+	assert.equal(mayRun(plan, move), true);
+	savePlan(brainDir, plan);
+	assert.deepEqual(loadPlan(brainDir).plan.moves[0].budget, { replies: 3, fileOps: 2, commandStarts: 0 }, "the contract round-trips through disk");
+});
+
+test("plan: acceptance refuses a reported move from an earlier envelope revision", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change one export.", done_when: "The export is demonstrated." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/one.mjs", done_when: "The export changes.", targets: ["src/one.mjs"], proof: "Focused test output." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	reportMove(plan, "m1", 1, { done: true, report: "t1", checkpoints: { before: "c1", after: "c2" }, changes: [{ path: "src/one.mjs" }], proof: "Focused test exits zero." }, NOW);
+	plan.items[0].revision = 2; // A hand-edited plan file must not let an old report complete new intent.
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /earlier revision of p1/);
+	savePlan(brainDir, plan);
+	assert.equal(loadPlan(brainDir).plan.moves[0].parentRevision, 1, "the persisted move still records the envelope revision it ran under");
+});
+
+test("plan: a move field edit carries the UI's capability and budget changes, and withdraws only that move revision", (t) => {
+	const { brainDir, root } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten one check.", done_when: "The narrow check is recorded." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/check.mjs", done_when: "The check is updated.", targets: ["src/check.mjs"], proof: "The focused check output." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	savePlan(brainDir, plan);
+	const said = editRow(brainDir, "m1", {
+		proof: "The named focused test exits zero.",
+		capabilities: { commands: false },
+		budget: { replies: 3, fileOps: 1, commandStarts: 0 },
+	}, root);
+	assert.match(said, /m1 changed and needs approval again/);
+	const move = loadPlan(brainDir).plan.moves[0];
+	assert.equal(move.revision, 2);
+	assert.equal(move.approvedRevision, undefined);
+	assert.deepEqual(move.capabilities, { files: true, commands: false, network: false });
+	assert.deepEqual(move.budget, { replies: 3, fileOps: 1, commandStarts: 0 });
+	assert.equal(move.proof, "The named focused test exits zero.");
 });
 
 // ─── The assessment ─────────────────────────────────────────────────────────
@@ -152,77 +417,147 @@ test("assessment: the book tool writes it whole, and /assessment reads the file"
 	const { brainDir, root } = fresh(t);
 	const tool = bookTool({ root, brainDir, config: {}, engine: { messagesOf: () => [] } });
 	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "test-assessment-write", now: () => Date.now(), executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	const result = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "A dice roller. Builds with npm test." } }), api, undefined);
+	const result = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", text: "A dice roller. Builds with npm test." }), api, undefined);
 	assert.equal(result.isError, undefined, JSON.stringify(result.output));
 	assert.match(readFileSync(assessmentPath(brainDir), "utf8"), /A dice roller\./);
 	assert.match(result.output[0].text, /Assessment saved \(36 characters/);
-	// An empty assessment is refused at the door, and the file is untouched.
-	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "" } }), /operation.text/);
+	// An empty assessment is refused at the door, and the file is untouched; the retired `operation` envelope is rejected.
+	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", text: "" }), /text/);
+	assert.throws(() => tool.prepareArguments({ target: "assessment", action: "write", operation: { text: "nope" } }), /operation|unknown|additional/i);
 	// An over-long one is clipped and says so.
 	const long = "x".repeat(4000);
-	const clipped = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", operation: { text: long } }), api, undefined);
+	const clipped = await tool.execute(tool.prepareArguments({ target: "assessment", action: "write", text: long }), api, undefined);
 	assert.equal(clipped.isError, undefined);
 	assert.equal(readFileSync(assessmentPath(brainDir), "utf8").trim().length <= 3001, true);
 });
 
 // ─── The plan: approval in the user's own words ─────────────────────────────
 
-test("approval words: a bare affirmative authorizes the one item waiting", (t) => {
+test("approval words: i yes approves the one waiting move revision, while a named move may deliberately allow network", (t) => {
 	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "Change the palette.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "Change the schema.", network: true, status: "open", added: 1 },
-		{ id: "p3", mode: "look", text: "Look first.", status: "open", added: 1 },
-	] });
-	assert.deepEqual(approvalWords(brainDir, "yes"), ["p1"]);
 	const { plan } = loadPlan(brainDir);
-	assert.equal(plan.items.find((item) => item.id === "p1").approved !== undefined, true, "the change item is approved");
-	assert.equal(plan.items.find((item) => item.id === "p2").approved, undefined, "a network item never rides a bare word — name it or /approve it");
-	// Naming the network item approves it: deliberate, item by item.
-	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change the palette.", done_when: "The palette changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/theme.mjs", done_when: "The values are exported.", targets: ["src/theme.mjs"], proof: "A palette check." }, NOW);
+	savePlan(brainDir, plan);
+	assert.deepEqual(approvalWords(brainDir, "i yes", NOW), ["m1"]);
+	let loaded = loadPlan(brainDir).plan;
+	assert.equal(loaded.moves[0].approvedRevision, 1);
+	applyPlanOp(loaded, { action: "add", mode: "change", text: "Check the published schema.", done_when: "The schema response is checked." , network: true }, NOW);
+	applyPlanOp(loaded, { action: "addMove", parent: "p2", text: "Run the schema check", done_when: "The command reports the schema version.", targets: ["src/schema.mjs"], proof: "Command output.", capabilities: { network: true } }, NOW);
+	savePlan(brainDir, loaded);
+	assert.deepEqual(approvalWords(brainDir, "approved m2", NOW), ["m2"]);
+	assert.equal(loadPlan(brainDir).plan.moves[1].approvedRevision, 1);
 });
 
-test("approval words: a bare affirmative with a batch waiting approves nothing", (t) => {
+test("approval words: a bare affirmative does not sweep a batch, while scoped approval snapshots its current waiting moves", (t) => {
 	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "One.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "Two.", status: "open", added: 1 },
-	] });
-	assert.equal(approvalWords(brainDir, "yes"), undefined, "an unrelated yes never approves a queue of changes");
-	assert.equal(approvalWords(brainDir, "ok"), undefined);
-	assert.deepEqual(loadPlan(brainDir).plan.items.filter((item) => item.approved !== undefined), [], "nothing was approved");
-	// Scoped to the batch on purpose: "yes all" is a batch approval, minus the network items.
-	assert.deepEqual(approvalWords(brainDir, "yes all"), ["p1", "p2"]);
-});
-
-test("approval words: only the named items are approved; look items never wait", (t) => {
-	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "One.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "Two.", network: true, status: "open", added: 1 },
-	] });
-	assert.deepEqual(approvalWords(brainDir, "approved p2"), ["p2"]);
 	const { plan } = loadPlan(brainDir);
-	assert.equal(plan.items.find((item) => item.id === "p1").approved, undefined);
-	assert.equal(approvalWords(brainDir, "approved p9"), undefined, "an unknown id approves nothing");
-});
-
-test("approval words: anything less than an affirmative is not an approval", (t) => {
-	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [{ id: "p1", mode: "change", text: "Change it.", status: "open", added: 1 }] });
-	for (const words of ["no, wait", "yes but not p1", "what does p1 do?", "maybe", "ok?", "approve it later", "I approved the plan yesterday"]) {
-		assert.equal(approvalWords(brainDir, words), undefined, JSON.stringify(words));
+	for (const [intent, action, path] of [["One", "Edit src/one.mjs", "src/one.mjs"], ["Two", "Edit src/two.mjs", "src/two.mjs"]]) {
+		applyPlanOp(plan, { action: "add", mode: "change", text: intent, done_when: `${intent} is complete.` }, NOW);
+		applyPlanOp(plan, { action: "addMove", parent: `p${plan.next - 1}`, text: action, done_when: `${intent} works.`, targets: [path], proof: `${intent} proof.` }, NOW);
 	}
-	assert.equal(loadPlan(brainDir).plan.items[0].approved, undefined);
+	savePlan(brainDir, plan);
+	assert.equal(approvalWords(brainDir, "yes", NOW), undefined, "an unrelated yes never approves a queue of moves");
+	assert.deepEqual(approvalWords(brainDir, "yes all", NOW), ["m1", "m2"]);
+	const loaded = loadPlan(brainDir).plan;
+	assert.deepEqual(loaded.moves.map((move) => move.approvedRevision), [1, 1]);
+	applyPlanOp(loaded, { action: "addMove", parent: "p1", text: "Add a later check", done_when: "The extra check runs.", targets: ["test/one.mjs"], proof: "Extra check output." }, NOW);
+	assert.equal(loaded.moves[2].approvedRevision, undefined, "a later addition never inherits the envelope snapshot");
 });
 
-test("approval words: the whole-plan wording authorizes the plan as it stands", (t) => {
+test("approval words: a named envelope selects only its waiting child revisions, and an unknown p or m selects nothing", (t) => {
 	const { brainDir } = fresh(t);
-	savePlan(brainDir, { version: 1, next: 1, items: [
-		{ id: "p1", mode: "change", text: "Change it.", status: "open", added: 1 },
-		{ id: "p2", mode: "change", text: "And that.", status: "open", added: 1 },
-	] });
-	assert.deepEqual(approvalWords(brainDir, "i approved the plan"), ["p1", "p2"]);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "One.", done_when: "One is complete." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/one.mjs", done_when: "One works.", targets: ["src/one.mjs"], proof: "One proof." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Test src/one.mjs", done_when: "One is tested.", targets: ["test/one.mjs"], proof: "Test output." }, NOW);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Two.", done_when: "Two is complete." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p2", text: "Edit src/two.mjs", done_when: "Two works.", targets: ["src/two.mjs"], proof: "Two proof." }, NOW);
+	savePlan(brainDir, plan);
+	assert.deepEqual(approvalWords(brainDir, "approved p1", NOW), ["m1", "m2"]);
+	const loaded = loadPlan(brainDir).plan;
+	assert.equal(loaded.moves[2].approvedRevision, undefined);
+	assert.equal(approvalWords(brainDir, "approved p9", NOW), undefined);
+	assert.equal(approvalWords(brainDir, "approved m99", NOW), undefined);
+});
+
+test("approval words: anything less than an affirmative is not approval of a move", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change it.", done_when: "It changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/it.mjs", done_when: "It works.", targets: ["src/it.mjs"], proof: "A check." }, NOW);
+	savePlan(brainDir, plan);
+	for (const words of ["no, wait", "yes but not p1", "what does p1 do?", "maybe", "ok?", "approve it later", "I approved the plan yesterday"]) {
+		assert.equal(approvalWords(brainDir, words, NOW), undefined, JSON.stringify(words));
+	}
+	assert.equal(loadPlan(brainDir).plan.moves[0].approvedRevision, undefined);
+});
+
+test("approval words: whole-plan wording approves the current moves, and an edit creates a fresh unapproved revision", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change it.", done_when: "It changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/it.mjs", done_when: "It works.", targets: ["src/it.mjs"], proof: "A check." }, NOW);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "And that.", done_when: "That changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p2", text: "Edit src/that.mjs", done_when: "That works.", targets: ["src/that.mjs"], proof: "Another check." }, NOW);
+	savePlan(brainDir, plan);
+	assert.deepEqual(approvalWords(brainDir, "i approved the plan", NOW), ["m1", "m2"]);
+	const loaded = loadPlan(brainDir).plan;
+	applyPlanOp(loaded, { action: "editMove", id: "m1", proof: "A newer check." }, NOW);
+	assert.equal(loaded.moves[0].revision, 2);
+	assert.equal(loaded.moves[0].approvedRevision, undefined);
+	assert.equal(mayRun(loaded, "m1"), false);
+});
+
+
+test("plan: a reported change move needs report, checkpoints, changed paths and proof before orchestration may accept it", (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Ship a narrow change.", done_when: "The narrow change is demonstrated." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/one.mjs", done_when: "The export changes.", targets: ["src/one.mjs"], proof: "The focused test output." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Check src/two.mjs", done_when: "The check passes.", targets: ["src/two.mjs"], proof: "The second test output." }, NOW);
+	approve(plan, NOW, ["p1"]);
+	startMove(plan, "m1", NOW);
+	reportMove(plan, "m1", 1, { done: true, report: "t1", checkpoints: { before: "c1", after: "c2" }, changes: [{ path: "src/other.mjs" }], proof: "test output" }, NOW);
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /outside its declared targets/);
+	plan.moves[0].reported.changes = [{ path: "src/one.mjs" }];
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /`review`/);
+	assert.doesNotThrow(() => applyPlanOp(plan, { action: "acceptMove", id: "m1", review: "The focused test output witnesses that the export changed." }, NOW));
+	assert.equal(plan.moves[0].acceptedReview, "The focused test output witnesses that the export changed.");
+	assert.throws(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW), /still has m2 \(open\)/);
+	startMove(plan, "m2", NOW);
+	reportMove(plan, "m2", 1, { done: true, report: "t2", checkpoints: { before: "c2", after: "c3" }, changes: [{ path: "src/two.mjs" }], proof: "second test output" }, NOW);
+	applyPlanOp(plan, { action: "acceptMove", id: "m2", review: "The second test output witnesses that the check passed." }, NOW);
+	assert.doesNotThrow(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW));
+	undoMove(plan, "m1", NOW);
+	assert.equal(plan.moves[0].status, "open");
+	assert.equal(plan.moves[0].approvedRevision, undefined);
+	assert.equal(plan.items[0].status, "open");
+	assert.equal(plan.items[0].closed, undefined);
+	assert.equal(plan.moves[1].status, "blocked", "a later accepted sibling is stale after an earlier undo");
+});
+
+test("plan: a recorded closure gap blocks a completion claim and survives a hand-edited reported state", (t) => {
+	const { plan } = loadPlan(fresh(t).brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Show the simulation.", done_when: "The browser visibly runs it." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Create js/main.js", done_when: "The browser loads the simulation.", targets: ["js/main.js"], proof: "Browser observation shows the running simulation." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	reportMove(plan, "m1", 1, {
+		done: true,
+		report: "t1",
+		checkpoints: { before: "c1", after: "c2" },
+		changes: [{ path: "js/main.js" }],
+		proof: "node --check js/main.js exits zero.",
+		closureGap: "index.html must load js/main.js before the browser witness is reachable.",
+	}, NOW);
+	assert.equal(plan.moves[0].status, "blocked");
+	assert.equal(plan.moves[0].reported.claimed, false);
+	assert.match(plan.moves[0].blocked, /Closure gap: index\.html/);
+	assert.equal(plan.moves[0].reported.closureGap, "index.html must load js/main.js before the browser witness is reachable.");
+	plan.moves[0].status = "reported";
+	plan.moves[0].reported.claimed = true;
+	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1", review: "A syntax check proves the browser runs it." }, NOW), /reported a closure gap/);
 });
 
 // ─── The atlas ──────────────────────────────────────────────────────────────
@@ -280,6 +615,61 @@ test("atlas: a graph written before ids existed gets them, deterministically, an
 	assert.deepEqual(loadAtlas(brainDir).atlas.nodes.map((node) => node.id), ["c1", "c7", "c2"], "and what was saved is what is read back");
 });
 
+test("atlas attention: focus, one-hop heat, gaps, decay and archive candidates stay separate from map truth", (t) => {
+	const { brainDir, root } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "entry.mjs"), "export const entry = 1;\n");
+	writeFileSync(join(root, "src", "nearby.mjs"), "export const nearby = 1;\n");
+	writeFileSync(join(root, "src", "unmapped.mjs"), "export const unmapped = 1;\n");
+	const { atlas } = loadAtlas(brainDir);
+	const who = { root, now: NOW, by: POLICY.enums.atlasAuthors.main, main: true, files: () => ["src/entry.mjs", "src/nearby.mjs", "src/unmapped.mjs"] };
+	applyAtlasOp(atlas, { action: "add", name: "entry", gist: "The entry path.", files: ["src/entry.mjs"], links: ["nearby"] }, who);
+	applyAtlasOp(atlas, { action: "add", name: "nearby", gist: "The direct neighbour.", files: ["src/nearby.mjs"] }, who);
+	applyAtlasOp(atlas, { action: "add", name: "orphan", gist: "A leaf no one uses." }, who);
+	const entry = atlas.nodes.find((node) => node.name === "entry");
+	applyAtlasOp(atlas, { action: "focus", path: "src/entry.mjs", reason: "Start at the file boundary." }, who);
+	const focused = applyAtlasOp(atlas, { action: "focus", name: entry.id, reason: "Trace request delivery." }, who);
+	assert.match(focused.line, /Focus changed from src\/entry\.mjs to c1 entry/, "a replacement is explicit rather than silently inferred from work");
+	observeAtlas(atlas, [{ kind: "read", paths: ["src/entry.mjs", "src/unmapped.mjs"] }], { at: NOW });
+	const active = activeMoveOverlays({ moves: [
+		{ id: "m1", status: POLICY.enums.moveStatus.running, targets: ["src/entry.mjs"] },
+		{ id: "m2", status: POLICY.enums.moveStatus.open, targets: ["src/nearby.mjs"] },
+	] });
+	assert.deepEqual(active, [{ kind: "move", paths: ["src/entry.mjs"], label: "m1 targets src/entry.mjs" }], "only a running declared move becomes a temporary overlay");
+	let snapshot = attentionSnapshot(root, atlas, { active });
+	assert.equal(snapshot.focus.label, "entry");
+	assert.deepEqual(snapshot.hot.map((entry) => entry.node.name), ["entry"]);
+	assert.deepEqual(snapshot.warm.map((entry) => entry.node.name), ["nearby"], "only one graph hop is warmed");
+	assert.deepEqual(snapshot.gaps.map((gap) => gap.path), ["src/unmapped.mjs"], "an active, unmapped path is a gap rather than an invented node");
+	assert.match(renderAttention(snapshot), /Focus: entry/);
+	assert.match(renderAttention(snapshot), /Mapping gaps/);
+
+	writeFileSync(join(root, "src", "entry.mjs"), "export const entry = 200;\n");
+	snapshot = attentionSnapshot(root, atlas, { active: { kind: "task", label: "m1 targets src/entry.mjs", paths: ["src/entry.mjs"] } });
+	assert.deepEqual(snapshot.care.map((entry) => entry.node.name), ["entry"], "file drift is care pressure, not ordinary warmth");
+
+	for (let round = 0; round < POLICY.limits.atlas.attention.candidateEpochs; round++) observeAtlas(atlas, [{ kind: "read", paths: ["src/entry.mjs"] }], { at: NOW });
+	snapshot = attentionSnapshot(root, atlas);
+	assert.deepEqual(snapshot.gaps.map((gap) => gap.path), ["src/unmapped.mjs"], "a persisted mapping gap stays visible until an existing node covers it");
+	assert.deepEqual(snapshot.candidates.map((candidate) => candidate.node.name), ["orphan"], "only a cold unreferenced leaf becomes a reversible archive candidate");
+	assert.match(renderAttention(snapshot, { idle: true }), /Cold candidates: 1/);
+	applyAtlasOp(atlas, { action: "archive", name: "orphan" }, who);
+	assert.equal(attentionSnapshot(root, atlas).candidateCount, 0, "archiving resolves the candidate without removing the node");
+	applyAtlasOp(atlas, { action: "restore", name: "orphan" }, who);
+	assert.equal(atlas.nodes.find((node) => node.name === "orphan").archived, undefined);
+	applyAtlasOp(atlas, { action: "rename", name: "entry", to: "delivery" }, who);
+	assert.equal(attentionSnapshot(root, atlas).focus.label, "delivery", "focus follows the stable node id through a rename");
+
+	saveAtlas(brainDir, atlas);
+	const reloaded = loadAtlas(brainDir).atlas;
+	assert.equal(reloaded.view.focus.target.id, entry.id, "focus and attention survive a restart by durable id");
+	applyAtlasOp(reloaded, { action: "archive", name: "delivery" }, who);
+	assert.equal(reloaded.view.focus.target.id, entry.id, "archiving never silently clears an explicit focus lens");
+	assert.match(renderAttention(attentionSnapshot(root, reloaded)), /archived; restore it to make it active/);
+	assert.throws(() => applyAtlasOp(reloaded, { action: "remove", name: "delivery" }, who), /explicit focus/, "removal asks for an explicit clear or replacement first");
+	assert.equal(fileMarks(reloaded).has("src/entry.mjs"), false, "an archived node leaves the active tree marks too");
+});
+
 test("atlas: the ref system takes the node, end to end through the book tool", async (t) => {
 	const { brainDir, root } = fresh(t);
 	mkdirSync(join(root, "src"), { recursive: true });
@@ -289,19 +679,35 @@ test("atlas: the ref system takes the node, end to end through the book tool", a
 	// which the replay guard swallows on purpose.
 	let serial = 0;
 	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `t${++serial}`, now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
-	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source." } }), api(), undefined);
+	const added = await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", name: "src", gist: "The source." }), api(), undefined);
 	assert.ok(!added.isError, added.output[0].text);
 	const id = loadAtlas(brainDir).atlas.nodes[0].id;
 	assert.match(id, /^c\d+$/, "the node came back with a c-id");
+	const focused = await tool.execute(tool.prepareArguments({ target: "atlas", action: "focus", id, reason: "Trace the source boundary." }), api(), undefined);
+	assert.ok(!focused.isError, focused.output[0].text);
+	assert.equal(loadAtlas(brainDir).atlas.view.focus.target.id, id, "a book call can persist a node lens by its stable id");
+	const cleared = await tool.execute(tool.prepareArguments({ target: "atlas", action: "unfocus" }), api(), undefined);
+	assert.ok(!cleared.isError, cleared.output[0].text);
+	assert.equal(loadAtlas(brainDir).atlas.view.focus, undefined, "unfocus clears only the explicit lens");
 	const listed = await tool.execute({ target: "atlas", action: "list" }, api(), undefined);
 	assert.match(listed.output[0].text, new RegExp(`"id": "${id}"`), "and `list` returns a ref to it");
-	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", ref: { id }, operation: {} }), api(), undefined);
+	const confirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", id }), api(), undefined);
 	assert.ok(!confirmed.isError, confirmed.output[0].text);
-	assert.match(confirmed.output[0].text, new RegExp(`${id} src confirmed\.`), "confirming by the id alone reaches the node");
-	const renamed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "rename", ref: { id }, operation: { to: "source" } }), api(), undefined);
+	assert.match(confirmed.output[0].text, new RegExp(`${id} src confirmed\\.`), "confirming by top-level id reaches the node");
+	const renamed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "rename", id, to: "source" }), api(), undefined);
 	assert.ok(!renamed.isError, renamed.output[0].text);
 	assert.equal(loadAtlas(brainDir).atlas.nodes[0].name, "source", "and the rename moves the name, not the id");
 	assert.equal(loadAtlas(brainDir).atlas.nodes[0].id, id);
+	// Node name lookup works anywhere `id` is accepted (`edit`, `read`, `look`, `confirm`).
+	const editedByName = await tool.execute(tool.prepareArguments({ target: "atlas", action: "edit", id: "source", gist: "Updated source.", files: ["src/app.mjs"] }), api(), undefined);
+	assert.ok(!editedByName.isError, editedByName.output[0].text);
+	const readByName = await tool.execute(tool.prepareArguments({ target: "atlas", action: "read", id: "source" }), api(), undefined);
+	assert.ok(!readByName.isError, readByName.output[0].text);
+	assert.equal(readByName.details.ref.id, id);
+	const lookedById = await tool.execute(tool.prepareArguments({ target: "atlas", action: "look", id }), api(), undefined);
+	assert.ok(!lookedById.isError && lookedById.output[0].text.includes("Updated source."));
+	const batchConfirmed = await tool.execute(tool.prepareArguments({ target: "atlas", action: "confirm", names: ["source"] }), api(), undefined);
+	assert.ok(!batchConfirmed.isError, batchConfirmed.output[0].text);
 });
 
 test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
@@ -311,9 +717,11 @@ test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
 	const { ref } = observeFile(root, brainDir, "src/index.html");
 	const describeRef = createRefDescriber({ brainDir });
 	assert.equal(describeRef(ref), `index.html (${ref.id})`);
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", ref } }, describeRef), `book file read index.html (${ref.id})`);
+	assert.equal(describeCall({ name: "read", arguments: { id: ref.id } }, describeRef), `read index.html (${ref.id})`);
+	assert.equal(describeCall({ name: "read", arguments: { id: ref.id, range: "1-20" } }, describeRef), `read index.html (${ref.id}) (lines 1-20)`);
+	assert.equal(describeCall({ name: "shelf", arguments: { action: "add", id: ref.id } }, describeRef), `shelf add index.html (${ref.id})`);
 	// What a call means without a describer is unchanged: the bare id.
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "read", ref } }), `book file read ${ref.id}`);
+	assert.equal(describeCall({ name: "read", arguments: { id: ref.id } }), `read ${ref.id}`);
 });
 
 test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t) => {
@@ -322,10 +730,11 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 	writeFileSync(join(root, "src", "app.mjs"), "console.log(1)\n");
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
 	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "t1", now: () => 0, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", operation: { name: "src", gist: "The source." } }), api, undefined);
+	await tool.execute(tool.prepareArguments({ target: "atlas", action: "add", name: "src", gist: "The source." }), api, undefined);
 	const node = loadAtlas(brainDir).atlas.nodes[0];
 	const describeRef = createRefDescriber({ brainDir });
 	assert.equal(describeRef({ kind: "atlas", id: node.id }), `src (${node.id})`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", id: node.id } }, describeRef), `book atlas confirm src (${node.id})`);
 	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: node.id } } }, describeRef), `book atlas confirm src (${node.id})`);
 });
 
@@ -333,11 +742,14 @@ test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t
 
 test("templates: every book has a template that parses and applies", (t) => {
 	const { brainDir, root } = fresh(t);
-	for (const [book, expect] of [["ledger", /added\.$/], ["plan", /added\.$/]]) {
+	for (const [book, expect] of [["ledger", /added\.$/], ["plan", /added as an authorization envelope\./]]) {
 		const template = addTemplate(book);
 		assert.equal(typeof template, "string");
 		assert.doesNotThrow(() => JSON.parse(template));
-		const filled = template.replace('"text": ""', '"text": "from the template."').replace('"gist": ""', '"gist": "from the template."');
+		const filled = template
+			.replace('"text": ""', '"text": "from the template."')
+			.replace('"done_when": ""', '"done_when": "the declared work is complete."')
+			.replace('"gist": ""', '"gist": "from the template."');
 		const line = applyAdd(brainDir, book, filled, root);
 		assert.match(line, expect, `${book} template should apply once filled in: ${line}`);
 	}
@@ -376,15 +788,146 @@ test("shell: arguments an action does not use are named in the result, not swall
 	assert.equal(ignoredLine({ action: "run", command: "ls" }, "run"), "");
 });
 
-test("shell: a run with a cross-action argument still runs, and says so", async (t) => {
-	const tool = shellTool({ config: { shellWait: 30 }, runner: { mode: "sandbox" }, windows: stubWindows(), runOf: () => ({ mode: "change" }) });
-	const result = await tool.execute({ action: "run", command: "ls", text: "typed?" }, { conversationId: "c", taskId: "t", now: () => Date.now() }, {});
+test("shell: a read-only inline run with a cross-action argument still runs, and says so", async () => {
+	const tool = shellTool({ config: { shellWait: 30 }, runner: { mode: "sandbox" }, windows: stubWindows(), runOf: () => ({ mode: "look" }) });
+	const result = await tool.execute({ action: "run", command: "ls", text: "typed?" }, { conversationId: ROOT_CONVERSATION_ID, taskId: "t", now: () => Date.now() }, {});
 	assert.match(result.output[0].text, /Ignored as not for `run`: `text` \(send only\)\./);
 });
 
-test("shell: TOOLS.shell and the charter both say the lane survives the sandbox being off while bubblewrap works", () => {
-	assert.match(TOOLS.shell, /when it says they run directly, I still run only in a read-only window, and only when bubblewrap works — when it does not, I run none at all\./);
+test("shell: TOOLS.shell distinguishes the confined inline lane from an authorized direct move", () => {
+	assert.match(TOOLS.shell, /Inline commands from the orchestrating context always use the read-only lane; in direct mode that lane still needs working bubblewrap and is refused without it\./);
+	assert.match(TOOLS.shell, /A declared change move is different in direct mode: it runs directly under its live move token with detection-only final checkpoint scope checking/);
+	assert.match(TOOLS.shell, /private disposable source copy/i);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
+});
+
+test("stage: a sandbox command candidate cannot touch the live tree before its approved promotion", (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	mkdirSync(join(root, ".git"), { recursive: true });
+	writeFileSync(join(root, "src", "format.mjs"), "export const value = 1;\n");
+	writeFileSync(join(root, ".git", "secret"), "not source\n");
+	writeFileSync(join(brainDir, "private"), "not source\n");
+	const stage = createStage({ root });
+	t.after(() => disposeStage(stage));
+	assert.equal(existsSync(join(stage.work, ".git")), false, "the source projection excludes git metadata");
+	assert.equal(existsSync(join(stage.work, ".brain")), false, "the source projection excludes the durable brain");
+	writeFileSync(join(stage.work, "src", "format.mjs"), "export const value = 2;\n");
+	assert.equal(readFileSync(join(root, "src", "format.mjs"), "utf8"), "export const value = 1;\n", "the stage copy cannot mutate the live source before promotion");
+	const candidate = collectStageCandidate(stage);
+	assert.deepEqual(candidate.changes.map(({ path, status }) => ({ path, status })), [{ path: "src/format.mjs", status: "changed" }]);
+	const prepared = prepareStagePromotion({ root, brainDir, record: stage, targets: ["src/format.mjs"], fileOpsLimit: 1 });
+	const applied = applyStagePromotion(prepared);
+	assert.deepEqual(applied.changes, [{ path: "src/format.mjs", status: "changed", added: 1, removed: 1 }], "the candidate is a normal bounded file change only after validation");
+	assert.equal(readFileSync(join(root, "src", "format.mjs"), "utf8"), "export const value = 2;\n");
+	assert.equal(disposeStage(stage).removed, true, "normal completion removes the private stage root");
+	assert.equal(existsSync(stage.root), false);
+});
+
+test("stage: the sandbox launch binds only the disposable work tree writable and blocks the brain without network", (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(root, "source.txt"), "source\n");
+	const stage = createStage({ root });
+	t.after(() => disposeStage(stage));
+	const launch = sandboxArgs({ root: stage.work, target: STAGE_WORK_DIR, cwd: STAGE_WORK_DIR, brainDir, sandboxHome: stage.home, bindBrain: false, hide: [brainDir, join(root, ".git")] });
+	const pairs = launch.args.join("\u0000");
+	const stageBind = launch.args.findIndex((entry, index) => entry === "--bind" && launch.args[index + 1] === stage.work && launch.args[index + 2] === STAGE_WORK_DIR);
+	const tmpfs = launch.args.findIndex((entry, index) => entry === "--tmpfs" && launch.args[index + 1] === "/tmp");
+	const stageDir = launch.args.findIndex((entry, index) => entry === "--dir" && launch.args[index + 1] === STAGE_WORK_DIR);
+	assert.ok(stageBind >= 0, "the stage work copy is the writable project-shaped mount");
+	assert.ok(tmpfs >= 0 && stageDir > tmpfs, "the stage mount target is made inside the writable /tmp tmpfs, never under the read-only system root");
+	assert.match(pairs, /--tmpfs\u0000.*\.brain/, "the live durable brain is covered after the system read-only bind");
+	assert.ok(launch.args.includes("--unshare-net"), "network is off unless the move explicitly enables it");
+	assert.doesNotMatch(pairs, new RegExp(`--bind\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the live project is never rebound writable");
+});
+
+test("stage: stale, forbidden, out-of-target, and oversized candidate paths are refused without promotion", (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "one.mjs"), "export const one = 1;\n");
+	writeFileSync(join(root, "src", "two.mjs"), "export const two = 2;\n");
+	const wrongTarget = createStage({ root });
+	t.after(() => disposeStage(wrongTarget));
+	writeFileSync(join(wrongTarget.work, "src", "one.mjs"), "export const one = 3;\n");
+	assert.throws(() => prepareStagePromotion({ root, brainDir, record: wrongTarget, targets: ["src/two.mjs"], fileOpsLimit: 1 }), /outside this move's declared targets/);
+	assert.equal(readFileSync(join(root, "src", "one.mjs"), "utf8"), "export const one = 1;\n");
+
+	const forbidden = createStage({ root });
+	t.after(() => disposeStage(forbidden));
+	mkdirSync(join(forbidden.work, ".brain"), { recursive: true });
+	writeFileSync(join(forbidden.work, ".brain", "bypass"), "no\n");
+	assert.throws(() => collectStageCandidate(forbidden), /forbidden .brain/);
+
+	const stale = createStage({ root });
+	t.after(() => disposeStage(stale));
+	writeFileSync(join(stale.work, "src", "one.mjs"), "export const one = 4;\n");
+	writeFileSync(join(root, "src", "two.mjs"), "export const two = 5;\n");
+	assert.throws(() => prepareStagePromotion({ root, brainDir, record: stale, targets: ["src/one.mjs"], fileOpsLimit: 1 }), /live project changed after this command stage was materialized/);
+	assert.equal(readFileSync(join(root, "src", "one.mjs"), "utf8"), "export const one = 1;\n", "a stale candidate never overwrites the live source");
+});
+
+test("stage: a failed promotion restores every earlier live path and cleans its disposable root", (t) => {
+	const { root, brainDir } = fresh(t);
+	mkdirSync(join(root, "src", "nested"), { recursive: true });
+	writeFileSync(join(root, "src", "a.mjs"), "export const a = 1;\n");
+	writeFileSync(join(root, "src", "nested", "b.mjs"), "export const b = 1;\n");
+	const stage = createStage({ root });
+	writeFileSync(join(stage.work, "src", "a.mjs"), "export const a = 2;\n");
+	writeFileSync(join(stage.work, "src", "nested", "b.mjs"), "export const b = 2;\n");
+	const prepared = prepareStagePromotion({ root, brainDir, record: stage, targets: ["src/a.mjs", "src/nested/b.mjs"], fileOpsLimit: 2 });
+	// This mimics a concurrent filesystem failure after the whole candidate was validated: the first path has
+	// already landed when the second's parent becomes a file. The staged apply must put the first one back.
+	rmSync(join(root, "src", "nested"), { recursive: true, force: true });
+	writeFileSync(join(root, "src", "nested"), "not a folder\n");
+	assert.throws(() => applyStagePromotion(prepared), StageError);
+	assert.equal(readFileSync(join(root, "src", "a.mjs"), "utf8"), "export const a = 1;\n", "the first promoted path was rolled back");
+	assert.equal(disposeStage(stage).removed, true, "a failed promotion still cleans its own stage root");
+	assert.equal(existsSync(stage.root), false);
+});
+
+test("shell: a live move owns its window, spends command starts, and loses stop authority when its revision changes", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Run the narrow check.", done_when: "The check is recorded." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run npm test", done_when: "The test exits.", targets: ["src/check.mjs"], proof: "Test output.", budget: { replies: 3, fileOps: 0, commandStarts: 1 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
+	const focus = "shell-focus";
+	updateContext(brainDir, (store) => { Object.assign(taskState(store, focus), { mode: "change", move: "m1", revision: 1, commandUses: 0, windows: [], commands: [] }); });
+	const open = new Set();
+	const result = (window, more = {}) => ({ text: "", ms: 1, reason: "time", window, cwd: ".", lines: 0, kept: 0, sandbox: true, network: false, state: "busy", ...more });
+	let stopped = 0;
+	let launched;
+	const windows = {
+		list: () => [...open].map((name) => ({ name, state: "busy" })),
+		run: async (name, command, options) => { launched = { name, command, options }; open.add(name); return result(name); },
+		send: async (name) => result(name),
+		stop: async (name) => { stopped++; return result(name, { wasBusy: true, ended: true, exit: 130, state: "idle" }); },
+		close: (name) => ({ wasGone: !open.delete(name) }),
+	};
+	const tool = shellTool({ root, brainDir, config: { shellWait: 30 }, gate: { yolo: false }, runner: { mode: "sandbox" }, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
+	const api = { conversationId: focus, taskId: "shell-focus" };
+	const started = await tool.execute({ action: "run", command: "npm test", window: "check" }, api, {});
+	assert.equal(started.isError, false, started.output[0].text);
+	assert.equal(loadContext(brainDir).tasks[focus].commandUses, 1);
+	assert.deepEqual(loadContext(brainDir).tasks[focus].windows, ["check"]);
+	const stageReceipt = loadContext(brainDir).tasks[focus].stage;
+	assert.match(stageReceipt.id, /./, "a sandboxed change command receives a task-owned stage receipt");
+	assert.equal(launched.options.stage.id, stageReceipt.id, "the writable window receives that stage rather than the live project");
+	assert.equal(existsSync(stageReceipt.root), true, "the receipt names the disposable root until task finalization");
+	t.after(() => disposeStage(stageReceipt));
+	const sent = await tool.execute({ action: "send", window: "check", text: "q" }, api, {});
+	assert.equal(sent.isError, false, sent.output[0].text);
+	const exhausted = await tool.execute({ action: "run", command: "npm test", window: "other" }, api, {});
+	assert.equal(exhausted.isError, true);
+	assert.match(exhausted.output[0].text, /started all 1 commands/);
+	const altered = loadPlan(brainDir).plan;
+	applyPlanOp(altered, { action: "editMove", id: "m1", proof: "A newer test output." }, NOW);
+	savePlan(brainDir, altered);
+	const refusedStop = await tool.execute({ action: "stop", window: "check" }, api, {});
+	assert.equal(refusedStop.isError, true);
+	assert.equal(stopped, 0, "a stale move cannot control its old shell window");
 });
 
 // ─── Reference ids count up per project ─────────────────────────────────────
@@ -573,6 +1116,33 @@ test("lane: with no sandbox and the switch not taken, the main agent cannot run 
 	assert.equal(called, false);
 });
 
+test("lane: a declared direct change move still runs when bubblewrap is absent", async (t) => {
+	const { brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Run the direct check.", done_when: "The direct check is recorded." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run the direct check", done_when: "The command exits.", targets: ["src/check.mjs"], proof: "Command output.", budget: { replies: 2, fileOps: 0, commandStarts: 1 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
+	const focus = "direct-shell-focus";
+	updateContext(brainDir, (store) => { Object.assign(taskState(store, focus), { mode: "change", move: "m1", revision: 1, commandUses: 0, windows: [], commands: [] }); });
+	let called;
+	const windows = {
+		...stubWindows(),
+		list: () => [],
+		async run(name, command, options) {
+			called = { name, command, options };
+			return { text: "ok", ms: 1, reason: "done", exit: 0, window: name, cwd: ".", lines: 1, kept: 1, sandbox: false, network: true, state: "idle" };
+		},
+	};
+	const runner = gatedRunnerOf(true, { ok: false, why: "bubblewrap (the bwrap command) is not installed" });
+	const tool = shellTool({ brainDir, config: { shellWait: 1 }, gate: { yolo: false }, runner, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
+	const result = await tool.execute({ action: "run", command: "npm test", window: "direct" }, { conversationId: focus, taskId: focus }, {});
+	assert.equal(result.isError, false, result.output[0].text);
+	assert.deepEqual(called, { name: "direct", command: "npm test", options: { network: false, waitMs: 1_000, signal: undefined, readOnly: false } });
+	assert.equal(loadContext(brainDir).tasks[focus].commandUses, 1);
+});
+
 // ─── The state block ────────────────────────────────────────────────────────
 
 const runnerOf = (off, available) => ({ off, available, get mode() { return this.off ? "direct" : this.available.ok ? "sandbox" : "none"; } });
@@ -585,7 +1155,7 @@ const blockOf = (t, runner) => {
 
 test("state: the sandbox-off line says the main agent keeps a read-only lane while bubblewrap works", (t) => {
 	const block = blockOf(t, runnerOf(true, { ok: true, version: "0.13.1", shell: "bash" }));
-	assert.match(block, /always in a read-only window, when bubblewrap works/);
+	assert.match(block, /Inline commands remain read-only when bubblewrap works; when it does not, none run\./);
 });
 
 test("state: the no-sandbox line says no command can be run at all", (t) => {
@@ -596,6 +1166,31 @@ test("state: the no-sandbox line says no command can be run at all", (t) => {
 test("state: the sandboxed block does not claim the main agent is blocked", (t) => {
 	const block = blockOf(t, runnerOf(false, { ok: true, version: "0.9.0", shell: "bash" }));
 	assert.doesNotMatch(block, /You yourself may still run commands in this session/);
+});
+
+test("state: Dispatch is main-only mechanical evidence, not an automatic task command", (t) => {
+	const { brainDir, root } = fresh(t);
+	writeFileSync(join(root, "src.txt"), "source\n");
+	const shelved = shelfItem(root, "src.txt", undefined, brainDir, []);
+	updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Change source.", done_when: "The source changes." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src.txt", done_when: "The source has the local edit.", targets: ["src.txt"], proof: "A named check passes." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	savePlan(brainDir, plan);
+	const main = stateBlock(brainDir, { mode: "sandbox" }, { root, messages: [] });
+	assert.match(main, /Dispatch\n/);
+	assert.match(main, /Eligible move facts:/);
+	assert.match(main, /m1 revision 1/);
+	assert.match(main, /Closure facts — boundary: src\.txt\. Claim: The source has the local edit\. Witness: A named check passes\./);
+	assert.match(main, /src\.txt: .*shelf sh1 current/);
+	assert.match(main, /This lens neither delegates work nor approves a move/);
+	assert.doesNotMatch(main, /I call `task` with `move:m1`/, "a ready move is a fact, not an imperative");
+	const focused = stateBlock(brainDir, { mode: "sandbox" }, { root, task: { purpose: "check the source", move: "m1", revision: 1, budget: { replies: 2, fileOps: 1, commandStarts: 0 } }, context: "Context\nFocus evidence and local shelf: empty.\n\n" });
+	assert.match(focused, /Focus Move: m1 revision 1\./);
+	assert.doesNotMatch(focused, /Dispatch\n/);
+	assert.doesNotMatch(focused, /Ledger\n/);
+	assert.doesNotMatch(focused, /Plan\n/);
 });
 
 test("dressRequest: the replay build equals the live build, for the same inputs", (t) => {
@@ -622,7 +1217,166 @@ test("dressRequest: the replay build equals the live build, for the same inputs"
 	assert.equal(JSON.stringify(live), JSON.stringify(replay), "the view the screen renders is byte-identical to the request the model got");
 });
 
-test("dressRequest: a task carries the context lines and the requests, as the live agent does", (t) => {
+test("request plan: it is a pure current calculation with ordered source facts", (t) => {
+	const { brainDir, root } = fresh(t);
+	const at = Date.parse("2026-11-15T10:00:00.000Z");
+	const messages = [
+		{ role: "user", content: [{ type: "text", text: "Map the parser." }], timestamp: at },
+		{ role: "assistant", content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "a.txt" } }] },
+		{ role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "alpha\nbeta\n" }] },
+	];
+	const before = JSON.stringify(messages);
+	const plan = planRequest(messages, {
+		brainDir,
+		root,
+		runner: { mode: "sandbox", available: { ok: true, version: "0.9.0", shell: "bash" } },
+		config: { contextWindow: 100_000 },
+		gate: { yolo: false },
+		main: true,
+		conversationId: ROOT_CONVERSATION_ID,
+		used: 4321,
+		fired: [],
+		wakeLines: ["one scheduled wake"],
+		windowRows: [],
+		// A planner never looks at these live-effect doors. Passing them makes an accidental call fail this test.
+		wakes: { check: () => { throw new Error("preview checked wakes"); }, noteShown: () => { throw new Error("preview consumed wakes"); } },
+		windows: { noteShown: () => { throw new Error("preview consumed windows"); } },
+	});
+	assert.equal(JSON.stringify(messages), before, "planning never mutates the active conversation");
+	assert.match(plan.messages.at(-1).content.at(-1).text, /<read-tail>/, "the current read batch is planned at the tail");
+	assert.deepEqual(plan.parts.map((part) => part.kind), ["active-message", "active-message", "active-message", "generated-state", "transient-read-tail"], "the plan captures source order before provider formatting");
+	assert.equal(plan.parts[0].source, `unmapped:${ROOT_CONVERSATION_ID}:0`, "an unavailable Durable id is explicitly unmapped, never a text-match key");
+	assert.match(plan.parts.find((part) => part.kind === "generated-state").fragment, /^<state>/, "generated state has its exact planned fragment");
+});
+
+test("active context projection: it preserves Durable entry identities through edits, multi-message contributions, ordering, and synthetic results", (t) => {
+	const user = { role: "user", timestamp: 100, content: [{ type: "text", text: "replacement words" }] };
+	const assistant = { role: "assistant", timestamp: 101, content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }] };
+	const result = { role: "toolResult", toolCallId: "c1", toolName: "read", content: [{ type: "text", text: "one result" }] };
+	const synthetic = { role: "toolResult", toolCallId: "missing", toolName: "read", content: [{ type: "text", text: "Durable synthesized this result" }] };
+	const view = {
+		entries: [
+			{ id: "u1", conversationId: "main", model: [{ role: "user", timestamp: 100, content: [{ type: "text", text: "old words" }] }] },
+			{ id: "a1", conversationId: "main", model: [assistant] },
+			{ id: "r1", conversationId: "main", model: [result] },
+			{ id: "omitted", conversationId: "main", model: [{ role: "user", timestamp: 99, content: [{ type: "text", text: "gone" }] }] },
+		],
+		contributions: [[user], [assistant], [result], []],
+		// Flattening may put the result beside its call and add a missing result. It is not an editable-row map.
+		messages: [user, assistant, result, synthetic],
+	};
+	const projection = activeContextProjection(view);
+	assert.deepEqual(projection.map((event) => [event.entryId, event.contributions.length]), [["u1", 1], ["a1", 1], ["r1", 1], ["omitted", 0]], "the projection follows active contributions, not raw entry models");
+	const copies = view.messages.map((message) => JSON.parse(JSON.stringify(message)));
+	const sources = bridgeRequestSources(copies, view);
+	assert.deepEqual(sources.map((source) => source?.entryId), ["u1", "a1", "r1", undefined], "reordered active messages retain their entry ids while a synthesized result stays unmapped");
+	assert.deepEqual(sources.slice(0, 3).map((source) => source?.position), [0, 0, 0], "each source also names its contribution position");
+	const { brainDir, root } = fresh(t);
+	const plan = planRequest(copies, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: "main", used: 1, fired: [], wakeLines: [], windowRows: [], sources });
+	const active = plan.parts.filter((part) => part.kind === "active-message");
+	assert.deepEqual(active.map((part) => part.source), ["durable:main:u1:0", "durable:main:a1:0", "durable:main:r1:0", "unmapped:main:3"], "frozen request provenance keeps contribution ids and marks a synthesized result as unmapped");
+	assert.equal(active[0].sourceRef.entryId, "u1", "the plan retains the structured source beside its printable provenance");
+	const firstSameStamp = { role: "user", timestamp: 200, content: [{ type: "text", text: "one" }] };
+	const secondSameStamp = { role: "user", timestamp: 200, content: [{ type: "text", text: "two" }] };
+	const ambiguous = { entries: [{ id: "u2", conversationId: "main" }, { id: "u3", conversationId: "main" }], contributions: [[firstSameStamp], [secondSameStamp]], messages: [firstSameStamp, secondSameStamp] };
+	assert.deepEqual(bridgeRequestSources(ambiguous.messages.map((message) => JSON.parse(JSON.stringify(message))), ambiguous), [undefined, undefined], "a copied ambiguous timestamp pair stays unmapped rather than borrowing array position or text");
+});
+
+test("talk source mutations: equal visible words cannot select one another", (t) => {
+	const { brainDir } = fresh(t);
+	const one = { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 };
+	const two = { kind: "durable-message", conversationId: "main", entryId: "u2", position: 0 };
+	noteChat(brainDir, "user", 100, "same words", { source: one });
+	noteChat(brainDir, "user", 101, "same words", { source: two });
+	assert.equal(reviseTalkSource(brainDir, one, "first reworded"), true, "the selected Durable source changes");
+	assert.deepEqual(loadContext(brainDir).chat.map((entry) => entry.text), ["first reworded", "same words"], "an equal later saying stays untouched");
+	assert.equal(removeTalkSource(brainDir, two), true, "the selected second source leaves future kept talk");
+	assert.deepEqual(loadContext(brainDir).chat.map((entry) => entry.text), ["first reworded"], "removal is source-specific too");
+	const provisional = { kind: "chat-call", conversationId: "main", callId: "c1" };
+	noteChat(brainDir, "you", 102, "agent words", { source: provisional });
+	assert.equal(bindTalkSource(brainDir, provisional, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }), true, "a tool call is promoted to its admitted entry id");
+	assert.equal(reviseTalkSource(brainDir, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }, "agent reworded"), true, "the stable admitted source drives later mutation");
+	const beforeToolWrites = { kind: "chat-call", conversationId: "main", callId: "c2" };
+	assert.equal(bindTalkSource(brainDir, beforeToolWrites, { kind: "durable-message", conversationId: "main", entryId: "a2", position: 0, callId: "c2" }), true, "an admitted entry may arrive before its tool writes talk");
+	noteChat(brainDir, "you", 103, "later tool words", { source: beforeToolWrites });
+	assert.deepEqual(loadContext(brainDir).chat.map((entry) => entry.text), ["first reworded", "agent reworded", "later tool words"]);
+	assert.equal(loadContext(brainDir).chat.at(-1).source.entryId, "a2", "the pending call binding promotes the stored saying without comparing its words");
+	const forgotten = { kind: "durable-message", conversationId: "main", entryId: "u-forget", position: 0 };
+	noteChat(brainDir, "user", 104, "equal soft-forget words", { source: forgotten });
+	noteChat(brainDir, "user", 105, "equal soft-forget words");
+	recordSoftForgetPending(brainDir, { entryId: "u-forget" });
+	const equalAfterForget = loadContext(brainDir).chat.filter((entry) => entry.text === "equal soft-forget words");
+	assert.equal(equalAfterForget.length, 1, "soft-forget removes only its admitted entry from kept talk");
+	assert.equal(equalAfterForget[0].source, undefined, "an equal legacy saying is not removed by its text");
+});
+
+test("task: selected main shelf evidence is captured into the durable focus capsule and replay stays local", async (t) => {
+	const { brainDir, root } = fresh(t);
+	writeFileSync(join(root, "evidence.txt"), "captured first version\n");
+	const selected = shelfItem(root, "evidence.txt", undefined, brainDir, []);
+	updateContext(brainDir, (store) => { store.shelf.push(selected.item); });
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "look", text: "Inspect captured evidence.", done_when: "The evidence is reported." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Read the captured evidence", done_when: "Its relevant fact is reported." }, NOW);
+	savePlan(brainDir, plan);
+	const entries = [];
+	const memos = new Map();
+	const child = "capsule-focus";
+	const now = Date.parse(NOW);
+	const tool = taskTool({ root, brainDir, config: { taskTurns: 4, maxTokens: 4096 } });
+	const result = await tool.execute({ move: "m1", context: "Read this source only; leave adjacent work for later.", shelf: [selected.item.id] }, {
+		conversationId: ROOT_CONVERSATION_ID,
+		taskId: "capsule-task",
+		callId: "task-call",
+		now: () => now,
+		memo: async (key, value) => { if (value !== undefined) memos.set(key, value); return memos.get(key); },
+		details: async () => {},
+		commit: async (fn) => fn({
+			scanConversations: async () => ({ items: [] }),
+			scanEntries: async ({ conversationId }) => {
+				if (conversationId === ROOT_CONVERSATION_ID) return { items: [{ id: "parent-call", model: [{ role: "assistant", content: [{ type: "toolCall", id: "task-call", name: "task", arguments: {} }] }] }] };
+				return { items: [] };
+			},
+			forkConversation: async () => ({ id: child }),
+			doc: async () => ({}),
+			appendEntry: async (_conversation, entry) => { entries.push(entry); },
+		}),
+		conversation: async () => ({
+			submit: async () => ({ wait: async () => {
+				updateContext(brainDir, (store) => { taskState(store, child).returned = { report: "Observed the captured source.", done: true }; });
+				return { status: "done" };
+			} }),
+		}),
+	}, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	const run = entries.find((entry) => entry.kind === "carto.brief")?.data;
+	assert.ok(run, "the focus durable brief stores its run");
+	assert.equal(run.evidence.length, 1);
+	assert.equal(run.evidence[0].placement, selected.item.id);
+	assert.equal(run.evidence[0].item.snapshot, selected.item.snapshot, "the exact rendered snapshot is retained");
+	assert.match(run.evidence[0].digest, /^[a-f0-9]{64}$/);
+	assert.match(run.brief, /Boundary and facts from the main context/);
+	assert.match(run.brief, /captured first version/);
+	assert.match(run.brief, /do not add targets, capabilities, proof, approval, or completion authority/);
+	assert.match(run.brief, /Closure: this focus is done only when its declared result is observed within its declared authority/);
+	writeFileSync(join(root, "evidence.txt"), "later live version\n");
+	updateContext(brainDir, (store) => {
+		store.shelf = [];
+		Object.assign(taskState(store, child), { mode: run.mode, move: run.move, revision: run.revision, budget: run.budget, evidence: run.evidence, changedSurface: { bytes: 0, lines: 0 } });
+	});
+	const request = dressRequest([
+		{ role: "user", content: [{ type: "text", text: "Broad parent planning history must not be sent." }] },
+		{ role: "toolResult", toolCallId: "task-call", toolName: "task", content: [{ type: "text", text: `${TASK_HEADER}\n\n${run.brief}` }] },
+	], { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: false, conversationId: child });
+	const rendered = request.map((message) => typeof message.content === "string" ? message.content : message.content.map((part) => part.text ?? "").join("")).join("\n");
+	assert.match(rendered, /captured first version/, "replay uses the captured snapshot");
+	assert.doesNotMatch(rendered, /later live version/, "a later shelf/source change cannot rewrite the handoff");
+	assert.doesNotMatch(rendered, /Broad parent planning history/, "the parent conversation is not replayed into the provider request");
+	assert.doesNotMatch(rendered, /Dispatch\n/, "the main-only Dispatch lens stays out of the focus");
+	assert.doesNotMatch(rendered, /Requests\n/, "the main request queue stays out of the focus");
+});
+
+test("dressRequest: a task gets compact local state, not main requests, reports, or shelf", (t) => {
 	const { brainDir, root } = fresh(t);
 	writeFileSync(join(brainDir, "carto-ledger.json"), JSON.stringify({ version: 1, next: 1, items: [] }, null, "\t"));
 	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ version: 1, items: [] }, null, "\t"));
@@ -643,10 +1397,11 @@ test("dressRequest: a task carries the context lines and the requests, as the li
 	assert.ok(block !== undefined, "a task's request ends with its state block");
 	assert.match(block, /Focus\n/, "with its one-line purpose");
 	assert.match(block, /My context holds about 1,234 of 100,000 tokens\./, "and its own server count");
-	assert.match(block, /Shelf items \(stable ID; unshelve by ID or path\):/, "and the shelf lines");
-	assert.match(block, /In view in full: s1 \(about [\d,]+ tokens\)\./, "and which reports stand in view in full");
-	assert.match(block, /Requests\nThese wait for /, "and what waits for the user");
-	assert.match(block, /q1 {2}Which parser\?/, "named, not counted");
+	assert.match(block, /Focus evidence and local shelf: empty\./, "it does not inherit the main shelf");
+	assert.doesNotMatch(block, /In view in full: s1/, "main reports stay out of a focus");
+	assert.doesNotMatch(block, /Requests\nThese wait for /, "the main request queue stays out of a focus");
+	assert.doesNotMatch(block, /Which parser\?/, "unrelated ledger material stays out too");
+	assert.doesNotMatch(block, /Dispatch\n/, "the main Dispatch lens is never replayed into a focus");
 	assert.doesNotMatch(block, /Wakes\n/, "wakes alone stay the main agent's");
 	const main = dressRequest(messages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID, used: 1234 });
 	const mainBlock = new RegExp(`<state>\\n[\\s\\S]*\\n</state>`).exec(textOf(main.at(-1)))?.[0];
@@ -727,170 +1482,475 @@ test("trace: one call to the model is one JSON line: the request as sent, the re
 
 // ─── The approval gate, as the live run taught it ────────────────────────────
 
-test("plan: an item approved one by one is authorized everywhere the agent is told so", (t) => {
+test("plan: named request approval expands an envelope's current moves and state names the move contract", (t) => {
 	const { brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "And the tests for it." }), null);
-	let { plan } = loadPlan(brainDir);
-	assert.equal(awaitsApproval(plan), true, "two change items wait for the user");
-	assert.match(authorizationLine(plan), /^Not approved/);
-	assert.match(planSummary(plan), /2 change items not authorized/);
+	const { plan } = loadPlan(brainDir);
+	for (const [intent, action, path] of [["Add the wrist throw.", "Edit src/throw.mjs", "src/throw.mjs"], ["Test the throw.", "Edit test/throw.mjs", "test/throw.mjs"]]) {
+		applyPlanOp(plan, { action: "add", mode: "change", text: intent, done_when: `${intent} is demonstrated.` }, NOW);
+		applyPlanOp(plan, { action: "addMove", parent: `p${plan.next - 1}`, text: action, done_when: `${intent} works.`, targets: [path], proof: `${intent} proof.` }, NOW);
+	}
+	savePlan(brainDir, plan);
+	let loaded = loadPlan(brainDir).plan;
+	assert.equal(awaitsApproval(loaded), true, "two change moves wait for the user");
+	assert.match(authorizationLine(loaded), /^Not approved/);
+	assert.match(planSummary(loaded), /2 moves wait for approval/);
 	const done = approveRequests(brainDir, ["p1"]);
-	assert.deepEqual(done.items, ["p1"]);
-	({ plan } = loadPlan(brainDir));
-	assert.equal(awaitsApproval(plan), true, "p2 still waits");
-	assert.match(authorizationLine(plan), /^Not approved/);
-	assert.match(planSummary(plan), /1 change item not authorized/);
-	approveRequests(brainDir, ["p2"]);
-	({ plan } = loadPlan(brainDir));
-	assert.equal(awaitsApproval(plan), false);
-	assert.match(authorizationLine(plan), new RegExp("^Authorized by " + USER_NAME));
-	assert.match(planSummary(plan), /authorized$/);
+	assert.deepEqual(done.items, ["m1"]);
+	loaded = loadPlan(brainDir).plan;
+	assert.equal(awaitsApproval(loaded), true, "m2 still waits");
+	assert.match(authorizationLine(loaded), /^Not approved/);
+	approveRequests(brainDir, ["m2"]);
+	loaded = loadPlan(brainDir).plan;
+	assert.equal(awaitsApproval(loaded), false);
+	assert.match(authorizationLine(loaded), new RegExp("^Authorized by " + USER_NAME));
+	assert.match(planSummary(loaded), /2 moves approved/);
 });
 
-test("change gate: a focus carries an approved item whatever the history's length; a stranger is refused", async (t) => {
+test("change gate: a focus carries one approved move revision; direct file authority is target- and budget-scoped", async (t) => {
 	const { root, brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the wrist throw." }), null);
-	approveRequests(brainDir, ["p1"]);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Add the wrist throw.", done_when: "The throw is available." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Create src/throw.mjs", done_when: "The module exists.", targets: ["src/throw.mjs"], proof: "The module is read back.", budget: { replies: 3, fileOps: 1, commandStarts: 0 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	/** A focus conversation id (7777), not the root: ROOT_CONVERSATION_ID is the main agent. Record it as the
-	 * context store does when the fork is created. */
-	const focus = 7777;
+	const [write] = changeTools({ root, brainDir, gate: { yolo: false }, write: { newOnly: true, maxLines: 60 } });
+	const focus = "focus-7777";
 	updateContext(brainDir, (store) => {
-		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
+		Object.assign(taskState(store, focus), { purpose: "create the throw", item: "p1", move: "m1", revision: 1, mode: "change", fileOps: 0, commandUses: 0, windows: [] });
 	});
-	const writes = [];
-	const apis = {
-		carry: { conversationId: focus, executeTool: async (name, args) => { writes.push([name, args]); return { isError: false, structuredOutput: "Wrote src/new.txt: 1 line, a new file." } } },
-		stranger: { conversationId: 4242, executeTool: async () => { throw new Error("must not be reached"); } },
+	const focusApi = {
+		conversationId: focus,
+		taskId: "file-focus",
+		executeTool: async (name, args) => {
+			assert.equal(name, "write");
+			const nested = await write.execute(args, focusApi, undefined);
+			return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
+		},
 	};
-	const ok = await tool.execute({ target: "file", action: "create", path: "src/new.txt", content: "hello\n", planItem: "p1" }, apis.carry, undefined);
-	assert.equal(writes.length, 1, "the authorized focus reached the nested write");
-	assert.equal(writes[0][0], "write");
-	assert.equal(ok.isError, false);
-	updateContext(brainDir, (store) => {
-		Object.assign(taskState(store, "4242"), { purpose: "nosy", item: "p2", mode: "look" });
-	});
-	const no = await tool.execute({ target: "file", action: "create", path: "src/nope.txt", content: "x\n", planItem: "p1" }, apis.stranger, undefined);
-	assert.equal(no.isError, true);
-	assert.match(no.output[0].text, /not carrying/);
+	const outside = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/outside.mjs", content: "export {};\n" }), focusApi, undefined);
+	assert.equal(outside.isError, true);
+	assert.match(outside.output[0].text, /outside m1's declared targets/);
+	assert.equal(loadContext(brainDir).tasks[focus].fileOps, 0, "a refused path does not spend the move's file budget");
+	const created = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/throw.mjs", content: "export const throwDie = () => 1;\n" }), focusApi, undefined);
+	assert.equal(created.isError, false, created.output[0].text);
+	assert.equal(existsSync(join(root, "src", "throw.mjs")), true);
+	assert.equal(loadContext(brainDir).tasks[focus].fileOps, 1, "the successful write spends the move's file budget");
+	const spent = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/throw.mjs", content: "export {};\n" }), focusApi, undefined);
+	assert.equal(spent.isError, true);
+	assert.match(spent.output[0].text, /used all 1 direct file mutations/);
+	const stranger = await tool.execute(tool.prepareArguments({ target: "file", action: "create", path: "src/throw.mjs", content: "export {};\n" }), { conversationId: "focus-4242", executeTool: async () => { throw new Error("must not run"); } }, undefined);
+	assert.equal(stranger.isError, true);
+	assert.match(stranger.output[0].text, /not carrying a live authorized change move/);
 });
 
-test("file edit: the ID alone is enough, and it always points at the live version", async (t) => {
+test("file edit: top-level id or path is enough, and always points at the live version", async (t) => {
 	const { root, brainDir } = fresh(t);
-	applyAdd(brainDir, "plan", JSON.stringify({ mode: "change", text: "Add the throw." }), null);
-	approveRequests(brainDir, ["p1"]);
 	mkdirSync(join(root, "src"), { recursive: true });
 	writeFileSync(join(root, "src", "dice.js"), "const a = 1;\nconst b = 2;\n");
+	writeFileSync(join(root, "src", "extra.js"), "export const x = 1;\n");
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Edit the throw files.", done_when: "The module and its helper are updated." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Update src/dice.js and src/extra.js", done_when: "Both source files have the intended edits.", targets: ["src/dice.js", "src/extra.js"], proof: "The files are read back." }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
 	const { ref } = observeFile(root, brainDir, "src/dice.js");
 	const id = ref.id;
-	// The agent never sees a namespace, a kind or a 64-character hash: only the file's ID.
+	// The agent never sees a namespace, a kind or a 64-character hash: only the file's ID or path.
 	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	const focus = 7777;
+	const focus = "focus-7777";
 	updateContext(brainDir, (store) => {
-		Object.assign(taskState(store, String(focus)), { purpose: "add the throw", item: "p1", mode: "change" });
+		Object.assign(taskState(store, focus), { purpose: "edit the throw", item: "p1", move: "m1", revision: 1, mode: "change", fileOps: 0, commandUses: 0, windows: [] });
 	});
-	const [, edit] = changeTools({ root, brainDir });
-	const focusApi = { conversationId: focus, executeTool: async (name, args) => {
-		if (name !== "edit") throw new Error(`unexpected nested tool ${name}`);
-		const nested = await edit.execute(args);
+	const [, edit, rm] = changeTools({ root, brainDir, gate: { yolo: false } });
+	const focusApi = { conversationId: focus, taskId: "file-edit-focus", executeTool: async (name, args) => {
+		const impl = name === "edit" ? edit : name === "rm" ? rm : undefined;
+		if (!impl) throw new Error(`unexpected nested tool ${name}`);
+		const nested = await impl.execute(args, focusApi, undefined);
 		// What the harness does with a nested call's result: flag + structured output.
 		return { isError: nested.isError === true, structuredOutput: nested.output?.[0]?.text };
 	} };
 
-	// `file read` by the ID alone: the bytes as they are, no line numbers, and the ID to edit by.
-	const read = await tool.execute({ target: "file", action: "read", ref: { id } }, focusApi, undefined);
+	// Top-level `read` by `id` (and by `path`): the bytes as they are, no line numbers, and the ID to edit by.
+	const reader = readTool({ root, brainDir });
+	const read = await reader.execute(reader.prepareArguments({ id }), focusApi, undefined);
 	const readText = read.output[0].text;
 	assert.ok(readText.includes("const a = 1;\nconst b = 2;"), `the read shows the exact bytes:\n${readText}`);
 	assert.ok(!/\d+ │ /.test(readText) && !/│/.test(readText), "no line numbers in the read");
 	assert.ok(readText.includes(`file ${id}`), "and it says which file ID it is");
+	const readByPath = await reader.execute(reader.prepareArguments({ path: "src/dice.js", range: "1-1" }), focusApi, undefined);
+	assert.match(readByPath.output[0].text, /== src\/dice\.js \(lines 1-1 of 2\) · file f\d+/);
+	assert.ok(!readByPath.output[0].text.includes("const b = 2;"));
+	// `book` redirects `file read` cleanly to top-level `read` / `shelf`.
+	assert.throws(() => tool.prepareArguments({ target: "file", action: "read", id }), /top-level `read` tool/);
 
-	// `file edit` by the ID alone.
-	const firstEdit = await tool.execute({ target: "file", action: "edit", ref: { id }, oldText: "const b = 2;\n", newText: "const b = 3;\n", planItem: "p1" }, focusApi, undefined);
+	// `file edit` by top-level `id` alone (with no `planItem` needed).
+	const firstEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", id, oldText: "const b = 2;\n", newText: "const b = 3;\n" }), focusApi, undefined);
 	assert.equal(firstEdit.isError, false, `the edit by ID succeeded: ${firstEdit.output[0].text}`);
 	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 1;\nconst b = 3;\n");
 
 	// The ID points at the live version: a second edit with no version anywhere must succeed too.
-	const secondEdit = await tool.execute({ target: "file", action: "edit", ref: { id }, oldText: "const a = 1;\n", newText: "const a = 10;\n", planItem: "p1" }, focusApi, undefined);
+	const secondEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", id, oldText: "const a = 1;\n", newText: "const a = 10;\n" }), focusApi, undefined);
 	assert.equal(secondEdit.isError, false, `the second edit by ID succeeded: ${secondEdit.output[0].text}`);
 	assert.equal(readFileSync(join(root, "src", "dice.js"), "utf8"), "const a = 10;\nconst b = 3;\n");
 
 	// A pinned ref is still honored as an optimistic check, and fails only because it is stale by choice.
-	const stale = await tool.execute({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n", planItem: "p1" }, focusApi, undefined);
+	const stale = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", ref: { ...ref, version: ref.version }, oldText: "const a = 10;\n", newText: "const a = 11;\n" }), focusApi, undefined);
 	assert.equal(stale.isError, true);
 	assert.match(stale.output[0].text, /Stale|status/);
 
+	// `file edit` and `file remove` also accept `path` directly (and empty `newText` deletes the passage).
+	const byPathEdit = await tool.execute(tool.prepareArguments({ target: "file", action: "edit", path: "src/extra.js", oldText: "export const x = 1;\n", newText: "" }), focusApi, undefined);
+	assert.equal(byPathEdit.isError, false, byPathEdit.output[0].text);
+	assert.equal(readFileSync(join(root, "src", "extra.js"), "utf8"), "");
+	const byPathRemove = await tool.execute(tool.prepareArguments({ target: "file", action: "remove", path: "src/extra.js" }), focusApi, undefined);
+	assert.equal(byPathRemove.isError, false, byPathRemove.output[0].text);
+	assert.equal(existsSync(join(root, "src", "extra.js")), false);
+
 	// The call label names the tool that carries it, and the result summary strips the file header like `edit`.
-	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", ref: { id }, oldText: "x", newText: "y" } }), `book file edit ${id}`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "file", action: "edit", id, oldText: "x", newText: "y" } }), `book file edit ${id}`);
 	assert.equal(describeResult({ toolName: "book", content: firstEdit.output, details: firstEdit.details, isError: firstEdit.isError }), "2 lines from line 2 replaced by 2 lines");
 });
 
-test("write create: over the line cap the head is written and the agent is told", (t) => {
+test("write create: standalone writes keep the complete requested file; focus tools measure surface before writing", (t) => {
 	const { root, brainDir } = fresh(t);
 	const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
-	const [write] = changeTools({ root, brainDir, write: { newOnly: true, maxLines: 60 } });
-	const prepared = write.prepareArguments({ path: "long.txt", content });
-	assert.equal(prepared.content.split("\n").length, 60, "prepareArguments clips to the line cap before validation sees it");
-	assert.equal(prepared.content, Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n"));
-	const result = writeOne(root, brainDir, "long.txt", content, { newOnly: true, maxLines: 60 });
-	assert.equal(readFileSync(join(root, "long.txt"), "utf8"), prepared.content, "the file holds the head, and only the head");
-	assert.match(result, /60 lines, a new file/);
-	assert.match(result, /if you wrote more, the rest is not in the file/);
-	// A file written exactly at the cap carries the same honest advisory; below the cap, no advisory.
-	assert.match(writeOne(root, brainDir, "exact.txt", "a\nb\n", { newOnly: true, maxLines: 2 }), /at most|most a new file/, "the exact-cap file is told the rule");
-	assert.doesNotMatch(writeOne(root, brainDir, "small.txt", "a\nb\n", { newOnly: true, maxLines: 60 }), /most a new file/);
-	// One pathological line is cut at the character budget, not kept whole.
-	const clipped = clipWriteContent("z".repeat(300), 1);
-	assert.equal(clipped.text.length, 250);
-	assert.equal(clipped.clipped, true);
+	const result = writeOne(root, brainDir, "long.txt", content, { newOnly: true });
+	assert.equal(readFileSync(join(root, "long.txt"), "utf8"), content, "the low-level primitive never clips a requested file");
+	assert.match(result, /100 lines, a new file/);
+	assert.throws(() => writeOne(root, brainDir, "long.txt", "replacement", { newOnly: true }), /already exists/);
+	assert.deepEqual(changedSurface("one\ntwo\n", "one\nthree\n"), { bytes: 6, lines: 2, added: { bytes: 4, lines: 1 }, removed: { bytes: 2, lines: 1 } }, "added and removed spans both count");
+	const oneLine = changedSurface("x".repeat(500), "y".repeat(500));
+	assert.equal(oneLine.bytes, 1000, "a one-line replacement is bounded by bytes too");
+	assert.equal(oneLine.lines, 2, "and still reports both replaced text spans");
 });
 
-test("shelf add: the ID alone is enough, and it finds the file behind it", async (t) => {
+test("direct file changes use one atomic symmetric changed-surface allowance", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Make one bounded file change.", done_when: "The file is changed." }, NOW);
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Change src/surface.txt", done_when: "The bounded file change is present.", targets: ["src/surface.txt"], proof: "The file is read back.", budget: { replies: 3, fileOps: 4, commandStarts: 0 } }, NOW);
+	approve(plan, NOW, ["m1"]);
+	startMove(plan, "m1", NOW);
+	savePlan(brainDir, plan);
+	const focus = "surface-focus";
+	updateContext(brainDir, (store) => { Object.assign(taskState(store, focus), { mode: "change", move: "m1", revision: 1, fileOps: 0, changedSurface: { bytes: 0, lines: 0 } }); });
+	const [write, edit, rm] = changeTools({ root, brainDir, gate: { yolo: false } });
+	const api = { conversationId: focus, taskId: "surface-task" };
+	const over = await write.execute({ path: "src/surface.txt", content: "x".repeat(POLICY.limits.change.surfaceBytes + 1) }, api, undefined);
+	assert.equal(over.isError, true);
+	assert.match(over.output[0].text, /Nothing was changed/);
+	assert.equal(existsSync(join(root, "src", "surface.txt")), false, "an oversized create never leaves a clipped or partial file");
+	assert.deepEqual(loadContext(brainDir).tasks[focus].changedSurface, { bytes: 0, lines: 0 }, "a refusal spends no surface");
+	const made = await write.execute({ path: "src/surface.txt", content: "old" }, api, undefined);
+	assert.equal(made.isError, undefined, made.output[0].text);
+	assert.match(made.output[0].text, /Direct changed surface: 3\//, "the tool makes used surface visible");
+	const rewrite = await edit.execute({ path: "src/surface.txt", old_text: "old", new_text: "y".repeat(POLICY.limits.change.surfaceBytes) }, api, undefined);
+	assert.equal(rewrite.isError, true);
+	assert.match(rewrite.output[0].text, /proposed edit changes/);
+	assert.equal(readFileSync(join(root, "src", "surface.txt"), "utf8"), "old", "a whole-file edit receives the same atomic refusal");
+	const removed = await rm.execute({ path: "src/surface.txt" }, api, undefined);
+	assert.equal(removed.isError, undefined, removed.output[0].text);
+	assert.equal(existsSync(join(root, "src", "surface.txt")), false);
+	const recreated = await write.execute({ path: "src/surface.txt", content: "new" }, api, undefined);
+	assert.equal(recreated.isError, true);
+	assert.match(recreated.output[0].text, /cannot be recreated as a rewrite path/);
+	assert.equal(existsSync(join(root, "src", "surface.txt")), false, "remove then create cannot evade the shared allowance in one focus");
+});
+
+test("shelf tool: first-class add/remove/list, one-line receipt, range refresh by placement id, and focus shelf in state", async (t) => {
 	const { root, brainDir } = fresh(t);
 	mkdirSync(join(root, "src"), { recursive: true });
-	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\n");
+	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Friday.\nSecond line.\nThird line.\n");
+	writeFileSync(join(root, "index.html"), "<!doctype html>\n<title>dice</title>\n");
 	const { ref } = observeFile(root, brainDir, "src/notes.txt");
-	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
-	// Root conversation: the main shelf.
-	const focusApi = { conversationId: ROOT_CONVERSATION_ID, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
+	const shelf = shelfTool({ root, brainDir, config: { contextWindow: 100_000 } });
+	const book = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	let taskSeq = 0;
+	const makeApi = (conversationId = ROOT_CONVERSATION_ID) => ({ conversationId, taskId: `shelf-${++taskSeq}`, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
 
-	// The harness runs every call through prepareArguments before dispatch; an id-only ref must survive it
-	// (it once was refused for missing kind and namespace, which the shelf infers by design).
-	const prepared = tool.prepareArguments({ target: "shelf", action: "add", ref: { id: ref.id } });
-	const added = await tool.execute(prepared, focusApi, undefined);
-	assert.ok(!added.isError, `shelf add by the ID alone succeeded: ${added.output[0].text}`);
-	const listed = await tool.execute({ target: "shelf", action: "list" }, focusApi, undefined);
+	// `book` redirects `target: "shelf"` to the top-level `shelf` tool.
+	assert.throws(() => book.prepareArguments({ target: "shelf", action: "add", id: ref.id }), /top-level `shelf` tool/);
+
+	// Top-level `id` alone survives prepareArguments, shelves the catalog file, and returns a 1-line receipt (no duplicate snapshot body).
+	const prepared = shelf.prepareArguments({ action: "add", id: ref.id });
+	const added = await shelf.execute(prepared, makeApi(), undefined);
+	assert.ok(!added.isError, `shelf add by top-level id succeeded: ${added.output[0].text}`);
+	assert.equal(added.output[0].text.includes("Ship it on Friday."), false, "receipt does not duplicate the snapshot body into tool history");
+	const listed = await shelf.execute(shelf.prepareArguments({ action: "list" }), makeApi(), undefined);
 	assert.match(listed.output[0].text, /placement/, "and the shelf holds it");
 	assert.match(listed.output[0].text, new RegExp(`"id":\\s*"${ref.id}"`), "as the file the agent saw");
 
+	// Re-adding by placement ID (`sh1`) updates the range and refreshes from disk.
+	writeFileSync(join(root, "src", "notes.txt"), "Ship it on Monday.\nSecond line.\nThird line.\n");
+	const narrowed = await shelf.execute(shelf.prepareArguments({ action: "add", id: added.details.placement, range: "1-1" }), makeApi(), undefined);
+	assert.ok(!narrowed.isError, narrowed.output[0].text);
+	assert.equal(narrowed.details.placement, added.details.placement, "updates the same placement in place");
+	assert.match(loadContext(brainDir).shelf[0].snapshot, /Ship it on Monday\./);
+	assert.doesNotMatch(loadContext(brainDir).shelf[0].snapshot, /Second line\./);
+
+	// Passing an existing project path in `id` (before any prior `read`) catalogs and shelves it on the first call.
+	const byPathInId = await shelf.execute(shelf.prepareArguments({ action: "add", id: "index.html" }), makeApi(), undefined);
+	assert.ok(!byPathInId.isError, `shelf add with path in id succeeded: ${byPathInId.output[0].text}`);
+
+	// Snapshot renders once in `<state>` (and vanishes immediately on `shelf remove`).
+	const userMessages = [{ role: "user", content: [{ type: "text", text: "Check shelf." }], timestamp: Date.parse("2026-11-16T10:00:00.000Z") }];
+	const beforeRemove = dressRequest(userMessages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID });
+	assert.match(beforeRemove.at(-1).content.at(-1).text, /<title>dice<\/title>/, "snapshot body appears in state block");
+
+	// Removing by placement `id` (`sh1`) and by `path` both work; retired `placementId` is rejected by validation.
+	assert.throws(() => shelf.prepareArguments({ action: "remove", placementId: added.details.placement }), /placementId|unknown|additional/i);
+	const removedById = await shelf.execute(shelf.prepareArguments({ action: "remove", id: added.details.placement }), makeApi(), undefined);
+	assert.ok(!removedById.isError, removedById.output[0].text);
+	const removedByPath = await shelf.execute(shelf.prepareArguments({ action: "remove", path: "index.html" }), makeApi(), undefined);
+	assert.ok(!removedByPath.isError, removedByPath.output[0].text);
+	const afterRemove = dressRequest(userMessages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: true, conversationId: ROOT_CONVERSATION_ID });
+	assert.doesNotMatch(afterRemove.at(-1).content.at(-1).text, /<title>dice<\/title>/, "unshelving drops the snapshot from the next request immediately");
+
+	// Inside a focused task, `shelf add` populates the focus's own shelf and `<state>` renders it for that focus.
+	const focusAdded = await shelf.execute(shelf.prepareArguments({ action: "add", path: "index.html" }), makeApi("focus-42"), undefined);
+	assert.ok(!focusAdded.isError, focusAdded.output[0].text);
+	assert.equal(loadContext(brainDir).shelf.length, 0, "main shelf remains empty");
+	const focusDressed = dressRequest(userMessages, { brainDir, root, config: { contextWindow: 100_000 }, gate: { yolo: false }, main: false, conversationId: "focus-42" });
+	assert.match(focusDressed.at(-1).content.at(-1).text, /<title>dice<\/title>/, "focus sees its own shelved snapshot in state");
+
 	// An ID that is nothing at all is refused with a sentence, not a validation error.
-	const missing = await tool.execute({ target: "shelf", action: "add", ref: { id: "f999" } }, focusApi, undefined);
+	const missing = await shelf.execute(shelf.prepareArguments({ action: "add", id: "f999" }), makeApi(), undefined);
 	assert.equal(missing.isError, true);
 	assert.match(missing.output[0].text, /Nothing with the ID/);
 });
 
-test("book: prepareArguments repairs the (deeply frozen) harness arguments without throwing", (t) => {
+test("prepareArguments: book, read, and shelf repair deeply frozen harness arguments without mutating them", (t) => {
 	// The harness reads the assistant entry and deep-freezes everything in it, the tool-call arguments included
-	// (pi-durable freezeJson). The repair must carry a new object instead of mutating the frozen one.
+	// (pi-durable freezeJson). Each tool's repair must carry a new object instead of mutating the frozen one.
 	const { root, brainDir } = fresh(t);
-	const tool = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const book = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const reader = readTool({ root, brainDir });
+	const shelf = shelfTool({ root, brainDir, config: {} });
 	const deepFreeze = (value) => {
 		if (value && typeof value === "object") { for (const child of Object.values(value)) deepFreeze(child); Object.freeze(value); }
 		return value;
 	};
-	const byPath = deepFreeze({ target: "file", action: "read", path: "index.html" });
-	const preparedPath = tool.prepareArguments(byPath);
-	assert.equal(preparedPath.target, "file");
-	assert.equal(preparedPath.action, "read");
-	assert.equal(preparedPath.ref, undefined, "no ref is invented for a path call");
-	const byRef = deepFreeze({ target: "file", action: "read", ref: { id: "f1" } });
-	const preparedRef = tool.prepareArguments(byRef);
-	assert.equal(preparedRef.ref.id, "f1");
-	assert.ok(typeof preparedRef.ref.namespace === "string" && preparedRef.ref.namespace.length >= 16, "the namespace is inferred");
-	assert.equal(preparedRef.ref.kind, "file", "the kind is inferred from the target");
+	const readPath = deepFreeze({ path: "index.html", range: "1-40" });
+	assert.deepEqual(reader.prepareArguments(readPath), { path: "index.html", range: "1-40" });
+	const readId = deepFreeze({ id: "f1", version: "a".repeat(64) });
+	assert.deepEqual(reader.prepareArguments(readId), { id: "f1", version: "a".repeat(64) });
+	assert.throws(() => reader.prepareArguments(deepFreeze({})), /read needs `path` or `id`/);
+
+	const shelfById = shelf.prepareArguments(deepFreeze({ action: "add", id: "f1", range: "1-20" }));
+	assert.equal(shelfById.id, "f1");
+	assert.equal(shelfById.ref.id, "f1");
+	assert.ok(typeof shelfById.ref.namespace === "string" && shelfById.ref.namespace.length >= 16);
+	assert.throws(() => shelf.prepareArguments(deepFreeze({ action: "add", id: "f1", ref: { id: "f2" } })), /matching `id` and `ref\.id`/);
+
+	const editPath = book.prepareArguments(deepFreeze({ target: "file", action: "edit", path: "index.html", oldText: "a", newText: "b" }));
+	assert.equal(editPath.ref, undefined, "no ref is invented for a path call");
+	const editId = book.prepareArguments(deepFreeze({ target: "file", action: "edit", id: "f1", oldText: "a", newText: "b" }));
+	assert.equal(editId.id, "f1");
+	assert.equal(editId.ref.id, "f1");
+	assert.equal(editId.ref.kind, "file", "the kind is inferred from the target");
+	const editRef = book.prepareArguments(deepFreeze({ target: "file", action: "edit", ref: { id: "f1", version: "a".repeat(64) }, oldText: "a", newText: "b" }));
+	assert.equal(editRef.ref.version, "a".repeat(64));
+	assert.throws(() => book.prepareArguments({ target: "file", action: "edit", id: "f1", ref: { id: "f2" }, oldText: "a", newText: "b" }), /matching `id` and `ref\.id`/);
 });
 
-test("prepend: the user's own markdown is read before the prompt — core first, brain second; nothing when absent", (t) => {
+test("book: target-family reads preserve their live and stale reference results", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const engine = { messagesOf: () => [], want: () => {}, callWords: () => "book" };
+	const registry = {
+		tools: () => [{
+			extension: { name: "demo" },
+			tool: { name: "echo", description: "Echo a value.", parameters: { type: "object", properties: { value: { type: "string" } } } },
+		}],
+	};
+	const tool = bookTool({ root, brainDir, config: {}, engine, gate: { yolo: false } });
+	let serial = 0;
+	const api = () => ({
+		conversationId: ROOT_CONVERSATION_ID,
+		taskId: `family-${++serial}`,
+		now: () => 1_700_000_000_000,
+		registry,
+		executeTool: async () => { throw new Error("unexpected nested tool"); },
+	});
+	const run = (args) => tool.execute(tool.prepareArguments(args), api(), undefined);
+
+	const durableList = await run({ target: "tool", action: "list" });
+	assert.equal(durableList.isError, undefined, durableList.output[0].text);
+	assert.deepEqual(durableList.details, { target: "tool", count: 1, shown: 1 });
+	assert.equal(JSON.parse(durableList.output[0].text)[0].ref.kind, "tool");
+	const durableLive = await run({ target: "tool", action: "read", id: "demo:echo" });
+	assert.equal(durableLive.isError, undefined, durableLive.output[0].text);
+	assert.deepEqual(JSON.parse(durableLive.output[0].text), { extension: "demo", name: "echo", description: "Echo a value.", schema: { type: "object", properties: { value: { type: "string" } } } });
+	assert.equal(durableLive.details.status, "live");
+	assert.equal(durableLive.details.ref.kind, "tool");
+	const durableStale = await run({ target: "tool", action: "read", ref: { id: "demo:echo", version: "0".repeat(64) } });
+	assert.equal(durableStale.isError, true);
+	assert.match(durableStale.output[0].text, /tool reference is stale: requested 0+, current [0-9a-f]{64}; the requested immutable version is unavailable/);
+
+	const added = await run({ target: "ledger", action: "add", kind: "note", text: "Keep this exact." });
+	assert.equal(added.isError, undefined, added.output[0].text);
+	const brainList = await run({ target: "ledger", action: "list" });
+	assert.equal(brainList.isError, undefined, brainList.output[0].text);
+	assert.deepEqual(brainList.details, { target: "ledger", count: 1, shown: 1 });
+	assert.equal(JSON.parse(brainList.output[0].text)[0].ref.kind, "ledger");
+	const brainLive = await run({ target: "ledger", action: "read", id: "n1" });
+	assert.equal(brainLive.isError, undefined, brainLive.output[0].text);
+	assert.equal(JSON.parse(brainLive.output[0].text).text, "Keep this exact.");
+	assert.equal(brainLive.details.status, "live");
+	assert.equal(brainLive.details.ref.kind, "ledger");
+	const brainStale = await run({ target: "ledger", action: "read", ref: { id: "n1", version: "0".repeat(64) } });
+	assert.equal(brainStale.isError, true);
+	assert.match(brainStale.output[0].text, /ledger reference is stale: requested 0+, current [0-9a-f]{64}; historical content is unavailable/);
+
+	addRecord(brainDir, { id: "t1", at: 1_700_000_000_000, mode: "look", brief: "Review routing", report: "The route stayed exact.", summary: "Routing reviewed." });
+	const reportList = await run({ target: "report", action: "list" });
+	assert.equal(reportList.isError, undefined, reportList.output[0].text);
+	assert.deepEqual(reportList.details, { target: "report", count: 1, shown: 1 });
+	assert.equal(JSON.parse(reportList.output[0].text)[0].ref.kind, "report");
+	const reportLive = await run({ target: "report", action: "read", id: "t1" });
+	assert.equal(reportLive.isError, undefined, reportLive.output[0].text);
+	assert.match(reportLive.output[0].text, /^Report t1 /);
+	assert.equal(reportLive.details.status, "live");
+	assert.equal(reportLive.details.ref.kind, "report");
+
+	const assessment = await run({ target: "assessment", action: "write", text: "The router is central." });
+	assert.equal(assessment.isError, undefined, assessment.output[0].text);
+	assert.deepEqual(assessment.details, { target: "assessment", action: "write", shown: ["assessment written, 22 characters"] });
+});
+
+test("return: a declared proof is durable and separate from the task report", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const tool = returnTool({ root, brainDir, config: {} });
+	const result = await tool.execute({ report: "The targeted test passed.", proof: "npm test -- focused exits 0.", done: true }, { conversationId: "proof-focus", now: () => Date.parse(NOW) }, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.report, "The targeted test passed.");
+	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.proof, "npm test -- focused exits 0.");
+	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.done, true);
+});
+
+test("return: a closure gap cannot accompany a completion claim and is kept for the orchestrator", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const tool = returnTool({ root, brainDir, config: {} });
+	const api = { conversationId: "gap-focus", now: () => Date.parse(NOW) };
+	const contradictory = await tool.execute({ report: "The script parses, but the page cannot load it.", proof: "node --check exits 0.", done: true, closure_gap: "index.html is outside the declared targets." }, api, undefined);
+	assert.equal(contradictory.isError, true);
+	assert.match(contradictory.output[0].text, /`closure_gap`.*`done` must be false/);
+	assert.equal(loadContext(brainDir).tasks["gap-focus"], undefined, "a contradictory return does not end or persist the focus");
+	const blocked = await tool.execute({ report: "The script parses, but the page cannot load it.", proof: "node --check exits 0.", done: false, closure_gap: "index.html is outside the declared targets." }, api, undefined);
+	assert.equal(blocked.isError, undefined, blocked.output[0].text);
+	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.done, false);
+	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.closureGap, "index.html is outside the declared targets.");
+});
+
+test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let messages = [];
+	const engine = { messagesOf: () => messages, want: () => {}, callWords: () => "book" };
+	const tool = bookTool({ root, brainDir, config: {}, engine, gate: { yolo: false } });
+	let seq = 0;
+	const api = () => ({ conversationId: ROOT_CONVERSATION_ID, taskId: `flat-${++seq}`, now: () => 1700000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
+	const run = (args) => tool.execute(tool.prepareArguments(args), api(), undefined);
+
+	// Plan: flat envelope/move add, a reported move's acceptance, edit, remove, and clear.
+	const p1 = await run({ target: "plan", action: "add", mode: "look", text: "Map the entry point." });
+	assert.ok(!p1.isError && /p1 added as an authorization envelope/.test(p1.output[0].text), p1.output[0].text);
+	const m1 = await run({ target: "plan", action: "addMove", parent: "p1", text: "Read src/index.mjs", done_when: "The entry point is named." });
+	assert.ok(!m1.isError && /m1 added under p1/.test(m1.output[0].text), m1.output[0].text);
+	const reportPlan = loadPlan(brainDir).plan;
+	startMove(reportPlan, "m1", NOW);
+	reportMove(reportPlan, "m1", 1, { done: true, report: "t-flat", proof: "src/index.mjs was read" }, NOW);
+	savePlan(brainDir, reportPlan);
+	assert.throws(() => tool.prepareArguments({ target: "plan", action: "acceptMove", id: "m1" }), /review/);
+	const mDone = await run({ target: "plan", action: "acceptMove", id: "m1", review: "Reading src/index.mjs witnesses that its entry point is named." });
+	assert.ok(!mDone.isError && /m1 accepted\./.test(mDone.output[0].text), mDone.output[0].text);
+	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
+	assert.ok(!pDone.isError && /p1 is done\./.test(pDone.output[0].text), pDone.output[0].text);
+	const p2 = await run({ target: "plan", action: "add", mode: "change", text: "Fix the roller.", done_when: "The roller works.", before: "p1" });
+	assert.ok(!p2.isError && /p2 added as an authorization envelope/.test(p2.output[0].text), p2.output[0].text);
+	const pEdit = await run({ target: "plan", action: "edit", id: "p2", text: "Fix the dice roller." });
+	assert.ok(!pEdit.isError, pEdit.output[0].text);
+	const pRemove = await run({ target: "plan", action: "remove", id: "p2" });
+	assert.ok(!pRemove.isError && /p2 removed/.test(pRemove.output[0].text), pRemove.output[0].text);
+	await run({ target: "plan", action: "add", mode: "look", text: "Leftover envelope." });
+	const cleared = await run({ target: "plan", action: "clear" });
+	assert.ok(!cleared.isError && /The plan is empty now\./.test(cleared.output[0].text), cleared.output[0].text);
+	assert.equal(loadPlan(brainDir).plan.items.length, 0);
+
+	// Ledger: flat goal add, salient note add/edit, done, remove.
+	const g1 = await run({ target: "ledger", action: "add", kind: "goal", text: "Clean schema", done_when: "npm test passes with flat book calls" });
+	assert.ok(!g1.isError && /g1 added/.test(g1.output[0].text), g1.output[0].text);
+	const n2 = await run({ target: "ledger", action: "add", kind: "note", text: "Use top-level id.", salient: true });
+	assert.ok(!n2.isError && /n2 added/.test(n2.output[0].text), n2.output[0].text);
+	const nEdit = await run({ target: "ledger", action: "edit", id: "n2", salient: false });
+	assert.ok(!nEdit.isError, nEdit.output[0].text);
+	const gDone = await run({ target: "ledger", action: "done", id: "g1", text: "All tests pass." });
+	assert.ok(!gDone.isError && /g1 closed/.test(gDone.output[0].text), gDone.output[0].text);
+	const nRemove = await run({ target: "ledger", action: "remove", id: "n2" });
+	assert.ok(!nRemove.isError && /n2 removed/.test(nRemove.output[0].text), nRemove.output[0].text);
+
+	// Context: fold by top-level `id`, dressMain notice, and `context recall` by top-level `id`.
+	addRecord(brainDir, { id: "t1", at: 1700000000000, mode: "look", brief: "Inspect", report: `Detailed report body.\n\n${KEPT_AS("t1")}`, summary: "Inspected" });
+	messages = [{ role: "toolResult", toolCallId: "tc1", toolName: "task", content: [{ type: "text", text: `Detailed report body.\n\n${KEPT_AS("t1")}` }] }];
+	const folded = await run({ target: "context", action: "fold", id: "t1" });
+	assert.ok(!folded.isError && /Dropped from view: t1/.test(folded.output[0].text), folded.output[0].text);
+	const dressed = dressMain(messages, brainDir);
+	assert.match(dressed[0].content[0].text, /target=context, action=recall/);
+	const recalled = await run({ target: "context", action: "recall", id: "t1" });
+	assert.ok(!recalled.isError && /Report t1 stands in its place again/.test(recalled.output[0].text), recalled.output[0].text);
+
+	// Task tool no longer appends the unconditional "Internal checkpoint" prompt to task reports.
+	const memos = new Map();
+	const tTool = taskTool({ root, brainDir, config: { taskTurns: 4, maxTokens: 4096 } });
+	const taskRes = await tTool.execute({ brief: "Read index", done_when: "The index entry point is reported." }, {
+		conversationId: ROOT_CONVERSATION_ID,
+		taskId: "task-run-1",
+		callId: "call-1",
+		now: () => 1700000000000,
+		memo: async (k, v) => { if (v !== undefined) memos.set(k, v); return memos.get(k); },
+		details: async () => {},
+		commit: async (fn) => fn({
+			scanConversations: async () => ({ items: [{ id: "focus-1", parent: { at: 1 } }] }),
+			scanEntries: async () => ({ items: [{ conversationId: "focus-1", kind: "carto.brief", data: { mode: "look" } }] }),
+		}),
+		conversation: async () => ({
+			submit: async () => ({
+				wait: async () => {
+					updateContext(brainDir, (store) => { taskState(store, "focus-1").returned = { report: "Clean task report.", done: true }; });
+					return {};
+				},
+			}),
+		}),
+	}, undefined);
+	assert.equal(taskRes.isError, undefined);
+	assert.match(taskRes.output[0].text, /Clean task report\./);
+	assert.doesNotMatch(taskRes.output[0].text, /Internal checkpoint/);
+
+	// Prompts accurately reflect first-class `read` and `shelf` plus flat `book`, with no stale `<shelf-ask>`, `target=shelf`, or `file read` instructions.
+	const fullPrompt = [
+		systemPrompt({ root }),
+		TOOLS.read,
+		TOOLS.shelf,
+		TOOLS.book,
+		LOOK_NOTE,
+		CHANGE_NOTE({ item: "p1", move: "m1", revision: 1, text: "Edit file", doneWhen: "The file is updated.", proof: "The focused check.", targets: ["src/file.mjs"] }, { commands: "sandbox", network: false }),
+		HANDOFF_IN_TURN("test"),
+		HANDOFF_NOTE("test"),
+		TASK_HANDOFF,
+	].join("\n");
+	assert.doesNotMatch(fullPrompt, /operation\s*\{|operation\.text|placementId|in `operation`|target=shelf|target="shelf"|`file read`|target\s*=\s*"?file"?[^.\n]*action\s*=\s*"?read"?|Should I shelf|asked when I read|asked whether to shelf/);
+	assert.match(TOOLS.read, /read batch/);
+	assert.match(TOOLS.read, /later successful read batch removes the prior batch from active view/);
+	assert.match(TOOLS.read, /deliberately preserve source material/);
+	assert.match(TOOLS.read, /shared ledger, atlas or assessment/);
+	assert.match(LOOK_NOTE, /retain lasting conclusions in the shared ledger, atlas or assessment/);
+	assert.match(CHANGE_NOTE({ item: "p1", move: "m1", revision: 1, text: "Edit file", doneWhen: "The file is updated.", proof: "A check.", targets: ["src/file.mjs"] }), /keep lasting findings before return/);
+	assert.doesNotMatch(TOOLS.read, /one `read` comes back per reply/);
+	assert.match(TOOLS.shelf, /action/);
+});
+
+test("prepend: the user's own markdown is read before the prompt as source of truth; nothing when absent", (t) => {
 	const { root, brainDir } = fresh(t);
 	const core = join(root, "PREPEND.md");
 	// Nothing anywhere: nothing to prepend.
@@ -898,513 +1958,758 @@ test("prepend: the user's own markdown is read before the prompt — core first,
 	// The core alone.
 	writeFileSync(core, "Be brief.\n");
 	const coreOnly = loadPrepend(brainDir, core);
-	assert.match(coreOnly, /PREPEND\.md \(the installation/);
-	assert.ok(coreOnly.includes(`written by ${USER_NAME}`));
-	assert.match(coreOnly, /Be brief\./);
-	assert.equal(coreOnly.includes("this project's brain"), false, "only what exists is read");
-	// Both: the core is read before the brain (the closer one said last, so it wins).
+	assert.equal(coreOnly, "Source of Truth:\nBe brief.");
+	assert.equal(coreOnly.includes("Always sign off"), false, "only what exists is read");
+	// Both: the core is read before the brain, so the closer instruction comes last.
 	writeFileSync(join(brainDir, "PREPEND.md"), "Always sign off as Molly.\n");
 	const both = loadPrepend(brainDir, core);
-	assert.ok(both.indexOf("Be brief.") < both.indexOf("Always sign off as Molly."), "core before brain");
-	assert.match(both, /this project's brain/);
+	assert.equal(both, "Source of Truth:\nBe brief.\n\nSource of Truth:\nAlways sign off as Molly.");
 	// A whitespace-only brain file is nothing, not even a header.
 	writeFileSync(join(brainDir, "PREPEND.md"), "  \n\n");
 	const after = loadPrepend(brainDir, core);
 	assert.equal(after.includes("Molly"), false);
-	assert.match(after, /Be brief\./);
+	assert.equal(after, "Source of Truth:\nBe brief.");
 	// An unreadable core (a folder) is skipped, not fatal.
 	assert.equal(loadPrepend(brainDir, root), undefined, "a folder where the file would be: nothing added");
 	// Line endings and a byte order mark do not stand in the way.
 	writeFileSync(core, "\uFEFFBe terse.\r\n");
 	const crlf = loadPrepend(brainDir, core);
-	assert.match(crlf, /Be terse\./);
+	assert.equal(crlf, "Source of Truth:\nBe terse.");
 	assert.equal(crlf.includes("\r"), false);
 });
 
-// ─── The read gate: one read per reply, then the shelf question ─────────────
+// ─── Read batches: bounded transient groups, with legacy cleanup ────────────
 
-import { beginShelfGate, readGateCheck, takeShelfAsk, settleShelfAsk, parseShelfDecision, dressShelfAsk, SHELF_ASK_OPEN } from "../src/shelf-ask.mjs";
+import { beginReadBatch, readBatchAllowance, readBatchCheck, withoutShelfAsk } from "../src/read-batch.mjs";
 
-const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c${path}`, name: "book", arguments: { target: "file", action: "read", path } });
+const readCall = (path, id) => ({ type: "toolCall", id: id ?? `c-${path}`, name: "read", arguments: { path } });
+const shelfCall = (path, id) => ({ type: "toolCall", id: id ?? `s-${path}`, name: "shelf", arguments: { action: "add", path } });
 
-test("read gate: the first file read of a reply is returned, the rest are refused, and the question rides the read that came back", () => {
-	const id = "gate-first";
-	const message = { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md"), readCall("c.md")] };
-	beginShelfGate(id, message);
-	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
-	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
-	assert.match(readGateCheck(id, readCall("c.md")), /c\.md was not returned/);
-	// A refusal carries no question,
-	assert.equal(takeShelfAsk(id, readCall("b.md"), { isError: true }), undefined, "a refusal never carries the question");
-	// and neither does a result from a call that is not one of the reply's reads.
-	assert.equal(takeShelfAsk(id, { type: "toolCall", id: "shell-1", name: "shell", arguments: {} }, { isError: false }), undefined);
-	// The read that came back does.
-	const ask = takeShelfAsk(id, readCall("a.md"), { isError: false });
-	assert.match(ask, /<shelf-ask>/);
-	assert.match(ask, /1  a\.md  \(read this reply\)/);
-	assert.match(ask, /2  b\.md {2}\(not returned\)/);
-	assert.match(ask, /3  c\.md {2}\(not returned\)/);
-	assert.match(ask, /not answering shelves none/);
-	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: false }), undefined, "the question rides a once");
-	// A reply without file reads clears the gate.
-	beginShelfGate(id, { role: "assistant", timestamp: 2, content: [{ type: "text", text: "noted" }] });
-	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: false }), undefined);
+test("read batches: one reply admits a bounded group, splits the output allowance, and never gates shelf", () => {
+	const id = "batch-first";
+	const reads = Array.from({ length: POLICY.limits.look.readMaxFiles + 1 }, (_, index) => readCall(`file-${index + 1}.md`));
+	const message = { role: "assistant", timestamp: 1, content: [reads[0], shelfCall("c.md"), reads[1], shelfCall("d.md"), ...reads.slice(2)] };
+	beginReadBatch(id, message);
+	for (const call of reads.slice(0, POLICY.limits.look.readMaxFiles)) assert.equal(readBatchCheck(id, call), undefined, `${call.arguments.path} runs in the batch`);
+	assert.equal(readBatchCheck(id, shelfCall("c.md")), undefined, "shelf calls are never gated");
+	assert.equal(readBatchCheck(id, shelfCall("d.md")), undefined, "multiple shelf calls in one reply all run");
+	const refused = readBatchCheck(id, reads.at(-1));
+	assert.match(refused, new RegExp(`read batch already has ${POLICY.limits.look.readMaxFiles} files`));
+	assert.match(refused, /later read batch/);
+	assert.equal(readBatchAllowance(id, reads[0].id), Math.floor(POLICY.limits.look.readTokenCeiling / POLICY.limits.look.readMaxFiles), "each permitted file gets its planned share of the batch budget");
+	assert.equal(readBatchAllowance(id, reads.at(-1).id), undefined, "the refused file has no allowance");
+	const three = [readCall("one.md", "batch-one"), readCall("two.md", "batch-two"), readCall("three.md", "batch-three")];
+	beginReadBatch(id, { role: "assistant", timestamp: 2, content: three });
+	const shares = three.map((call) => readBatchAllowance(id, call.id));
+	assert.equal(shares.reduce((total, allowance) => total + allowance, 0), POLICY.limits.look.readTokenCeiling, "all planned shares add up to the one aggregate ceiling");
+	assert.ok(shares[0] >= shares[1] && shares[1] >= shares[2] && shares[0] - shares[2] <= 1, "whole-token remainder goes to earlier calls in reply order");
+	// A reply with no `read` clears the batch plan.
+	beginReadBatch(id, { role: "assistant", timestamp: 3, content: [shelfCall("f.md")] });
+	assert.equal(readBatchCheck(id, reads[0]), undefined);
+	assert.equal(readBatchAllowance(id, reads[0].id), undefined);
 });
 
-test("read gate: when no read comes back cleanly, the last read of the reply carries the question", () => {
-	const id = "gate-all-fail";
-	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("a.md"), readCall("b.md")] });
-	assert.equal(readGateCheck(id, readCall("a.md")), undefined);
-	assert.match(readGateCheck(id, readCall("b.md")), /b\.md was not returned/);
-	assert.equal(takeShelfAsk(id, readCall("a.md"), { isError: true }), undefined, "not before the round's reads are all in");
-	const ask = takeShelfAsk(id, readCall("b.md"), { isError: true });
-	assert.match(ask, /<shelf-ask>/, "the last read carries it rather than no one");
-});
-
-test("read gate: a single read that fails asks nothing — there is nothing to weigh", () => {
-	const id = "gate-single-fail";
-	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("broken.md")] });
-	assert.equal(readGateCheck(id, readCall("broken.md")), undefined);
-	assert.equal(takeShelfAsk(id, readCall("broken.md"), { isError: true }), undefined);
-});
-
-test("read gate: a single read asks the yes/no question about the one file", () => {
-	const id = "gate-single";
-	beginShelfGate(id, { role: "assistant", timestamp: 1, content: [readCall("solo.md")] });
-	assert.equal(readGateCheck(id, readCall("solo.md")), undefined);
-	const ask = takeShelfAsk(id, readCall("solo.md"), { isError: false });
-	assert.match(ask, /Should I shelf solo\.md\? Yes or no/);
-	assert.doesNotMatch(ask, /by number/);
-});
-
-test("read gate: a yes shelves the files, numbers pick, a no shelves none", (t) => {
+test("read tool: a batch share is the actual returned ceiling", async (t) => {
 	const { root, brainDir } = fresh(t);
-	writeFileSync(join(root, "x.md"), "alpha\n");
-	writeFileSync(join(root, "y.md"), "beta\n");
-	const mk = (id, files) => {
-		beginShelfGate(id, { role: "assistant", timestamp: 1, content: files.map((f, i) => readCall(f, `c${i}`)) });
-		for (const f of files) readGateCheck(id, readCall(f, `c${files.indexOf(f)}`));
-		takeShelfAsk(id, readCall(files[0], "c0"), { isError: false });
+	writeFileSync(join(root, "long.txt"), Array.from({ length: 1_024 }, () => "x".repeat(100)).join("\n"));
+	const id = "batch-ceiling";
+	const first = readCall("long.txt", "batch-long-a");
+	const second = readCall("other.txt", "batch-long-b");
+	beginReadBatch(id, { role: "assistant", content: [first, second] });
+	const reader = readTool({ root, brainDir });
+	const result = await reader.execute(reader.prepareArguments(first.arguments), { conversationId: id, callId: first.id }, undefined);
+	assert.equal(result.isError, undefined);
+	assert.match(result.output[0].text, /share of this read batch/, "the result says why it stopped early");
+	assert.match(result.output[0].text, /more lines; ask for range/, "and tells the next useful selection");
+	const failed = await reader.execute(reader.prepareArguments(second.arguments), { conversationId: id, callId: second.id }, undefined);
+	assert.equal(failed.isError, true, "an admitted missing file still fails inline");
+	assert.equal(readBatchAllowance(id, first.id), POLICY.limits.look.readTokenCeiling / 2, "that failure does not redistribute the first call's planned share");
+	assert.equal(readBatchAllowance(id, second.id), POLICY.limits.look.readTokenCeiling / 2, "or discard its own planned share");
+	const legacy = bookTool({ root, brainDir, config: {}, engine: {}, gate: { yolo: false } });
+	const replay = await legacy.execute({ target: "file", action: "read", path: "long.txt" }, { conversationId: id, callId: first.id }, undefined);
+	assert.match(replay.output[0].text, /share of this read batch/, "a stored legacy book file read receives the same planned share");
+});
+
+test("engine: task read turnover drops only redundant task steps, never schedules a collapse", (t) => {
+	const { root, brainDir } = fresh(t);
+	const focus = "focus-read-turnover";
+	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
+	engine.seen(focus, [
+		{ role: "toolResult", content: [{ type: "text", text: TASK_HEADER }] },
+		{ role: "assistant", content: [readCall("a.js", "old-read")] },
+		{ role: "toolResult", toolCallId: "old-read", toolName: "read", content: [{ type: "text", text: "x".repeat(2_000) }] },
+		{ role: "assistant", content: [readCall("a.js", "new-read")] },
+	]);
+	assert.deepEqual(engine.afterTaskRead(focus, { path: "a.js" }), ["s1"], "the older same-file task step is the only change");
+	assert.equal(engine.due(), undefined, "a read turnover does not schedule the main-context collapse");
+	const task = loadContext(brainDir).tasks[focus];
+	assert.equal(task.cut, undefined, "and it does not write a task collapse block");
+	assert.equal(task.dropped.s1, "An earlier read of the same lines stood here; the newer one is further down.");
+});
+
+test("engine: the optional context handoff is a raw no-tools native grammar decision and fails closed", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	const ignored = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
+	t.after(async () => { await server.close(); await ignored.close(); });
+	const payload = {
+		model: "stand-in",
+		messages: [
+			{ role: "system", content: "ordinary system prompt" },
+			{ role: "user", content: "ON COLLAPSE: preserve this one fact" },
+		],
+		tools: [{ type: "function", function: { name: "book", parameters: {} } }],
+		tool_choice: "auto",
+		stream: true,
 	};
-	const main = ROOT_CONVERSATION_ID;
-	mk(main, ["x.md", "y.md"]);
-	settleShelfAsk(main, { role: "assistant", content: [{ type: "text", text: "yes" }] }, { root, brainDir });
-	assert.deepEqual(loadContext(brainDir).shelf.map((s) => s.path).sort(), ["x.md", "y.md"]);
-
-	// A no: nothing new on the shelf.
-	const id = "gate-no";
-	mk(id, ["x.md"]);
-	const before = loadContext(brainDir).shelf.length;
-	settleShelfAsk(id, { role: "assistant", content: [{ type: "text", text: "no" }] }, { root, brainDir });
-	assert.equal(loadContext(brainDir).shelf.length, before);
-
-	// Numbers pick, across an unanswered single question folded in.
-	assert.deepEqual(parseShelfDecision("yes — 2", 3), [1]);
-	assert.deepEqual(parseShelfDecision("1 3", 3), [0, 2]);
-	assert.deepEqual(parseShelfDecision("yes", 2), [0, 1]);
-	assert.deepEqual(parseShelfDecision("the renderer has 3 faces and 18 vertices", 3), []);
-	assert.deepEqual(parseShelfDecision("2d canvas", 3), []);
-});
-
-test("shelf ask: the question stays until the agent has answered, then dresses out", () => {
-	const toolResult = (text) => ({ role: "toolResult", toolName: "book", toolCallId: "c0", content: [{ type: "text", text }] });
-	const ask = `content of the read\n\n${SHELF_ASK_OPEN}\nShould I shelf it? Yes or no.\n${SHELF_ASK_OPEN.replace("shelf-ask", "/shelf-ask")}`;
-	// Nothing for the model to see yet: no assistant message after it.
-	const before = dressShelfAsk([toolResult(ask)]);
-	assert.match(text0(before), /shelf it/i);
-	// The agent answered: the question is stripped from what it sees.
-	const after = dressShelfAsk([toolResult(ask), { role: "assistant", content: [{ type: "text", text: "no" }] }]);
-	assert.doesNotMatch(text0(after), /shelf it/i);
-	assert.match(text0(after), /content of the read/, "the read itself stays");
-});
-const text0 = (messages) => messages.map((m) => (typeof m.content === "string" ? m.content : (m.content ?? []).map((p) => p.text ?? "").join(""))).join("\n");
-
-// ─── The consult tool ────────────────────────────────────────────────────────
-
-const consultConfig = { server: "http://127.0.0.1:8888/v1", consultModel: "MythosNano", consultMaxTokens: 40960, consultTemperature: 0.6, consultTimeoutSeconds: 1800, contextWindow: 100000 };
-const consultApi = (conversationId) => ({ conversationId, taskId: "c1", now: () => 1726000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
-/** An SSE body the way the endpoint streams one: deltas, a final finish_reason with usage, a [DONE]. */
-const sseAnswer = (content = "The answer is 42.", finishReason = "stop", completionTokens = 1234) => {
-	const frames = [];
-	for (const piece of String(content).split(/(?<=\n)/)) {
-		if (piece === "") continue;
-		frames.push(`data: ${JSON.stringify({ choices: [{ delta: { content: piece }, finish_reason: null }] })}\n\n`);
-	}
-	frames.push(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 256, completion_tokens: completionTokens, total_tokens: 256 + completionTokens } })}\n\n`);
-	frames.push("data: [DONE]\n\n");
-	return new Response(frames.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
-};
-const okAnswer = sseAnswer;
-
-test("consult: one plain chat completion, the answer in a file, shelved", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		calls.push({ url, init });
-		return okAnswer("The answer is 42.\n");
+	const prepare = (url) => {
+		const engine = createEngine({ root, brainDir, config: { server: url, model: "stand-in", contextWindow: 10_000, collapseFull: 80 } });
+		engine.sending(ROOT_CONVERSATION_ID, payload, { provider: "local", id: "stand-in" });
+		engine.replied(ROOT_CONVERSATION_ID, { content: [{ type: "text", text: "A normal participant reply." }] });
+		return engine;
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const chunks = [];
-	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
-	const result = await tool.execute({ question: "What is the answer?", context: "It was asked before." }, api, undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.equal(chunks.join(""), "The answer is 42.\n", "the words are reported as they stream, token for token");
-	// The request: same endpoint, plain chat completion, no tools, no grammar, the question last.
-	assert.equal(calls.length, 1);
-	assert.equal(calls[0].url, "http://127.0.0.1:8888/v1/chat/completions");
-	assert.equal(calls[0].init.method, "POST");
-	const sent = JSON.parse(calls[0].init.body);
-	assert.equal(sent.model, "MythosNano");
-	assert.equal(sent.max_tokens, 40960);
-	assert.equal(sent.temperature, 0.6);
-	assert.equal(sent.stream, true, "the story streams token by token");
-	assert.equal(sent.stream_options?.include_usage, true, "and asks the server for usage at the end");
-	assert.equal("tools" in sent, false, "no tool definitions are sent");
-	assert.equal(sent.messages.length, 1);
-	assert.equal(sent.messages[0].role, "user");
-	assert.ok(sent.messages[0].content.endsWith("What is the answer?"), "the question is last");
-	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
-	// The answer lands in the brain under a thread; the question stands in the story for whoever reads it later.
-	const thread = result.details.thread;
-	assert.match(thread, /^st\d+$/, "a fresh story mints the short thread marker, like every other id");
-	assert.equal(result.details.rounds, 1);
-	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
-	assert.ok(file.includes("What is the answer?"));
-	assert.ok(file.includes("The answer is 42."));
-	assert.ok(file.includes("finish: stop"));
-	assert.equal(result.output[0].text.includes(".brain"), false, "the receipt never names a path");
-	assert.equal(result.output[0].text.includes("storyteller/"), false, "the receipt never names the file");
-	// Shelved for the main agent as a story reference; the receipt names the placement, not the answer.
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1);
-	assert.equal(store.shelf[0].ref.type, "story");
-	assert.equal(store.shelf[0].ref.id, thread);
-	assert.match(result.output[0].text, new RegExp(`shelved as placement ${store.shelf[0].id}`, "i"));
-	assert.match(result.output[0].text, new RegExp(`thread: "${thread}"`), "the receipt says how to ask on");
-	assert.doesNotMatch(result.output[0].text, /The answer is 42/, "the answer is not dumped into the context");
-	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance");
+	const choice = await prepare(server.url).ask(ROOT_CONVERSATION_ID, { reason: "a test collapse" });
+	assert.equal(choice.handoff, true);
+	const request = server.nativeRequests.at(-1);
+	assert.equal(request.stream, false);
+	assert.equal(request.tools, undefined, "the host decision never copies ordinary provider tools");
+	assert.equal(request.tool_choice, undefined);
+	assert.match(request.grammar, /handoff/);
+	assert.match(request.messages.at(-1).content, /Answer \{\"handoff\": true\}/);
+
+	const refused = await prepare(ignored.url).ask(ROOT_CONVERSATION_ID, { reason: "a test collapse" });
+	assert.equal(refused.handoff, false, "an ignored grammar cannot be accepted by a prompt-only parser");
+	assert.match(refused.error, /required native grammar handoff decision failed/i);
 });
 
-test("consult: a focus shelves the answer into its own shelf, not the main one", async (t) => {
+test("engine: a sent provider request is an immutable snapshot with separate provider usage", (t) => {
 	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => okAnswer("Task-scoped answer.");
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "Settle this kernel." }, consultApi(7777), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 0, "the main shelf is untouched");
-	assert.equal(taskState(store, "7777").shelf.length, 1, "the focus shelf holds it");
-	assert.equal(taskState(store, "7777").shelf[0].ref.id, result.details.thread);
+	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
+	const focus = "focus-snapshot";
+	const payload = { model: "qwen", stream: true, messages: [{ role: "user", content: "first words" }], tools: [{ type: "function", function: { name: "read" } }] };
+	const plan = { messages: [{ role: "user", content: [{ type: "text", text: "first words" }] }], parts: [{ id: "part:focus-snapshot:message:0", kind: "active-message", source: "durable:focus-snapshot:42", lifecycle: "planned" }] };
+	engine.planned(focus, plan);
+	engine.sending(focus, payload, { provider: "local", api: "openai-completions", id: "qwen" });
+	payload.messages[0].content = "changed after dispatch";
+	plan.parts[0].source = "changed after dispatch";
+	payload.tools[0].function.name = "changed";
+	engine.replied(focus, { role: "assistant", content: [{ type: "text", text: "reply" }], usage: { input: 10, cacheRead: 7, output: 3 } });
+
+	const first = engine.window("newest");
+	assert.equal(first.requestId, `${focus}:1`);
+	assert.equal(first.payload.messages[0].content, "first words", "the body was copied before outside code could mutate it");
+	assert.equal(first.payload.tools[0].function.name, "read");
+	assert.equal(first.payloadHash?.length, 16, "the frozen JSON has a short comparison hash");
+	assert.deepEqual(first.model, { provider: "local", api: "openai-completions", id: "qwen" });
+	assert.equal(first.plan.parts[0].source, "durable:focus-snapshot:42", "the pre-formatting plan and its source fact freeze with the provider body");
+	assert.deepEqual(first.usage, { input: 10, cacheRead: 7, output: 3 }, "provider fields stay separate from the old collapse accounting total");
+	assert.equal(first.used, 20, "the existing total keeps its old collapse meaning");
+	first.payload.messages[0].content = "a screen cannot mutate the snapshot";
+	first.reply.content[0].text = "a screen cannot mutate the reply";
+	const again = engine.window("newest");
+	assert.equal(again.payload.messages[0].content, "first words", "window callers get copies too");
+	assert.equal(again.reply.content[0].text, "reply");
+	engine.sending(focus, { messages: [{ role: "user", content: "a later direct send" }] }, { provider: "local", id: "qwen" });
+	assert.equal(engine.window("newest").plan, undefined, "a send without a fresh plan never inherits prior request provenance");
 });
 
-test("consult: the context is clipped to the cap, in prepareArguments and at send time", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const big = "c".repeat(65000);
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => okAnswer("clipped ok") });
-	const prepared = tool.prepareArguments({ question: "q?", context: big });
-	assert.equal(prepared.context.length, 64000, "prepareArguments clips to the cap before validation sees it");
-	const calls = [];
-	const spy = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("clipped ok"); } });
-	const result = await spy.execute({ question: "q?", context: big }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const sent = calls[0].messages[0].content;
-	assert.ok(sent.includes("c".repeat(64000)) && !sent.includes("c".repeat(64001)), "only the head is sent");
-	assert.match(result.output[0].text, /clipped to the first/);
+test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped cleanly", () => {
+	const legacy = "file body\n\n<shelf-ask>\nShould I shelf index.html? Yes or no.\n</shelf-ask>\n";
+	assert.equal(withoutShelfAsk(legacy), "file body");
+	assert.equal(withoutAdditions(legacy), "file body");
 });
 
-test("consult: an HTTP error names the model and the setting that fixes it", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => new Response("unknown model: MythosNano", { status: 404 });
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /HTTP 404/);
-	assert.match(result.output[0].text, /consultModel/, "it says which setting names the model");
-});
+// ─── Same-model consultation conference ─────────────────────────────────────
 
-test("consult: a cut-off answer says the ending is incomplete", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => okAnswer("Partial reasoning…", "length", 40960);
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.match(result.output[0].text, /ran out of room/);
-	assert.match(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8"), /finish: length/);
-});
+test("native grammar is Cartographer's hard host-decision boundary, not an OpenAI custom-tool option", async (t) => {
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
+	const capability = await probeNativeGrammarCapability({ server: server.url, modelId: "stand-in", cache: false });
+	assert.equal(capability.ok, true);
+	const probe = server.nativeRequests.at(-1);
+	assert.equal(probe.tools, undefined);
+	assert.equal(probe.tool_choice, undefined);
+	assert.equal(probe.stream, false);
+	assert.match(probe.grammar, /"cartographer"/);
+	assert.match(probe.messages.at(-1).content, /outside-the-allowed-native-grammar-set/);
 
-test("consult: an empty consultModel switches the tool off and asks nothing", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: { ...consultConfig, consultModel: "" }, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /switched off/);
-	assert.equal(called, 0, "the endpoint is never hit");
-});
-
-test("consult: the stream is read the way llama.cpp frames it — pings, CRLF, and frames split mid-frame across chunks", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const encoder = new TextEncoder();
-	const frames = [
-		": ping\r\n\r\n",
-		`data: {"choices":[{"delta":{"role":"assistant","content":"It "},"finish_reason":null}]}\r\n\r\n`,
-		`data: {"choices":[{"delta":{"content":"is 42."},"finish_reason":null}]}\r\n\r\n`,
-		": ping\r\n\r\n",
-		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":12}}\r\n\r\n`,
-		"data: [DONE]\r\n\r\n",
-	];
-	// Bytes, not frames: every TCP chunk boundary is fair game.
-	const bytes = encoder.encode(frames.join(""));
-	const stream = new ReadableStream({
-		async start(controller) {
-			for (let at = 0; at < bytes.length; at += 7) controller.enqueue(bytes.slice(at, at + 7));
-			controller.close();
-		},
+	const choice = await chooseNativeGrammar({
+		server: server.url,
+		modelId: "stand-in",
+		messages: [{ role: "user", content: "Choose the next host role." }],
+		grammar: nativeLiteralGrammar(["atlas", "ledger"]),
+		eligible: ["atlas", "ledger"],
 	});
-	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
-	const chunks = [];
-	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, api, undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.equal(chunks.join(""), "It is 42.", "the pieces are reassembled across chunk boundaries");
-	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("It is 42."));
+	assert.equal(choice.value, "atlas");
+	assert.equal(choice.record.request.tools, undefined);
+
+	const ignored = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
+	t.after(() => ignored.close());
+	const refused = await probeNativeGrammarCapability({ server: ignored.url, modelId: "stand-in", cache: false });
+	assert.equal(refused.ok, false, "a server that accepts but ignores grammar never becomes a valid Cartographer route");
+	assert.match(refused.error, /outside the grammar/i);
 });
 
-test("consult: a story that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
+test("harness: a direct Durable submission cannot bypass the deferred native grammar gate", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const encoder = new TextEncoder();
-	const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: "It is not. Roll twice." }, finish_reason: null }] })}\n\n`;
-	let sent = false;
-	const stream = new ReadableStream({
-		pull(controller) {
-			if (!sent) {
-				controller.enqueue(encoder.encode(frames));
-				sent = true;
-				return;
-			}
-			controller.error(new Error("connection reset"));
-		},
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ prefill: false }));
+	const server = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
+	let session;
+	t.after(async () => {
+		await session?.harness.close(session.context);
+		await server.close();
 	});
-	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true, "a broken story is an error");
-	assert.match(result.output[0].text, /broke off mid-answer/);
-	const file = readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8");
-	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the story");
-	assert.match(file, /broke off mid-answer/, "and says it broke off");
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1, "the partial is shelved all the same");
+	const config = loadConfig({
+		brainDir,
+		flags: { url: server.url, model: "stand-in" },
+		env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" },
+	});
+	session = await openSession({ root, brainDir, config, runner: createRunner() });
+	assert.equal(server.nativeRequests.length, 0, "opening a local Durable session does not preflight the server");
+	assert.equal(server.requests.length, 0);
+
+	// This deliberately calls Durable directly, without terminal.submit()/ensureModelReady(). The provider wrapper
+	// remains the non-bypassable last gate for resumed work and other integration entry points.
+	const submission = await session.main.submit({ type: "input", content: "say: this ordinary request must not be sent || sleep" }, session.context);
+	const outcome = await submission.wait(session.context);
+	await session.harness.waitForIdle(session.context);
+	assert.equal(outcome.status, "unanswered");
+	assert.equal(outcome.reason, "model_error");
+	assert.match(outcome.detail, /requires llama\.cpp native GBNF grammar enforcement/i);
+	assert.equal(server.nativeRequests.length, 1, "the direct path sends only the mandatory native proof");
+	assert.equal(server.requests.length, 0, "an ignored native grammar still receives no ordinary provider request");
 });
 
-test("consult: a server that refuses stream_options is asked again without it", async (t) => {
+test("conference C1-C4: an independent same-model child preserves the handoff prefix, reaches a bounded return, and lets the root rest", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		const sent = JSON.parse(init.body);
-		calls.push(sent);
-		if (sent.stream_options !== undefined) return new Response("unknown field: stream_options", { status: 400 });
-		return okAnswer("Plain answer.");
+	writeFileSync(join(root, "source.txt"), "first captured line\nsecond captured line\n");
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false }));
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	let session;
+	t.after(async () => {
+		await session?.harness.close(session.context);
+		await server.close();
+	});
+	const config = loadConfig({
+		brainDir,
+		flags: { url: server.url, model: "stand-in" },
+		env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" },
+	});
+	session = await openSession({ root, brainDir, config, runner: createRunner() });
+	const input = {
+		question: "Which bounded fixture path should we choose?",
+		context: "COMMON CONTEXT SENTINEL",
+		files: [{ path: "source.txt", range: "1-1" }],
+		myPersona: "OPENING PERSONA SENTINEL",
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.equal(calls.length, 2, "the refusal is answered with one retry, no more");
-	assert.equal(calls[1].stream_options, undefined, "without stream_options the second time");
-});
+	const submitted = await session.main.submit({ type: "input", content: `PARENT-EXCLUSION-SENTINEL || consult: ${JSON.stringify(input)}` }, session.context);
+	const settled = await submitted.wait(session.context);
+	assert.equal(settled.status, "done", "the root ends after its post-consult sleep rather than repeatedly accepting the completed receipt");
+	assert.equal(server.requests.length, 5, "root call, two bounded debate turns, host-authorized Cartographer report, then one root receipt turn");
+	const [rootBefore, opening, selected, report, rootAfter] = server.requests;
+	assert.equal(rootBefore.model, "stand-in");
+	const [capability, firstSelector, reportSelector] = server.nativeRequests;
+	const tools = (request) => (request.tools ?? []).map((tool) => `function:${tool.function?.name}`);
+	const messageText = (message) => typeof message.content === "string" ? message.content : (message.content ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
+	const joined = (request) => request.messages.map(messageText).join("\n");
 
-test("consult: a server that answers with one plain JSON body all the same reads the story out of it", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: "42." }, finish_reason: "stop" }], usage: { completion_tokens: 7 } }), { status: 200, headers: { "content-type": "application/json" } });
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("42."));
-});
-
-test("consult: a timeout is reported as a timeout and writes nothing", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { throw new DOMException("The operation timed out.", "TimeoutError"); } });
-	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /did not answer within 1800 seconds/);
-	assert.equal(existsSync(join(brainDir, "storyteller")), false, "no story is written");
-});
-
-test("consult: a follow-up carries the whole story — the original question and the answer — and appends its round", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		calls.push(JSON.parse(init.body));
-		return okAnswer(calls.length === 1 ? "Roll twice, not once, or the die never lands on six." : "Once lands on six only half the time.");
-	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "Is the roller sound?", context: "It rolls one die." }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(first.isError, undefined, first.output[0].text);
-	const thread = first.details.thread;
-	assert.equal(first.details.rounds, 1);
-	const second = await tool.execute({ question: "Why twice?", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(second.isError, undefined, second.output[0].text);
-	assert.equal(second.details.thread, thread, "the follow-up keeps the same thread");
-	assert.equal(second.details.rounds, 2);
-	// The storyteller sees round one whole: the context, the question, the answer — then this question.
-	const sent = calls[1];
-	assert.equal(sent.messages.length, 3);
-	assert.equal(sent.messages[0].role, "user");
-	assert.ok(sent.messages[0].content.startsWith("It rolls one die."), "round one's context stands first");
-	assert.ok(sent.messages[0].content.endsWith("Is the roller sound?"), "and its question last within the round");
-	assert.equal(sent.messages[1].role, "assistant");
-	assert.equal(sent.messages[1].content, "Roll twice, not once, or the die never lands on six.");
-	assert.equal(sent.messages[2].role, "user");
-	assert.equal(sent.messages[2].content, "Why twice?");
-	// One story on disk, both rounds, in order.
-	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
-	assert.match(file, /## Round 1 — /);
-	assert.match(file, /## Round 2 — /);
-	assert.ok(file.indexOf("## Round 1") < file.indexOf("## Round 2"));
-	assert.ok(file.includes("Roll twice") && file.includes("Once lands on six"));
-	// One placement on the shelf, re-shelved with the whole exchange; no path and no model name in it.
-	const store = loadContext(brainDir);
-	assert.equal(store.shelf.length, 1, "the story is one placement, re-shelved, not minted twice");
-	assert.equal(store.shelf[0].ref.type, "story");
-	assert.equal(store.shelf[0].ref.id, thread);
-	assert.ok(store.shelf[0].snapshot.includes("Is the roller sound?"));
-	assert.ok(store.shelf[0].snapshot.includes("Roll twice"));
-	assert.ok(store.shelf[0].snapshot.includes("Why twice?"));
-	assert.ok(store.shelf[0].snapshot.includes("Once lands on six"));
-	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance or the path");
-	// The round-two receipt says where in the story it stands, and never carries the answer.
-	assert.match(second.output[0].text, /^Round 2\./);
-	assert.ok(second.output[0].text.includes(`thread: "${thread}"`));
-	assert.doesNotMatch(second.output[0].text, /Once lands on six/);
-});
-
-test("consult: a fresh round-two of the same story re-uses the placement id", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let n = 0;
-	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const second = await tool.execute({ question: "q2", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const placement = loadContext(brainDir).shelf[0].id;
-	assert.equal(first.details.placement, second.details.placement, "the placement is re-used, not re-minted");
-	assert.equal(loadContext(brainDir).shelf[0].id, placement);
-	assert.ok(loadContext(brainDir).shelf[0].snapshot.includes("Answer 1.") && loadContext(brainDir).shelf[0].snapshot.includes("Answer 2."));
-});
-
-test("consult: a thread that is not a storyteller thread is refused before anything is asked", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	for (const bad of ["../etc/passwd", "st-20261115", "st-20261115-143022-XYZ!", "story:st-20261115-143022-k7q2", `/abs/path/st-20261115-143022-k7q2`]) {
-		const result = await tool.execute({ question: "q?", thread: bad }, consultApi(ROOT_CONVERSATION_ID), undefined);
-		assert.equal(result.isError, true, bad);
-		assert.match(result.output[0].text, /not a thread the storyteller minted/);
+	assert.equal(capability.model, "stand-in");
+	assert.match(capability.grammar, /"cartographer"/);
+	assert.deepEqual(tools(opening), ["function:consult_source"], "an opening/debate participant cannot receive consult_return");
+	assert.equal(opening.tool_choice, undefined);
+	assert.deepEqual(tools(selected), ["function:consult_source"], "an arbitrary selected debater cannot return the conference");
+	assert.equal(selected.tool_choice, undefined);
+	assert.deepEqual(tools(report), ["function:consult_source", "function:consult_return"], "only the host-authorized Cartographer report receives the terminal tool");
+	assert.equal(report.tool_choice, undefined);
+	for (const selector of [firstSelector, reportSelector]) {
+		assert.equal(selector.tools, undefined, "the raw native selector has no tool surface");
+		assert.equal(selector.tool_choice, undefined);
 	}
-	assert.equal(called, 0, "a bad thread never reaches the endpoint");
+	assert.match(firstSelector.grammar, /"continue:atlas"/);
+	assert.doesNotMatch(firstSelector.grammar, /"report:cartographer"/, "the host gate physically removes the report choice before two members have debated");
+	assert.doesNotMatch(firstSelector.grammar, /"continue:cartographer"/, "the prior speaker is physically absent from the finite grammar");
+	assert.match(reportSelector.grammar, /"report:cartographer"/, "only the host-native selector can authorize Cartographer's final report");
+	for (const request of [opening, selected, report]) {
+		assert.equal(request.model, "stand-in", "every participant request uses the caller's resolved model");
+		assert.doesNotMatch(joined(request), /PARENT-EXCLUSION-SENTINEL/, "the independent child has no parent transcript");
+	}
+	const firstSelectorText = firstSelector.messages.map(messageText).join("\n");
+	const reportSelectorText = reportSelector.messages.map(messageText).join("\n");
+	assert.match(joined(opening), /OPENING PERSONA SENTINEL/, "Cartographer alone receives the request-local opening persona");
+	assert.match(joined(opening), /COMMON CONTEXT SENTINEL/, "the captured caller context is part of the immutable common packet");
+	assert.doesNotMatch(firstSelectorText, /OPENING PERSONA SENTINEL/, "the native selector receives no active persona packet");
+	assert.doesNotMatch(firstSelectorText, /COMMON CONTEXT SENTINEL/, "the native selector receives no raw captured project context");
+	assert.doesNotMatch(joined(selected), /OPENING PERSONA SENTINEL/, "the selected participant does not inherit the prior persona tail");
+	assert.match(joined(selected), /You are Atlas \(atlas\)/);
+	assert.match(joined(selected), /private entry-time atlas snapshot.*empty snapshot/is, "even an empty Atlas book remains a real role packet");
+	assert.match(joined(selected), /OPENING CONFERENCE CONTRIBUTION/, "the selected participant retains the completed shared contribution");
+	assert.match(joined(selected), /Native GBNF selected atlas to continue the bounded debate/, "the host records the native continuation handoff in the durable child");
+	assert.match(reportSelectorText, /Host debate gate: 2\/2 completed contributions and 2\/2 distinct participants \(met\)/, "the host-native selector receives explicit debate evidence before it may conclude");
+	assert.match(joined(report), /host's native GBNF decision found the bounded debate ready for a final advisory/i);
+	assert.match(joined(report), /Native GBNF authorized Cartographer to write the final advisory report/);
+	assert.match(messageText(rootAfter.messages.at(-1)), /Consult conference co1 returned answered from cartographer/);
+
+	const { conference } = loadConference(brainDir, "co1");
+	assert.equal(conference.status, "returned");
+	assert.notEqual(conference.childConversationId, session.main.id, "the conference owns a new Durable conversation, not a parent fork");
+	assert.deepEqual(conference.model, { provider: "local", modelId: "stand-in" });
+	assert.deepEqual(conference.turns.map((turn) => turn.participant), ["cartographer", "atlas"]);
+	assert.deepEqual(conference.selectorEvents.map((event) => [event.after, event.participant, event.decision]), [["cartographer", "atlas", "continue"], ["atlas", "cartographer", "report"]]);
+	assert.equal(conference.final.participant, "cartographer", "only host-authorized Cartographer can return the conference");
+	assert.equal(conference.requestPlans.length, 5);
+	assert.ok(conference.requestPlans.length <= POLICY.limits.conference.requestPlans, "the audit cap is above this complete bounded handoff and did not discard its evidence");
+	assert.ok(POLICY.limits.conference.requestPlans >= Math.max(8, POLICY.limits.conference.turns * 4 + 4) + POLICY.limits.conference.turns, "the request-plan audit cap covers every bounded child request plus each possible raw selector handoff");
 });
 
-test("consult: fresh stories mint short thread markers from the folder, and legacy markers stay valid", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let n = 0;
-	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	// Two new stories in a fresh brain: st1, then st2.
-	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const second = await tool.execute({ question: "q2" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(first.details.thread, "st1");
-	assert.equal(second.details.thread, "st2");
-	// A follow-up to the legacy story minted before the short markers: the marker stays as it was.
-	const legacy = "st-20261115-143022-k7q2";
-	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
-	writeFileSync(join(brainDir, "storyteller", `${legacy}.md`), "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: MythosNano\nStarted: 2026-11-15T14:30:22.000Z\n\n## Round 1 — 2026-11-15T14:30:22.000Z\n\nQuestion:\n```text\nlegacy question?\n```\n\nAnswer:\n```text\nlegacy answer.\n```\n");
-	const third = await tool.execute({ question: "and then?", thread: legacy }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(third.isError, undefined, third.output[0].text);
-	assert.equal(third.details.thread, legacy, "a legacy thread keeps its marker");
-	// The next fresh story after legacy files still mints the short form from the short ids in the folder — st3.
-	const fourth = await tool.execute({ question: "q4" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(fourth.details.thread, "st3");
-});
-
-test("consult: a well-formed thread with no story behind it is refused before anything is asked", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	const result = await tool.execute({ question: "q?", thread: "st-20261115-000000-zzzz" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /No story stands under thread st-20261115-000000-zzzz/);
-	assert.equal(called, 0);
-});
-
-test("consult: a story file that does not parse is refused, never guessed at", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const id = "st-20261115-000000-a1b2";
-	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
-	writeFileSync(join(brainDir, "storyteller", `${id}.md`), "The storyteller — one long problem, kept whole\n\n## Round 1 — nope\n\nQuestion:\naaa\nAnswer:\nbbb\n");
-	let called = 0;
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
-	const result = await tool.execute({ question: "follow up?", thread: id }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /cannot be read as a story/);
-	assert.equal(called, 0, "a broken story never reaches the endpoint");
-});
-
-test("consult: a follow-up whose story grows is sent the whole conversation — round one is not re-sent by the agent", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const fetchImpl = async (url, init) => {
-		calls.push(JSON.parse(init.body));
-		return okAnswer(`Answer ${calls.length}.`);
+test("conference C1/C2: host-native choices gate the terminal report and debate payloads cannot expose it", () => {
+	const declared = {
+		model: "fixture",
+		tool_choice: "required",
+		tools: [
+			{ type: "function", function: { name: "consult_source", parameters: {} } },
+			{ type: "function", function: { name: "consult_return", parameters: {} } },
+		],
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "Round one question." }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const second = await tool.execute({ question: "Round two question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const third = await tool.execute({ question: "Round three question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(third.details.rounds, 3);
-	const sent = calls[2];
-	assert.deepEqual(sent.messages.map((m) => m.role), ["user", "assistant", "user", "assistant", "user"]);
-	assert.equal(sent.messages[0].content, "Round one question.");
-	assert.equal(sent.messages[1].content, "Answer 1.");
-	assert.equal(sent.messages[2].content, "Round two question.");
-	assert.equal(sent.messages[3].content, "Answer 2.");
-	assert.equal(sent.messages[4].content, "Round three question.");
-	assert.equal(second.details.rounds, 2);
-});
-
-test("consult: a story survives a question that carries its own fenced blocks and labels", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const tricky = "It failed with:\n\nQuestion:\n```text\nAnswer:\n```\n\n## Round 99 — fake\n\nWhat does it print?";
-	const fetchImpl = async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("The exit code is 1.\n```\nb ```\nDone."); };
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: tricky }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(first.isError, undefined, first.output[0].text);
-	const second = await tool.execute({ question: "And the sign?", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(second.isError, undefined, second.output[0].text);
-	const sent = calls[1];
-	assert.equal(sent.messages.length, 3);
-	assert.equal(sent.messages[0].content, tricky, "the tricky round-one payload round-trips byte for byte");
-	assert.equal(sent.messages[1].content, "The exit code is 1.\n```\nb ```\nDone.");
-});
-
-test("consult: a server refusing an over-long conversation is said as such — the story outgrew the storyteller", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let call = 0;
-	const fetchImpl = async () => {
-		call += 1;
-		if (call === 1) return okAnswer("Roll twice.");
-		return new Response("request (99999 tokens) exceeds the available context size (65536 tokens)", { status: 400 });
+	const deliberation = restrictParticipantPayload(declared);
+	assert.deepEqual(deliberation.tools.map((tool) => tool.function.name), ["consult_source"]);
+	assert.equal(deliberation.tool_choice, undefined, "a participant never inherits host routing control");
+	const report = restrictParticipantPayload(declared, { allowReturn: true });
+	assert.deepEqual(report.tools.map((tool) => tool.function.name), ["consult_source", "consult_return"]);
+	assert.throws(() => restrictParticipantPayload({ tools: [{ type: "function", function: { name: "consult_source" } }] }, { allowReturn: true }), ConferenceError);
+	const record = {
+		id: "co1",
+		question: "Which role should inspect the boundary?",
+		turns: [{ participant: "cartographer", text: "The opening contribution is complete." }],
+		active: { kind: "selector", previousSpeaker: "cartographer" },
 	};
-	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
-	const first = await tool.execute({ question: "Is the roller sound?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	const thread = first.details.thread;
-	const second = await tool.execute({ question: "Go on.", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(second.isError, true);
-	assert.match(second.output[0].text, /outgrown what the storyteller can hold/);
-	assert.match(second.output[0].text, /let it rest, or begin a new one with the crux/);
-	assert.doesNotMatch(second.output[0].text, /consultModel/, "an overflow is not a model-name problem");
-	// Round one overflow names the ask, not a story:
-	const solo = await consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => new Response("prompt is too long: 99999 tokens", { status: 400 }) }).execute({ question: "x".repeat(50000) }, consultApi(ROOT_CONVERSATION_ID), undefined);
-	assert.equal(solo.isError, true);
-	assert.match(solo.output[0].text, /outgrew what the storyteller can hold/);
+	assert.deepEqual(debateStatus(record), { turns: 1, participants: ["cartographer"], debateTurns: POLICY.limits.conference.debateTurns, debateParticipants: POLICY.limits.conference.debateParticipants, ready: false });
+	const firstOptions = selectorOptions(record, ["atlas", "ledger"]);
+	assert.deepEqual(firstOptions.map((option) => option.value), ["continue:atlas", "continue:ledger"]);
+	assert.equal(selectorGrammar(firstOptions), 'root ::= "continue:atlas" | "continue:ledger"');
+	const messages = selectorMessages(record, ["atlas", "ledger"]);
+	assert.equal(messages.length, 2);
+	assert.match(messages[1].content, /continue:atlas, continue:ledger/);
+	assert.match(messages[1].content, /Host debate gate: 1\/2 completed contributions and 1\/2 distinct participants \(not met\)/);
+	assert.match(messages[1].content, /opening contribution/);
+	assert.doesNotMatch(messages.map((message) => message.content).join("\n"), /consult_source|consult_return|select_persona/);
+	assert.equal(enumGrammar(["atlas", "ledger"]), 'root ::= "atlas" | "ledger"');
+	const ready = {
+		...record,
+		turns: [...record.turns, { participant: "atlas", text: "A second perspective completed the debate." }],
+		active: { kind: "selector", previousSpeaker: "atlas" },
+	};
+	const readyOptions = selectorOptions(ready, ["cartographer", "ledger"]);
+	assert.deepEqual(readyOptions.map((option) => option.value), ["continue:cartographer", "continue:ledger", "report:cartographer"]);
+	assert.match(selectorTail(ready, ["cartographer", "ledger"]), /report:cartographer/);
+	assert.throws(() => selectorMessages({ ...record, active: { kind: "selector", previousSpeaker: "invented" } }), /unvalidated state|invalid previous/i, "a corrupt routing record cannot widen a native grammar");
+	assert.throws(() => selectorTail(record, ["cartographer", "atlas"]), /immediately prior participant/, "a caller cannot reinsert the prior speaker into an explicit eligible set");
+});
+
+test("conference recovery resumes a pending native selector and commits its labelled handoff once", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
+	const conference = createConferenceCapture({
+		root,
+		brainDir,
+		question: "Which fresh perspective should inspect the recovery boundary?",
+		myPersona: "Keep the host handoff auditable.",
+		model: { provider: "local", modelId: "stand-in" },
+		caller: { conversationId: "parent", taskId: "outer", callId: "consult" },
+		at: 1,
+	});
+	attachChildConference(brainDir, conference.id, "recovery-child", 2);
+	// This is the durable state a process can leave after recording a no-tool turn
+	// and before it finishes the raw selector HTTP call.
+	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "The opening contribution survived the restart." }] }, 3);
+	assert.equal(loadConference(brainDir, conference.id).conference.active.kind, "selector");
+
+	const extension = createConferenceExtension({ brainDir, server: server.url });
+	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
+	const planned = await generation.beforeRequest({ messages: [{ role: "user", content: "Conference entry packet" }] }, { conversationId: "recovery-child", now: () => 4 });
+	const joined = planned.messages.map((message) => message.content).join("\n");
+	assert.match(joined, /Native GBNF selected atlas to continue the bounded debate/, "recovery recreates the labelled host handoff before the selected participant request");
+	assert.match(joined, /You are Atlas \(atlas\)/, "the recovered request uses the selected participant's private tail");
+	assert.equal(server.nativeRequests.length, 2, "cold recovery first proves native enforcement, then makes its bounded selector decision");
+	const [capability, selector] = server.nativeRequests;
+	assert.equal(capability.tools, undefined);
+	assert.match(capability.grammar, /"cartographer"/);
+	assert.equal(selector.tools, undefined);
+	assert.match(selector.grammar, /"continue:atlas"/);
+	assert.doesNotMatch(selector.grammar, /"continue:cartographer"/);
+	assert.doesNotMatch(selector.grammar, /"report:cartographer"/, "a recovered one-member opening cannot skip the debate gate");
+	const resumed = loadConference(brainDir, conference.id).conference;
+	assert.equal(resumed.active.participant, "atlas");
+	assert.equal(resumed.active.nativeSelectionPending, undefined, "the restart path consumes the handoff marker before a provider request can replay it");
+	assert.equal(resumed.selectorEvents.length, 1);
+	assert.equal(resumed.requestPlans.filter((plan) => plan.kind === "native-selector").length, 1);
+	assert.equal(generation.onYield({ stopReason: "stop", content: [] }, { conversationId: "recovery-child", now: () => 5 }), undefined, "a recovered handoff is not appended again after Atlas speaks");
+});
+
+test("conference C2/C3: entry snapshots stay immutable, persona tails are private, and routing excludes the previous speaker", (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(root, "source.txt"), "one\ntwo\nthree\n");
+	const conference = createConferenceCapture({
+		root,
+		brainDir,
+		question: "Which bounded migration is safer?",
+		context: "Caller fact A.",
+		files: [{ path: "source.txt", range: "2-3" }],
+		myPersona: "Care about a reversible migration boundary.",
+		model: { provider: "local", modelId: "fixture" },
+		caller: { conversationId: "main", taskId: "task-1", callId: "call-1" },
+		at: 1,
+	});
+	assert.equal(conference.id, "co1");
+	assert.equal(readConferenceSource(brainDir, conference, "s1").text, "two\nthree");
+	writeFileSync(join(root, "source.txt"), "mutated live project bytes\n");
+	assert.equal(readConferenceSource(brainDir, loadConference(brainDir, "co1").conference, "s1").text, "two\nthree", "the conference reads its frozen source, not the changed project path");
+	assert.throws(() => readConferenceSource(brainDir, conference, "b-atlas"), /only inspect c0 or one captured s<N> source/);
+	assert.throws(() => createConferenceCapture({ root, brainDir, question: "q", myPersona: "p", files: ["../escape.txt"], model: {}, caller: {} }), /Supplied file refused/);
+	assert.throws(() => createConferenceCapture({ root, brainDir, question: "q", myPersona: "p", files: [{ path: "source.txt", range: "1-99999" }], model: {}, caller: {} }), /at most/);
+
+	const running = attachChildConference(brainDir, conference.id, "conference-child", 2);
+	const opening = participantTail(withConferenceBrain(running, brainDir));
+	assert.match(opening, /Care about a reversible migration boundary/);
+	assert.doesNotMatch(opening, /Atlas entry snapshot/);
+	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
+	assert.throws(() => recordSelectorChoice(brainDir, conference.id, "continue:cartographer", { at: 4 }), /not an eligible native decision/);
+	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
+	const atlas = loadConference(brainDir, conference.id).conference;
+	const atlasTail = participantTail(withConferenceBrain(atlas, brainDir));
+	assert.match(atlasTail, /You are Atlas \(atlas\)/);
+	assert.match(atlasTail, /empty snapshot/);
+	assert.doesNotMatch(atlasTail, /Care about a reversible migration boundary/, "the next participant never inherits Cartographer's request-local persona");
+	const neutral = selectorTail({ ...running, turns: [{ participant: "cartographer" }], active: { kind: "selector", previousSpeaker: "cartographer" } });
+	assert.match(neutral, /continue:atlas, continue:ledger, continue:plan, continue:assessment, continue:context/);
+	assert.doesNotMatch(neutral, /Care about a reversible migration boundary/);
+	assert.doesNotMatch(neutral, /Atlas entry snapshot/);
+	assert.equal(loadConference(brainDir, conference.id).conference.turns[0].participant, "cartographer");
+	assert.equal(loadConference(brainDir, conference.id).conference.selectorEvents[0].participant, "atlas");
+});
+
+test("conference C4: request-plan audit retention stays bounded with monotonic provenance indexes", (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Bound the audit.", myPersona: "Keep the handoff evidence finite.", model: {}, caller: {}, at: 1 });
+	const total = POLICY.limits.conference.requestPlans + 3;
+	for (let index = 0; index < total; index++) {
+		recordRequestPlan(brainDir, conference.id, index % 2 === 0 ? "participant" : "selector", [{ role: "user", content: `stable ${index}` }], `tail ${index}`, index + 2);
+	}
+	const bounded = loadConference(brainDir, conference.id).conference;
+	assert.equal(bounded.requestPlans.length, POLICY.limits.conference.requestPlans);
+	assert.equal(bounded.requestPlanCount, total);
+	assert.equal(bounded.requestPlans[0].index, total - POLICY.limits.conference.requestPlans + 1);
+	assert.equal(bounded.requestPlans.at(-1).index, total);
+	assert.match(renderConference(bounded), new RegExp(`${total} total`));
+});
+
+test("conference C4: private activity and receipt retention use durable event identities and bounded monotonic indexes", (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Can the audit remain bounded?", myPersona: "Keep every retained response attributable.", model: {}, caller: {}, at: 1 });
+	attachChildConference(brainDir, conference.id, "retention-child", 2);
+	const repeated = { stopReason: "toolUse", content: [{ type: "text", text: "The same short local observation." }, { type: "toolCall", id: "same-local-call", name: "consult_source", arguments: { action: "list" } }] };
+	const totalActivities = POLICY.limits.conference.activities + 3;
+	for (let index = 1; index <= totalActivities; index++) recordParticipantActivity(brainDir, conference.id, "cartographer", repeated, index + 1, `generation-${index}`);
+	// A restart of one generation must not create another activity, but identical words from another generation do.
+	recordParticipantActivity(brainDir, conference.id, "cartographer", repeated, totalActivities + 2, `generation-${totalActivities}`);
+	let bounded = loadConference(brainDir, conference.id).conference;
+	assert.equal(bounded.activities.length, POLICY.limits.conference.activities);
+	assert.equal(bounded.activityCount, totalActivities);
+	assert.equal(bounded.activities[0].index, totalActivities - POLICY.limits.conference.activities + 1);
+	assert.equal(bounded.activities.at(-1).index, totalActivities);
+	assert.equal(bounded.activities.at(-1).eventId, `generation-${totalActivities}`);
+
+	const totalReceipts = POLICY.limits.conference.toolReceipts + 3;
+	for (let index = 1; index <= totalReceipts; index++) {
+		recordToolReceipt(brainDir, conference.id, { id: `source-${index}`, callId: `call-${index}`, participant: "cartographer", action: "list", result: `listed source snapshot ${index}`, at: new Date(index).toISOString() });
+	}
+	// A replay of the most recent tool call keeps the original receipt rather than duplicating it.
+	recordToolReceipt(brainDir, conference.id, { id: `source-${totalReceipts}`, callId: `call-${totalReceipts}`, participant: "cartographer", action: "list", result: "replayed", at: new Date(totalReceipts).toISOString() });
+	bounded = loadConference(brainDir, conference.id).conference;
+	assert.equal(bounded.toolReceipts.length, POLICY.limits.conference.toolReceipts);
+	assert.equal(bounded.toolReceiptCount, totalReceipts);
+	assert.equal(bounded.toolReceipts[0].index, totalReceipts - POLICY.limits.conference.toolReceipts + 1);
+	assert.equal(bounded.toolReceipts.at(-1).index, totalReceipts);
+	assert.match(renderConference(bounded), new RegExp(`${totalActivities} total`));
+	assert.match(renderConference(bounded), new RegExp(`${totalReceipts} total`));
+});
+
+test("conference C4: a recovered completed turn is idempotent after the selector has advanced", (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Can recovered turns replay safely?", myPersona: "Keep audit provenance stable.", model: {}, caller: {}, at: 1 });
+	attachChildConference(brainDir, conference.id, "replay-child", 2);
+	const response = { id: "durable-generation-7", content: [{ type: "text", text: "The first member completed this contribution." }] };
+	recordParticipantTurn(brainDir, conference.id, "cartographer", response, 3, "durable-generation-7");
+	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
+	const before = loadConference(brainDir, conference.id).conference;
+	assert.equal(before.active.participant, "atlas");
+	// Durable may replay its afterResponse hook after the selector has moved on. This must be an idempotent no-op,
+	// not an active-speaker failure and not a second activity/turn.
+	const replayed = recordParticipantTurn(brainDir, conference.id, "cartographer", response, 5, "durable-generation-7");
+	assert.equal(replayed.active.participant, "atlas");
+	const after = loadConference(brainDir, conference.id).conference;
+	assert.equal(after.activities.length, 1);
+	assert.equal(after.turns.length, 1);
+	assert.equal(after.selectorEvents.length, 1);
+	assert.equal(after.activities[0].eventId, "durable-generation-7");
+	assert.equal(after.turns[0].eventId, "durable-generation-7");
+});
+
+test("conference C4: tool activity keeps its speaker, malformed returns and limits preserve an auditable incomplete state, and a valid return carries provenance", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
+	writeFileSync(join(root, "packet.txt"), "captured evidence\n");
+	const captured = createConferenceCapture({
+		root,
+		brainDir,
+		question: "How should the bounded conference end?",
+		context: "captured context",
+		files: ["packet.txt"],
+		myPersona: "Opening perspective.",
+		model: { provider: "local", modelId: "fixture" },
+		caller: { conversationId: "parent", taskId: "outer-tool", callId: "call-consult" },
+		at: 1,
+	});
+	attachChildConference(brainDir, captured.id, "conference-child", 2);
+	assert.throws(() => completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Opening prose is not a host-authorized conclusion." }, 3), /host-authorized Cartographer report state/, "a direct storage call cannot turn the opening contribution into a final advisory");
+	const extension = createConferenceExtension({ brainDir, server: server.url });
+	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
+	const source = extension.tools.find((tool) => tool.name === "consult_source");
+	const returned = extension.tools.find((tool) => tool.name === "consult_return");
+	assert.equal(extension.tools.length, 2, "the child exposes only participant tools; native selection is outside Durable's tool registry");
+	const api = { conversationId: "conference-child", now: () => 10 };
+
+	await generation.afterResponse({ stopReason: "toolUse", content: [
+		{ type: "text", text: "I will inspect the packet before I hand off." },
+		{ type: "toolCall", id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } },
+	] }, api);
+	const afterToolResponse = loadConference(brainDir, captured.id).conference;
+	assert.deepEqual(afterToolResponse.active, { kind: "participant", participant: "cartographer", opening: true }, "text plus a tool call does not trigger a selector handoff");
+	assert.deepEqual(afterToolResponse.activities.map((activity) => [activity.participant, activity.reasoning, activity.prose, activity.calls?.[0]?.name]), [["cartographer", undefined, "I will inspect the packet before I hand off.", "consult_source"]], "the private co<N> audit retains a persona-attributed response and local call without placing it in parent context");
+	const read = await source.execute({ action: "read", id: "s1" }, api);
+	assert.equal(read.isError, undefined);
+	assert.match(read.output[0].text, /captured evidence/);
+	assert.equal(loadConference(brainDir, captured.id).conference.toolReceipts.length, 1);
+	assert.match(loadConference(brainDir, captured.id).conference.toolReceipts[0].result, /captured evidence/, "a consult-local tool receipt retains its bounded result for the separate audit view");
+
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "My completed contribution." }] }, api);
+	let running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.active.kind, "participant");
+	assert.equal(running.active.participant, "atlas", "the raw native grammar selector activates the validated next participant");
+	assert.equal(running.turns.length, 1, "only the no-tool response closes the participant turn");
+	assert.equal(running.active.phase, "debate");
+	assert.equal(running.selectorEvents[0].method, "llama.cpp-native-gbnf");
+	assert.equal(running.selectorEvents[0].grammarEnforced, true);
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF selected atlas to continue the bounded debate/);
+	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined, "the labelled host continuation is consumed exactly once");
+
+	const premature = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
+	assert.equal(premature.isError, true);
+	assert.match(premature.output[0].text, /host must first make a native-GBNF report decision/i);
+	running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.status, "running");
+	assert.equal(running.active.participant, "atlas", "a deliberating participant cannot end the conference even by calling the registered tool directly");
+	assert.equal(running.active.phase, "debate");
+	assert.throws(() => validateConsultReturn({ outcome: "answered", synthesis: "x", alternatives: [{ option: "", tradeoff: "missing option" }] }), /alternatives/);
+
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "Atlas completed the second bounded contribution." }] }, api);
+	running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.active.participant, "cartographer");
+	assert.equal(running.active.phase, "report", "the native selector alone advances a completed debate to Cartographer's report state");
+	assert.equal(running.turns.length, 2);
+	assert.equal(running.selectorEvents.at(-1).decision, "report");
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF authorized Cartographer to write the final advisory report/);
+	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined);
+
+	const malformed = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
+	assert.equal(malformed.isError, true);
+	running = loadConference(brainDir, captured.id).conference;
+	assert.equal(running.status, "running");
+	assert.equal(running.active.participant, "cartographer", "a malformed host-authorized return leaves Cartographer active to correct it");
+	assert.equal(running.active.phase, "report");
+
+	const final = await returned.execute({
+		outcome: "answered",
+		synthesis: "Use the captured evidence and keep the conclusion advisory.",
+		evidence: [{ source: "c0", claim: "The caller captured bounded common context." }],
+		uncertainties: ["No live project verification happened."],
+	}, api);
+	assert.equal(final.isError, undefined);
+	assert.equal(final.control.terminate, true);
+	const returnedRecord = loadConference(brainDir, captured.id).conference;
+	assert.equal(returnedRecord.status, "returned");
+	assert.deepEqual(returnedRecord.final.provenance.participantPacket, { kind: "opening-persona", id: "myPersona", digest: returnedRecord.myPersona.digest });
+	assert.deepEqual(returnedRecord.final.provenance.selectorHistory.map((event) => [event.after, event.participant, event.decision]), [["cartographer", "atlas", "continue"], ["atlas", "cartographer", "report"]]);
+	assert.match(renderConference(returnedRecord), /authorize Cartographer final report/);
+	assert.match(renderConference(returnedRecord), /grammar enforced yes/);
+	assert.match(conferenceStatusLine(returnedRecord), /returned/);
+
+	const limited = createConferenceCapture({ root, brainDir, question: "What if output ends?", myPersona: "Bound the output.", model: {}, caller: {}, at: 20 });
+	attachChildConference(brainDir, limited.id, "limited-child", 21);
+	await generation.afterResponse({ stopReason: "length", content: [{ type: "text", text: "partial" }] }, { conversationId: "limited-child", now: () => 22 });
+	const limitedRecord = loadConference(brainDir, limited.id).conference;
+	assert.equal(limitedRecord.status, "interrupted");
+	assert.equal(limitedRecord.final, undefined, "an output limit never fabricates a synthesis");
+	assert.match(renderConference(limitedRecord), /No synthesis was fabricated/);
+
+	const cancelled = createConferenceCapture({ root, brainDir, question: "What if routing is stopped?", myPersona: "Keep cancellation explicit.", model: { provider: "local", modelId: "stand-in" }, caller: {}, at: 30 });
+	attachChildConference(brainDir, cancelled.id, "cancelled-selector-child", 31);
+	const controller = new AbortController();
+	controller.abort();
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "A turn whose native routing was stopped." }] }, { conversationId: "cancelled-selector-child", now: () => 32 }, { abortSignal: controller.signal });
+	const cancelledRecord = loadConference(brainDir, cancelled.id).conference;
+	assert.equal(cancelledRecord.status, "cancelled", "aborting an in-flight raw selector preserves cancellation instead of recording a generic failure");
+	assert.match(cancelledRecord.ended.reason, /native selector/i);
+
+	const chat = createChat({ readConference: (id) => id === captured.id ? returnedRecord : undefined });
+	chat.entry(0, { id: "entry-1", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-call", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
+		{ role: "toolResult", toolCallId: "consult-call", toolName: "consult", isError: false, details: { conference: captured.id }, content: [{ type: "text", text: "Only the compact parent receipt." }] },
+	] });
+	const group = chat.items.find((item) => item.type === "group");
+	const viewText = (instance, projection) => instance.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
+	assert.doesNotMatch(viewText(chat, "work"), /Consult conference|Only the compact parent receipt/, "the parent Work projection has no conference notebook or receipt");
+	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot export conference activity");
+	assert.match(viewText(chat, "consult"), /Consultation co1/, "only Consult reads the local co<N> notebook");
+
+	let liveAudit = { ...returnedRecord, status: "running", final: undefined, ended: undefined, active: { kind: "participant", participant: "cartographer" } };
+	const liveChat = createChat({ readConference: () => liveAudit });
+	liveChat.entry(0, { id: "entry-live", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-live", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
+	] });
+	liveChat.liveTools(0, [{ callId: "consult-live", status: "running", details: { conference: captured.id } }]);
+	assert.match(viewText(liveChat, "consult"), /Cartographer · active/, "Consult reads live conference status without exposing it through parent Work");
+	liveAudit = { ...liveAudit, active: { kind: "participant", participant: "atlas" } };
+	assert.match(viewText(liveChat, "consult"), /Atlas · active/, "Consult refreshes its private audit while the conference progresses");
+	assert.doesNotMatch(viewText(liveChat, "work"), /Cartographer · active|Atlas · active/, "Work remains isolated from private conference activity");
+});
+
+test("conference C4: an authorized report that omits consult_return fails closed", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const conference = createConferenceCapture({ root, brainDir, question: "Must a report use the terminal boundary?", myPersona: "Preserve the final-return contract.", model: { provider: "local", modelId: "fixture" }, caller: {}, at: 1 });
+	attachChildConference(brainDir, conference.id, "report-child", 2);
+	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
+	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
+	recordParticipantTurn(brainDir, conference.id, "atlas", { content: [{ type: "text", text: "Second contribution." }] }, 5);
+	recordSelectorChoice(brainDir, conference.id, "report:cartographer", { at: 6 });
+	const extension = createConferenceExtension({ brainDir, server: "http://unused.invalid" });
+	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
+	const api = { conversationId: "report-child", now: () => 7 };
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /authorized Cartographer to write the final advisory report/);
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "An unstructured final-looking sentence." }] }, api);
+	const failed = loadConference(brainDir, conference.id).conference;
+	assert.equal(failed.status, "failed");
+	assert.equal(failed.final, undefined);
+	assert.match(failed.ended.reason, /ended without consult_return/);
+	assert.match(renderConference(failed), /No synthesis was fabricated/);
+});
+
+test("conference C4: recovery resumes the captured child and captured model rather than allocating or adopting a later model", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
+	const captured = createConferenceCapture({
+		root,
+		brainDir,
+		question: "Can recovery preserve the model boundary?",
+		myPersona: "Keep recovery deterministic.",
+		model: { provider: "frozen-provider", modelId: "frozen-model" },
+		caller: { conversationId: "caller", taskId: "recover-task", callId: "recover-call" },
+		at: 1,
+	});
+	const selected = [];
+	const submissions = [];
+	const frozenModel = { provider: "frozen-provider", id: "frozen-model", api: "openai-completions", baseUrl: server.url };
+	const models = {
+		getModel(provider, modelId) {
+			selected.push([provider, modelId]);
+			return provider === "frozen-provider" && modelId === "frozen-model" ? frozenModel : undefined;
+		},
+	};
+	const tool = consultTool({ root, brainDir, config: {}, conferenceExtension: { name: "consult-conference", tools: [{}, {}] } });
+	const api = {
+		conversationId: "caller",
+		taskId: "recover-task",
+		callId: "recover-call",
+		now: () => 3,
+		models,
+		agent: async () => { throw new Error("a resumed conference must not read a later caller model"); },
+		commit: async (work) => work({
+			createConversation: async () => { throw new Error("a resumed conference must not create another child"); },
+			scanConversations: async () => ({ items: [{ id: "unrelated-child", parent: { at: 1 } }, { id: "existing-private-child", parent: { at: 1 } }] }),
+			scanEntries: async ({ conversationId }) => ({ items: [{ conversationId, kind: "carto.conference-seed", data: { conference: conversationId === "existing-private-child" ? captured.id : "co999", version: captured.version } }] }),
+		}),
+		details: async () => {},
+		conversation: async (id) => {
+			assert.equal(id, "existing-private-child");
+			return {
+				submit: async (input) => {
+					submissions.push(input);
+					recordParticipantTurn(brainDir, captured.id, "cartographer", { content: [{ type: "text", text: "Recovered opening contribution." }] }, 4);
+					recordSelectorChoice(brainDir, captured.id, "continue:atlas", { at: 5 });
+					recordParticipantTurn(brainDir, captured.id, "atlas", { content: [{ type: "text", text: "Recovered second contribution." }] }, 6);
+					recordSelectorChoice(brainDir, captured.id, "report:cartographer", { at: 7 });
+					completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Recovered from the existing isolated child.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] }, 8);
+					return { wait: async () => ({ status: "done" }) };
+				},
+				abort: async () => {},
+			};
+		},
+	};
+	const result = await tool.execute({ question: captured.question, myPersona: captured.myPersona.text }, api, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.deepEqual(selected, [["frozen-provider", "frozen-model"]]);
+	assert.deepEqual(submissions, [{ type: "continue", requestId: "consult:recover-task" }]);
+	const resumed = loadConference(brainDir, captured.id).conference;
+	assert.equal(resumed.childConversationId, "existing-private-child");
+	assert.equal(resumed.status, "returned");
+	assert.match(result.output[0].text, /Recovered from the existing isolated child/);
+});
+
+test("conference C4: stopping the outer tool records cancellation rather than a made-up answer", async (t) => {
+	const { root, brainDir } = fresh(t);
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false }));
+	const server = await startStandIn({
+		tokenDelayMs: 0,
+		holdWhen: (request) => (request.tools ?? []).some((tool) => tool.function?.name === "consult_source")
+			&& request.messages.some((message) => typeof message.content === "string" && message.content.includes("Active participant packet")),
+	});
+	let session;
+	t.after(async () => {
+		await session?.harness.close(session.context);
+		await server.close();
+	});
+	const config = loadConfig({ brainDir, flags: { url: server.url, model: "stand-in" }, env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" } });
+	session = await openSession({ root, brainDir, config, runner: createRunner() });
+	const submitted = await session.main.submit({ type: "input", content: `consult: ${JSON.stringify({ question: "Stop this child.", myPersona: "Observe cancellation." })}` }, session.context);
+	const deadline = Date.now() + 2_000;
+	while (server.heldCount() === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(server.heldCount(), 1, "the test stopped an active participant request, not a completed consultation");
+	await session.main.abort(session.context);
+	const settled = await submitted.wait(session.context);
+	assert.equal(settled.status, "unanswered");
+	const cancelled = loadConference(brainDir, "co1").conference;
+	assert.equal(cancelled.status, "cancelled");
+	assert.equal(cancelled.final, undefined);
+	assert.match(cancelled.ended.reason, /caller stopped/i);
+});
+
+
+test("conference C4/C5: final objects require an honest structured return and legacy thread revival is refused before model work", async (t) => {
+	assert.throws(() => validateConsultReturn({ outcome: "needs_input", synthesis: "Need a choice." }), /blocking_question/);
+	assert.deepEqual(validateConsultReturn({ outcome: "answered", synthesis: "Use the frozen packet.", evidence: [{ source: "s1", claim: "The captured file says so." }], uncertainties: ["No live verification yet."] }), {
+		outcome: "answered",
+		synthesis: "Use the frozen packet.",
+		evidence: [{ source: "s1", claim: "The captured file says so." }],
+		assumptions: [],
+		uncertainties: ["No live verification yet."],
+		alternatives: [],
+		next_checks: [],
+	});
+	const { root, brainDir } = fresh(t);
+	const tool = consultTool({ root, brainDir });
+	const result = await tool.execute({ question: "q", myPersona: "p", thread: "st1" }, {}, undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /thread.*removed by the C5 cutover/i);
 });

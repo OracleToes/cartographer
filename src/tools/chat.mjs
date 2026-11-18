@@ -24,7 +24,9 @@ export function chatTool({ brainDir } = {}) {
 		replay: POLICY.enums.toolReplay.safe,
 		execute: async (args, api) => {
 			if (String(args.text ?? "").trim() === "") return { isError: true, output: [{ type: "text", text: `\`text\` is empty, so nothing was shown to ${USER_NAME}.` }] };
-			if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), args.text);
+			// Durable mints the assistant entry outside this tool. The call id is only a short-lived join key; terminal
+			// observation promotes it to that admitted entry id before Talk exposes an edit/remove handle.
+			if (brainDir !== undefined) noteChat(brainDir, "you", api.now(), args.text, { source: { kind: "chat-call", conversationId: String(api.conversationId), callId: String(api.callId) } });
 			// A task goes on working: it ends with `return` and nothing else.
 			if (api.conversationId !== ROOT_CONVERSATION_ID) return { output: [{ type: "text", text: `Shown to ${USER_NAME}. I am still the task: I carry on.` }], details: { chat: true, task: true } };
 			return {

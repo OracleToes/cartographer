@@ -8,26 +8,29 @@
 //   ┊ what the main agent thinks and notes for itself, streamed (Ctrl-T hides and shows it)
 //   what the main agent says to you with `chat`, streamed
 //   ▸ task  first line of the brief
-//   │ read src/a.ts, src/b.ts          → 412 lines
-//   │ search /register/ in src          → 9 matches
+//   │ read src/a.ts                     → 212 lines
+//   │ read src/b.ts                     → 200 lines
+//   │ search /register/ in src           → 9 matches
 //   ◂ report  1.3k characters  (/report shows it)
 //
 // It is also where the user authorizes the plan (/approve) and takes a change task
 // back (/undo): the two things only the user can do. And it is what wakes the agent
 // when something happens in a shell window while the agent is not working.
-import { POLICY } from "./config.mjs";
+import { modelContextWindow, POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
-import { atlasPath, atlasSummary, fileMarks, loadAtlas, renderOutline, staleNodes } from "./atlas.mjs";
+import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
+import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
+import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
+import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { authorize, awaitsApproval, isAuthorized, loadPlan, openItems, planPath, planSummary, planWaits, renderPlan, savePlan, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { authorize, awaitsApproval, loadPlan, planPath, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { listRequests, approveRequests, denyRequest, answerQuestion, approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -40,7 +43,8 @@ import { REPEAT_NOTE } from "./wake.mjs";
 import { createStreamFreeze } from "./stream.mjs";
 import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
 import { USER_NAME } from "./user.mjs";
-import { dressRequest, withoutAdditions } from "./request.mjs";
+import { planRequest, withoutAdditions } from "./request.mjs";
+import { bridgeRequestSources } from "./request-sources.mjs";
 
 /**
  * How often the agent is woken in quick succession before its wakes are spaced out. One more becomes free with
@@ -94,14 +98,33 @@ export function describeCall(call, describeRef) {
 		case "book": {
 			const target = typeof args.target === "string" && args.target !== "" ? args.target : "";
 			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
-			const refText = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== "" ? describeRef?.(args.ref) ?? args.ref.id : undefined;
-			const what = refText ?? args.path ?? args.placementId ?? args.operation?.id ?? args.operation?.kind ?? args.operation?.mode ?? args.operation?.name ?? args.operation?.text ?? "";
+			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== "" ? args.ref : (typeof args.id === "string" && args.id !== "" ? { ...(target !== "" && target !== "shelf" ? { kind: target } : {}), id: args.id } : undefined);
+			const refText = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : undefined;
+			const what = refText ?? args.path ?? args.name ?? args.kind ?? args.mode ?? args.text ?? args.gist ?? "";
 			return `book ${[target, action, oneLine(String(what), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}`.trim();
 		}
 		case "read": {
-			const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
-			const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
-			return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
+			// Older stored calls can have plural `paths`; new public reads are one-file `path` calls.
+			if (args.paths !== undefined) {
+				const paths = Array.isArray(args.paths) ? args.paths : [args.paths];
+				const range = args.offset !== undefined || args.limit !== undefined ? ` (from line ${args.offset ?? 1}${args.limit !== undefined ? `, ${args.limit} lines` : ""})` : "";
+				return `read ${oneLine(paths.join(", "), POLICY.limits.terminal.callSummary.readPaths)}${range}`;
+			}
+			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
+				? args.ref
+				: (typeof args.id === "string" && args.id !== "" ? { kind: "file", id: args.id } : undefined);
+			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
+			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
+			return `read ${oneLine(String(target), POLICY.limits.terminal.callSummary.readPaths)}${range}`.trim();
+		}
+		case "shelf": {
+			const action = typeof args.action === "string" && args.action !== "" ? args.action : "?";
+			const rawRef = args.ref && typeof args.ref === "object" && typeof args.ref.id === "string" && args.ref.id !== ""
+				? args.ref
+				: (typeof args.id === "string" && args.id !== "" ? { ...(/^f\d+$/.test(args.id) ? { kind: "file" } : /^c\d+$/.test(args.id) ? { kind: "atlas" } : {}), id: args.id } : undefined);
+			const target = rawRef !== undefined ? (describeRef?.(rawRef) ?? rawRef.id) : (args.path ?? "");
+			const range = typeof args.range === "string" && args.range !== "" ? ` (lines ${args.range})` : "";
+			return `shelf ${[action, oneLine(String(target), POLICY.limits.terminal.callSummary.contextOp)].filter((piece) => piece !== "").join(" ")}${range}`.trim();
 		}
 		case "search":
 			return `search /${oneLine(args.pattern, POLICY.limits.terminal.callSummary.searchPattern)}/${args.path ? ` in ${args.path}` : ""}${args.glob ? ` (${args.glob})` : ""}`;
@@ -109,7 +132,7 @@ export function describeCall(call, describeRef) {
 			return `list ${args.path ?? "."}${args.depth !== undefined ? ` (depth ${args.depth})` : ""}`;
 
 		case "consult":
-			return `the storyteller  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
+			return `consult conference  ${oneLine(args.question, POLICY.limits.terminal.callSummary.consultQuestion)}`;
 		case "wake":
 			return `wake ${args.action ?? "?"} ${oneLine(args.id ?? args.note ?? "", POLICY.limits.terminal.callSummary.wakeCall)}`.trim();
 		case "sleep":
@@ -150,20 +173,18 @@ export function describeResult(message) {
 	if (message.toolName === "book" && message.details?.target === "atlas") return oneLine(Array.isArray(message.details?.shown) && message.details.shown.length > 0 ? message.details.shown.join(" · ") : text.split("\n")[0], POLICY.limits.terminal.resultSummary.atlas);
 	if (message.toolName === "search") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.search);
 	if (message.toolName === "list") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.list);
-	// The storyteller: how long it took, how much it wrote — in the receipt's own words. Where the answer stands is said in the opened row.
-	if (message.toolName === "consult" && !message.isError) {
-		const tokens = typeof message.details?.tokens === "number" && Number.isFinite(message.details.tokens) ? `${Math.round(message.details.tokens).toLocaleString("en-US")} tokens` : "";
-		const seconds = typeof message.details?.seconds === "number" && Number.isFinite(message.details.seconds)
-			? `${Math.floor(message.details.seconds / 60)} m ${String(Math.round(message.details.seconds % 60)).padStart(2, "0")} s`
-			: "";
-		const ended = message.details?.finish === "length" ? " · cut off at consultMaxTokens" : "";
-		const parts = [seconds, tokens].filter((part) => part !== "");
-		return `${parts.join(" · ")}${ended}`;
+	if (message.toolName === "shelf") return oneLine(text.split("\n")[0], POLICY.limits.terminal.resultSummary.context);
+	// A same-model conference has a compact parent receipt; its detailed notebook stays private under /consult co<N>.
+	if (message.toolName === "consult" && !message.isError && typeof message.details?.conference === "string") {
+		return oneLine(text, POLICY.limits.terminal.resultSummary.refusal);
 	}
 	// "Wrote roll.py: 34 lines, a new file." / "Edited roll.py: …" / "Removed roll.py."
 	if (message.toolName === "write" || message.toolName === "edit" || (message.toolName === "book" && message.details?.target === "file" && message.details?.change === true)) {
-		const colon = text.indexOf(": ");
-		const summary = colon >= 0 ? text.slice(colon + 2).replace(/\s+File id:.*$/, "").replace(/\.$/, "") : text.replace(/\.$/, "");
+		// A direct-file result may follow its receipt with the focus-local surface accounting. The terminal's one-line
+		// summary names the mutation; the full result still carries the visible allowance facts.
+		const first = text.split("\n")[0];
+		const colon = first.indexOf(": ");
+		const summary = colon >= 0 ? first.slice(colon + 2).replace(/\s+File id:.*$/, "").replace(/\.$/, "") : first.replace(/\.$/, "");
 		return oneLine(summary, POLICY.limits.terminal.resultSummary.write);
 	}
 	const lines = text.split("\n").length;
@@ -173,12 +194,12 @@ export function describeResult(message) {
 /**
  * @param {{ harness: any, main: any, context: any, windows?: ReturnType<typeof import("./windows.mjs").createWindows>, wakes?: ReturnType<typeof import("./wakes.mjs").createWakes> }} session
  * @param {{ input: NodeJS.ReadableStream, output: NodeJS.WritableStream, interactive: boolean, contextWindow: number, root: string, brainDir: string, oneShot?: string, gate?: { yolo: boolean }, initiation?: { on: boolean }, wakeMin?: number }} options
- *   gate: whether change items run without /approve; /yolo changes it, and the tools read it (src/harness.mjs)
+ *   gate: whether declared change moves run without /approve; /yolo changes it, and the tools read it (src/harness.mjs)
  * @returns {Promise<number>} exit code
  */
 /** Sent for the user when /approve finds nothing to authorize; like the message that follows an approval, in their voice. */
 const NOTHING_TO_APPROVE =
-	"I typed /approve, but the plan holds no open change item, so nothing was authorized. I can only approve what the plan holds: what you describe in the chat is not in it. If you have changes for me to approve, write them with `plan` now, then ask me again.";
+	"I typed /approve, but the plan holds no declared change move waiting for approval, so nothing changed. I can only approve the current move revisions stored in the plan; chat wording is not a move. Add a narrow move, then ask me again.";
 
 export async function runTerminal(session, options) {
 	const { harness, main, context, windows, wakes, engine, asks } = session;
@@ -230,6 +251,35 @@ export async function runTerminal(session, options) {
 		if (midNotes) endLine();
 		out.write(text);
 		midLine = !text.endsWith("\n");
+	};
+	// A server is optional while Cartographer opens: local commands remain available, and a later model turn retries
+	// this gate. Keep one clear failure on screen rather than making an unavailable endpoint look like a hung UI.
+	let lastModelError;
+	const applyModelLimits = (limits) => {
+		if (Number.isInteger(limits?.usableContextWindow) && limits.usableContextWindow > 0) options.contextWindow = limits.usableContextWindow;
+	};
+	const showModelError = (error) => {
+		const message = String(error?.message ?? error);
+		if (message === "" || message === lastModelError) return;
+		lastModelError = message;
+		// Chat output can scroll in the full-screen view. Keep this recoverable gate failure in that view's persistent
+		// status strip as well, so a stopped server is never mistaken for an idle or hung Cartographer session.
+		ui?.modelError?.(message);
+		line(`! ${message}`);
+	};
+	const ensureModelReady = async () => {
+		if (typeof session.ensureModelReady !== "function") return true;
+		if (session.isModelReady?.() !== true) line(dim("  connecting to the model server and checking native GBNF; a stopped model may start now"));
+		try {
+			const limits = await session.ensureModelReady();
+			applyModelLimits(limits);
+			lastModelError = undefined;
+			ui?.modelReady?.();
+			return true;
+		} catch (error) {
+			showModelError(error);
+			return false;
+		}
 	};
 	/** The agent's own text: dim, each line behind the gutter. */
 	const streamNotes = (text) => {
@@ -315,13 +365,17 @@ export async function runTerminal(session, options) {
 	const pendingCalls = new Map(); // call id -> { depth, text } waiting for its result
 	const attached = new Set();
 	const watches = [];
+	// Conference child ids never change ownership. Cache that one narrow association so ordinary task live frames
+	// do not repeatedly scan consult records merely to prove that they are not a conference.
+	const conferenceChildren = new Map();
+	const ordinaryConversations = new Set();
 
 	// The call for which Cartographer last said that it ended a turn, per depth: several results of one reply carry it.
 	const saidLoop = [];
 	/** Print what one new entry of a conversation means. depth 0 is the main agent, 1 a task. */
-	const showEntry = (depth, entry) => {
+	const showEntry = (depth, entry, consult) => {
 		if ((entry.model ?? []).some((message) => message.role === "assistant")) saidLoop[depth] = undefined;
-		showOne(depth, entry);
+		showOne(depth, entry, consult);
 		// A call that failed the same way again and again (src/harness.mjs): said after the call's own line.
 		for (const message of entry.model ?? []) {
 			const loop = message.role === "toolResult" ? message.details?.loop : undefined;
@@ -336,7 +390,18 @@ export async function runTerminal(session, options) {
 	const afterCall = new Map();
 	const afterResult = [];
 	const afterReply = [];
-	const showOne = (depth, entry) => {
+	const promoteChatSources = (message, source) => {
+		if (message?.role !== "assistant" || source?.kind !== "durable-message") return;
+		for (const part of message.content ?? []) if (part?.type === "toolCall" && part.name === "chat") {
+			bindTalkSource(options.brainDir, { kind: "chat-call", conversationId: String(source.conversationId), callId: String(part.id) }, { ...source, callId: String(part.id) });
+		}
+	};
+	const showOne = (depth, entry, consult) => {
+		// `chat` records its tool call before Durable commits the assistant entry on some paths. Promote that
+		// provisional call correlation to the admitted entry id before the screen exposes an edit handle.
+		if (entry?.id !== undefined && entry?.conversationId !== undefined) for (const [position, message] of (entry.model ?? []).entries()) {
+			promoteChatSources(message, { kind: "durable-message", conversationId: String(entry.conversationId), entryId: String(entry.id), position });
+		}
 		if (ui === undefined) showMessages(depth, entry);
 		else {
 			capture = [];
@@ -349,7 +414,7 @@ export async function runTerminal(session, options) {
 				capture = undefined;
 			}
 			for (const message of entry.model ?? []) if (message.role === "assistant") finished.add(message.timestamp);
-			ui.entry(depth, entry, printed);
+			ui.entry(depth, entry, printed, consult);
 		}
 		if (depth === 0 && (entry.model ?? []).some((message) => message.role === "assistant")) for (const print of afterReply.splice(0)) print();
 		for (const message of entry.model ?? []) {
@@ -434,9 +499,9 @@ export async function runTerminal(session, options) {
 						else {
 							lastReport = text;
 							line(`${bold("◂")} report${message.details?.report ? ` ${message.details.report}` : ""}  ${count(text.length)} characters${message.details?.done === false ? " · returned not done" : ""}  ${dim("(/report shows it)")}`);
-							// A plan item's task says itself whether the item is done.
-							if (message.details?.marked !== undefined) line(`${bold("●")} plan  ✓ ${message.details.marked} marked done by its task`);
-							else if (message.details?.done === false && message.details?.item !== undefined) line(`${bold("●")} plan  ${message.details.item} stays open: its task returned not done`);
+							// A focus reports one move; only the orchestrator accepts it after review.
+							if (message.details?.move !== undefined && message.details?.done === true) line(`${bold("●")} plan  ${message.details.move} reported; review its evidence before accepting it`);
+							else if (message.details?.done === false && message.details?.move !== undefined) line(`${bold("●")} plan  ${message.details.move} is blocked: ${message.details.reason ?? "the focus returned not done"}`);
 						}
 						// What the task put on the main agent's shelf.
 						if (Array.isArray(message.details?.shelved)) {
@@ -522,14 +587,15 @@ export async function runTerminal(session, options) {
 	}
 
 	/** Print the main agent's reply as it is generated. */
-	const showLive = (live, depth = 0) => {
+	const showLive = (live, depth = 0, consult) => {
 		const message = live?.generation?.message;
 		const writing = message === undefined || finished.has(message.timestamp) ? undefined : message;
 		checkRepeat(writing, depth);
 		if (ui !== undefined) {
-			ui.live(depth, writing);
-			// What the tools are saying while they run: the storyteller's draft, as far as the harness keeps it.
-			ui.liveTools?.(depth, live?.tools);
+			ui.live(depth, writing, consult);
+			// A conference child stays isolated from ordinary Work, but its live reasoning and local tools still need
+			// to reach the dedicated Consult projection as they grow.
+			ui.liveTools?.(depth, live?.tools, consult);
 			return;
 		}
 		if (writing === undefined || depth > 0) return;
@@ -612,13 +678,14 @@ export async function runTerminal(session, options) {
 	const printBlocks = (state, windows, tail) => {
 		if (state !== undefined) ui.block("the state block — the time, the atlas, the ledger, the plan", state);
 		if (windows !== undefined) ui.block("the shell windows as they stand", windows);
-		if (tail !== undefined) ui.block("the newest read — its content stands at the end of the request", tail);
+		if (tail !== undefined) ui.block("the current read batch — its contents stand at the end of the request", tail);
 	};
 	/**
 	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in
 	 * between, the blocks the message carries after it. The screen only; the plain terminal has its own behavior.
 	 */
-	const renderDressed = (depth, message) => {
+	const renderDressed = (depth, message, source, consult) => {
+		promoteChatSources(message, source);
 		const original = textOf(message);
 		const { text: afterTail, tail } = splitReadTail(original);
 		const { text: afterState, state, windows } = splitState(afterTail);
@@ -629,7 +696,7 @@ export async function runTerminal(session, options) {
 			// The front block of a collapse: everything before it is gone from the agent's view, so the tab shows
 			// only the marker (the collapse leaves the intro alone), and then what stands in its place.
 			const store = loadContext(options.brainDir);
-			ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`);
+				ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`, consult);
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
 		} else {
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
@@ -643,11 +710,11 @@ export async function runTerminal(session, options) {
 				} else if (isNote({ role: "user", content: [{ type: "text", text: cleaned }] })) {
 					ui.print(`◆ a note Cartographer left itself: ${oneLine(cleaned.replace(/\n/g, " "), POLICY.limits.terminal.messageSummaryChars)}\n`);
 				} else {
-					ui.user(cleaned);
+						ui.entry(depth, { model: [{ ...message, content: [{ type: "text", text: cleaned }] }], source }, "", consult);
 				}
 			} else {
 				const cleaned = message.role === "toolResult" ? withoutAdditions(body).trim() : undefined;
-				ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "");
+					ui.entry(depth, { model: [cleaned === undefined ? message : { ...message, content: [{ type: "text", text: cleaned }] }] }, "", consult);
 			}
 		}
 		if (state !== undefined || windows !== undefined || tail !== undefined) printBlocks(state, windows, tail);
@@ -657,7 +724,7 @@ export async function runTerminal(session, options) {
 	 * plain terminal prints nothing of the past; the screen shows it. A task's replay begins at its brief (the
 	 * fork point is the main conversation's story, shown at depth 0).
 	 */
-	const replayHistory = async (conversation, id, depth, fallback = []) => {
+	const replayHistory = async (conversation, id, depth, fallback = [], consult) => {
 		if (ui === undefined) return;
 		// What the agent keeps in view is the current stretch of the conversation since its last restart, exactly as
 		// the request sees it — not a window of the newest entries. The brief of a task's fork is in it, unless the task
@@ -672,29 +739,106 @@ export async function runTerminal(session, options) {
 		const found = depth === 0 ? 0 : entries.findIndex((entry) => entry.kind === "carto.brief" || entry.kind === "carto.sibling");
 		const at = found < 0 ? 0 : found;
 		const own = depth === 0 ? entries : entries.slice(at);
+		if (consult !== undefined) {
+			// A conference child has its own consult-local projection. Do not dress its replay through the ordinary
+			// request/block renderer: that could surface private child state as a Work block before chat.mjs routes its
+			// attributed messages to Consult. The durable co<N> audit remains the historic source of truth. Replay uses
+			// only a durable message match for attribution; a later active speaker must not relabel old pruned activity.
+			for (const entry of own) {
+				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
+				ui.entry(depth, entry, "", consultScope(id, message, { activeFallback: false }) ?? consult);
+			}
+			return;
+		}
 		// The brief and sibling notes of the fork are the main conversation's rows; they are not the task's story.
 		const briefIds = new Set();
 		for (const entry of own) for (const message of entry.model ?? []) if (message.role === "toolResult" && message.toolName === "task") briefIds.add(message.toolCallId);
-		const raw = [];
-		// The system prompt rides in its own entry and is rebuilt fresh for every request; it is not part of the
-		// conversation the tab shows, and a system message at the end would keep the state and windows blocks off
-		// the end of the request.
-		for (const entry of own) for (const message of entry.model ?? []) {
-			if (message.role === "system") continue;
-			raw.push(message);
+		let view;
+		try {
+			view = await conversation.context(context);
+		} catch {
+			view = undefined;
+		}
+		let raw;
+		let sources;
+		if (view !== undefined) {
+			// A task inherits its fork's active context. The screen starts at its brief, so retain only the active
+			// contributions of its own stretch. This is still the Durable contribution projection, not entry.model.
+			const allowed = new Set(own.map((entry) => String(entry.id)));
+			const allSources = bridgeRequestSources(view.messages ?? [], view);
+			const ownCalls = new Set();
+			for (const [index, entry] of (view.entries ?? []).entries()) {
+				if (!allowed.has(String(entry.id))) continue;
+				for (const message of view.contributions?.[index] ?? []) if (message.role === "assistant") for (const part of message.content ?? []) if (part?.type === "toolCall") ownCalls.add(part.id);
+			}
+			raw = [];
+			sources = [];
+			for (const [index, message] of (view.messages ?? []).entries()) {
+				const source = allSources[index];
+				const ownMessage = source !== undefined && allowed.has(source.entryId);
+				const ownSyntheticResult = source === undefined && message.role === "toolResult" && ownCalls.has(message.toolCallId);
+				// The main view owns every active non-system row. An ambiguous bridge may still be shown, but reaches
+				// Talk without an edit handle; it never borrows another row's identity.
+				const ownUnmappedMain = depth === 0 && source === undefined && message.role !== "system";
+				if (!ownMessage && !ownSyntheticResult && !ownUnmappedMain) continue;
+				raw.push(message);
+				sources.push(source);
+			}
+		} else {
+			// An unreadable ContextView must not blank the screen. This compatibility fallback has no mutable source
+			// handles: raw entry models are only shown, never used to target an edit or removal.
+			raw = [];
+			for (const entry of own) for (const message of entry.model ?? []) if (message.role !== "system") raw.push(message);
 		}
 		if (raw.length === 0) return;
 		let dressed;
+		let dressedSources;
 		try {
-			dressed = dressRequest(raw, { brainDir: options.brainDir, root: options.root, runner: options.runner, config, windows, wakes, gate, main: depth === 0, conversationId: depth === 0 ? undefined : id, replay: true });
+			const plan = planRequest(raw, { brainDir: options.brainDir, root: options.root, runner: options.runner, config, gate, main: depth === 0, conversationId: depth === 0 ? undefined : id, used: engine.usedBy(id), sources, fired: [], wakeLines: depth === 0 ? wakes?.lines() : undefined, windowRows: windows?.list(config.windowTail) });
+			dressed = plan.messages;
+			dressedSources = new Map(plan.parts.filter((part) => part.kind === "active-message" || part.kind === "focus-capsule").map((part) => [part.message, part.sourceRef]));
 		} catch (error) {
 			ui.print(`! the stored conversation could not be shown as the agent sees it (${error?.message ?? error}); it is stored safely\n`);
 			dressed = raw;
 		}
-		for (const message of dressed) {
+		for (const [index, message] of dressed.entries()) {
 			if (message.role === "toolResult" && briefIds.has(message.toolCallId)) continue;
-			renderDressed(depth, message);
+			renderDressed(depth, message, dressedSources?.get(index), consult);
 		}
+	};
+
+	/**
+	 * Conference children are ordinary Durable conversations for scheduling, but not ordinary parent/focus work for
+	 * presentation. Carry only their co<N> identity and the best known active speaker to the screen; the screen
+	 * reads its own consult-local audit rather than receiving any child material in the parent conversation.
+	 */
+	const consultScope = (id, message, { activeFallback = true } = {}) => {
+		const conversationId = String(id ?? "");
+		let record;
+		try {
+			const known = conferenceChildren.get(conversationId);
+			if (known !== undefined) record = loadConference(options.brainDir, known).conference;
+			else if (!ordinaryConversations.has(conversationId)) {
+				record = findConferenceByChild(options.brainDir, conversationId);
+				if (record === undefined) ordinaryConversations.add(conversationId);
+				else conferenceChildren.set(conversationId, record.id);
+			}
+		} catch { record = undefined; }
+		if (record === undefined) return undefined;
+		let participant;
+		if (message?.role === "assistant") {
+			const calls = callsOf(message);
+			const callIds = new Set(calls.map((call) => call.id).filter((callId) => typeof callId === "string"));
+			const activity = record.activities?.findLast?.((entry) => entry?.participant && (
+				(callIds.size > 0 && Array.isArray(entry.calls) && entry.calls.some((call) => callIds.has(call.id))) ||
+				(callIds.size === 0 && entry.prose === textOf(message))
+			));
+			participant = activity?.participant;
+			if (participant === undefined && calls.some((call) => call.name === "consult_return")) participant = record.final?.participant;
+			if (participant === undefined && calls.length === 0) participant = record.turns?.findLast?.((turn) => turn.text === textOf(message))?.participant;
+		}
+		if (activeFallback) participant ??= record.active?.participant ?? record.final?.participant;
+		return { conference: record.id, ...(participant === undefined ? {} : { participant }), status: record.status };
 	};
 
 	const follow = async (id, depth) => {
@@ -703,7 +847,8 @@ export async function runTerminal(session, options) {
 		const watch = await conversation.watch(context);
 		watches.push(watch);
 		// Awaited: entries that come in while the replay is built are handed in after it, in order.
-		await replayHistory(conversation, id, depth, watch.value.entries ?? []);
+		const replayConsult = consultScope(id);
+		await replayHistory(conversation, id, depth, watch.value.entries ?? [], replayConsult === undefined ? undefined : { conference: replayConsult.conference, status: replayConsult.status });
 		if (depth === 0 && watch.value.docs["pi.live"]?.run !== undefined) line(dim("Continuing unfinished work from the last session…"));
 		// The main agent's history is not replayed. A task is shown from its brief on.
 		let newest = watch.value.entries.at(-1)?.id ?? 0;
@@ -713,12 +858,16 @@ export async function runTerminal(session, options) {
 		}
 		const handle = async (value) => {
 			if (stopped) return;
-			for (const entry of value.entries) if (entry.id > newest) showEntry(depth, entry);
+			for (const entry of value.entries) if (entry.id > newest) {
+				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
+				showEntry(depth, entry, consultScope(id, message));
+			}
 			newest = Math.max(newest, value.entries.at(-1)?.id ?? 0);
 			const live = value.docs["pi.live"];
-			if (depth > 0) showLive(live, depth);
+			const writing = live?.generation?.message;
+			if (depth > 0) showLive(live, depth, consultScope(id, writing));
 			if (depth === 0) {
-				showLive(live);
+				showLive(live, 0, consultScope(id, writing));
 				if (live?.runFailure !== undefined && live.runFailure.taskId !== lastFailure) {
 					lastFailure = live.runFailure.taskId;
 					const { reason, detail } = live.runFailure;
@@ -772,14 +921,8 @@ export async function runTerminal(session, options) {
 	/** A reason as the engine words it for a task ("My context held …"), worded for the user. */
 	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^My context/, "its context").replace(/^I asked/, "it asked");
 	/** The question before a collapse and what came back. */
-	let saidFallback = false;
 	const askedLine = (event) => {
 		const who = event.task ? dim("│ ") : "";
-		// Said once: the server would not take the form of the answer, so the question is asked without it from here on.
-		if (event.fallback !== undefined && !saidFallback) {
-			saidFallback = true;
-			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, POLICY.limits.terminal.resultSummary.handoffFallback)}). From here on the question before a collapse is asked without it.`)}`);
-		}
 		if (event.skipped) line(`${who}${dim("◆ not asked before collapsing: carto has only just started, and the question would make the server read the whole context first")}`);
 		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, POLICY.limits.terminal.messageSummaryChars)}). The context is collapsed without it.`);
 		else line(`${who}${dim(`◆ asked before collapsing (${event.task ? ofTask(event.reason) : event.reason}): does it need to write something down first? ${event.handoff ? "yes" : "no"} · ${(event.ms / 1000).toFixed(1)} s`)}`);
@@ -849,7 +992,9 @@ export async function runTerminal(session, options) {
 		// In the line-by-line terminal the marker is said here; in the full screen it is said by the
 		// conversation's front-block entry, so that it is said after everything before it is wiped.
 		if (ui === undefined) collapsedLine();
-		if (config.readAhead !== false && !final) {
+		// Read-ahead is optional performance work, never a reason to wake or require a model while Cartographer is
+		// opening offline. Once the first actual model turn has proven its route, it resumes its usual behavior.
+		if (config.readAhead !== false && !final && (typeof session.isModelReady !== "function" || session.isModelReady())) {
 			const ahead = engine.readAhead(text, info.at);
 			if (ahead !== undefined) {
 				readingAhead = ahead;
@@ -908,7 +1053,18 @@ export async function runTerminal(session, options) {
 	});
 	session.on?.((event) => {
 		enqueue(async () => {
-			if (stopped || event.main !== true) return;
+			if (stopped) return;
+			if (event.type === "model-ready") {
+				applyModelLimits(event.limits);
+				lastModelError = undefined;
+				ui?.modelReady?.();
+				return;
+			}
+			if (event.type === "model-error") {
+				showModelError(event.error);
+				return;
+			}
+			if (event.main !== true) return;
 			// Said after the reply it is about, which comes in a moment later.
 			if (event.type === "limit") afterReply.push(() => line(`! The agent made ${event.replies} replies in this turn without calling \`sleep\`, so Cartographer ended the turn. Say "continue" to let it go on.`));
 			else if (event.type === "same-note") afterReply.push(() => line(`! Cartographer ended the turn: the agent wrote ${event.empty ? `nothing and called nothing, ${event.times} times in a row` : `the same note ${event.times} times in a row and called nothing`}.`));
@@ -965,9 +1121,9 @@ export async function runTerminal(session, options) {
 	/** One line on the plan, when there is one. */
 	const planLine = () => {
 		const { plan, error } = loadPlan(options.brainDir);
-		if (plan === undefined) return line(`! The plan cannot be read: ${error}. Repair the file; until then no plan item can run.`);
+		if (plan === undefined) return line(`! The plan cannot be read: ${error}. Repair the file; until then no declared move can run.`);
 		if (plan.items.length === 0) return;
-		line(dim(`plan: ${planSummary(plan)} · /plan shows it${awaitsApproval(plan) && !gate.yolo ? ", /approve authorizes it" : ""}`));
+			line(dim(`plan: ${planSummary(plan)} · /plan shows envelopes and moves${awaitsApproval(plan) && !gate.yolo ? ", /approve snapshots current move revisions" : ""}`));
 	};
 
 	/** Said once for each state of the plan that waits for the user, when the agent has stopped. */
@@ -979,19 +1135,21 @@ export async function runTerminal(session, options) {
 			return;
 		}
 		const waiting = waitingItems(plan);
-		const mark = JSON.stringify(waiting.map((item) => [item.id, item.text, item.network === true, item.standing === true]));
-		const online = waiting.filter((item) => item.network === true).length;
-		const duties = waiting.filter((item) => item.standing === true).length;
-		const notes = [online > 0 ? `${online} with network access` : "", duties > 0 ? `${duties} standing` : ""].filter((note) => note !== "");
+		const mark = JSON.stringify(waiting.map((move) => [move.id, move.action ?? move.text, move.capabilities?.network === true]));
+		const online = waiting.filter((move) => move.capabilities?.network === true).length;
+		const notes = [online > 0 ? `${online} with network access` : ""].filter((note) => note !== "");
 		if (mark === reminded) return;
 		reminded = mark;
-		line(`${bold("plan")}  ${plural(waiting.length, "change item")} ${waiting.length === 1 ? "waits" : "wait"} for you${notes.length > 0 ? ` (${notes.join(", ")})` : ""}: /plan shows the plan, /approve authorizes it`);
+		line(`${bold("plan")}  ${plural(waiting.length, "change move")} ${waiting.length === 1 ? "waits" : "wait"} for you${notes.length > 0 ? ` (${notes.join(", ")})` : ""}: /plan shows the move contracts, /approve snapshots their current revisions`);
 	};
 
 	const submit = async (content) => {
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
 		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
+		// This runs after the terminal has opened. A cold llama-swap route may now load, but an absent server leaves
+		// the local Cartographer session open and the user's message is not admitted into an unserviceable run.
+		if (!(await ensureModelReady())) return undefined;
 		busy = true;
 		try {
 			// While the agent is working, a message joins the current run after its current tool round.
@@ -1108,17 +1266,20 @@ export async function runTerminal(session, options) {
 					[
 						"  /thinking  show or hide what the agent thinks and notes for itself (/thinking on, /thinking off; Ctrl-T does the same)",
 						"  /report   the last task's report in full; /report t12 shows a kept one",
+						"  /consult  consultation conference audits; /consult co1 shows its immutable packet, participant/selector trail, receipts, and final or incomplete outcome; /consult probe [PATH] writes a no-project llama.cpp native-grammar selector diagnostic",
 						"  /ledger   goals, questions and notes, open and closed, and where the file is",
 						"  /plan     the plan, whether it is authorized, and where the file is",
-						"  /atlas    the tree as the agent sees it, the graph's nodes, and where the file is",
+						"  /atlas    the tree as the agent sees it, its local attention map, the graph's nodes, and where the file is",
+						"  /focus TARGET reason    set an explicit atlas focus on a node id/name or project path",
+						"  /unfocus  clear the explicit atlas focus (a running move's targets remain temporary)",
 						"  /assessment  the agent's summary of the project, and where the file is",
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
-						"  /requests what waits for you: change items, questions of taste, and ",
-						"  /approve  /approve ID ... approves those requests; /approve alone approves the whole plan as it stands",
+						"  /requests what waits for you: declared move revisions and questions of taste",
+						"  /approve  /approve ID ... approves those requests; /approve alone snapshots every current waiting move revision",
 						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
 						"  /pause    hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream",
-												"  /yolo     /yolo on lets change items run without /approve while you watch; /yolo off ends that",
+						"  /yolo     /yolo on lets declared change moves run without /approve while you watch; /yolo off ends that",
 						"  /initiate /initiate off keeps the agent waiting for you at the start; /initiate on lets it start on its own again",
 						"  /wakes    what the agent has set to wake itself; /wakes remove ID (or all) takes one away",
 						"  /diff     what the last change task did to the files (/diff all: the whole patch)",
@@ -1131,9 +1292,9 @@ export async function runTerminal(session, options) {
 						"  /context  what the agent's context holds: its parts, their sizes, the shelf, when it is next collapsed",
 						"  /fold ID  what the agent does with `fold`: take a report out of view, leaving its one line",
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
-					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan item, a node of the graph; the row stays on disk either way",
-					"  /done ID …  settle a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan item, a node of the graph",
+					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph; the row stays on disk either way",
+					"  /done ID …  settle rows; a reported move needs /done mN -- REVIEW saying why its proof witnesses its done-when",
+					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1160,6 +1321,48 @@ export async function runTerminal(session, options) {
 					const kept = loadReport(options.brainDir, argument);
 					line(kept ?? `  There is no report ${argument}. /context lists the kept ones.`);
 				} else line(lastReport === undefined ? "  No task has reported in this run of carto." : lastReport);
+				return true;
+			}
+			case "consult": {
+				if (argument === "probe") {
+					if (args.length > 2) {
+						line("  /consult probe [PATH] accepts at most one project-relative JSON log path (paths with spaces are not supported).");
+						return true;
+					}
+					if (busy) {
+						line("  The agent is working. /stop first, then /consult probe, so the raw native-grammar check does not compete with a live request.");
+						return true;
+					}
+					try {
+						if (!(await ensureModelReady())) return true;
+						const current = await session.model?.();
+						const modelId = current?.modelId ?? config.model;
+						const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path: args[1] });
+						line(dim("  Running two synthetic, selector-only llama.cpp GBNF requests. They send no project files, chat, tools, or conference capture."));
+						const record = await runLlamaCppSelectorProbe({ server: config.server, modelId });
+						const written = writeSelectorProbeLog(logPath, record);
+						line(renderLlamaCppSelectorProbe(record));
+						const shown = relative(options.root, written) || written;
+						line(`  JSON log: ${shown}${args[1] === undefined ? "  (ignored under .brain/export; pass a project-relative PATH to commit one)" : ""}`);
+						line(dim("  A PASS is inspectable evidence for Cartographer's required native-grammar boundary on this endpoint; it does not establish calibrated or semantically correct routing."));
+					} catch (error) {
+						const message = error instanceof ConsultProbeError ? error.message : error?.message ?? String(error);
+						line(`! Native llama.cpp selector probe could not run: ${message}`);
+					}
+					return true;
+				}
+				if (argument !== undefined) {
+					const loaded = loadConference(options.brainDir, argument);
+					line(loaded.conference === undefined ? `! ${loaded.error}` : renderConference(loaded.conference));
+					return true;
+				}
+				const conferences = listConferences(options.brainDir);
+				if (conferences.length === 0) line("  No consultation conference stands yet. A same-model `consult` creates a co<N> record; /consult co1 shows its private auditable notebook. /consult probe checks a llama.cpp native GBNF selector without creating a conference.");
+				else {
+					line(`  ${bold("Consult conferences")}`);
+					for (const entry of conferences) line(entry.error === undefined ? `    ${conferenceStatusLine(entry.conference)}` : `    ${entry.id} · unreadable: ${entry.error}`);
+					line(dim("  /consult co1 shows immutable sources, roster snapshots, participant turns, selector grammar events, tool receipts, and the returned or incomplete outcome. /consult probe [PATH] writes a standalone native-grammar diagnostic. /stop cancels an active outer call."));
+				}
 				return true;
 			}
 			case "context": {
@@ -1224,6 +1427,43 @@ export async function runTerminal(session, options) {
 				line(dim(`  ${planPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
+			case "focus": {
+				if (argument === undefined || tail === "") {
+					line("  /focus needs a node id/name or project path, then a short reason. Example: /focus c3 trace the request path");
+					return true;
+				}
+				const { atlas, error } = loadAtlas(options.brainDir);
+				if (atlas === undefined) {
+					line(`! The atlas cannot be read: ${error}`);
+					return true;
+				}
+				try {
+					const node = findNode(atlas, argument);
+					const result = applyAtlasOp(atlas, node === undefined ? { action: POLICY.enums.atlasActions.focus, path: argument, reason: tail } : { action: POLICY.enums.atlasActions.focus, name: node.id, reason: tail }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+					if (result.changed) saveAtlas(options.brainDir, atlas);
+					line(result.line);
+				} catch (error) {
+					if (error instanceof AtlasError) line(`! ${error.message}`);
+					else throw error;
+				}
+				return true;
+			}
+			case "unfocus": {
+				const { atlas, error } = loadAtlas(options.brainDir);
+				if (atlas === undefined) {
+					line(`! The atlas cannot be read: ${error}`);
+					return true;
+				}
+				try {
+					const result = applyAtlasOp(atlas, { action: POLICY.enums.atlasActions.unfocus }, { root: options.root, now: new Date().toISOString(), by: POLICY.enums.atlasAuthors.user, main: false });
+					if (result.changed) saveAtlas(options.brainDir, atlas);
+					line(result.line);
+				} catch (error) {
+					if (error instanceof AtlasError) line(`! ${error.message}`);
+					else throw error;
+				}
+				return true;
+			}
 			case "atlas": {
 				const { atlas, error } = loadAtlas(options.brainDir);
 				line(bold("Tree"));
@@ -1231,10 +1471,12 @@ export async function runTerminal(session, options) {
 				if (atlas === undefined) line(`! The graph cannot be read: ${error}`);
 				else {
 					line(bold(`Graph: ${atlasSummary(atlas)}`));
+					const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
+					const local = renderAttention(attentionSnapshot(options.root, atlas, { active: overlays }), { idle: !busy && overlays.length === 0 });
+					if (local !== "") line(local);
 					if (atlas.nodes.length > 0) line(renderOutline(atlas, Number.POSITIVE_INFINITY));
-					for (const node of staleNodes(options.root, atlas)) line(`  may be out of date: ${node.name} (${node.why.join(", ")})`);
 				}
-				line(dim(`  ${atlasPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
+				line(dim(`  ${atlasPath(options.brainDir)} · /focus TARGET reason sets a lens; /unfocus clears it; edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "assessment": {
@@ -1265,35 +1507,33 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "approve": {
-				// One or more ids: approve those requests, one item at a time. The agent goes on meanwhile and is
-				// told what changed; it does not have to have been waiting. With no ids the old whole-plan /approve
-				// still works, so a plan described in a few lines can be agreed to in one word.
+				// `/approve p7` expands only to p7's waiting child moves now. `/approve` snapshots every
+				// waiting move at this moment; adding another move later never inherits this decision.
 				if (args.length > 0) {
 					const done = approveRequests(options.brainDir, args);
 					const names = done.items;
-					if (names.length === 0) line(`  None of ${args.join(", ")} names a request that waits. /requests lists them.`);
+					if (names.length === 0) line(`  None of ${args.join(", ")} names a move revision that waits. /requests lists them.`);
 					else {
-						line(`${bold("●")} requests  approved ${names.join(", ")}`);
-						await send(`I approved ${names.join(", ")}. What waited on these requests can go on; everything else you were doing does not stop.`);
+						line(`${bold("●")} moves  approved ${names.join(", ")}`);
+						await send(`I approved the current revisions of ${names.join(", ")}. Only those declared moves may now run; later moves still need their own approval.`);
 					}
-					for (const id of done.unknown) line(dim(`  ${id} is not a request that waits. /requests lists them.`));
+					for (const id of done.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
 					return true;
 				}
 				const { plan, error } = loadPlan(options.brainDir);
 				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
-				else if (openItems(plan, POLICY.enums.planMode.change).length === 0) {
-					line("  The plan has no open change item, so there is nothing to authorize. /plan shows it. The agent is told.");
-					// A model that described its plan in the chat instead of writing it would wait for an approval that cannot come.
-					await send(NOTHING_TO_APPROVE);
-				}
-				else if (isAuthorized(plan)) line("  The plan is already authorized.");
 				else {
-					const covered = authorize(plan, new Date().toISOString());
-					savePlan(options.brainDir, plan);
-					line(`${bold("●")} plan  authorized by you: ${plural(covered, "change item")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
-					for (const item of openItems(plan, POLICY.enums.planMode.change)) line(dim(`  ${item.id} ${item.text}${item.network === true ? "  · its commands reach the network" : ""}${item.standing === true ? "  · standing: the agent may carry it out again and again" : ""}`));
-					// The agent is told, so that it starts on the plan without another message from the user.
-					await send("I authorize the plan as it stands. Carry it out.");
+					const pending = waitingItems(plan);
+					if (pending.length === 0) {
+						line("  The plan has no declared change move waiting for approval. /plan shows envelopes and moves. The agent is told.");
+						await send(NOTHING_TO_APPROVE);
+					} else {
+						const covered = authorize(plan, new Date().toISOString());
+						savePlan(options.brainDir, plan);
+						line(`${bold("●")} moves  approved by you: ${plural(covered, "change move")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
+						for (const move of pending) line(dim(`  ${move.id} ${move.action ?? move.text}${move.capabilities?.network === true ? "  · its commands reach the network" : ""}`));
+						await send(`I approve the current declared move revisions: ${pending.map((move) => move.id).join(", ")}. Carry out only one move per focus and review each report before accepting it.`);
+					}
 				}
 				return true;
 			}
@@ -1325,26 +1565,26 @@ export async function runTerminal(session, options) {
 			}
 			case "yolo": {
 				const { plan } = loadPlan(options.brainDir);
-				const waiting = plan === undefined ? [] : openItems(plan, POLICY.enums.planMode.change);
+				const waiting = plan === undefined ? [] : waitingItems(plan);
 				if (argument === undefined) {
-					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · change items wait for /approve"}`);
-					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets change items run without /approve"}`));
+					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · declared change moves wait for /approve"}`);
+					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets declared change moves run without /approve"}`));
 				} else if (argument === "on") {
 					if (gate.yolo) line("  Approval is already off.");
 					else {
 						gate.yolo = true;
 						line(`${bold("●")} ${YOLO_LINE}`);
-						line(dim("  Every change is still a plan item with a checkpoint. The sandbox is a separate switch (/bwrap). Not remembered: the next start asks for approval again."));
+						line(dim("  Every change is still one declared move with its own targets, budget, checkpoint and report. The sandbox is a separate switch (/bwrap). Not remembered: the next start asks for approval again."));
 						if (options.runner?.mode === "direct") line("! The sandbox is OFF as well: commands run directly on this machine, and nothing asks you first.");
 						setPrompt();
 						// The agent may be resting in front of a plan that waited for the user: tell it, as /approve does.
-						if (!busy && plan !== undefined && awaitsApproval(plan)) await send(`I have switched approval off: change items may run without /approve while it stays off. Carry out the plan${waiting.length === 1 ? ` (${waiting[0].id})` : ""}.`);
+						if (!busy && plan !== undefined && awaitsApproval(plan)) await send(`I have switched approval off: declared change moves may run without /approve while it stays off. Carry out exactly one current move revision per focus${waiting.length === 1 ? ` (${waiting[0].id})` : ""}; its targets, capabilities, budgets, checkpoints, report and acceptance still apply.`);
 					}
 				} else if (argument === "off") {
 					if (!gate.yolo) line("  Approval is already on.");
 					else {
 						gate.yolo = false;
-						line(`${bold("●")} approval: on · change items wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
+						line(`${bold("●")} approval: on · declared change moves wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
 						setPrompt();
 						reminded = undefined;
 						if (!busy) approvalLine();
@@ -1446,29 +1686,20 @@ export async function runTerminal(session, options) {
 					line(`${bold("●")} undone  ${result.item ?? (result.windows ? `window ${result.windows.join(", ")}` : "change task")} · ${result.text}`);
 					if (result.changes.length === 0) line(dim("  The files were already as they were before it."));
 					for (const text of changeRecord(result.changes)) line(dim(text));
-					// The agent learns of it from the plan: the item is open again, marked, and nothing more may change
-					// until the user says so. An item the agent already cleared away is put back, or the agent would go on
-					// believing in files that are gone.
+					// A checkpoint belongs to one move. Undoing it makes that exact move a new, unapproved
+					// revision; later accepted siblings are blocked for deliberate review.
 					const { plan } = loadPlan(options.brainDir);
 					if (plan === undefined) {
-						line("! The plan file cannot be read, so the undo is not noted in it. Tell the agent that you took this task back.");
+						line("! The plan file cannot be read, so the undo is not noted in it. Tell the agent which move you took back.");
 					} else if (result.item !== undefined) {
 						const now = new Date().toISOString();
-						let item = plan.items.find((entry) => entry.id === result.item);
-						const back = item === undefined;
-						if (back) {
-							item = { id: result.item, mode: POLICY.enums.planMode.change, text: result.text, status: POLICY.enums.entryStatus.open, added: now };
-							plan.items.unshift(item);
-							const number = Number(result.item.slice(POLICY.idPrefixes.plan.length));
-							if (Number.isInteger(number) && number >= plan.next) plan.next = number + 1;
+						try {
+							const changed = undoMove(plan, result.item, now);
+							savePlan(options.brainDir, plan);
+							line(dim(`  ${changed.line} ${gate.yolo ? "Approval is off, but the new revision still has to stay within its move contract." : "Its new revision needs /approve before another focus can run it."}`));
+						} catch (error) {
+							line(`! The files were undone, but ${result.item} could not be updated in the plan: ${error.message}. Tell the agent before any further change.`);
 						}
-						Object.assign(item, { status: POLICY.enums.entryStatus.open, undone: now });
-						delete item.outcome;
-						delete item.closed;
-						delete item.approved;
-						delete plan.authorized;
-						savePlan(options.brainDir, plan);
-						line(dim(`  ${item.id} is ${back ? "back in the plan, open" : "open again"}. ${gate.yolo ? "Approval is off, so the agent may carry it out again: tell it what you want instead." : "The plan needs /approve again before a change item runs. Tell the agent what you want instead."}`));
 					}
 					if (result.windows !== undefined) line(dim("  The plan is as it was, and the window may still be running: /shells shows it. Tell the agent what you took back."));
 					line(dim("  /undo again takes back the change task before this one."));
@@ -1505,8 +1736,8 @@ export async function runTerminal(session, options) {
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
 						const { plan } = loadPlan(options.brainDir);
-						const open = plan !== undefined && isAuthorized(plan) ? openItems(plan, POLICY.enums.planMode.change).length : 0;
-						if (open > 0) line(`  The plan is authorized: its ${plural(open, "open change item")} will run without the sandbox.`);
+						const open = plan === undefined ? 0 : runnableMoves(plan).length;
+						if (open > 0) line(`  The plan has ${plural(open, "approved move")} ready to run without the sandbox.`);
 						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
 					}
 				} else if (!runner.off) line(runner.mode === "sandbox" ? "  The sandbox is already on." : `  ${sandboxLine(runner)}`);
@@ -1641,25 +1872,25 @@ export async function runTerminal(session, options) {
 			case "model": {
 				// The list comes from the server each time: llama-swap serves what is loaded now.
 				let served = session.servedModels ?? [config.model];
-				// The entries as listed: meta.n_ctx (llama-server) sizes the effective window on a switch.
+				// The listing's context_length/context_window (or legacy meta.n_ctx) is the full context limit used after a switch.
 				let entries = [];
 				try {
-					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
-					const body = await response.json().catch(() => undefined);
-					const listed = (body?.data ?? []).filter((entry) => typeof entry?.id === "string");
+					const status = await session.checkServer?.();
+					const listed = status?.listing?.entries ?? [];
 					if (listed.length > 0) { entries = listed; served = listed.map((entry) => entry.id); }
-				} catch {
-					// The server did not answer: the names from the start are shown.
+					applyModelLimits(status?.limits);
+				} catch (error) {
+					showModelError(error);
 				}
 				const on = await session.model?.();
 				const current = on?.modelId ?? config.model;
 				if (argument === undefined) {
 					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
 					served.forEach((id, index) => {
-						const ctx = entries.find((entry) => entry.id === id)?.meta?.n_ctx;
-						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${Number.isInteger(ctx) && ctx > 0 ? dim(`  · ${count(ctx)} tokens`) : ""}`);
+						const ctx = modelContextWindow(entries.find((entry) => entry.id === id));
+						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${ctx === undefined ? "" : dim(`  · server capacity ${count(ctx)} tokens`)}`);
 					});
-					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; the context window follows the new model's limit."));
+					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer uses each reported capacity as its full context limit."));
 					return true;
 				}
 				const byNumber = /^\d+$/.test(argument) ? served[Number(argument) - 1] : undefined;
@@ -1672,20 +1903,27 @@ export async function runTerminal(session, options) {
 					line(`  Already on ${wanted}.`);
 					return true;
 				}
-				const reported = entries.find((entry) => entry.id === wanted)?.meta?.n_ctx;
-				const effective = await session.setModel(wanted, undefined, Number.isInteger(reported) && reported > 0 ? { contextWindow: reported } : {});
+				const reported = modelContextWindow(entries.find((entry) => entry.id === wanted));
+				let effective;
+				try {
+					// `setModel` owns the required native-grammar gate so every programmatic and terminal switch shares it.
+					effective = await session.setModel(wanted, undefined, reported === undefined ? {} : { contextWindow: reported });
+				} catch (error) {
+					line(`  ${wanted} was not selected: ${error.message ?? error}`);
+					return true;
+				}
 				if (effective === false) {
 					line(`  ${wanted} is not a model of this session. /model lists what the server serves.`);
 					return true;
 				}
 				const was = options.contextWindow;
-				options.contextWindow = effective;
-				const context = Number.isInteger(reported) && reported > 0 && effective < reported
-					? ` · context ${count(effective)} tokens (the server's limit; the settings say more)`
-					: effective !== was ? ` · context ${count(effective)} tokens (was ${count(was)})` : ` · context ${count(effective)} tokens`;
+				options.contextWindow = effective.usableContextWindow;
+				const context = effective.serverContextWindow !== undefined
+					? ` · context ${count(effective.usableContextWindow)} tokens (server capacity ${count(effective.serverContextWindow)}; settings cap ${count(effective.configuredContextWindow)})`
+					: effective.usableContextWindow !== was ? ` · context ${count(effective.usableContextWindow)} tokens (was ${count(was)})` : ` · context ${count(effective.usableContextWindow)} tokens`;
 				line(`${bold("●")} model  ${current} → ${wanted}${context}${busy ? " · the answer being written finishes on the old one" : ""}`);
-				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective / POLICY.validation.reservedContextDivisor)
-					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective)}. It stays as set; chatWindow in the settings is the setting to lower.`));
+				if (Number.isInteger(config.chatWindow) && config.chatWindow > effective.usableContextWindow / POLICY.validation.chatWindowDivisor)
+					line(dim(`  Warning: chatWindow is ${count(config.chatWindow)} tokens, more than half of ${count(effective.usableContextWindow)}. It stays as set; chatWindow in the settings is the setting to lower.`));
 				return true;
 			}
 			case "fold": {
@@ -1728,7 +1966,7 @@ export async function runTerminal(session, options) {
 			case "unarchive": {
 				const ids = args;
 				if (ids.length === 0) {
-					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan item, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
+					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
 				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
@@ -1736,7 +1974,16 @@ export async function runTerminal(session, options) {
 			}
 			case "done": {
 				if (argument === undefined || args.length === 0) {
-					line("  /done ID …  settles a row the way the agent does: a ledger entry is closed, a plan item is done, a node is confirmed.");
+					line("  /done ID … settles rows. To accept a reported move, write /done mN -- REVIEW, saying how its reported proof witnesses its done-when.");
+					return true;
+				}
+				const reviewAt = parts.indexOf("--");
+				if (reviewAt >= 0) {
+					if (reviewAt !== 1 || parts.length < 3) {
+						line("  /done mN -- REVIEW accepts one reported move. Put the exact evidence review after --.");
+						return true;
+					}
+					line(`  ${settleRow(options.brainDir, argument, options.root, parts.slice(2).join(" "))}`);
 					return true;
 				}
 				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);
@@ -1745,7 +1992,7 @@ export async function runTerminal(session, options) {
 			case "delete": {
 				const ids = args;
 				if (ids.length === 0) {
-					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan item, a node of the graph. /archive hides a row and keeps it.");
+					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan envelope or move, a node of the graph. /archive hides a row and keeps it.");
 					return true;
 				}
 				line(`  ${dropRows(options.brainDir, ids)}`);
@@ -1793,9 +2040,10 @@ export async function runTerminal(session, options) {
 	const atlasLine = () => {
 		const { atlas, error } = loadAtlas(options.brainDir);
 		if (atlas === undefined) return line(`! The atlas cannot be read: ${error}. Repair the file; until then the agent cannot use its graph.`);
-		const stale = atlas.nodes.length > 0 ? staleNodes(options.root, atlas).length : 0;
+		const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
+		const attention = attentionSummary(attentionSnapshot(options.root, atlas, { active: overlays }));
 		const assessment = loadAssessment(options.brainDir);
-		line(dim(`atlas: ${atlasSummary(atlas)}${stale > 0 ? `, ${stale} may be out of date` : ""} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
+		line(dim(`atlas: ${atlasSummary(atlas)}${attention === "" ? "" : ` · ${attention}`} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
 	};
 
 	// ─── Start ──────────────────────────────────────────────────────────────
@@ -1805,6 +2053,15 @@ export async function runTerminal(session, options) {
 	const lost = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.gone);
 	if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
 	await follow(main.id, 0);
+	// A restarted outer tool normally names its child in a live slot, but a settled/recovered watch can arrive
+	// without that transient slot. Follow any still-running co<N> child directly so Consult continues to show its
+	// live participant stream; this does not attach it to parent context or grant it parent authority.
+	for (const { conference } of listConferences(options.brainDir)) {
+		const child = conference?.status === "running" ? conference.childConversationId : undefined;
+		if (typeof child !== "string" || child === "" || attached.has(child)) continue;
+		attached.add(child);
+		await follow(child, 1);
+	}
 	harness.resume();
 	if (busy) {
 		// The work that was going on when carto last went away goes on. The screen and the prompt must come up
@@ -1989,22 +2246,24 @@ export async function runTerminal(session, options) {
 					asks.answer(text);
 					return;
 				}
-				// Their words carry the approval: an unambiguous yes while change items wait approves them (the gate reads it, not the agent).
+				// Their words carry an exact current move approval; a bare yes never sweeps a batch (the gate reads it, not the agent).
 				if (gate.yolo !== true) {
 					const approved = approvalWords(options.brainDir, text);
 					if (approved !== undefined) {
 						// An item marked network is never approved by bare words — say so when that is what is left.
-						const named = /p\d+/i.test(text);
+							const named = /[pm]\d+/i.test(text);
 						let held = [];
-						if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((item) => item.network === true).map((item) => item.id); } catch { held = []; }
-						line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
+							if (!named) try { held = waitingItems(loadPlan(options.brainDir).plan).filter((move) => move.capabilities?.network === true).map((move) => move.id); } catch { held = []; }
+							line(`${bold("●")} approved from your words: ${approved.join(", ")}${held.length > 0 ? ` · still waiting for you: ${held.join(", ")} (network)` : ""}`);
 					}
 				}
 				const wasBusy = busy;
 				userSpoke();
-				// A task runs: the line is for it, and it reads it with its next result.
-				if (wasBusy && session.tellTask?.(text)) {
-					// A call that only waits for a window returns, so that the task reads this sooner.
+				// A private task owns its input while it runs and receives this line with its next result.
+				const routed = wasBusy
+					? (session.tellWork?.(text) ?? (session.tellTask?.(text) ? { kind: "task" } : false))
+					: false;
+				if (routed !== false && routed !== undefined) {
 					windows?.nudge();
 					line(dim("  (sent to the running task: it reads it at its next step, and the main agent is told with the report)"));
 					return;
@@ -2056,6 +2315,18 @@ export async function runTerminal(session, options) {
 			});
 		});
 		line(dim(ui !== undefined ? "Type a message. /help lists commands, F1 the keys. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue." : "Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent; Ctrl-V holds the agent in its stream, and Ctrl-V again lets it continue; Ctrl-T hides and shows its thinking."));
+		// Check connectivity only after the terminal exists. This does not load a model; an unavailable server becomes a
+		// recoverable on-screen status instead of preventing Cartographer from opening.
+		if (typeof session.checkServer === "function") {
+			void session.checkServer().then(
+				(status) => enqueue(async () => {
+					if (!stopped && !closing) applyModelLimits(status?.limits);
+				}),
+				(error) => enqueue(async () => {
+					if (!stopped && !closing) showModelError(error);
+				}),
+			);
+		}
 		// A context left large by the last session is collapsed before the first message has to carry it. Then,
 		// unless the setting says otherwise, the agent gets its first turn without waiting to be addressed.
 		enqueue(async () => {

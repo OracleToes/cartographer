@@ -74,7 +74,7 @@ export function startNote() {
 		OPEN,
 		`${HEAD} Nobody typed this. The session has started, and nothing is waiting on me: this turn is mine.`,
 		"",
-		`The standing duty. I look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what I learn in the books and the atlas. I form hypotheses and record them; I verify what I can, with the commands I may run; I carry out what stands approved in the plan. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved open item, no question waiting for ${USER_NAME} — I call \`sleep\`.`,
+		`The standing duty. I look at the project — what it is, how it builds, how it tests, where the entry points are, what the docs claim — and record what I learn in the books and the atlas. I form hypotheses and record them; I verify what I can, with the commands I may run; I carry out one approved move revision at a time. When nothing remains — no unmapped ground at the tree depth in view, no untested hypothesis, no approved runnable move, no question waiting for ${USER_NAME} — I call \`sleep\`.`,
 		CLOSE,
 	].join("\n");
 }

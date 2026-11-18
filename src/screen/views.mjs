@@ -5,19 +5,20 @@
 // what is open decides which items there are. An item names the file it comes from and the line, so that `e` can
 // open it there.
 //
-// The Context tab is the one that is not read from a file. It shows the request the agent was last sent, exactly
-// as the server got it and in the order the model reads it: the system prompt, the tools, then every message, with
-// the blocks Cartographer adds (the copy of the assessment and the graph, what a collapse kept, the state block,
-// the windows block) as parts of their own. Then what has come since: the reply and what its calls returned.
+// The Model tab is the one that is not read from a file. Its sent panes show the frozen provider payload captured
+// immediately before dispatch in semantic reading order: the system prompt, tools, then messages, with Cartographer's
+// additions as parts of their own. The raw serialized payload has its own audit view; it is not another context part.
+// Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto; a sent
+// snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { atlasPath, atlasSummary, fileMarks, loadAtlas, staleNodes } from "../atlas.mjs";
+import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, fileMarks, loadAtlas, renderAttention } from "../atlas.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { chatLine, estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows } from "../context.mjs";
-import { entryLine, loadLedger, salientNotes } from "../ledger.mjs";
-import { authorizationLine, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
+import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, splitReadTail } from "../context.mjs";
+import { entryLine, loadLedger } from "../ledger.mjs";
+import { authorizationLine, itemLine, loadPlan, movesOf, planPath, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
 import { listRequests } from "../requests.mjs";
 import { ago, clock, stamp, took } from "../time.mjs";
@@ -59,16 +60,21 @@ export function atlasView({ root, brainDir }) {
 	const file = atlasPath(brainDir);
 	const { atlas, error } = loadAtlas(brainDir);
 	if (atlas === undefined) return { header: [[[`! The graph cannot be read: ${error}`, "warn"]], [[`  ${file} · e opens it`, "muted"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-	const stale = new Map(staleNodes(root, atlas).map((node) => [node.name, node.why]));
-	const items = atlas.nodes.map((node) => {
-		const old = stale.get(node.name);
+	const active = activeMoveOverlays(loadPlan(brainDir).plan);
+	const snapshot = attentionSnapshot(root, atlas, { active });
+	const care = new Map(snapshot.care.map(({ node, why }) => [node.id, why]));
+	const local = renderAttention(snapshot, { idle: active.length === 0 });
+	const items = [];
+	if (local !== "") items.push({ key: "atlas:attention", plain: true, head: [["Local map", "heading"]], body: local });
+	items.push(...atlas.nodes.map((node) => {
+		const checking = care.get(node.id);
 		const body = [
 			`gist: ${node.gist}`,
 			node.detail,
 			node.files.length > 0 ? `files: ${node.files.join(", ")}` : undefined,
 			node.links.length > 0 ? `links: ${node.links.join(", ")}` : undefined,
 			`written ${when(node.written) ?? "at an unknown time"} by ${node.by === "task" ? "a task" : "the main agent"}`,
-			old ? `may be out of date: ${old.join(", ")}` : undefined,
+			checking?.length > 0 ? `needs checking: ${checking.join(", ")}` : undefined,
 		].filter((line) => line !== undefined && line !== "");
 		return {
 			key: `node:${node.name}`,
@@ -78,15 +84,15 @@ export function atlasView({ root, brainDir }) {
 				[`  ${node.gist}`, ""],
 				[node.files.length > 0 ? `  [${node.files.join(", ")}]` : "", "tool"],
 				[node.links.length > 0 ? `  → ${node.links.join(", ")}` : "", "muted"],
-				[old ? "  (may be out of date)" : "", "warn"],
+				[checking?.length > 0 ? "  (needs checking)" : "", "warn"],
 				[node.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
 			],
 			body: body.join("\n"),
 			target: { file, line: jsonLine(file, "name", node.name) },
 		};
-	});
-	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [stale.size > 0 ? ` · ${stale.size} may be out of date` : "", "warn"]]];
-	if (items.length === 0) items.push(note("  No nodes yet. The agent and its tasks write them as they learn the project."));
+	}));
+	const header = [[[`Graph: ${atlasSummary(atlas)}`, "bold"], [care.size > 0 ? ` · ${care.size} need checking` : "", "warn"]]];
+	if (atlas.nodes.length === 0) items.push(note("  No nodes yet. The agent and its tasks write them as they learn the project."));
 	return { header, items };
 }
 
@@ -135,38 +141,81 @@ export function ledgerView({ brainDir }) {
 	return { header, items };
 }
 
-/** The plan: whether it is authorized, then its items in order. */
+/** The plan: authorization envelopes, then their declared executable moves. */
 export function planView({ brainDir, yolo }) {
 	const file = planPath(brainDir);
 	const { plan, error } = loadPlan(brainDir);
 	if (plan === undefined && error !== undefined) return { header: [[[`! The plan cannot be read: ${error}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-	if (plan === undefined || plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes one when a goal needs changes.")] };
-	const items = plan.items.map((item) => ({
-		key: `item:${item.id}`,
-		archived: item.archived === true,
-		head: [
-			[item.status === POLICY.enums.entryStatus.done ? "✓ " : "○ ", item.status === POLICY.enums.entryStatus.done ? "ok" : "warn"],
-			[`${item.id} `, "tool"],
-			[`[${item.mode}${item.network ? ", network" : ""}${item.standing ? ", standing" : ""}] `, "muted"],
-			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
-			[item.status === POLICY.enums.entryStatus.done && item.outcome ? `  → ${item.outcome}` : "", "muted"],
-			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
-		],
-		body: [
-			item.text,
-			item.status === POLICY.enums.entryStatus.done ? `done${when(item.closed) ? ` ${when(item.closed)}` : ""}${item.outcome ? `: ${item.outcome}` : ""}` : "open",
-			item.undone ? "undone by you: the files are as they were before this item ran" : undefined,
-		]
-			.filter((line) => line !== undefined)
-			.join("\n"),
-		copy: itemLine(item),
-		target: { file, line: jsonLine(file, "id", item.id) },
-	}));
+	if (plan === undefined || plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes an envelope when a goal needs changes.")] };
+	const items = [];
+	for (const envelope of plan.items) {
+		items.push({
+			key: `envelope:${envelope.id}`,
+			archived: envelope.archived === true,
+			head: [
+				[envelope.status === POLICY.enums.entryStatus.done ? "✓ " : "○ ", envelope.status === POLICY.enums.entryStatus.done ? "ok" : "warn"],
+				[`${envelope.id} `, "tool"],
+				[`[envelope · ${envelope.mode}${envelope.network ? ", network" : ""}] `, "muted"],
+				[envelope.text, envelope.status === POLICY.enums.entryStatus.done || envelope.archived === true ? "muted" : ""],
+				[envelope.status === POLICY.enums.entryStatus.done && envelope.outcome ? `  → ${envelope.outcome}` : "", "muted"],
+				[envelope.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
+			],
+			body: [
+				envelope.text,
+				`intent envelope · ${envelope.status === POLICY.enums.entryStatus.done ? `done${when(envelope.closed) ? ` ${when(envelope.closed)}` : ""}` : "open; it cannot run itself"}`,
+				envelope.doneWhen ? `envelope complete when: ${envelope.doneWhen}` : "legacy envelope: add a done-when line and declared moves",
+				envelope.status === POLICY.enums.entryStatus.done && envelope.outcome ? `outcome: ${envelope.outcome}` : undefined,
+				envelope.undone ? "undone by you: accepted moves may need review" : undefined,
+			]
+				.filter((line) => line !== undefined)
+				.join("\n"),
+			copy: itemLine(envelope),
+			target: { file, line: jsonLine(file, "id", envelope.id) },
+		});
+		for (const move of movesOf(plan, envelope.id)) {
+			const state = move.status === "done" ? "✓" : move.status === "reported" ? "!" : move.status === "running" ? "▶" : move.status === "blocked" ? "×" : move.approvedRevision === move.revision ? "●" : "○";
+			const muted = move.status === "done" || move.archived === true;
+			const budget = move.budget ?? { replies: move.turns, fileOps: undefined, commandStarts: undefined };
+			items.push({
+				key: `move:${move.id}`,
+				archived: move.archived === true,
+				head: [
+					[`  ${state} `, move.status === "done" ? "ok" : move.status === "reported" || move.status === "blocked" ? "warn" : "tool"],
+					[`${move.id} `, "tool"],
+					[`[move · ${move.status} · r${move.revision}] `, "muted"],
+					[move.action ?? move.text, muted ? "muted" : ""],
+					[move.archived === true ? "  · archived" : "", "warn"],
+				],
+				body: [
+					`parent: ${move.parent} revision ${move.parentRevision}`,
+					`action: ${move.action ?? move.text}`,
+					`targets: ${(move.targets ?? []).join(", ") || "none"}`,
+					`done when: ${move.doneWhen}`,
+					`required proof: ${move.proof ?? "none"}`,
+					`capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}`,
+					`budget: ${budget.replies} replies${budget.fileOps === undefined ? "" : `; ${budget.fileOps} file operations`}${budget.commandStarts === undefined ? "" : `; ${budget.commandStarts} command starts`}`,
+					move.status === "reported" ? `reported: ${move.reported?.id ?? "no report id"}; inspect the report and checkpoints, then press t and write why its proof witnesses this move's done-when` : undefined,
+					move.status === "reported" && move.reported?.checkpoints ? `checkpoints: ${move.reported.checkpoints.before} → ${move.reported.checkpoints.after}` : undefined,
+					move.status === "reported" && Array.isArray(move.reported?.changes) ? `changed paths: ${move.reported.changes.map((change) => change.path).join(", ") || "none"}` : undefined,
+					move.status === "reported" && move.reported?.proof ? `reported proof: ${move.reported.proof}` : undefined,
+					move.status === "reported" && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
+					move.status === "blocked" ? `blocked: ${move.blocked ?? "no reason recorded"}` : undefined,
+					move.status === "blocked" && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
+					move.status === "done" ? `accepted${when(move.closed) ? ` ${when(move.closed)}` : ""}${move.outcome ? `: ${move.outcome}` : ""}` : undefined,
+					move.status === "done" && move.acceptedReview ? `acceptance review: ${move.acceptedReview}` : undefined,
+				]
+					.filter((line) => line !== undefined)
+					.join("\n"),
+				copy: itemLine(move),
+				target: { file, line: jsonLine(file, "id", move.id) },
+			});
+		}
+	}
 	const waits = !yolo && waiting(plan).length > 0;
-	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to authorize it." : "", "warn"]]], items };
+	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to snapshot the current move revisions." : "", "warn"]]], items };
 }
 
-/** What waits for the user: change items and questions of taste. */
+/** What waits for the user: change moves and questions of taste. */
 export function requestsView({ brainDir, yolo }) {
 	const all = listRequests(brainDir, { yolo });
 	if (all.length === 0) return { header: [], items: [note("  Nothing waits for you. The agent goes on with whatever does not depend on an answer.")] };
@@ -430,7 +479,9 @@ function partsOfMessage(message, toolNames) {
 	take(CONTEXT_BLOCK, "kept", "What the last collapse kept", parts);
 	take(STATE_BLOCK, "state", "State block: the time, the tree, the ledger, the plan", tail);
 	take(WINDOWS_BLOCK, "windows", "Windows block: the shell windows as they are", tail);
-	text = text.trim();
+	const readTail = splitReadTail(text);
+	text = readTail.text.trim();
+	if (readTail.tail !== undefined) tail.push({ cat: "result", title: "Current read batch: transient file content", text: readTail.tail });
 	if (message.role === "assistant") {
 		const calls = message.tool_calls ?? [];
 		const body = [typeof message.reasoning_content === "string" && message.reasoning_content.trim() !== "" ? `(thinking)\n${message.reasoning_content.trim()}` : "", text, ...calls.map((call) => callText(call.function?.name ?? "?", call.function?.arguments))].filter((part) => part !== "").join("\n\n");
@@ -472,150 +523,23 @@ export function contextBar(parts, windowSize, cols) {
 }
 
 /**
- * The kept part unfolds into one row per stored object inside it, so the user can see, edit and delete each like a
- * row of its own. The tasks, salient notes, shelf items and the talk come from the store — the same truth the
- * agent reads (the Context view rebuilds on every action, so an edit shows at once); the calls come from the
- * block's own lines, since they are history and are not stored anywhere.
- * @returns {{ children: any[], summary: string }}
- */
-function keptChildren(part, { root, brainDir, edits, deleted }) {
-	const store = brainDir === undefined ? undefined : loadContext(brainDir);
-	const children = [];
-	const counts = [];
-	const front = store?.front;
-	// The preamble, in the block's own words.
-	const preamble = part.text.split("\n").find((line) => line.includes("My context was collapsed")) ?? part.text.split("\n")[1] ?? part.text;
-	children.push({
-		key: "kept:meta",
-		plain: true,
-		depth: 1,
-		head: [[`  ${firstWords(preamble)}`, "faint"]],
-		body: preamble,
-	});
-	// Finished tasks: the same rows the Hands view offers, with the same verbs.
-	const tasks = (front?.rows ?? (store === undefined ? [] : composedRows(store))).filter((row) => row.archived !== true);
-	for (const record of tasks) {
-		const folded = store?.dropped?.includes(record.id) === true;
-		children.push({
-			key: `report:${record.id}`,
-			kind: "report",
-			archived: false,
-			folded,
-			depth: 1,
-			head: [
-				[`${clock(record.at)}  `, "muted"],
-				[`${record.id}`, "bold"],
-				[folded ? " · folded  " : " · in view  ", folded ? "muted" : "ok"],
-				[firstWords(record.brief), "faint"],
-			],
-			body: () => loadReport(brainDir, record.id) ?? "(the report's file is gone)",
-			copy: recordLine(record),
-		});
-	}
-	if (tasks.length > 0) counts.push(`${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}`);
-	// Salient notes: ledger entries — the small box edits them (e), t settles, d deletes.
-	let salient = [];
-	try {
-		const { ledger } = brainDir === undefined ? { ledger: undefined } : loadLedger(brainDir);
-		if (ledger !== undefined) salient = salientNotes(ledger);
-	} catch {
-		salient = [];
-	}
-	for (const item of salient) {
-		children.push({
-			key: `entry:${item.id}`,
-			depth: 1,
-			head: [
-				[`${clock(item.added)}  `, "muted"],
-				[`● ${item.id}  `, ""],
-				[firstWords(item.text), "faint"],
-			],
-			body: entryLine(item),
-			copy: entryLine(item),
-		});
-	}
-	if (salient.length > 0) counts.push(`${salient.length} ${salient.length === 1 ? "note" : "notes"}`);
-	// The shelf: what stood at the collapse, with the contents on open.
-	const shelfItems = front?.shelf ?? [];
-	for (const item of shelfItems) {
-		children.push({
-			key: `shelf:${item.id}`,
-			kind: "shelf",
-			depth: 1,
-			...(item.path === undefined || root === undefined ? {} : { path: join(root, item.path) }),
-			head: [
-				[`${clock(front?.at ?? 0)}  `, "muted"],
-				[shelfLabel(item), ""],
-				[`  [${item.id}]`, "muted"],
-			],
-			body: () => shelfText(root, item, brainDir),
-			copy: () => shelfText(root, item, brainDir),
-		});
-	}
-	if (shelfItems.length > 0) counts.push(`${shelfItems.length} shelf ${shelfItems.length === 1 ? "item" : "items"}`);
-	// The talk: real chat objects — e edits the words, d takes them out of the talk the collapse keeps. The store's
-	// indices hold as keys; a deleted saying is skipped, not filtered, so deleting one in the middle renumbers nothing.
-	let talk = 0;
-	for (const [index, entry] of (store?.chat ?? []).entries()) {
-		if (deleted !== undefined && deleted.has(entry.text)) continue;
-		talk += 1;
-		const full = chatLine(entry);
-		const shown = edits?.get(full) ?? full;
-		children.push({
-			key: `talk:${index}:${entry.at}`,
-			depth: 1,
-			chat: entry.text,
-			editKind: entry.who === "user" ? "chat-you" : "chat-agent",
-			head: [
-				[`${clock(entry.at)}  `, "muted"],
-				[entry.who === "user" ? USER_NAME : "me", styleOf(entry.who === "user" ? "you" : "agent")],
-				[`: ${firstWords(entry.text)}`, "faint"],
-			],
-			body: shown === "" ? "(empty)" : shown,
-			copy: shown,
-		});
-	}
-	if (talk > 0) counts.push(`${talk} talk`);
-	// The calls: history, read-only, one line each — parsed from the block's own section.
-	const callsHeading = "Calls of the stretch before the collapse";
-	const at = part.text.indexOf(callsHeading);
-	let calls = 0;
-	if (at >= 0) {
-		const start = part.text.indexOf("\n", at) + 1;
-		for (const raw of part.text.slice(start).split("\n")) {
-			const line = raw.trim();
-			if (line === "" || line === "</context>" || line.startsWith("This collapse came in the middle")) break;
-			if (line.startsWith("(")) continue;
-			children.push({
-				key: `call:${calls}`,
-				depth: 1,
-				head: [[`  ${line}`, "muted"]],
-				body: line,
-				copy: line,
-			});
-			calls += 1;
-		}
-	}
-	if (calls > 0) counts.push(`${calls} ${calls === 1 ? "call" : "calls"}`);
-	return { children, summary: counts.length === 0 ? "empty" : counts.join(" · ") };
-}
-
-/**
- * The Context tab's main view.
+ * The Model tab's sent-request view.
  * @param {ReturnType<ReturnType<typeof import("../engine.mjs").createEngine>["window"]>} sent  what the engine holds of the newest request
- * @param {{ windowSize: number, cols: number, writing?: any, root?: string, brainDir?: string }} options  writing: the reply as far as it is written
+ * @param {{ windowSize: number, cols: number, writing?: any, isOpen?: (key: string) => boolean }} options  writing: the response as far as it is written
  */
-export function contextView(sent, { windowSize, cols, writing, isOpen, edits, deleted, root, brainDir }) {
-	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to the model in this run of carto yet. Say something, and what the agent sees shows here.")] };
+export function contextView(sent, { windowSize, cols, writing, isOpen }) {
+	if (sent === undefined) return { header: [], items: [note("  Nothing has been sent to a provider in this run of carto yet. Send a message, then its frozen provider payload appears here.")] };
 	const { payload } = sent;
 	const messages = payload.messages ?? [];
 	const parts = [];
+	const since = [];
 	const add = (key, part, extra = {}) => parts.push({ key, tokens: estimate(part.text), ...part, ...extra });
+	const addSince = (key, part, extra = {}) => since.push({ key, tokens: estimate(part.text), ...part, ...extra, since: true });
 	const rest = messages[0]?.role === "system" ? messages.slice(1) : messages;
 	if (messages[0]?.role === "system") add("system", { cat: "system", title: "System prompt", text: contentText(messages[0].content) });
 	const tools = payload.tools ?? [];
-	// The tools are one part, as the model reads them as one block; opened (Enter), it gives a line to each tool,
-	// so that one description can be read, copied, and opened in the editor (e, which finds where it is defined).
+	// The tools are one sent block. Opened, it gives a line to each definition for reading and copying; the raw
+	// provider JSON remains available separately, because this is a semantic reading order rather than raw JSON.
 	if (tools.length > 0) {
 		const text = tools.map((tool) => `── ${tool.function?.name ?? "?"} ──\n${tool.function?.description ?? ""}\nparameters: ${pretty(tool.function?.parameters ?? {})}`).join("\n\n");
 		add("tools", { cat: "tools", title: `Tools · ${tools.length}: ${tools.map((tool) => tool.function?.name).join(", ")}`, text, preview: "" }, { tokens: estimate(JSON.stringify(tools)) });
@@ -625,36 +549,45 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 		for (const call of message.tool_calls ?? []) toolNames.set(call.id, call.function?.name ?? "?");
 		for (const [n, part] of partsOfMessage(message, toolNames).entries()) add(`m${index}.${n}.${part.cat}`, part);
 	}
-	const inRequest = parts.length;
-	// What has come since that request: the reply, and what its calls returned. The next request holds them.
+	// A response and its results are deliberately outside the frozen provider request. They can inform a later
+	// request, but state, windows, read tails, a collapse, or a new message may transform or discard them first.
 	const reply = sent.reply ?? writing;
 	if (reply !== undefined) {
 		const content = Array.isArray(reply.content) ? reply.content : [];
 		const calls = content.filter((part) => part.type === "toolCall");
 		const text = [
-			...content.filter((part) => part.type === "thinking" && String(part.thinking ?? "").trim() !== "").map((part) => `(thinking, not kept in the context)\n${part.thinking.trim()}`),
+			...content.filter((part) => part.type === "thinking" && String(part.thinking ?? "").trim() !== "").map((part) => `(private reasoning)\n${part.thinking.trim()}`),
 			...content.filter((part) => part.type === "text" && part.text.trim() !== "").map((part) => part.text.trim()),
 			...calls.map((call) => callText(call.name, call.arguments)),
 		].join("\n\n");
 		const names = calls.map((call) => call.name);
-		const said = calls.length === 1 && calls[0].name === "chat" && typeof calls[0].arguments?.text === "string" && calls[0].arguments.text.trim() !== "" ? calls[0].arguments.text : undefined;
-		add("reply", { cat: "agent", title: `${sent.reply === undefined ? "The reply, as it is being written" : "The reply"}${names.length > 0 ? ` · ${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}` : " · note"}`, text, preview: firstWords(content.filter((part) => part.type === "text").map((part) => part.text).join(" ")), ...(said !== undefined ? { chat: said } : {}) }, { since: true });
+		addSince("reply", { cat: "agent", title: `${sent.reply === undefined ? "Response, as it is being written" : "Response received"}${names.length > 0 ? ` · ${names.length === 1 ? "call" : "calls"}: ${names.join(", ")}` : " · agent note"}`, text, preview: firstWords(content.filter((part) => part.type === "text").map((part) => part.text).join(" ")) });
 		for (const call of calls) {
 			const result = sent.results.get(call.id);
-			if (result !== undefined) add(`result:${call.id}`, { cat: "result", title: `Result of ${call.name}`, text: result }, { since: true });
+			if (result !== undefined) addSince(`result:${call.id}`, { cat: "result", title: `Result after ${call.name}`, text: result });
 		}
 	}
 	const used = parts.reduce((sum, part) => sum + part.tokens, 0);
 
-	// The top: whose window it is, how full, the bar, and what each colour is.
-	const who = sent.task ? "the running task" : "the main agent";
+	// The top describes this frozen provider request only. Response output is shown below the sent boundary and is
+	// never counted into the input bar.
+	const who = sent.task ? "focus" : "main agent";
+	const provider = [sent.model?.provider, sent.model?.api, sent.model?.id].filter((part) => typeof part === "string" && part !== "").join(" · ");
+	const usage = sent.usage ?? {};
+	const reported = [
+		typeof usage.input === "number" ? `input ${short(usage.input)}` : undefined,
+		typeof usage.cacheRead === "number" ? `cache read ${short(usage.cacheRead)}` : undefined,
+		typeof usage.cacheWrite === "number" ? `cache write ${short(usage.cacheWrite)}` : undefined,
+		typeof usage.output === "number" ? `output ${short(usage.output)}` : undefined,
+	].filter((part) => part !== undefined).join(" · ");
 	const header = [
 		[
-			[`What ${who} sees`, "bold"],
-			[`  ·  about ${short(used)} of ${short(windowSize)} tokens (${Math.round((used / windowSize) * 100)}%) — estimated`, ""],
-			[sent.used !== undefined ? `  ·  the server counted ${short(sent.used)} (measured)` : "", "muted"],
+			["Sent provider request", "bold"],
+			[`  ·  ${who} · ${sent.requestId ?? `request ${sent.count}`}`, ""],
+			[provider === "" ? "" : `  ·  ${provider}`, "muted"],
 		],
-		[[`request ${sent.count} of this run, sent ${stamp(sent.at).split(", ").at(-1)} (${ago(Date.now() - sent.at)}), as the server got it · part sizes are estimates`, "muted"]],
+		[[`sent ${stamp(sent.at).split(", ").at(-1)} (${ago(Date.now() - sent.at)}) · frozen for this run${sent.payloadHash === undefined ? "" : ` · payload ${sent.payloadHash}`}`, "muted"]],
+		[[`about ${short(used)} of ${short(windowSize)} input tokens (${Math.round((used / windowSize) * 100)}%) — estimated${reported === "" ? "" : ` · provider reported ${reported}`}`, ""]],
 		contextBar(parts, windowSize, cols),
 	];
 	const totals = new Map();
@@ -671,60 +604,29 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 		}
 		header.push(row);
 	}
-	if (sent.collapsedSince) header.push([["! The context was collapsed after this request was sent: the next request starts from what the collapse kept, not from this.", "warn"]]);
-	header.push([], [["Every part, in the order the model reads it.", "faint"]]);
+	if (sent.collapsedSince) header.push([["! A collapse happened after this request was sent. This snapshot stays as sent; a later request starts from the new kept block.", "warn"]]);
+	header.push([], [["Frozen payload parts, in provider reading order. Raw provider JSON is a separate audit view, not another context part.", "faint"]]);
 
-	/** What e does on a part: the kinds of thing it can open, or the reason it refuses. */
-	const editOf = (part) => {
-		if (part.key === "system") return { editKind: "prompt" };
-		if (part.key === "tools") return { editKind: "tools" };
-		if (typeof part.key === "string" && part.key.startsWith("tool:")) return { editKind: "tool" };
-		if (part.cat === "top") return { editKind: "assessment" };
-		if (part.cat === "kept") return { editKind: "store" };
-		if (part.cat === "you") return { editKind: "chat-you" };
-		if (part.cat === "agent") return { editKind: "chat-agent" };
-		if (part.key === "reply") return sent.reply === undefined ? { editKind: "reply" } : { editKind: "chat-agent" };
-		if (part.cat === "result") return { editKind: "result" };
-		if (part.cat === "state") return { editKind: "state" };
-		if (part.cat === "windows") return { editKind: "windows" };
-		if (part.cat === "carto") return { editKind: "carto" };
-		return {};
-	};
+	// A frozen payload is read-only. Its copies are useful historical evidence, not edit handles for current prompt,
+	// tool, brain, or talk sources.
 	const items = [];
 	const one = (part, extra = {}) => {
-		// What the user has said anew in the editor stands where the original stood; the sizes stay those of what was sent.
-		const text = edits?.get(part.text) ?? part.text;
+		// Sent and since-send rows each render the captured text they describe. Current brain edits belong in the
+		// Brain view; they never replace bytes in a historical request row.
+		const text = part.text;
 		return {
 			key: part.key,
 			head: [["■ ", styleOf(part.cat)], [short(part.tokens).padStart(5), "muted"], [`  ${part.title}`, ""], [`  ${part.preview ?? firstWords(text)}`, "faint"]],
 			body: text === "" ? "(empty)" : text,
 			copy: text,
-			...editOf(part),
-			...(part.chat !== undefined ? { chat: part.chat } : {}),
 			...extra,
 		};
 	};
-	for (const [index, part] of parts.entries()) {
-		if (index === inRequest) items.push({ key: "since", plain: true, head: [["── since that request: what the next one will hold as well ──", "muted"]] });
-		// A part the user has deleted stands out of the list, but the sizes above stay those of what was sent:
-		// the agent reads it until the next collapse, and then the talk that replaced it keeps nothing of it.
-		if (deleted !== undefined && (deleted.has(part.text) || (part.chat !== undefined && deleted.has(part.chat)))) continue;
-		// The collapse block unfolds into one row per stored object inside it; the rows carry the verbs the same objects carry elsewhere.
-		if (part.cat === "kept") {
-			let kept;
-			try {
-				kept = keptChildren(part, { root, brainDir, edits, deleted });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				kept = { summary: "not readable", children: [{ key: "kept:error", plain: true, depth: 1, head: [[`! ${firstWords(message)}`, "warn"]], body: message }] };
-			}
-			part.preview = kept.summary;
-			items.push(one(part, { folder: true, key: "kept" }));
-			if (isOpen?.("kept")) items.push(...kept.children);
-			continue;
-		}
+	for (const part of parts) {
+		// A collapse snapshot is a normal frozen payload part. Opening it shows exactly its own bytes; current
+		// ledger, shelf, report, and talk data never unfold underneath it.
 		items.push(one(part, part.key === "tools" ? { folder: true } : {}));
-		// The tools part stands for the block the model reads; unfolded, a line for each tool of it.
+		// The tools part stands for the block the provider reads; unfolded, a line for each frozen definition.
 		if (part.key === "tools" && isOpen?.("tools")) {
 			for (const tool of tools) {
 				const name = tool.function?.name ?? "?";
@@ -735,31 +637,125 @@ export function contextView(sent, { windowSize, cols, writing, isOpen, edits, de
 					head: [["· ", "muted"], [short(estimate(JSON.stringify(tool))).padStart(5), "muted"], [`  ${name}`, ""], [`  ${firstWords(tool.function?.description ?? "")}`, "faint"]],
 					body: text,
 					copy: text,
-					editKind: "tool",
 				});
 			}
 		}
 	}
-	// The state block stands at the end of every request; one that is not in view here is a defect, not the absence of one: say so instead of showing nothing.
+	// The state block stands at the end of every sent request; one that is not in view here is a defect, not an
+	// invitation to substitute current state.
 	if (!parts.some((part) => part.cat === "state")) {
-		const missing = {
+		items.push({
 			key: "state:missing",
 			plain: true,
-			editKind: "state",
-			head: [["! ", "warn"], ["  No state block in this request — every request ends with one; this should never happen.", "warn"]],
-			body: "The state block is written anew for every request and rides at its very end. If it is not in view here, the request never carried one (or it was cut off the message it was glued to) — either way the block is missing, not just this row. Please report this.",
+			head: [["! ", "warn"], ["  No state block in this sent request — this provider payload did not carry one.", "warn"]],
 			copy: "",
-		};
-		const at = items.findIndex((item) => item.key === "since");
-		if (at < 0) items.push(missing);
-		else items.splice(at, 0, missing);
+		});
 	}
-	return { header, items, parts };
+	if (since.length > 0) {
+		items.push({ key: "since", plain: true, head: [[`── since ${sent.requestId ?? `request ${sent.count}`}: response material, not sent ──`, "muted"]] });
+		for (const part of since) items.push(one(part));
+	}
+	return { header, items, parts, since };
+}
+
+/**
+ * The exact serialized provider body captured at dispatch. It is an audit artifact for copying or wire-level
+ * comparison, deliberately separate from the semantic sent-context view so it cannot look like a second prompt.
+ */
+export function rawPayloadView(sent) {
+	const title = "Raw provider payload · audit copy";
+	if (sent === undefined) {
+		return {
+			header: [[[title, "bold"]], [["No provider request has been sent in this run, so there is no frozen raw JSON to inspect.", "muted"]]],
+			items: [note("  Nothing has been sent to a provider in this run of carto yet.")],
+		};
+	}
+	const who = sent.task ? "focus" : "main agent";
+	const request = sent.requestId ?? `request ${sent.count}`;
+	const header = [
+		[[title, "bold"], [`  ·  ${who} · ${request}`, ""]],
+		[[`Frozen at dispatch${sent.payloadHash === undefined ? "" : ` · payload ${sent.payloadHash}`}. It serializes the same sent request shown in Latest sent or Main sent.`, "muted"]],
+		[["This is an audit copy, not another model-context part; it is not included in either sent view's input-token bar.", "faint"]],
+	];
+	if (typeof sent.payloadJson !== "string") {
+		return { header, items: [note("  This sent request has no retained raw provider JSON.", "warn")] };
+	}
+	return {
+		header,
+		items: [{
+			key: "payload",
+			head: [["■ ", "catSystem"], ["  Provider payload JSON", ""], [`  ${short(sent.payloadJson.length)} chars · audit only`, "faint"]],
+			body: sent.payloadJson,
+			copy: sent.payloadJson,
+		}],
+	};
+}
+
+/** The current request plan is not a provider payload yet. It keeps source facts alongside the exact fragments the
+ * planner produced, so this renderer need not guess a lifecycle from completed provider JSON. */
+const plannedText = (fragment) => {
+	if (typeof fragment === "string") return fragment;
+	if (fragment === null || typeof fragment !== "object") return String(fragment ?? "");
+	if (!Array.isArray(fragment.content)) return pretty(fragment);
+	return fragment.content.map((part) => {
+		if (part?.type === "text") return part.text ?? "";
+		if (part?.type === "thinking") return `(private reasoning)\n${part.thinking ?? ""}`;
+		if (part?.type === "toolCall") return callText(part.name ?? "?", part.arguments);
+		return pretty(part);
+	}).filter((text) => text !== "").join("\n\n");
+};
+const plannedTitle = (part) => {
+	if (part.kind === "brain-copy") return "Frozen brain copy for this preview";
+	if (part.kind === "generated-state") return "Generated state block";
+	if (part.kind === "generated-windows") return "Generated windows block";
+	if (part.kind === "transient-read-tail") return "Current read batch · transient";
+	if (part.kind === "focus-capsule") return "Prepared focus capsule · captured handoff";
+	if (part.kind === "focus-start") return "Focused task start query · request-only";
+	return `${part.role ?? "active"} message from active conversation`;
+};
+
+/** The explicitly prospective main-agent plan. It has no provider payload because pi-ai has not formatted one and no
+ * request has been sent. */
+export function previewView(preview) {
+	if (preview === undefined) return { header: [[["Next request preview · not sent", "bold"]]], items: [note("  Calculating the current main-agent plan without consuming wakes…")] };
+	if (preview?.error !== undefined) return { header: [[["Next request preview · not sent", "bold"]]], items: [note(`  ! ${preview.error}`, "warn")] };
+	const plan = preview.plan;
+	if (plan === undefined) return { header: [[["Next request preview · not sent", "bold"]]], items: [note("  No main-agent request can be planned now.")] };
+	const at = Number.isFinite(preview.at) ? stamp(preview.at).split(", ").at(-1) : "just now";
+	const header = [
+		[["Next request preview · not sent", "bold"], [`  ·  main agent · rebuilt ${at}`, ""]],
+		[["Pure current calculation: wakes were not checked or consumed, and no provider request was made or retained.", "muted"]],
+		[["State, windows, the read batch, a collapse, or a new message can change this before any send. Provider JSON does not exist for a preview.", "faint"]],
+	];
+	const items = [];
+	for (const part of plan.parts ?? []) {
+		const text = plannedText(part.fragment);
+		items.push({
+			key: `preview:${part.id}`,
+			head: [["◇ ", "catState"], [`${plannedTitle(part)}  `, ""], [`${part.source} · preview only`, "faint"]],
+			body: text === "" ? "(empty)" : text,
+			copy: text,
+		});
+	}
+	if (items.length === 0) items.push(note("  The current plan has no displayable parts."));
+	return { header, items };
 }
 
 /** A view of plain lines, for text that a command prints. */
 export function textView(text) {
 	return { header: [], items: String(text ?? "").replace(/\n+$/, "").split("\n").map((line, index) => ({ key: `line:${index}`, plain: true, head: [[line, /^\s*!/.test(line) ? "warn" : ""]] })) };
+}
+
+/** Current `/context` accounting, deliberately not a historical request inspector or a preview. */
+export function accountingView(text) {
+	const view = textView(text);
+	return {
+		...view,
+		header: [
+			[["Current active-context accounting", "bold"]],
+			[["Calculated now from the active conversation and brain. It is neither a sent provider payload nor a promise of the next request.", "muted"]],
+		],
+	};
 }
 
 /**
@@ -785,23 +781,25 @@ export const isFolder = (path) => {
 	}
 };
 
-// ─── The user's hands on the context ────────────────────────────────────────
+// ─── Current shared brain ───────────────────────────────────────────────────
 
 /**
- * The Context tab's fourth view: what the agent keeps with its `context` tool — the shelf and the reports —
- * with the same operations offered to the user: a report folds out of view or comes back (f), a file comes off
- * the shelf (x), a file is shelved (a, which puts /shelve in the prompt). The typed commands /fold, /recall,
- * /shelve, /unshelve and /collapse do the same things from the prompt.
+ * Carto's current shared-brain view: what the agent keeps with `shelf` and `book` context actions — the shelf and
+ * reports — with the same operations offered to the user. These are live brain records, never children of a frozen
+ * sent request. A report folds out of view or comes back (f), a file comes off the shelf (x), and a file is shelved
+ * with a, which puts /shelve in the prompt. The typed commands /fold, /recall, /shelve, /unshelve and /collapse do
+ * the same things from the prompt.
  * @param {{ root: string, brainDir: string }} env
  */
 export function handsView({ root, brainDir }) {
 	const store = loadContext(brainDir);
 	const header = [
-		[["Your hands on what the agent keeps", "bold"], ["  ·  the shelf, and reports of finished work; salient notes live in the Ledger view", "muted"]],
+		[["Current shared brain", "bold"], ["  ·  live shelf and reports; not part of any sent provider request", "muted"]],
+		[["Your hands on what the agent keeps", "muted"], ["  ·  salient notes live in the Ledger view", "muted"]],
 	];
 	const items = [];
 	items.push(heading("  The shelf · snapshots are in view now, carried through collapse, and read by every task at its start"));
-	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `context`, action shelve."));
+	if (store.shelf.length === 0) items.push(note("  Nothing is on the shelf. a shelves a file; the agent shelves with `shelf`."));
 	for (const item of store.shelf) {
 		items.push({
 			key: `shelf:${shelfLabel(item)}`,
@@ -851,7 +849,7 @@ export function handsView({ root, brainDir }) {
 
 /**
  * Where a tool of the context is defined: cartographer's own source, by its `name: "…"` line. `e` on a tool
- * part of the Context tab opens it there.
+ * part of the Model tab opens it there.
  * @returns {{ file: string, line: number } | undefined}
  */
 export function toolSource(name) {

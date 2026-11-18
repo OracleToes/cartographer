@@ -10,10 +10,10 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { droppable, dressTask, KEPT_AS, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
+import { droppable, dressTask, KEPT_AS, loadContext, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { TASK_HEADER } from "../src/prompt.mjs";
+import { FOCUS_START, TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
 import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, loadAtlas, nodeChanges, nodeHashes, NODES_MAX, renderOutline, saveAtlas, staleNodes } from "../src/atlas.mjs";
@@ -28,7 +28,7 @@ import { drawTree, treeSection } from "../src/tree.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
 import { confine, listProject, LookError, projectFiles, readOne, searchProject } from "../src/tools/look.mjs";
 import { findProject, setUpBrain } from "../src/project.mjs";
-import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
+import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, STAGE_WORK_DIR, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
 import { describeCall, describeResult, WAKE_BURST } from "../src/terminal.mjs";
 import { isNote, wakeNote, withoutQuietWakes } from "../src/wake.mjs";
 import { createWakes, NOTE_MAX, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
@@ -36,6 +36,9 @@ import { createWindows, findScript, KEEP_LINES, WindowError } from "../src/windo
 import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
+import { POLICY } from "../src/config.mjs";
+import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
+import { loadConference } from "../src/conference.mjs";
 
 /** The first line of every block the harness writes; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -146,8 +149,9 @@ let python;
 async function cartoOnTerminal(cwd, server, args, steps) {
 	python ??= (await run("python3", ["-c", "import pty"])).code === 0;
 	if (!python) return undefined;
+	const serverUrl = typeof server === "string" ? server : server.url;
 	// The line-by-line terminal, unless the test is about the full screen.
-	const command = [process.execPath, CARTO, "--url", server.url, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
+	const command = [process.execPath, CARTO, "--url", serverUrl, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
 	const result = await run("python3", ["-c", PTY, JSON.stringify(steps), ...command], { cwd, timeoutMs: 70_000 });
 	// Colour codes and carriage returns are the terminal's business, not the test's.
 	return { ...result, screen: result.stdout.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "") };
@@ -201,26 +205,116 @@ test("launch: the command works through a symlink, as install.sh sets it up", as
 	has(result.stdout, `core     ${CORE}`, "the core folder is the real one, not the symlink's");
 });
 
-test("launch: a model name the server does not have is reported with the names it has", async () => {
+test("launch: a model name the server does not have is reported when model work is first requested", async () => {
 	const root = makeProject("wrong-model");
 	const server = await startStandIn({ models: ["ByteShape", "other"] });
 	try {
-		const result = await run(CARTO, ["--url", server.url, "--model", "Byteshape"], { cwd: root });
+		const result = await run(CARTO, ["--url", server.url, "--model", "Byteshape", "-p", "say: hi || sleep"], { cwd: root });
 		assert.equal(result.code, 1, `expected exit 1:\n${result.all}`);
-		has(result.stderr, 'has no model named "Byteshape". It has: ByteShape, other.', "message");
+		has(result.stdout, 'has no model named "Byteshape". It has: ByteShape, other.', "message");
+		assert.equal(server.requests.length, 0, "an invalid listed route never receives an ordinary agent request");
 	} finally {
 		await server.close();
 	}
 });
 
-test("launch: a llama-server run on its own answers to any name, and its context size is used when smaller", async () => {
+test("launch: Cartographer opens without a server and keeps local commands available", async () => {
+	const root = makeProject("offline-open", { git: false });
+	const result = await run(CARTO, ["--url", "http://127.0.0.1:1/v1", "--model", "offline"], { cwd: root, input: "/model\n/status\n/quit\n" });
+	ok(result, "an offline Cartographer session");
+	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the unavailable server is an on-screen recoverable error");
+	has(result.stdout, "model offline · idle", "local status remains usable without a model connection");
+	assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session opens before a server is reachable");
+});
+
+test("launch: an offline interactive terminal renders before it reports the server error", async () => {
+	const root = makeProject("offline-interactive", { git: false });
+	configure(root, { initiate: false });
+	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", [], [["Set one up in", ""], ["Type a message.", ""], ["Could not connect to the model server", "/quit"]]);
+	if (result === undefined) return "python3 is needed for the pseudo-terminal launch check";
+	ok(result, "an offline interactive Cartographer session");
+	has(result.screen, "Type a message.", "the terminal is usable before the health check completes");
+	has(result.screen, "Could not connect to the model server at http://127.0.0.1:1/v1", "the failed health check is shown in the open terminal");
+	assert.ok(result.screen.indexOf("Type a message.") < result.screen.indexOf("Could not connect to the model server"), "the terminal renders before its unavailable-server error");
+});
+
+test("launch: the full-screen terminal keeps an offline server error visible", async () => {
+	const root = makeProject("offline-screen", { git: false });
+	configure(root, { initiate: false });
+	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [["Set one up in", ""], ["Could not connect to the model server", "\x03", false], [0.1, "\x03", false]]);
+	if (result === undefined) return "python3 is needed for the full-screen terminal check";
+	ok(result, "an offline full-screen Cartographer session");
+	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the full-screen status strip says the server is unavailable");
+});
+
+test("launch: a grammar-ignoring route is refused before its first agent request", async () => {
+	const root = makeProject("native-grammar-required", { git: false });
+	const server = await startStandIn({ ignoreNativeGrammar: true });
+	try {
+		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: should never run || sleep"], { cwd: root });
+		assert.equal(result.code, 1, `a grammar-ignoring endpoint must be rejected before agent work:\n${result.all}`);
+		has(result.stdout, "requires llama.cpp native GBNF grammar enforcement", "the failure names Cartographer's platform requirement");
+		assert.equal(server.requests.length, 0, "the normal agent request never reaches a grammar-ignoring route");
+		assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session can open before the deferred route check");
+	} finally {
+		await server.close();
+	}
+});
+
+test("launch: a lone llama-server exposes its reported 75k capacity as the context limit", async () => {
 	const root = makeProject("lone-server", { git: false });
-	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 8192 } }] });
+	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 75_000 } }] });
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "anything", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a name the lone server does not list");
-		has(result.stdout, "context 8192 tokens (the server's limit; the settings say 100000)", "the smaller context size is used and stated");
-		has(result.stdout, "of 8.2k tokens", "and shown in the context line");
+		has(result.stdout, "of 75k tokens", "the full reported context is shown after the first model turn");
+		hasNot(result.stdout, "reserved for replies", "no fixed reply reserve is displayed");
+		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains configured independently of the context plan");
+	} finally {
+		await server.close();
+	}
+});
+
+test("launch: llama-swap's context_length is refreshed after the proof warms a model", async () => {
+	const root = makeProject("lazy-llama-swap-context", { git: false });
+	const server = await startStandIn({
+		// llama-swap can omit capability data until the first routed model request has started it. The native
+		// grammar proof is that request, so Cartographer must read /models once more before sizing the session.
+		models: ({ nativeRequests }) => [{
+			id: "stand-in",
+			object: "model",
+			...(nativeRequests.length === 0 ? {} : { context_length: 64_000, context_window: 64_000 }),
+		}],
+	});
+	try {
+		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: hi || sleep"], { cwd: root });
+		ok(result, "a lazily described llama-swap model");
+		has(result.stdout, "of 64k tokens", "the full advertised input context is shown after the deferred proof refresh");
+		hasNot(result.stdout, "of 32k tokens", "the model capacity is never halved for a static reply reserve");
+		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains independent of the full context plan");
+	} finally {
+		await server.close();
+	}
+});
+
+test("model: a 75k switch uses the full reported context after lazy capability discovery", async () => {
+	const root = makeProject("model-context-window", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({
+		models: ({ nativeRequests }) => [
+			{ id: "stand-in", object: "model", context_length: 200_000, context_window: 200_000 },
+			// This model's capacity appears only after the switch's required proof starts it.
+			{ id: "Qwen3.8", object: "model", ...(nativeRequests.some((request) => request.model === "Qwen3.8") ? { context_length: 75_000, context_window: 75_000 } : {}) },
+		],
+	});
+	try {
+		const result = await carto(root, server, [], { input: "/model Qwen3.8\nsay: after the switch || sleep\n/quit\n" });
+		ok(result, "switching to the reported model");
+		has(result.stdout, "model  stand-in → Qwen3.8 · context 75k tokens (server capacity 75k; settings cap 100k)", "the switch exposes the full discovered server capacity");
+		const request = server.requests.find((entry) => entry.model === "Qwen3.8");
+		assert.ok(request, "the next request uses the switched model");
+		assert.equal(request.max_tokens, 32768, "the reply ceiling stays independent of the full context limit");
+		assert.ok(server.nativeRequests.some((entry) => entry.model === "Qwen3.8" && /outside-the-allowed-native-grammar-set/.test(entry.messages.map(rawText).join("\n"))), "the switch proves native grammar before adopting the new model");
 	} finally {
 		await server.close();
 	}
@@ -287,12 +381,12 @@ test("ledger: a call that is run again after a crash is not applied twice", asyn
 	mkdirSync(dir, { recursive: true });
 	const tool = bookTool({ root: dir, brainDir: dir, config: {}, engine: undefined, gate: undefined });
 	const api = { taskId: "task-1", conversationId: ROOT_CONVERSATION_ID, now: () => 0 };
-	const first = await tool.execute({ target: "ledger", action: "add", operation: { kind: "note", text: "once" } }, api);
+	const first = await tool.execute({ target: "ledger", action: "add", kind: "note", text: "once" }, api);
 	assert.equal(first.output[0].text, "n1 added.\nOpen: no goals, no questions, 1 note.");
-	const again = await tool.execute({ target: "ledger", action: "add", operation: { kind: "note", text: "once" } }, api);
+	const again = await tool.execute({ target: "ledger", action: "add", kind: "note", text: "once" }, api);
 	has(again.output[0].text, "These operations were already applied, before a restart.", "the rerun says so");
 	assert.equal(loadLedger(dir).ledger.items.length, 1, "and adds nothing");
-	await tool.execute({ target: "ledger", action: "add", operation: { kind: "note", text: "twice" } }, { ...api, taskId: "task-2" });
+	await tool.execute({ target: "ledger", action: "add", kind: "note", text: "twice" }, { ...api, taskId: "task-2" });
 	assert.equal(loadLedger(dir).ledger.items.length, 2, "another call is applied");
 });
 
@@ -312,10 +406,12 @@ test("state: the block is added to the last message of a request only, and the i
 	const dir = join(scratch, "state-unit");
 	mkdirSync(dir, { recursive: true });
 	saveLedger(dir, { version: 1, next: 2, items: [{ id: "q1", kind: "question", text: "Which port?", status: "open" }] });
-	assert.equal(
-		stateBlock(dir, undefined, { now: new Date(2026, 0, 1, 9, 5).getTime() }),
-		"<state>\n" + RECORD + " This is the current state; it supersedes any earlier copy I carry.\n\nNow: Thu 1 Jan 2026, 09:05.\n\nLedger\nQuestions for " + USER_NAME + ":\n  q1  Which port?\n\nNo goal is set. Looking and answering questions is fine without one. I find out what " + USER_NAME + " wants to achieve. When we agree on it, I record it as a goal with a done-when line. I need not sit idle meanwhile: in the same reply I may start a task (no item, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.\n</state>",
-	);
+	const state = stateBlock(dir, undefined, { now: new Date(2026, 0, 1, 9, 5).getTime() });
+	assert.match(state, new RegExp(`^<state>\\n${RECORD} This is the current state; it supersedes any earlier copy I carry\\.\\n\\nNow: Thu 1 Jan 2026, 09:05\\.`));
+	assert.match(state, new RegExp(`Ledger\\nQuestions for ${USER_NAME}:\\n  q1  Which port\\?`));
+	assert.match(state, /Dispatch\nGoals: none open\.\nPlan: no envelopes or moves\./);
+	assert.match(state, /This lens neither delegates work nor approves a move\./);
+	assert.match(state, /\n<\/state>$/);
 });
 
 // ─── The plan, change tasks, checkpoints ─────────────────────────────────────
@@ -530,14 +626,14 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		hasNot(result.text, "TOKEN-123", "the user's environment is not passed on");
 		has(`${result.text}\n`, `HOME=${home}\n`, "HOME is the home path");
 
-		// The network belongs to the window: it is what the plan item said when the window was opened.
+		// The network belongs to the window: it is what the move capability said when the window was opened.
 		const reach = `exec 3<>/dev/tcp/127.0.0.1/${port} && echo reached`;
 		result = await sh(reach);
 		assert.notEqual(result.exit, 0, "without network, a server on this machine cannot be reached");
 		hasNot(result.text, "reached", "without network");
 		result = await sh(reach, { window: "net", network: true });
 		assert.deepEqual([result.exit, result.text, result.network], [0, "reached", true], "a window opened for an item marked network can");
-		await assert.rejects(sh("echo x", { window: "net" }), /Window net was opened by a task whose plan item is marked network, and this task's item is not\. Run this in a window of another name\./, "a task without the mark cannot borrow that window");
+		await assert.rejects(sh("echo x", { window: "net" }), /Window net was opened by a move whose capability allows network, and this move does not\. Run this in a window of another name\./, "a move without the capability cannot borrow that window");
 		await assert.rejects(sh("echo x", { network: true }), /Window main was opened without network access, and it keeps it that way\. This task may use the network: run this in a window of another name\./, "and a window without network does not get it later");
 
 		result = await sh(`kill -0 ${process.pid}; ps -e -o pid= | wc -l`);
@@ -566,6 +662,28 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 		process.env.PATH = saved.PATH;
 		delete process.env.CARTO_TEST_SECRET;
 		await server.close();
+	}
+});
+
+test("shell: a staged command writes only its disposable work tree before candidate promotion", async () => {
+	const skip = NO_SANDBOX();
+	if (skip) return skip;
+	const root = makeProject("staged-command");
+	await git(root, "init", "-q");
+	const { brainDir } = setUpBrain(root);
+	const stage = createStage({ root });
+	const windows = windowsOf(root, brainDir);
+	try {
+		const result = await windows.run("stage", `printf 'export const add = () => 99;\\n' > src/math.js; test ! -e ${STAGE_WORK_DIR}/.brain; test ! -e ${STAGE_WORK_DIR}/.git; echo staged`, { network: false, waitMs: 20_000, stage });
+		assert.deepEqual([result.reason, result.exit, result.text, result.cwd, result.stage], ["done", 0, "staged", "(staged work)", stage.id], "the stage shell runs from its private work copy");
+		assert.equal(existsSync(join(stage.home, ".cartographer-stage-rc")), true, "the stage startup file stays in the private host-side stage home that bwrap binds as HOME");
+		assert.equal(existsSync(join(stage.home, ".cartographer-stage-stage.cmd")), true, "each staged command is written in that private home before the shell sources its in-sandbox bind");
+		assert.match(readFileSync(join(root, "src", "math.js"), "utf8"), /return a \+ b/, "the live project is unchanged before promotion");
+		windows.close("stage");
+		assert.deepEqual(collectStageCandidate(stage).changes.map(({ path, status }) => ({ path, status })), [{ path: "src/math.js", status: "changed" }], "only the bounded stage candidate records the formatter-like change");
+	} finally {
+		windows.shutdown();
+		disposeStage(stage);
 	}
 });
 
@@ -707,31 +825,210 @@ test("windows: what the windows block says about them", () => {
 	assert.equal(withoutAdditions(timed[0].content), note, "the mark comes off again like the other");
 });
 
-test("plan: the network mark belongs to change items, and giving it withdraws the authorization", () => {
-	const plan = { version: 1, next: 1, items: [] };
+test("plan: network belongs to a change envelope, but each move must declare its own network capability", () => {
+	const plan = { version: 2, next: 1, nextMove: 1, items: [], moves: [] };
 	const now = "2026-01-01T00:00:00.000Z";
-	assert.throws(() => applyPlanOp(plan, { action: "add", mode: "look", text: "Look", network: true }, now), /`network` goes with a change item: only a change task runs commands\./, "a look item cannot have it");
-	assert.equal(applyPlanOp(plan, { action: "add", mode: "change", text: "Install", network: true }, now).shown, "+ p1 [change, network] Install", "a change item shows it");
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Build" }, now);
-	applyPlanOp(plan, { action: "add", mode: "look", text: "Read" }, now);
-	authorize(plan, now);
-	assert.equal(applyPlanOp(plan, { action: "edit", id: "p1", network: false }, now).withdrawn, false, "taking the network away asks for less");
-	assert.ok(plan.authorized !== undefined && plan.items[0].network === undefined, "the authorization stands and the mark is gone");
-	assert.equal(applyPlanOp(plan, { action: "edit", id: "p2", network: true }, now).withdrawn, true, "giving it asks for more");
-	assert.equal(plan.authorized, undefined, "the authorization is withdrawn");
-	assert.throws(() => applyPlanOp(plan, { action: "edit", id: "p3", network: true }, now), /`network` goes with a change item/, "a look item cannot be given it");
-	applyPlanOp(plan, { action: "edit", id: "p2", mode: "look" }, now);
-	assert.equal(plan.items[1].network, undefined, "an item turned into a look item loses it");
-	has(renderPlan(plan), "p1 [change] Install", "the plan as text");
+	assert.throws(() => applyPlanOp(plan, { action: "add", mode: "look", text: "Look", network: true }, now), /`network` goes with a change envelope/, "a look envelope cannot have it");
+	assert.equal(applyPlanOp(plan, { action: "add", mode: "change", text: "Install", done_when: "The dependency is installed.", network: true }, now).shown, "+ p1 [change, network] Install (done when: The dependency is installed.)", "a change envelope shows its network grant");
+	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run the install", done_when: "The command exits.", targets: ["package.json"], proof: "Install output.", capabilities: { network: true } }, now);
+	assert.equal(plan.moves[0].capabilities.network, true, "the child explicitly takes the envelope's grant");
+	assert.throws(() => applyPlanOp(plan, { action: "edit", id: "p1", mode: "look" }, now), /`network` goes with a change envelope/, "the grant must be removed before turning an envelope into look");
+	assert.equal(applyPlanOp(plan, { action: "edit", id: "p1", network: false }, now).withdrawn, true, "changing an incomplete envelope invalidates its move revision");
+	assert.equal(plan.moves[0].capabilities.network, false, "taking the envelope grant removes the child's network lane");
+	assert.throws(() => applyPlanOp(plan, { action: "editMove", id: "m1", capabilities: { network: true } }, now), /does not grant network/, "a move cannot grant its own network access");
+	applyPlanOp(plan, { action: "edit", id: "p1", network: true }, now);
+	assert.equal(plan.moves[0].capabilities.network, false, "restoring an envelope grant does not expand an existing move by implication");
+	applyPlanOp(plan, { action: "editMove", id: "m1", capabilities: { network: true } }, now);
+	has(renderPlan(plan), "p1 [change, network] Install", "the plan renders the envelope and its child move");
 
-	// By hand: the mark counts on a change item only, and only as true.
+	// By hand: network counts on a change envelope only, and only as true.
 	const root = makeProject("plan-network", { git: false });
 	const { brainDir } = setUpBrain(root);
-	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ items: [{ id: "p1", mode: "look", text: "a", network: true }, { id: "p2", mode: "change", text: "b", network: "yes" }, { id: "p3", mode: "change", text: "c", network: true }] }));
+	writeFileSync(join(brainDir, "carto-plan.json"), JSON.stringify({ version: 2, next: 4, nextMove: 1, items: [
+		{ id: "p1", mode: "look", text: "a", network: true },
+		{ id: "p2", mode: "change", text: "b", doneWhen: "b is known", network: "yes" },
+		{ id: "p3", mode: "change", text: "c", doneWhen: "c is known", network: true },
+	], moves: [] }));
 	assert.deepEqual(loadPlan(brainDir).plan.items.map((item) => item.network), [undefined, undefined, true], "a plan file edited by hand");
 });
 
 // ─── Looking: only inside the project ───────────────────────────────────────
+
+test("task: a change focus executes the cached declared move contract through an isolated provider continuation", async () => {
+	const root = makeProject("move-contract", { git: false });
+	configure(root, { initiate: false });
+	const { brainDir } = setUpBrain(root);
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "change", text: "Check the entry point.", doneWhen: "The focused read is reviewed.", status: "open", revision: 1 }],
+		moves: [{
+			id: "m1", parent: "p1", action: "read: src/main.js", text: "read: src/main.js", doneWhen: "The entry point is reported.",
+			targets: ["src/main.js"], proof: "The read output names the entry point.",
+			capabilities: { files: false, commands: false, network: false }, budget: { replies: 2, fileOps: 0, commandStarts: 0 }, turns: 2,
+			revision: 1, parentRevision: 1, status: "open", approvedRevision: 1, approvedAt: "2026-11-15T00:00:00.000Z",
+		}],
+	});
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, ["-p", "task(m1): ignore this free-form text || then think"]);
+		ok(result, "cached move contract");
+		const move = readPlan(root).moves.find((entry) => entry.id === "m1");
+		assert.equal(move.status, "reported", "the focus reports the one stored move instead of completing its envelope");
+		assert.equal(move.reported.claimed, true);
+		assert.equal(move.reported.proof, "Stand-in observed the task results above.", "proof is stored separately from the report claim");
+		assert.deepEqual(move.reported.changes, [], "checkpoint evidence is kept even for a read-only execution step");
+		const contractRequest = server.requests.find((request) => request.messages.some((message) => rawText(message).includes("Move contract:\nread: src/main.js")));
+		assert.ok(contractRequest, "the child received the stored move action, not a broad new brief");
+		const capsuleAt = contractRequest.messages.findIndex((message) => message.role === "tool" && rawText(message).startsWith(TASK_HEADER));
+		assert.ok(capsuleAt > 0, "the focused provider request carries the prepared capsule");
+		assert.equal(contractRequest.messages[capsuleAt - 1]?.role, "user", "the focused provider request has the user-role query its chat template requires");
+		assert.equal(rawText(contractRequest.messages[capsuleAt - 1]), FOCUS_START, "the continuation is request-only rather than replayed parent chat");
+		const focusOnly = contractRequest.messages.filter((message) => message.role !== "system").map(rawText).join("\n");
+		assert.doesNotMatch(focusOnly, /ignore this free-form text/, "the parent request is not replayed into the focus");
+		assert.match(focusOnly, /Required proof: The read output names the entry point\./);
+		assert.match(focusOnly, /Closure: this focus is done only when its declared result is observed within its declared authority/);
+		assert.ok(server.requests.some((request) => request.messages.some((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.function?.name === "read"))), "the focus continues past its capsule with a normal focus-local read call");
+	} finally {
+		await server.close();
+	}
+});
+
+test("consult C1-C5: a CLI conference uses the caller model, returns an isolated bounded audit, and has no legacy writer", async () => {
+	const root = makeProject("consult-conference-cli", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	try {
+		const result = await carto(root, server, ["-p", `consult: ${JSON.stringify({ question: "What should we verify?", context: "CLI CAPTURED CONTEXT", myPersona: "Be a skeptical systems reviewer.", files: ["src/math.js"] })}`]);
+		assert.equal(result.code, 0, `conference CLI call exits cleanly:\n${result.all}`);
+		has(result.stdout, "Consult conference co1 returned", "the parent receives only the compact terminal conference receipt");
+		const loaded = loadConference(join(root, ".brain"), "co1").conference;
+		assert.equal(loaded.status, "returned");
+		assert.equal(loaded.model.modelId, "stand-in", "the conference records the model resolved for its caller");
+		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM cartographer");
+		assert.equal(loaded.final.participant, "cartographer", "the host authorizes Cartographer alone to write the terminal advisory");
+		assert.ok(loaded.childConversationId, "the independent child identity is durable");
+		assert.ok(loaded.requestPlans.length >= 5, "two debate turns, two native finite decisions, and the terminal report request are auditable");
+		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the conference has no storyteller writer");
+		assert.equal(server.requests.some((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom")), false, "conference routing does not retain the OpenAI custom-tool adapter");
+		const selectorRequests = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("Neutral native selector packet"));
+		assert.equal(selectorRequests.length, 2, "the conference makes a native continuation decision after each completed debate contribution");
+		assert.ok(selectorRequests.every((request) => request.tools === undefined && request.tool_choice === undefined && request.stream === false), "native selection has no tool surface");
+		assert.match(selectorRequests[0].grammar, /"continue:atlas"/);
+		assert.doesNotMatch(selectorRequests[0].grammar, /"report:cartographer"/, "one opening contribution cannot authorize a conclusion");
+		assert.match(selectorRequests[1].grammar, /"report:cartographer"/, "the ready debate makes a final-report decision a native finite choice");
+		assert.deepEqual(loaded.selectorEvents.map((event) => event.decision), ["continue", "report"]);
+		assert.ok(loaded.selectorEvents.every((event) => event.method === "llama.cpp-native-gbnf" && event.grammarEnforced === true));
+		const participantRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Active participant packet"));
+		assert.equal(participantRequests.some((request) => request.messages.map(rawText).join("\n").includes("CLI CAPTURED CONTEXT")), true, "the immutable conference seed reaches its independent child");
+		const reportRequest = participantRequests.find((request) => request.messages.map(rawText).join("\n").includes("host's native GBNF decision found the bounded debate ready for a final advisory"));
+		assert.deepEqual((reportRequest?.tools ?? []).map((tool) => tool.function?.name), ["consult_source", "consult_return"], "only the host-authorized report request exposes consult_return");
+	} finally {
+		await server.close();
+	}
+});
+
+test("consult probe: /consult probe sends standalone native GBNF selector checks and writes a shareable log", async () => {
+	const root = makeProject("consult-native-grammar-probe", { git: false });
+	configure(root, { initiate: false });
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	try {
+		const result = await carto(root, server, [], { input: "/consult probe llama-cpp-selector-probe.json\n/quit\n" });
+		ok(result, "native grammar selector diagnostic");
+		has(result.stdout, "Native llama.cpp selector probe", "the terminal identifies the standalone diagnostic");
+		has(result.stdout, "Result: PASS", "the terminal reports both grammar checks passed");
+		const logPath = join(root, "llama-cpp-selector-probe.json");
+		assert.equal(existsSync(logPath), true, "an explicit project-relative path makes the evidence easy to commit");
+		const log = JSON.parse(readFileSync(logPath, "utf8"));
+		assert.equal(log.kind, "cartographer.llama-cpp-native-selector-probe");
+		assert.equal(log.model, "stand-in", "the command probes the model currently selected by the session");
+		assert.equal(log.passed, true);
+		assert.deepEqual(log.cases.map((entry) => entry.id), ["forced-literal", "finite-route"]);
+		assert.ok(log.cases.every((entry) => entry.request.tools === undefined && entry.request.tool_choice === undefined), "the selector grammar is deliberately isolated from the tool surface");
+		assert.doesNotMatch(readFileSync(logPath, "utf8"), /MARKER-ONLY-IN-FILE/, "the synthetic diagnostic does not capture project material");
+		const probes = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("outside-the-allowed-selector-set") || request.messages.map(rawText).join("\n").includes("Eligible ids: atlas"));
+		assert.equal(probes.length, 2, "the server receives one forced grammar enforcement request and one finite routing request");
+		assert.ok(probes.every((request) => request.stream === false && request.tools === undefined && request.tool_choice === undefined));
+	} finally {
+		await server.close();
+	}
+});
+
+test("C5 CLI cutover blocks running Cases, archives stopped data, and exposes no Case tool", async () => {
+	const root = makeProject("c5-cli-cutover", { git: false });
+	const brainDir = join(root, ".brain");
+	configure(root, { initiate: false });
+	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
+	mkdirSync(join(brainDir, "cases"), { recursive: true });
+	const story = "<!-- storyteller v1 -->\nlegacy transcript\n";
+	writeFileSync(join(brainDir, "storyteller", "st1.md"), story);
+	writeFileSync(join(brainDir, "cases", "c1.json"), JSON.stringify({ id: "c1", status: "running" }));
+	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ shelf: [{ id: "sh1", ref: { type: "story", id: "st1" } }], tasks: { legacy: { caseId: "c1", phase: "construct" } } }));
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	try {
+		const blocked = await carto(root, server, ["-p", "say: should not start || sleep"]);
+		assert.equal(blocked.code, 1, `a running legacy Case blocks startup:\n${blocked.all}`);
+		has(blocked.stderr, "active or resumable legacy Case material: c1", "the blocker identifies the Case once");
+		assert.equal(existsSync(join(brainDir, "cases", "c1.json")), true, "the blocked source is untouched");
+
+		writeFileSync(join(brainDir, "cases", "c1.json"), JSON.stringify({ id: "c1", status: "stopped" }));
+		const migrated = await carto(root, server, ["-p", "say: archive complete || sleep"]);
+		ok(migrated, "stopped legacy data starts through the C5 cutover");
+		has(migrated.stdout, "C5 legacy archive", "startup reports the static archive");
+		assert.equal(existsSync(join(brainDir, "storyteller")), false);
+		assert.equal(existsSync(join(brainDir, "cases")), false);
+		assert.equal(readFileSync(join(brainDir, "legacy", "raw", "storyteller", "st1.md"), "utf8"), story);
+		assert.match(readFileSync(join(brainDir, "legacy", "exports", "cases", "c1.md"), "utf8"), /Recorded legacy status: stopped/);
+		const requestToolNames = server.requests.flatMap((request) => request.tools ?? []).map((tool) => tool.function?.name ?? tool.name).filter(Boolean);
+		assert.equal(requestToolNames.includes("case"), false, "fresh C5 provider payloads contain no Case tool");
+	} finally {
+		await server.close();
+	}
+});
+
+test("task: browser evidence outside m2's JavaScript boundary becomes a durable closure gap without undeclared edits", async () => {
+	const root = makeProject("browser-closure-gap", { git: false });
+	configure(root, { initiate: false });
+	writeFileSync(join(root, "index.html"), "<!doctype html><script type=\"module\" src=\"js/main.js\"></script>\n");
+	mkdirSync(join(root, "js"), { recursive: true });
+	const { brainDir } = setUpBrain(root);
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "change", text: "Show the browser simulation.", doneWhen: "The browser visibly runs the simulation.", status: "open", revision: 1 }],
+		moves: [{
+			id: "m2", parent: "p1", action: "Create the simulation module.", text: "Create the simulation module.",
+			doneWhen: "The browser loads and runs js/main.js.", targets: ["js/main.js"], proof: "Browser observation shows the running simulation.",
+			capabilities: { files: true, commands: false, network: false }, budget: { replies: 3, fileOps: 1, commandStarts: 0 }, turns: 3,
+			revision: 1, parentRevision: 1, status: "open", approvedRevision: 1, approvedAt: "2026-11-15T00:00:00.000Z",
+		}],
+	});
+	const server = await startStandIn({
+		focusSteps: ["book: {\"target\":\"file\",\"action\":\"create\",\"path\":\"js/main.js\",\"content\":\"console.log('simulation');\"}"],
+		returnProof: "node --check js/main.js exits zero.",
+		closureGap: "Browser proof depends on index.html loading js/main.js, but index.html is outside m2's declared targets.",
+	});
+	try {
+		const result = await carto(root, server, ["-p", "task(m2): inspect the JavaScript-only browser claim || then think"]);
+		ok(result, "browser closure gap");
+		const plan = readPlan(root);
+		const move = plan.moves.find((entry) => entry.id === "m2");
+		assert.equal(move.status, "blocked", "the focus cannot claim browser completion from a JavaScript-only check");
+		assert.equal(move.reported.claimed, false);
+		assert.equal(move.reported.proof, "node --check js/main.js exits zero.", "JavaScript syntax evidence remains distinct from browser evidence");
+		assert.match(move.reported.closureGap, /index\.html loading js\/main\.js/);
+		assert.match(move.blocked, /^Closure gap:/);
+		assert.equal(readFileSync(join(root, "js", "main.js"), "utf8"), "console.log('simulation');", "the declared JavaScript surface may change without closing the browser claim");
+		assert.equal(readFileSync(join(root, "index.html"), "utf8"), "<!doctype html><script type=\"module\" src=\"js/main.js\"></script>\n", "the undeclared browser-integration path is not edited");
+		const focusRequest = server.requests.find((request) => request.messages.some((message) => rawText(message).includes("Move contract:\nCreate the simulation module.")));
+		assert.ok(focusRequest, "the focused request was made");
+		assert.match(focusRequest.messages.map(rawText).join("\n"), /Closure: this focus is done only when its declared result is observed within its declared authority/);
+	} finally {
+		await server.close();
+	}
+});
 
 test("look: read gives the exact bytes, ranges, and says how to continue", () => {
 	const root = makeProject("read-unit", { git: false });
@@ -868,15 +1165,15 @@ test("time: each of the user's messages and each task report says when it came, 
 });
 
 test("terminal: one line per call to the atlas and the assessment", () => {
-	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", operation: { name: "dice" } } }), "book atlas add dice");
-	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", ref: { namespace: "n-0123456789abcdef", kind: "atlas", id: "a" } } }), "book atlas confirm a");
-	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "write", operation: { text: "x".repeat(1200) } } }), `book assessment write ${"x".repeat(69)}…`);
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "add", name: "dice" } }), "book atlas add dice");
+	assert.equal(describeCall({ name: "book", arguments: { target: "atlas", action: "confirm", id: "a" } }), "book atlas confirm a");
+	assert.equal(describeCall({ name: "book", arguments: { target: "assessment", action: "write", text: "x".repeat(1200) } }), `book assessment write ${"x".repeat(69)}…`);
 	const result = (details, text) => describeResult({ role: "toolResult", toolName: "book", isError: false, details: { target: "atlas", ...details }, content: [{ type: "text", text }] });
 	assert.equal(result({ shown: ["+ node a  what a is", "✓ confirmed b"] }, "a written.\nb confirmed."), "+ node a what a is · ✓ confirmed b");
 	assert.equal(result({ shown: [] }, "a (node) · written just now\nwhat a is"), "a (node) · written just now", "a call that only read shows the first line of what it got");
 });
 
-// ─── Wakes, sleep, approval switched off, standing items ────────────────────
+// ─── Wakes, sleep, approval switched off, declared moves ────────────────────
 
 /** Shell windows as src/wakes.mjs asks about them, for the tests that need no real shell. */
 const fakeWindows = () => {
@@ -1158,7 +1455,7 @@ test("yolo: the prompt shows it for as long as it is on", async () => {
 		const result = await cartoOnTerminal(root, server, [], [["Set one up in", ""], ["Type a message", "/yolo on"], ["[yolo, waits] › ", "say: hi || sleep"], ["context ", "/yolo off"], ["approval: on", "/quit"]]);
 		if (result === undefined) return "python3 is needed for a terminal";
 		has(result.screen, "[yolo, waits] › say: hi", "the prompt after /yolo on");
-		has(result.screen, "● approval: on · change items wait for /approve again", "and after /yolo off");
+		has(result.screen, "● approval: on · declared change moves wait for /approve again", "and after /yolo off");
 		has(result.screen, "[waits] › /quit", "the prompt is back to waiting for you");
 	} finally {
 		await server.close();
@@ -1280,9 +1577,9 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 		text("user", "do it"),
 		call("task", { brief: "b" }),
 		text("toolResult", `${TASK_HEADER}\n\nBrief:\nb`, { toolName: "task", toolCallId: "c" }),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: { paths: ["a.js"] } }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: { path: "a.js" } }] },
 		text("toolResult", big, { toolName: "read", toolCallId: "r1" }),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "read", arguments: { paths: ["b.js"] } }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "read", arguments: { path: "b.js" } }] },
 		text("toolResult", "== b.js (lines 1-2 of 2)\n1  x\n2  y", { toolName: "read", toolCallId: "r2" }),
 	];
 	assert.equal(stepsOf([text("user", "hi")]), undefined, "no brief, no task");
@@ -1291,13 +1588,13 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(steps.replies, 2);
 	assert.deepEqual(steps.results.map((result) => result.id), ["s1", "s2"]);
 	// A read of the same lines again: the older copy is replaced, when it is large and not much has come since.
-	assert.deepEqual(supersededBy(steps, { paths: ["a.js"] }), ["s1"]);
-	assert.deepEqual(supersededBy(steps, { paths: ["b.js"] }), [], "a small result is left alone: replacing it saves less than reading the rest again costs");
-	assert.deepEqual(supersededBy(steps, { paths: ["a.js"], offset: 5 }), [], "other lines are another read");
-	assert.deepEqual(supersededBy(steps, { paths: ["a.js"] }, { s1: "gone" }), [], "what is dropped already is not dropped again");
+	assert.deepEqual(supersededBy(steps, { path: "a.js" }), ["s1"]);
+	assert.deepEqual(supersededBy(steps, { path: "b.js" }), [], "a small result is left alone: replacing it saves less than reading the rest again costs");
+	assert.deepEqual(supersededBy(steps, { path: "a.js", offset: 5 }), [], "other lines are another read");
+	assert.deepEqual(supersededBy(steps, { path: "a.js" }, { s1: "gone" }), [], "what is dropped already is not dropped again");
 	// Far back, with much read since: left alone, since everything behind it would be read again.
-	const far = [...messages.slice(0, 5), ...Array.from({ length: 12 }, (_, i) => [{ role: "assistant", content: [{ type: "toolCall", id: `m${i}`, name: "read", arguments: { paths: [`f${i}.js`] } }] }, text("toolResult", big, { toolName: "read", toolCallId: `m${i}` })]).flat()];
-	assert.deepEqual(supersededBy(stepsOf(far), { paths: ["a.js"] }), [], "far back");
+	const far = [...messages.slice(0, 5), ...Array.from({ length: 12 }, (_, i) => [{ role: "assistant", content: [{ type: "toolCall", id: `m${i}`, name: "read", arguments: { path: `f${i}.js` } }] }, text("toolResult", big, { toolName: "read", toolCallId: `m${i}` })]).flat()];
+	assert.deepEqual(supersededBy(stepsOf(far), { path: "a.js" }), [], "far back");
 	// Dressed for the request: the mark at the end of a large result, a dropped one as one line.
 	const dressed = dressTask(messages, { dropped: {} });
 	assert.match(dressed[4].content[0].text, /\n\n\[s1 · about [\d,]+ tokens\]$/);
@@ -1308,35 +1605,50 @@ test("context: what the engine works with: line ranges, what a collapse would fr
 	assert.equal(messages[4].content[0].text, big, "the stored messages are not changed");
 });
 
-test("context: read results are ephemeral — all but the newest leave one line, and the newest stands at the end of the request", async () => {
+test("context: file-read results are ephemeral — successful reply batches replace older batches, while failed reads and brain reads never evict one", async () => {
 	const { dressReads, splitReadTail, withReadTail, withoutReadTail } = await import("../src/context.mjs");
 	const { withoutAdditions } = await import("../src/request.mjs");
 	const rawText = (message) => message.content[0].text;
 	const text = (role, words, more = {}) => ({ role, content: [{ type: "text", text: words }], ...more });
 	const convo = [
 		text("user", "read two files"),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "book", arguments: { target: "file", action: "read", path: "a.js" } }] },
-		text("toolResult", "== a.js (lines 1-2 of 2)\n1  alpha\n2  beta", { toolName: "book", toolCallId: "r1" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r1", name: "read", arguments: { path: "a.js" } }] },
+		text("toolResult", "== a.js (lines 1-2 of 2) · file f1 @0000\nalpha\nbeta", { toolName: "read", toolCallId: "r1" }),
 		{ role: "assistant", content: [{ type: "toolCall", id: "r2", name: "book", arguments: { target: "ledger", action: "read" } }] },
 		text("toolResult", "{ \"entries\": [] }", { toolName: "book", toolCallId: "r2" }),
-		{ role: "assistant", content: [{ type: "toolCall", id: "r3", name: "book", arguments: { target: "file", action: "read", ref: { id: "f9" }, range: "1-40" } }] },
-		text("toolResult", "== c.js (lines 1-40 of 300)\n1  gamma", { toolName: "book", toolCallId: "r3" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r3", name: "read", arguments: { id: "f9", range: "1-40" } }] },
+		text("toolResult", "== c.js (lines 1-40 of 300) · file f9 @1111\ngamma", { toolName: "read", toolCallId: "r3" }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r4", name: "read", arguments: { path: "missing.js" } }] },
+		text("toolResult", "<harness>[error] No file at missing.js.</harness>", { toolName: "read", toolCallId: "r4", isError: true }),
+		{ role: "assistant", content: [{ type: "toolCall", id: "r5", name: "book", arguments: { target: "atlas", action: "read", id: "c1" } }] },
+		text("toolResult", "{ \"id\": \"c1\" }", { toolName: "book", toolCallId: "r5" }),
 	];
 	const { messages, tail } = dressReads(convo);
-	// The earlier reads of any target are one line each; the newest one leaves its content for the tail.
-	assert.match(rawText(messages[2]), /no longer in view — file read a\.js/);
-	assert.match(rawText(messages[4]), /no longer in view — ledger read/);
-	assert.match(rawText(messages[6]), /stands at the end of the request[^\n]*file read f9/);
-	assert.equal(tail, "== c.js (lines 1-40 of 300)\n1  gamma");
-	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2)\n1  alpha\n2  beta", "the stored messages are not changed");
+	// Earlier successful batches leave one line; brain reads and failed file reads stay inline and never evict the current batch.
+	assert.match(rawText(messages[2]), /no longer in active view — read a\.js/);
+	assert.equal(rawText(messages[4]), "{ \"entries\": [] }", "ledger read stays inline");
+	assert.match(rawText(messages[6]), /stands in the current read batch at the end of the request[^\n]*read f9 lines 1-40/);
+	assert.match(rawText(messages[8]), /No file at missing\.js/, "failed read stays inline");
+	assert.equal(rawText(messages[10]), "{ \"id\": \"c1\" }", "atlas read after the file read does not evict the file read");
+	assert.match(tail, /^Current read batch: read f9 lines 1-40\. This is the only transient file content in view\./);
+	assert.match(tail, /later successful read batch removes the prior batch from active view\. That changes only this transient tail; it is not a context collapse\./);
+	assert.match(tail, /deliberately preserve source material I need afterward on the shelf or write lasting conclusions to the shared ledger, atlas or assessment\./);
+	assert.match(tail, /== c\.js \(lines 1-40 of 300\) · file f9 @1111\ngamma$/);
+	assert.equal(convo[2].content[0].text, "== a.js (lines 1-2 of 2) · file f1 @0000\nalpha\nbeta", "the stored messages are not changed");
 	// Deterministic: the same request is dressed the same way.
 	assert.equal(dressReads(convo).tail, tail);
+	// Legacy stored `book` `file read` entries with `<shelf-ask>` still collapse cleanly with `<shelf-ask>` stripped.
+	const legacy = [
+		{ role: "assistant", content: [{ type: "toolCall", id: "l1", name: "book", arguments: { target: "file", action: "read", path: "old.js" } }] },
+		text("toolResult", "== old.js (lines 1-1 of 1)\nconst x = 1;\n\n<shelf-ask>\nShould I shelf old.js? Yes or no.\n</shelf-ask>", { toolName: "book", toolCallId: "l1" }),
+	];
+	assert.match(dressReads(legacy).tail, /== old\.js \(lines 1-1 of 1\)\nconst x = 1;$/);
 	// A non-read action is not a read.
 	const noReads = [text("assistant", "thinking", {}), text("toolResult", "done", { toolName: "book", toolCallId: "x" })];
 	assert.equal(dressReads(noReads).tail, undefined, "no reads, no tail");
 	// A result already folded keeps the line it was folded under (it carries the id).
 	const folded = [
-		{ role: "assistant", content: [{ type: "toolCall", id: "r9", name: "read", arguments: { paths: ["d.js"] } }] },
+		{ role: "assistant", content: [{ type: "toolCall", id: "r9", name: "read", arguments: { path: "d.js" } }] },
 		text("toolResult", "[s9: I dropped this result. It was: read d.js, about 40 tokens. Call again if I need it.]", { toolName: "read", toolCallId: "r9" }),
 	];
 	const dressedFolded = dressReads(folded);
@@ -1345,7 +1657,7 @@ test("context: read results are ephemeral — all but the newest leave one line,
 	// The tail is glued at the very end of the request, after everything else.
 	const ended = withReadTail(messages, tail);
 	const lastText = ended.at(-1).content.at(-1).text;
-	assert.match(lastText, /<read-tail>\n== c\.js/);
+	assert.match(lastText, /<read-tail>\nCurrent read batch: read f9 lines 1-40\./);
 	assert.deepEqual(splitReadTail(lastText), { text: rawText(messages.at(-1)), tail: `<read-tail>\n${tail}` });
 	assert.equal(withoutReadTail(lastText), rawText(messages.at(-1)));
 	assert.equal(withoutAdditions(lastText), withoutAdditions(rawText(messages.at(-1))), "and it comes off again like the other additions");
@@ -1353,6 +1665,89 @@ test("context: read results are ephemeral — all but the newest leave one line,
 	const endedAssistant = withReadTail([...messages, text("assistant", "a note to myself")], tail);
 	assert.equal(endedAssistant.at(-1).role, "user");
 	assert.match(endedAssistant.at(-1).content[0].text, /<read-tail>/);
+});
+
+test("context: successful reads from one reply stay together in call order until another batch replaces them", async () => {
+	const { dressReads } = await import("../src/context.mjs");
+	const text = (words, more = {}) => ({ role: "toolResult", content: [{ type: "text", text: words }], ...more });
+	const call = (id, path) => ({ type: "toolCall", id, name: "read", arguments: { path } });
+	const index = call("r-index", "index.html");
+	const dice = call("r-dice", "dice.js");
+	const smoke = call("r-smoke", "smoke-p2.js");
+	const missing = call("r-missing", "gone.js");
+	const first = [
+		{ role: "user", content: [{ type: "text", text: "Why does the die not render?" }] },
+		{ role: "assistant", content: [index, dice, smoke, missing] },
+		text("== smoke-p2.js (lines 1-1 of 1) · file f3 @ccc\nsmoke", { toolName: "read", toolCallId: smoke.id }),
+		text("== index.html (lines 1-1 of 1) · file f1 @aaa\n<script>", { toolName: "read", toolCallId: index.id }),
+		text("== dice.js (lines 1-1 of 1) · file f2 @bbb\nexport const die = 6;", { toolName: "read", toolCallId: dice.id }),
+		text("<harness>[error] No file at gone.js.</harness>", { toolName: "read", toolCallId: missing.id, isError: true }),
+	];
+	const current = dressReads(first);
+	for (const at of [2, 3, 4]) assert.match(current.messages[at].content[0].text, /stands in the current read batch/, "each successful result points at the shared tail");
+	assert.equal(current.messages[5].content[0].text, "<harness>[error] No file at gone.js.</harness>", "a failed read remains inline");
+	assert.match(current.tail, /^Current read batch: read index\.html, read dice\.js, read smoke-p2\.js\./);
+	assert.ok(current.tail.indexOf("== index.html") < current.tail.indexOf("== dice.js") && current.tail.indexOf("== dice.js") < current.tail.indexOf("== smoke-p2.js"), "the tail follows call order, not completion order");
+
+	const later = call("r-later", "main.js");
+	const replaced = dressReads([...first, { role: "assistant", content: [later] }, text("== main.js (lines 1-1 of 1) · file f4 @ddd\nboot();", { toolName: "read", toolCallId: later.id })]);
+	for (const at of [2, 3, 4]) assert.match(replaced.messages[at].content[0].text, /later successful read batch removed the prior batch from active view/, "the entire earlier batch leaves together");
+	assert.match(replaced.tail, /^Current read batch: read main\.js\./);
+	assert.doesNotMatch(replaced.tail, /index\.html|dice\.js|smoke-p2\.js/, "only the new batch remains at the tail");
+});
+
+test("harness: one reply's admitted reads share a tail batch, the ninth is refused, and turnover does not collapse", async () => {
+	const root = makeProject("read-batch", { git: false });
+	configure(root, { initiate: false });
+	for (let index = 1; index <= 9; index++) writeFileSync(join(root, `batch-${index}.txt`), `batch file ${index}\n`);
+	const server = await startStandIn();
+	try {
+		const firstReply = Array.from({ length: 9 }, (_, index) => `read: batch-${index + 1}.txt`).join(" +++ ");
+		// `|||` is the stand-in's durable task-step separator: real inspect briefs are one line.
+		const result = await carto(root, server, ["-p", `task: ${firstReply} ||| read: src/main.js || then think`]);
+		ok(result, "read-batch task");
+		const tailOf = (request) => {
+			const text = request.messages.map(rawText).join("\n");
+			const at = text.lastIndexOf("<read-tail>\n");
+			return at < 0 ? undefined : text.slice(at);
+		};
+		const tails = server.requests.map(tailOf).filter((tail) => tail !== undefined);
+		assert.equal(tails.length, 2, "one request follows each successful reply batch");
+		assert.match(tails[0], /^<read-tail>\nCurrent read batch: read batch-1\.txt, read batch-2\.txt, read batch-3\.txt, read batch-4\.txt, read batch-5\.txt, read batch-6\.txt, read batch-7\.txt, read batch-8\.txt\./);
+		for (let index = 1; index <= 8; index++) assert.match(tails[0], new RegExp(`== batch-${index}\\.txt`), `batch file ${index} is in the shared tail`);
+		assert.doesNotMatch(tails[0], /batch file 9/, "the ninth file did not run or enter the tail");
+		const firstBatchRequest = server.requests.find((request) => tailOf(request) === tails[0]);
+		assert.ok(firstBatchRequest, "the first tail came from a request");
+		assert.match(firstBatchRequest.messages.map(rawText).join("\n"), /read batch already has 8 files/, "the ninth call is refused before disk content returns");
+		assert.match(tails[1], /^<read-tail>\nCurrent read batch: read src\/main\.js\./);
+		assert.doesNotMatch(tails[1], /batch file [1-8]/, "the later successful batch replaces all earlier file content together");
+		assert.equal(server.asides.length, 0, "batch turnover does not create a collapse question or read-ahead request");
+	} finally {
+		await server.close();
+	}
+});
+
+test("atlas attention: a completed read and shelf batch publishes one durable mapping epoch", async () => {
+	const root = makeProject("atlas-attention-publisher", { git: false });
+	configure(root, { initiate: false });
+	const { brainDir } = setUpBrain(root);
+	const { atlas } = loadAtlas(brainDir);
+	applyAtlasOp(atlas, { action: "add", name: "entry", gist: "The main entry point.", files: ["src/main.js"] }, { root, now: "2026-11-16T00:00:00.000Z", by: "main", main: true });
+	saveAtlas(brainDir, atlas);
+	const before = atlas.attention.epoch;
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, ["-p", 'task: read: src/main.js +++ shelf: {"action":"add","path":"src/math.js"} || then think']);
+		ok(result, "atlas attention publisher");
+		const persisted = loadAtlas(brainDir).atlas;
+		const entry = persisted.nodes.find((node) => node.name === "entry");
+		assert.equal(persisted.attention.epoch, before + 1, "one completed reply batch advances attention once, not once per tool result");
+		assert.equal(persisted.attention.nodes[entry.id].kind, "read", "the successful deliberate read heats its existing node");
+		assert.equal(persisted.attention.gaps["src/math.js"].kind, "shelf", "a successful shelf placement records an unmapped path as a gap instead of inventing a node");
+		assert.equal(persisted.nodes.length, 1, "observations never create an Atlas claim");
+	} finally {
+		await server.close();
+	}
 });
 
 test("screen: a collapse of the main context leaves only the marker, and the agent's blocks fold open", async () => {
@@ -1437,7 +1832,7 @@ test("screen: keys are named for the commands mode, and several lines that arriv
 	assert.equal(watch.lineEnd("\r"), undefined, "a later read forgets the earlier one");
 });
 
-test("screen: the Chat tab folds the agent's work into one line, opens it to a line per call, and shows what is being written", async () => {
+test("screen: Work folds the agent's private trace into one line, opens it to a line per call, and shows what is being written", async () => {
 	const { createChat, homeOf } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
@@ -1448,7 +1843,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 
 	chat.user("Look at the roller");
 	chat.entry(0, reply([{ type: "text", text: "I should look first." }, call("c1", "task", { brief: "Read the roller" })], 1));
-	chat.entry(1, reply([call("c2", "read", { paths: ["roll.py"] }), call("c3", "search", { pattern: "seed" })], 2));
+	chat.entry(1, reply([call("c2", "read", { path: "roll.py" }), call("c3", "search", { pattern: "seed" })], 2));
 	clock += 3000;
 	// The run that is going on is open by itself.
 	has(text(), "▾ 3 calls · task · 3s\n  ┊ I should look first.\n  … task  Read the roller  3s\n  │ … read roll.py  3s\n  │ … search /seed/", "while it runs, the run is open");
@@ -1459,6 +1854,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	chat.entry(1, result("c4", "return", "Returned. The task has ended."));
 	chat.entry(0, result("c1", "task", "It rolls one die.", { details: { report: "t1" } }), "◂ report t1  17 characters  (/report shows it)\n");
 	chat.entry(0, reply([call("c5", "chat", { text: "It rolls one die." })], 4));
+	chat.entry(0, result("c5", "chat", "Delivered."));
 	clock += 60_000;
 	has(text(), "› Look at the roller\n\n▸ 3 calls · t1 · 3s · 1 failed\n◂ report t1  17 characters  (/report shows it)\n\nIt rolls one die.", "once something is said, the run is one line, with how many calls, which task and how long");
 	hasNot(text(), "read roll.py", "its calls are folded away");
@@ -1471,7 +1867,7 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	const read = chat.lines(80).find((line) => line.kind === "call" && line.spans.some(([part]) => part.includes("read roll.py")));
 	chat.toggleRow(read.item, read.row);
 	has(text(), "│ ✓ read roll.py  → 3 lines\n  │   == roll.py (lines 1-2 of 2)\n  │   1  import random\n  │   2  print(1)", "a call opens to its result, in place");
-	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("book", { target: "file", action: "read" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, undefined, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, a command in Shells, the plan in Carto; a read opens where it stands");
+	assert.deepEqual([homeOf("write"), homeOf("book", { target: "file", action: "edit" }), homeOf("shelf", { action: "add" }), homeOf("shell"), homeOf("plan"), homeOf("read")], [{ tab: "diff" }, { tab: "diff" }, { tab: "context" }, { tab: "shells" }, { tab: "carto", view: "plan" }, undefined], "a write or file edit lives in Diff, shelf in Context, a command in Shells, the plan in Carto; a read opens where it stands");
 
 	// With the notes hidden, the note rows are gone and the calls stay.
 	chat.setThinking(false);
@@ -1482,14 +1878,15 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	// What is being written now is shown as it grows: notes, a message, the arguments of a call.
 	chat.user("Write it");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: "The file needs a seed." }, call("c9", "task", { brief: "Add a seed\nto the roller" })] });
-	has(text(), "┊ The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
+	has(text(), "The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
+	assert.equal(chat.lines(80).find((line) => line.kind === "live" && line.bg === "bgNote")?.bg, "bgNote", "live private material uses the same quiet block as a completed note");
 	assert.equal(chat.doing().what, "writing task Add a seed to the roller");
 	// `book file edit` streams `oldText` and then `newText`; both show as they are written, and `newText` wins at equal length.
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)" })] });
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)" })] });
 	has(text(), "  │ ✎ book file edit f1\n  │   │ print(1)", "book file edit shows oldText while newText has not started yet");
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "random.seed(7)\nprint(1)" })] });
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)", newText: "random.seed(7)\nprint(1)" })] });
 	has(text(), "  │ ✎ book file edit f1\n  │   │ random.seed(7)\n  │   │ print(1)", "book file edit streams newText as it grows");
-	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", ref: { id: "f1" }, oldText: "print(1)", newText: "print(2)" })] });
+	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)", newText: "print(2)" })] });
 	has(text(), "  │ ✎ book file edit f1\n  │   │ print(2)", "at equal length, newText is shown over oldText");
 	chat.live(1, undefined);
 	chat.live(0, { timestamp: 9, content: [call("c9", "chat", { text: "Half a sen" })] });
@@ -1506,170 +1903,247 @@ test("screen: the Chat tab folds the agent's work into one line, opens it to a l
 	has(text(), "● plan  authorized by you\n  p1 Write it", "printed text stands as printed");
 
 	const transcript = chat.transcript({ title: "T" });
-	has(transcript, "# T\n\n## You\n\nLook at the roller\n\n- _note:_ I should look first.\n- `task  Read the roller` → report t1\n  - `read roll.py` → 3 lines\n  - `search /seed/` → refused: no match for seed (failed)\n\n```text\n◂ report t1  17 characters  (/report shows it)\n```\n\n## Cartographer\n\nIt rolls one die.\n", "the session as Markdown: what was said in full, a line for each call");
+	has(transcript, "# T\n\n## You\n\nLook at the roller\n\n- _private note:_ I should look first.\n- `task  Read the roller` → report t1\n  - `read roll.py` → 3 lines\n  - `search /seed/` → refused: no match for seed (failed)\n\n```text\n◂ report t1  17 characters  (/report shows it)\n```\n\n## Cartographer\n\nIt rolls one die.\n", "the session as Markdown: what was said in full, a line for each call");
 	assert.equal(chat.lastAgent(), "It rolls one die.");
 });
 
-test("screen: a consult call folds to one line, and opens to the whole story — the context, the question, and the answer under its thread", async () => {
+test("screen: Talk separates delivered speech from private Work", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
-	const thread = "st-20261116-053946-a1b2";
-	const roundOne = [
-		"<!-- storyteller v1 -->",
-		"The storyteller — one long problem, kept whole",
-		"",
-		"Model: MythosNano",
-		"Started: 2026-11-16T05:39:46.000Z",
-		"",
-		"## Round 1 — 2026-11-16T05:39:46.000Z",
-		"Elapsed: 1 m 12 s · 9,001 output tokens · finish: stop",
-		"",
-		"Context:",
-		"```text",
-		"The roller rolls one die.",
-		"The user suspects it is unfair.",
-		"```",
-		"",
-		"Question:",
-		"```text",
-		"Is the roller sound?",
-		"```",
-		"",
-		"Answer:",
-		"```text",
-		"It is not. Roll twice, not once, or the die never lands on six.",
-		"```",
-		"",
-	].join("\n");
-	const stories = { [thread]: roundOne };
-	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const chat = createChat({ now: () => clock });
+	const text = (projection, cols = 120) => chat.lines(cols, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
 
-	chat.user("Is the roller sound?");
-	chat.entry(0, reply([call("c1", "consult", { question: "Is the roller sound?", context: "The roller rolls one die.\nThe user suspects it is unfair." })], 1));
-	clock += 72_000;
-	chat.entry(0, result("c1", "consult", `The storyteller took 1 m 12 s (9,001 output tokens). The story stands under thread ${thread}; shelved as placement sh1 (12,340 rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so. A story is not a record: check the work against a test or a proof, and apply it yourself. I can ask on with \`thread: "${thread}"\` — the storyteller sees the original question and its answer — for as long as the work needs.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
-	chat.entry(0, reply([call("c2", "chat", { text: "It rolls once; ask the storyteller, and it says twice." })], 2));
+	chat.user("Please inspect the roller.");
+	chat.entry(0, reply([
+		{ type: "thinking", thinking: "Private chain of thought." },
+		{ type: "text", text: "I should inspect the implementation first." },
+		call("read-1", "read", { path: "roll.py" }),
+		call("chat-1", "chat", { text: "I am checking it." }),
+	], 1));
+	chat.entry(0, result("read-1", "read", "== roll.py\n1  return 1"));
+	chat.entry(0, result("chat-1", "chat", "Delivered."));
+	chat.print("◆ active context changed\n");
+	chat.setAll(true);
 
-	// Folded: one line for the run, and the line says whose work it was; nothing of the answer stands until it is opened.
-	has(text(), "▸ 1 call · Is the roller sound? · 1m 12s", "once something is said, the run is one line, and the line says what the storyteller was asked");
-	hasNot(text(), "the storyteller  Is the roller sound?", "the call's own line is folded away with the run");
-	hasNot(text(), "Roll twice", "the answer is not shown until the call is opened");
-	hasNot(text(), "It is not.", "and the receipt never carried it either");
+	const talk = text("talk");
+	has(talk, "Please inspect the roller.", "Talk keeps submitted user speech");
+	has(talk, "You → agent · submitted", "Talk names the user-speech lifecycle");
+	has(talk, "Agent speech · delivered · chat call chat-1", "a successful chat result makes speech delivered");
+	has(talk, "I am checking it.", "Talk keeps delivered agent speech");
+	hasNot(talk, "Private chain of thought.", "reasoning never becomes Talk");
+	hasNot(talk, "I should inspect the implementation first.", "an ordinary assistant note never becomes Talk");
+	hasNot(talk, "read roll.py", "tool work never becomes Talk");
+	hasNot(talk, "active context changed", "harness notices never become Talk");
 
-	// The run opened: the call is one line — who was asked, what, how long it took, how much it wrote, where the story stands.
-	chat.toggle(chat.lines(80).find((line) => line.kind === "group").item);
-	has(text(), "the storyteller  Is the roller sound?  → 1 m 12 s · 9,001 tokens", "opened, the call line says who was asked, what, how long it took and how much it wrote");
-	hasNot(text(), "Roll twice", "the answer stands behind the call");
+	const work = text("work");
+	has(work, "Main · Private reasoning · provider response · replay: provider-bound", "Work labels provider reasoning and its replay boundary");
+	has(work, "Main · Agent note · provider response · replay: active-context dependent", "Work labels an undelivered assistant note");
+	has(work, "Main · call · read roll.py · completed", "Work names call source and completion");
+	has(work, "Harness · notice", "Work labels harness output");
+	hasNot(work, "Please inspect the roller.", "submitted user speech is not duplicated in Work");
+	hasNot(work, "I am checking it.", "delivered agent speech is not duplicated in Work");
 
-	// Opened: the whole story stands in the row, read from the brain under its thread, never from the session.
-	const consultRow = chat.lines(80).find((line) => line.kind === "call");
-	chat.toggleRow(consultRow.item, consultRow.row);
-	const opened = text();
-	has(opened, `the story stands under thread ${thread} · 1 round`, "the opened row names the thread, never a path");
-	has(opened, "round 1 · 2026-11-16 05:39 UTC", "the round is labelled");
-	has(opened, "what I sent — the context", "the ask says what was sent");
-	has(opened, "The roller rolls one die.", "the context of the call");
-	has(opened, "The user suspects it is unfair.", "all of it");
-	has(opened, "what I asked — the question", "and what was asked");
-	has(opened, "Is the roller sound?", "the question in full");
-	has(opened, "what the storyteller answered", "and what came back");
-	has(opened, "It is not. Roll twice, not once, or the die never lands on six.", "the answer, from the story it stands in");
-	hasNot(opened, "Shelved as placement", "the receipt is not repeated inside the opened row");
+	chat.entry(0, reply([call("chat-2", "chat", { text: "This delivery failed." })], 2));
+	chat.entry(0, result("chat-2", "chat", "the provider refused it", { isError: true }));
+	hasNot(text("talk"), "This delivery failed.", "failed chat speech does not read as something said to the user");
+	has(text("work"), "Agent speech · failed · chat call chat-2", "a failed chat call stays in Work with its source");
+	has(text("work"), "Failed delivery · the provider refused it", "Work shows why that attempted speech failed");
+	assert.equal(chat.lastAgent(), "I am checking it.", "copying the last agent message ignores a failed delivery");
+	chat.entry(1, reply([call("chat-focus", "chat", { text: "The focus checked it too." })], 3));
+	chat.entry(1, result("chat-focus", "chat", "Delivered."));
+	has(text("talk"), "Agent speech · focus · delivered · chat call chat-focus", "focus speech keeps the same agent-speech label and names its scope");
 
-	// y copies the whole story: the context, the question and the answer, not just the one line.
-	const copied = chat.textOf(consultRow.item, consultRow.row);
-	has(copied, `The story stands under thread ${thread}`, "the copied text carries the thread");
-	has(copied, "The roller rolls one die.", "the copied text carries the context");
-	has(copied, "Is the roller sound?", "the question");
-	has(copied, "Roll twice, not once", "and the answer");
-
-	// A follow-up is its own call; the story grew under the same thread, and its row reads the whole of it.
-	stories[thread] = roundOne.replace(/\s+$/, "\n\n") + [
-		"## Round 2 — 2026-11-16T06:10:02.000Z",
-		"Elapsed: 0 m 41 s · 640 output tokens · finish: stop",
-		"",
-		"Question:",
-		"```text",
-		"Why twice?",
-		"```",
-		"",
-		"Answer:",
-		"```text",
-		"Once lands on six only half the time.",
-		"```",
-		"",
-	].join("\n");
-	chat.entry(0, reply([call("c3", "consult", { question: "Why twice?", thread })], 3));
-	clock += 41_000;
-	chat.entry(0, result("c3", "consult", `Round 2. The storyteller took 0 m 41 s (640 output tokens). The story (2 rounds) stands under thread ${thread}; shelved as placement sh1 (12,410 rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so. A story is not a record: check it against a test or a proof. Ask on with \`thread: "${thread}"\` while a refutable doubt remains — the storyteller sees the whole exchange — or let it rest.`, { details: { consult: true, thread, rounds: 2, placement: "sh1", tokens: 640, finish: "stop", seconds: 41 } }));
-	const consultLines = chat.lines(80).filter((line) => line.kind === "call" && line.spans.some(([part]) => String(part).includes("Why twice?")));
-	const secondRow = consultLines.at(-1);
-	chat.toggleRow(secondRow.item, secondRow.row);
-	const opened2 = text();
-	has(opened2, `the story stands under thread ${thread} · 2 rounds`, "the follow-up row reads the story, both rounds");
-	has(opened2, "round 1 · 2026-11-16 05:39 UTC", "the first round stands in it");
-	has(opened2, "round 2 · 2026-11-16 06:10 UTC", "and so does the second");
-	has(opened2, "Why twice?", "the follow-up question");
-	has(opened2, "Once lands on six only half the time.", "the follow-up answer");
-
-	// A missing story is said as such, not as an empty answer: a fresh chat cannot read a thread the brain no longer holds.
-	delete stories[thread];
-	const gone = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	gone.entry(0, reply([call("c9", "consult", { question: "Is the roller sound?", context: "" })], 1));
-	gone.entry(0, result("c9", "consult", `The storyteller took 1 m 12 s. The story stands under thread ${thread}.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
-	gone.toggle(gone.lines(80).find((line) => line.kind === "group").item);
-	const goneRow = gone.lines(80).find((line) => line.kind === "call");
-	gone.toggleRow(goneRow.item, goneRow.row);
-	has(gone.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "is gone from the brain", "a story that is gone is said as gone");
-
-	// A failed consult shows why it failed, once, where the answer would stand.
-	const failed = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	failed.entry(0, reply([call("c8", "consult", { question: "Is the roller sound?", context: "" })], 1));
-	failed.entry(0, result("c8", "consult", "The storyteller refused the call: HTTP 500. boom", { isError: true }));
-	failed.toggle(failed.lines(80).find((line) => line.kind === "group").item);
-	const failedRow = failed.lines(80).find((line) => line.kind === "call");
-	failed.toggleRow(failedRow.item, failedRow.row);
-	const failedText = failed.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	has(failedText, "why it failed", "a failed consult says why");
-	has(failedText, "HTTP 500", "with what the endpoint said");
-	hasNot(failedText, "what the storyteller answered", "and no empty answer section under it");
-
-	// A consult that fails carries no answer section and no story; the harness line stands alone.
-	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
+	chat.live(0, { timestamp: 4, content: [call("chat-3", "chat", { text: "Still checking." })] });
+	has(text("talk"), "Agent speech · sending · chat call chat-3", "a live chat call is visibly sending in Talk");
+	hasNot(text("work"), "Still checking.", "a live speech attempt is not private Work");
+	chat.live(0, undefined);
+	chat.setThinking(false);
+	hasNot(text("work"), "Private chain of thought.", "Ctrl-T hides private Work material");
+	has(text("work"), "read roll.py", "Ctrl-T leaves tool work visible");
 });
 
-test("screen: while the storyteller writes, the Chat tab shows the tail of its draft, and wipes it when the answer lands", async () => {
+test("screen: Talk binds an admitted Durable source by lifecycle, not matching words", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
-	let clock = 1000;
-	const thread = "st-20261116-053946-a1b2";
-	const stories = { [thread]: "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: Mythos-nano\nStarted: 2026-11-16T05:39:46.000Z\n\n## Round 1 — 2026-11-16T05:39:46.000Z\nElapsed: 0 m 12 s · finish: stop\n\nQuestion:\n```text\nq?\n```\n\nAnswer:\n```text\nIt is not. Roll twice.\n```\n" };
-	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const chat = createChat();
+	chat.user("same visible words");
+	chat.entry(0, {
+		id: "u1",
+		conversationId: "main",
+		model: [{ role: "user", timestamp: 10, content: [{ type: "text", text: "same visible words" }] }],
+	});
+	const user = chat.items.find((item) => item.type === "user");
+	assert.equal(chat.items.filter((item) => item.type === "user").length, 1, "the admitted user entry binds the pending submitted row instead of adding an equal-text duplicate");
+	assert.deepEqual(user.source, { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, "the Talk row now names its admitted Durable entry");
+	assert.match(chat.lines(120, "talk").map((line) => line.spans.map(([part]) => part).join("")).join("\n"), /Durable u1\/0/, "Talk renders the stable source instead of using its visible words as an identity");
+	chat.entry(0, {
+		id: "a1",
+		conversationId: "main",
+		model: [{ role: "assistant", timestamp: 11, content: [{ type: "toolCall", id: "c1", name: "chat", arguments: { text: "same visible words" } }] }],
+	});
+	const speech = chat.items.find((item) => item.type === "agent");
+	assert.deepEqual(speech.source, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }, "a delivered-speech candidate carries the assistant entry id and its call boundary");
+});
+
+test("screen: long live reasoning names its compact tail, opens in Work, and resets when it finishes", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const chat = createChat();
+	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const previewRows = POLICY.limits.screen.notePreviewLines;
+	const thoughtLines = previewRows + 8;
+	const thought = Array.from({ length: thoughtLines }, (_entry, index) => `thought ${index + 1}`).join("\n");
+	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: thought }] });
+	const compact = text();
+	has(compact, "▸ thinking · 8 earlier lines · Enter opens all", "a long stream names what is left out and how to open it");
+	has(compact, `thought ${thoughtLines}`, "the newest reasoning stays visible");
+	hasNot(compact, "thought 1\n", "the old reasoning does not make the preview grow");
+	const live = chat.lines(40).find((line) => line.kind === "live" && line.liveDepth === 0);
+	assert.ok(live, "the compact stream is selectable in Chat");
+	chat.setAll(true);
+	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds`, "open all opens the live stream too");
+	chat.setAll(false);
+	has(text(), "▸ thinking · 8 earlier lines · Enter opens all", "fold all returns it to the compact tail");
+	assert.equal(chat.toggleLive(live.liveDepth, true), true, "the selected live stream opens");
+	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds\nthought 1`, "opening shows the beginning as well as the tail");
+	assert.equal(chat.textOf("live:0"), thought, "copying the live stream takes its whole reasoning");
+	const nextThoughtLine = thoughtLines + 1;
+	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] });
+	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds`, "an opened stream stays open as it grows");
+	has(text(), `thought ${nextThoughtLine}`, "the growing stream includes its new reasoning");
+	chat.setThinking(false);
+	has(text(), "thinking… (Ctrl-T shows it)", "Ctrl-T hides the live reasoning");
+	hasNot(text(), `thought ${nextThoughtLine}`, "the hidden stream does not leave its open text behind");
+	chat.setThinking(true);
+	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds\nthought 1`, "showing thinking again keeps the deliberate open state");
+	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] }] });
+	hasNot(text(), "Enter folds", "the completed reply has no live expansion control");
+	has(text(), "thought 1", "the completed reasoning stands as its saved message");
+	assert.equal(chat.lines(40).find((line) => line.kind === "reasoning")?.bg, "bgNote", "completed private reasoning keeps its own quiet block instead of blending into tool work");
+	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
+	const nextLines = previewRows + 3;
+	const next = Array.from({ length: nextLines }, (_entry, index) => `next ${index + 1}`).join("\n");
+	chat.live(0, { timestamp: 10, content: [{ type: "thinking", thinking: next }] });
+	has(text(), "▸ thinking · 3 earlier lines · Enter opens all", "the next reply starts folded again");
+	chat.live(0, undefined);
+	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
+});
+
+test("screen: only Consult loads a conference audit; parent rows remain private pointers", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const record = {
+		id: "co7",
+		status: "returned",
+		model: { provider: "openai-completions", modelId: "stand-in" },
+		question: "What must the parent verify?",
+		createdAt: "2026-11-17T00:00:00.000Z",
+		roster: { version: 1 },
+		bookSources: {},
+		myPersona: { digest: "a".repeat(64) },
+		turns: [], selectorEvents: [], requestPlans: [], sources: [], toolReceipts: [], activities: [],
+		final: { participant: "cartographer", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
+	};
+	let reads = 0;
+	const chat = createChat({ now: () => 1_000, readConference: (id) => { reads++; return id === "co7" ? record : undefined; } });
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
+	const text = (projection) => chat.lines(100, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	chat.entry(0, reply([call("c1", "consult", { question: "What must the parent verify?", myPersona: "Audit the source boundary." })], 1));
+	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from cartographer.", { details: { consult: true, conference: "co7" } }));
+	assert.equal(reads, 0, "the private notebook is not loaded into Conversation or Work");
+	hasNot(text("work"), "What must the parent verify?", "the parent consult call is absent from Work");
+	// A child replay without terminal-supplied persona metadata must not synchronously open co<N> just to guess one
+	// while the user is still in another Chat subview. Consult will reconstruct it from its durable audit on demand.
+	let childReads = 0;
+	const child = createChat({ readConference: () => { childReads++; return record; } });
+	child.entry(1, reply([{ type: "text", text: "Private child replay words." }], 2), "", { conference: "co7" });
+	child.live(1, { timestamp: 3, content: [{ type: "thinking", thinking: "Private child live reasoning." }] }, { conference: "co7" });
+	assert.equal(childReads, 0, "unattributed child replay/live state never loads a private audit outside Consult");
+	hasNot(child.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "Private child", "child state cannot become an ordinary Work row while attribution is unavailable");
+	const group = chat.items.find((item) => item.type === "group");
+	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot load or export the audit");
+	const consult = text("consult");
+	assert.equal(reads, 1, "Consult deliberately reads its co<N> audit");
+	has(consult, "Consultation co7 · returned", "the dedicated view names the conference record");
+	has(consult, "Verify the current source before acting.", "the durable advisory renders only in Consult");
 
-	chat.user("q?");
-	chat.entry(0, reply([call("c1", "consult", { question: "q?", context: "" })], 1));
-	// The draft streams in through the harness's live slot, a bounded tail — nothing from the session.
-	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six" }]);
-	has(text(), "… the storyteller", "while it runs, the call line shows the waiting mark");
-	has(text(), "No. The uniform() call modulo six", "and the draft as far as it has come");
-	clock += 3000;
-	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six biases toward 1 and 2. Draw with rejection." }]);
-	has(text(), "biases toward 1 and 2. Draw with", "the tail grows as it writes");
-	has(text(), "rejection.", "wrapped onto the next row like everything else");
-	assert.equal(chat.doing().what, "the storyteller is writing", "the strip says whose words those are");
-	// The answer lands: the tool result stands, the tail is gone.
-	clock += 2000;
-	chat.entry(0, result("c1", "consult", `The storyteller took 0 m 05 s (40 output tokens). The story stands under thread ${thread}; shelved as placement sh1.`, { details: { consult: true, thread, rounds: 1, tokens: 40, finish: "stop", seconds: 5 } }));
-	chat.liveTools(0, []);
-	hasNot(text(), "modulo six", "once the answer lands, the draft leaves the tab — the story holds it");
-	has(text(), "→ 0 m 05 s · 40 tokens", "and the call line keeps how long it took and how much it wrote");
+	const historical = createChat({ readConference: () => { throw new Error("a historical row must not load an archive"); } });
+	historical.entry(0, reply([call("c2", "consult", { question: "Old question", thread: "st1" })], 1));
+	historical.entry(0, result("c2", "consult", "Legacy row", { details: { consult: true, thread: "st1" } }));
+	const historicalWork = historical.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	hasNot(historicalWork, "Legacy row", "an old parent receipt is never rendered as ordinary Work");
+	const historicalConsult = historical.lines(100, "consult").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	has(historicalConsult, "Legacy row", "the isolated Consult view can name the compact historic parent receipt without parsing an archive");
+});
+
+test("screen: Consult is a separate persona-attributed conference timeline with durable and live activity", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	const record = {
+		id: "co18",
+		status: "returned",
+		question: "Which migration boundary remains advisory?",
+		model: { provider: "local", modelId: "fixture" },
+		roster: { version: 1 },
+		activities: [{
+			index: 1,
+			participant: "cartographer",
+			at: "2026-11-16T12:00:00.000Z",
+			reasoning: "First separate the parent context from the private audit.",
+			prose: "I will inspect only the frozen packet.",
+			calls: [{ id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } }],
+		}],
+		turns: [
+			{ index: 1, participant: "cartographer", at: "2026-11-16T12:00:00.000Z", text: "I will inspect only the frozen packet." },
+			{ index: 2, participant: "atlas", at: "2026-11-16T12:00:01.500Z", text: "The second perspective completed the bounded debate." },
+		],
+		selectorEvents: [
+			{ index: 1, at: "2026-11-16T12:00:01.000Z", after: "cartographer", participant: "atlas", decision: "continue", eligible: ["atlas", "ledger", "plan", "assessment", "context"], grammarEnforced: true, debate: { turns: 1, debateTurns: 2, participants: ["cartographer"], debateParticipants: 2, ready: false } },
+			{ index: 2, at: "2026-11-16T12:00:02.000Z", after: "atlas", participant: "cartographer", decision: "report", eligible: ["cartographer", "ledger", "plan", "assessment", "context"], grammarEnforced: true, debate: { turns: 2, debateTurns: 2, participants: ["cartographer", "atlas"], debateParticipants: 2, ready: true } },
+		],
+		toolReceipts: [{ id: "source-1", callId: "source-1", participant: "cartographer", action: "read", source: "s1", result: "== s1\n1 immutable evidence", at: "2026-11-16T12:00:00.500Z" }],
+		final: { participant: "cartographer", outcome: "answered", at: "2026-11-16T12:00:03.000Z", synthesis: "Keep the conference audit isolated from parent context.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] },
+	};
+	let reads = 0;
+	const chat = createChat({
+		readConference: (id) => { reads++; return id === record.id ? record : undefined; },
+		listConferences: () => [{ id: record.id, conference: record }],
+	});
+	const text = (projection) => chat.lines(110, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+
+	// A parent call creates only a private Consult pointer. Ordinary Work does not fetch or echo the co<N> audit.
+	chat.entry(0, { model: [{ role: "assistant", content: [call("outer-consult", "consult", { question: record.question, myPersona: "Keep the boundary explicit." })] }] });
+	chat.liveTools(0, [{ callId: "outer-consult", status: "running", details: { consult: true, conference: record.id } }]);
+	assert.equal(reads, 0, "the parent Work projection does not read a consult audit");
+	hasNot(text("work"), record.question, "the parent consult call is not mixed into ordinary Work");
+
+	const consult = text("consult");
+	assert.equal(reads, 0, "Consult uses the durable conference listing supplied for this paint instead of redundantly rereading its record");
+	for (const name of ["Cartographer", "Atlas", "Ledger", "Plan", "Assessment", "Context"]) has(consult, `${name} ·`, `the roster visibly labels ${name}`);
+	has(consult, "Cartographer · reasoning", "a participant's reasoning is its own named block");
+	has(consult, "Cartographer · chat / prose", "participant prose is distinct from reasoning");
+	has(consult, "Cartographer · tool call · consult_source · read s1", "local tool calls name their participant and action");
+	has(consult, "Cartographer · tool result · consult_source · read s1 · completed", "local tool results stay with the same participant");
+	has(consult, "Conference host · native debate routing", "host continuation routing is visibly distinguished from participant prose");
+	has(consult, "Conference host · native final-report decision", "the host's conclusion decision is visibly distinct from debate routing");
+	has(consult, "Cartographer · final advisory · answered", "the host-authorized final advisory names Cartographer");
+	has(consult, "Keep the conference audit isolated from parent context.", "the durable final synthesis stays readable in Consult");
+
+	// Child streaming comes through the same separate projection and never creates a generic focus/Work row.
+	chat.live(1, { timestamp: 9, content: [{ type: "thinking", thinking: "Check what the ledger snapshot actually supports." }, { type: "text", text: "I am checking the retained claim." }, call("source-live", "consult_source", { action: "search", id: "s1", pattern: "claim" })] }, { conference: record.id, participant: "ledger" });
+	chat.liveTools(1, [{ callId: "source-live", status: "running", output: "s1:4: claim is bounded" }], { conference: record.id, participant: "ledger" });
+	const live = text("consult");
+	has(live, "Ledger · reasoning · writing", "live consultation reasoning keeps its persona label");
+	has(live, "Ledger · chat / prose · writing", "live consultation prose keeps its persona label");
+	has(live, "Ledger · tool call · consult_source · search s1", "a live local call names the active persona");
+	has(live, "Ledger · tool result · consult_source · search s1 · \"claim\" · running", "a live local result is visibly separate from its call");
+	hasNot(text("work"), "Check what the ledger snapshot", "live child reasoning does not leak into parent Work");
+
+	const conferenceLine = chat.lines(110, "consult").find((line) => line.kind === "consult");
+	assert.ok(conferenceLine, "the conference header is selectable for folding/copying");
+	assert.match(chat.textOf(conferenceLine.item), /# Consultation co18/, "copying the header exports the private consult timeline, not parent history");
 });
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
@@ -1691,7 +2165,7 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(hues.every((hue) => hue.c > 0.07), `and each is a colour, not a grey: ${what}`);
 		assert.ok(Math.abs(hues[0].h - HUES.user) < 12 && Math.abs(hues[1].h - HUES.tool) < 12, `the hues are the ones named: ${what}`);
 		// Where it is: every block is near the background, in its own direction, and all of them tell apart.
-		const blocks = ["bgUser", "bgTool", "bgPanel", "bgInput", "bgBar", "bgSel"];
+		const blocks = ["bgUser", "bgTool", "bgNote", "bgPanel", "bgInput", "bgBar", "bgSel"];
 		for (const name of blocks) assert.ok(far(rgb[name], rgb.bg) < 70, `${name} stays near the background: ${what}`);
 		assert.equal(new Set(blocks.map((name) => rgb[name].join())).size, blocks.length, `each block has a background of its own: ${what}`);
 		assert.ok(far(rgb.bgSel, rgb.bg) > far(rgb.bgUser, rgb.bg) && far(rgb.bgUser, rgb.bg) > far(rgb.bgTool, rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
@@ -1751,7 +2225,7 @@ test("screen: lines are painted on their block's background, and text says by it
 		"- | ",
 		"bgUser | › {user bold}Look at it{bold}",
 		"- | ",
-		"- | ┊ {faint}A thought.{note italic}",
+		"bgNote | A thought.{note italic}",
 		"- | ",
 		"bgTool | ▸ {tool}1 call · t1 · 0s{muted}{err}",
 		"- | ◂ {carto}report t1  5 characters{muted}",
@@ -1779,6 +2253,73 @@ test("screen: lines are painted on their block's background, and text says by it
 	const call = opened.find((line) => line.kind === "call");
 	chat.toggleRow(call.item, call.row);
 	assert.ok(chat.lines(60).some((line) => line.kind === "detail"), "and a call that is opened inside it shows what it returned");
+});
+
+test("screen: static chrome keeps hierarchy, affordances, and whole labels across terminal widths", async () => {
+	const { TabBar, ViewBar, contentRow, marginOf } = await import("../src/screen/parts.mjs");
+	const { clean } = await import("../src/screen/text.mjs");
+	const tabs = [
+		{ id: "chat", name: "Chat" },
+		{ id: "carto", name: "Carto" },
+		{ id: "diff", name: "Diff" },
+		{ id: "shells", name: "Shells" },
+		{ id: "context", name: "Model" },
+	];
+	const views = [
+		{ id: "window", name: "Latest sent" },
+		{ id: "main", name: "Main sent" },
+		{ id: "raw", name: "Raw payload" },
+		{ id: "preview", name: "Next preview" },
+		{ id: "parts", name: "Current accounting" },
+	];
+	const picked = [];
+	const ui = {
+		tabs,
+		state: { tab: "context" },
+		views: () => views,
+		view: () => "raw",
+		fileHint: () => "src/screen/app.mjs",
+		setTab: (id) => picked.push(`tab:${id}`),
+		setView: (id) => picked.push(`view:${id}`),
+	};
+	const text = (line) => clean(line).replace(/ +$/, "");
+	assert.deepEqual([20, 35, 36, 71, 72, 119, 120, 159, 160].map(marginOf), [0, 0, 1, 1, 2, 2, 4, 4, 6], "the reading margin grows only when the terminal has room for it");
+
+	const wideTabs = new TabBar(ui);
+	const wide = text(wideTabs.render(80)[0]);
+	has(wide, "Cartographer", "a roomy tab bar establishes the product before its areas");
+	has(wide, "1 Chat", "the full tab labels scan with their number keys");
+	has(wide, "5 Model", "the last tab remains visible too");
+	wideTabs.handleMouse({ type: "click", button: "left", x: wideTabs.spans[1].from, y: 0 });
+	assert.equal(picked.pop(), "tab:carto", "the re-spaced tab still receives its own click");
+	const narrow = text(new TabBar(ui).render(35)[0]);
+	assert.equal(narrow, " 1  2  3  4  5", "when names cannot fit, the compact tabs remain complete instead of clipping one another");
+
+	const compactViews = new ViewBar(ui);
+	const compact = text(compactViews.render(80)[0]);
+	has(compact, "Latest", "the common-width subview bar keeps the first sibling visible");
+	has(compact, "Accounting", "and it keeps the last sibling visible");
+	has(compact, "[ ]", "the keyboard affordance stays beside the subviews");
+	hasNot(compact, "Latest sent", "compact labels are deliberate, not clipped full labels");
+	compactViews.handleMouse({ type: "click", button: "left", x: compactViews.spans[3].from, y: 0 });
+	assert.equal(picked.pop(), "view:preview", "every compact subview keeps its click target");
+	const cartoViews = [
+		{ id: "atlas", name: "Atlas" },
+		{ id: "ledger", name: "Ledger" },
+		{ id: "plan", name: "Plan" },
+		{ id: "requests", name: "Requests" },
+		{ id: "tree", name: "Tree" },
+		{ id: "hands", name: "Current shared brain" },
+	];
+	const cartoCompact = text(new ViewBar({ ...ui, views: () => cartoViews, view: () => "atlas" }).render(80)[0]);
+	has(cartoCompact, "Atlas", "the six Carto subviews keep their first item visible at the common width");
+	has(cartoCompact, "Brain", "and compact the long Current shared brain name without hiding that view");
+	const roomy = text(new ViewBar(ui).render(120)[0]);
+	has(roomy, "Latest sent", "a wide terminal restores the descriptive subview names");
+	has(roomy, "Current accounting", "without changing the underlying information architecture");
+
+	has(text(contentRow({ spans: [["your message", ""]], bg: "bgUser", pad: 1 }, 40)), "▎your message", "your multi-line block has a stable blue rail");
+	has(text(contentRow({ spans: [["tool work", ""]], bg: "bgTool", pad: 1 }, 40)), "│tool work", "tool work has its own quieter rail");
 });
 
 test("screen: a list of items that fold: the selection, opening one and all, folders, what is in view, and what e and y act on", async () => {
@@ -1837,11 +2378,11 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 	assert.equal(list.text(40), "Three things\nHeading\n▸ alpha\n▸ dir/\n▸ gamma", "the tab as text, for copying");
 });
 
-test("screen: the Context tab shows the request the agent was sent, part by part in the order the model reads it, and what came since", async () => {
-	const { contextBar, contextView } = await import("../src/screen/views.mjs");
+test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
+	const { contextBar, contextView, rawPayloadView } = await import("../src/screen/views.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
-		tools: [{ type: "function", function: { name: "read", description: "Read files.", parameters: { type: "object", properties: { paths: { type: "array" } } } } }],
+		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
 			{ role: "user", content: `<project>\n${RECORD} My own records of this project.\nMy assessment\nA demo.\n</project>\n\n<context>\n${RECORD} Kept.\nt1 · look · asked: x → y\n</context>\n\n${USER_NAME}: Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]` },
@@ -1850,14 +2391,21 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 		],
 	};
 	const reply = { role: "assistant", content: [{ type: "thinking", thinking: "Say it." }, { type: "toolCall", id: "c2", name: "chat", arguments: { text: "It is in src/config.js." } }] };
-	const sent = { task: false, payload, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, used: 6100, collapsedSince: false };
+	const payloadJson = JSON.stringify(payload);
+	const sent = { task: false, requestId: "main:7", payload, payloadJson, payloadHash: "a1b2c3d4e5f60708", model: { provider: "local", api: "openai-completions", id: "qwen" }, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, usage: { input: 6000, cacheRead: 100, output: 500 }, used: 6100, collapsedSince: false };
 	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
-	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since that request: what the next one will hold as well ──", "The reply · call: chat", "Result of chat"], "the parts in the order the model reads them");
-	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    37  Tools · 1: read  "], "each is one line: its colour, its size, what it is, how it begins");
+	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the semantic sent request stays in provider order, then the explicit not-sent response boundary");
+	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
+	assert.equal(view.items.some((item) => item.key === "payload"), false, "the serialized audit copy is not rendered as a first context part");
+	const raw = rawPayloadView(sent);
+	assert.equal(raw.items[0].body, payloadJson, "the raw frozen provider body remains available without reconstructing it");
+	assert.match(raw.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /not another model-context part/, "the raw view makes clear that its duplicate JSON is not a second prompt");
+	has(rawPayloadView({ ...sent, payloadJson: undefined }).items[0].head[0][0], "This sent request has no retained raw provider JSON", "the audit view does not manufacture a serialized body from the semantic snapshot");
+	assert.equal(view.items.every((item) => item.editKind === undefined), true, "sent payload and since-send response rows have no edit route");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
-	has(byKey("Tools · 1").body, '── read ──\nRead files.\nparameters: {\n  "type": "object"', "the tools as they are sent");
+	has(byKey("Tools · 1").body, '── read ──\nRead one file.\nparameters: {\n  "type": "object"', "the tools as they are sent");
 	assert.match(byKey("Assessment and graph").body, /^<project>\n[\s\S]*\n<\/project>$/, "the block Cartographer puts in front is a part of its own");
 	assert.match(byKey("What the last collapse kept").body, /^<context>\n[\s\S]*\n<\/context>$/, "so is what a collapse kept");
 	assert.equal(byKey("Chat · You").body, `${USER_NAME}: Where is the config?\n\n[sent Thu 12 Nov 2026, 14:02]`, "and the user's message is what is left");
@@ -1865,33 +2413,74 @@ test("screen: the Context tab shows the request the agent was sent, part by part
 	assert.match(byKey("State block").body, /^<state>\n[\s\S]*\n<\/state>$/, "the state block is cut off the result it was added to");
 	assert.match(byKey("Windows block").body, /^<windows>\n[\s\S]*\n<\/windows>$/, "and the windows block");
 	hasNot(byKey("Result of task").body, "<state>", "which is then only the result");
-	assert.equal(byKey("The reply").body, "(thinking, not kept in the context)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the request: the reply");
-	assert.equal(byKey("Result of chat").body, "Shown to the user.", "and what its call returned");
+	assert.equal(byKey("Response received").body, "(private reasoning)\nSay it.\n\ncall chat\n  text: It is in src/config.js.", "after the sent request: the response, marked as not sent");
+	assert.equal(byKey("Result after chat").body, "Shown to the user.", "and what its call returned afterward");
 
-	// The top: whose window, the bar, the legend.
+	// The top describes only the sent provider payload; reported usage remains separate from its estimated input bar.
 	const top = view.header.map((line) => line.map(([part]) => part).join(""));
-	assert.match(top[0], /^What the main agent sees {2}· {2}about [\d.]+k of 20k tokens \(\d+%\) — estimated {2}· {2}the server counted 6\.1k \(measured\)$/);
-	assert.match(top[1], /^request 7 of this run, sent \d\d:\d\d \(/);
-	assert.equal(top[2].length, 40, "the bar is as wide as the screen");
-	assert.match(top[2], /^■+□+$/, "used cells, then free ones");
-	// A quarter of the window is the big result: about ten of forty cells are its colour.
-	const resultCells = view.header[2].filter(([, style]) => style === "catResult").reduce((sum, [cells]) => sum + cells.length, 0);
+	assert.match(top[0], /^Sent provider request {2}· {2}main agent · main:7 {2}· {2}local · openai-completions · qwen$/);
+	assert.match(top[1], /^sent \d\d:\d\d \(.*\) · frozen for this run · payload a1b2c3d4e5f60708$/);
+	assert.match(top[2], /^about [\d.]+k of 20k input tokens \(\d+%\) — estimated · provider reported input 6\.0k · cache read 100 · output 500$/);
+	assert.equal(top[3].length, 40, "the bar is as wide as the screen");
+	assert.match(top[3], /^■+□+$/, "used cells, then free ones");
+	// A quarter of the window is the big sent result: about ten of forty cells are its colour.
+	const resultCells = view.header[3].filter(([, style]) => style === "catResult").reduce((sum, [cells]) => sum + cells.length, 0);
 	assert.ok(resultCells >= 9 && resultCells <= 11, `a part takes as much of the bar as of the window: ${resultCells} of 40 cells for about 5k of 20k tokens`);
 	has(top.join("\n"), "■ Tool results ", "what each colour is");
 	has(top.join("\n"), "□ Free ", "and how much is free");
 	assert.deepEqual(contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
 
 	const task = contextView({ ...sent, task: true, reply: undefined, results: new Map() }, { windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] } });
-	has(task.header[0][0][0], "What the running task sees", "while a task runs, the window is the task's");
+	has(task.header[0][0][0], "Sent provider request", "while a task runs, the frozen request stays labelled as sent");
+	has(task.header[0].map(([part]) => part).join(""), "focus", "and names the focus rather than calling it main");
 	const writing = task.items.at(-1);
-	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("The reply, as it is being written"), writing.body], [true, "Half a tho"], "and the reply shows as far as it is written");
-	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "The context was collapsed after this request was sent", "a collapse since then is said");
-	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to the model in this run of carto yet", "before the first request there is nothing to show");
+	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("Response, as it is being written"), writing.body], [true, "Half a tho"], "and unfinished response material is explicitly not sent");
+	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
+	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
+	has(rawPayloadView(undefined).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "and the audit view does not invent raw JSON before a request exists");
 });
 
-test("screen: a windows block followed by an ephemeral read tail is still a part of its own, and a request without a state block says so", async () => {
+test("screen: the Next preview is explicit that its request plan was not sent", async () => {
+	const { accountingView, previewView } = await import("../src/screen/views.mjs");
+	const view = previewView({
+		at: Date.parse("2026-11-16T14:05:00.000Z"),
+		plan: {
+			parts: [
+				{ id: "part:1:message:0", kind: "active-message", source: "durable:main:u1:0", sourceRef: { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
+				{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
+			],
+		},
+	});
+	const header = view.header.map((line) => line.map(([part]) => part).join(" ")).join("\n");
+	assert.match(header, /Next request preview · not sent/, "the prospective boundary is in the title");
+	assert.match(header, /wakes were not checked or consumed/, "the preview names its non-effect");
+	assert.match(header, /Provider JSON does not exist for a preview/, "it does not present an unsent plan as a provider payload");
+	assert.equal(view.items[0].body, "Please inspect the parser.");
+	assert.match(view.items[0].head.map(([part]) => part).join(""), /durable:main:u1:0 · preview only/, "each row names its planned source and lifecycle");
+	assert.equal(view.items[0].editKind, undefined, "a preview has no historical or mutable edit route");
+	const accounting = accountingView("about 4k tokens");
+	assert.match(accounting.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /neither a sent provider payload nor a promise of the next request/, "current accounting has its own temporal boundary");
+});
+
+test("screen: Current shared brain lives in Carto, not Model", async () => {
+	const [{ TABS, VIEWS }, { handsView }] = await Promise.all([
+		import("../src/screen/app.mjs"),
+		import("../src/screen/views.mjs"),
+	]);
+	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model"], "the top-level tabs group speech and private activity under Chat before the project and provider views");
+	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }, { id: "consult", name: "Consult" }], "Chat gives isolated consultation activity its own adjacent subtab, rather than hiding it in parent Work");
+	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
+	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
+	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
+	const current = handsView({ root: scratch, brainDir: join(scratch, "empty-current-brain") });
+	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");
+	has(header, "Current shared brain", "the live scope is named in the view itself");
+	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");
+});
+
+test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
 	const { contextView } = await import("../src/screen/views.mjs");
-	// Exactly what dressRequest produces after a read: the blocks are glued to the result, and the newest read stands at the very end.
+	// Exactly what dressRequest produces after a read batch: the blocks are glued to the result, and the current batch stands at the very end.
 	const payload = {
 		messages: [
 			{ role: "system", content: "You are Cartographer." },
@@ -1904,74 +2493,39 @@ test("screen: a windows block followed by an ephemeral read tail is still a part
 	const byKey = (key) => view.items.find((item) => item.key === key);
 	assert.ok(keys.some((key) => key.endsWith(".windows")), "the windows block stands as its own part even with the read tail after it");
 	assert.ok(keys.some((key) => key.endsWith(".state")), "and so does the state block");
-	hasNot(byKey("m0.0.result").body, "<windows>", "the result keeps only the result and the tail");
+	const readBatch = view.items.find((item) => item.head?.[2]?.[0]?.includes("Current read batch"));
+	assert.ok(readBatch, "the tail is named as the current transient batch, not as an ordinary read result");
+	assert.match(readBatch.body, /^<read-tail>\n== c\.js/, "the named part keeps the tail's bytes");
+	hasNot(byKey("m0.0.result").body, "<read-tail>", "the original result does not duplicate the tail");
 	// A request with no state block at all: a loud, visible marker, not silence.
 	const bare = { ...sent, payload: { messages: [{ role: "system", content: "You are Cartographer." }, { role: "tool", tool_call_id: "c1", content: "== a.js" }] } };
 	const bareView = contextView(bare, { windowSize: 20_000, cols: 40 });
 	assert.ok(bareView.items.some((item) => item.key === "state:missing"), "the absence of the state block is said out loud");
-	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this request", "and the marker tells the user what one should always carry");
+	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this sent request", "and the marker tells the user what this payload did not carry");
 });
 
-test("screen: the Context tab unfolds the collapse block into one row per kept object, with the same verbs", async () => {
+test("screen: a sent collapse block stays frozen when the current brain changes", async () => {
 	const { contextView } = await import("../src/screen/views.mjs");
-	const { writeFront, noteChat, shelfItem, updateContext } = await import("../src/context.mjs");
-	const root = mkdtempSync(join(tmpdir(), "carto-kept-"));
+	const { writeFront, noteChat, updateContext } = await import("../src/context.mjs");
+	const root = mkdtempSync(join(tmpdir(), "carto-snapshot-"));
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
 	const at = (h, m) => new Date(2026, 10, 15, h, m).getTime();
 	try {
-		writeFileSync(join(root, "shelf.txt"), "the shelf keeps this\n");
-		noteChat(brainDir, "user", at(13, 10), "please add the wrist throw");
-		noteChat(brainDir, "you", at(13, 12), "on it");
-		applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep quotes in English." }), null);
-		mkdirSync(join(brainDir, "reports"), { recursive: true });
-		writeFileSync(join(brainDir, "reports", "s3.md"), "# Report s3\n\nIt throws now.\n");
-		updateContext(brainDir, (store) => {
-			store.rows.push({ id: "s3", species: "composed", at: at(13, 5), mode: "look", brief: "Add the wrist throw", outcome: "It throws.", changed: 2, ref: { type: "report", id: "s3" } });
-		});
-		const shelved = shelfItem(root, "shelf.txt", undefined, brainDir, []);
-		updateContext(brainDir, (store) => { store.shelf.push(shelved.item); });
-		// The salient mark, through the same op the agent edits with.
-		const ledger = loadLedger(brainDir).ledger;
-		applyOp(ledger, { action: "edit", id: "n1", salient: true }, new Date().toISOString());
-		saveLedger(brainDir, ledger);
-		const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, { now: at(14, 32), reason: "a test collapse", calls: [
-			{ at: at(13, 20), text: "read shelf.txt", outcome: "12 lines" },
-			{ at: at(13, 25), text: "edit src/dice.mjs", outcome: "34 lines changed" },
-		] });
+		noteChat(brainDir, "user", at(13, 10), "words at collapse");
+		const front = writeFront(brainDir, root, { chatWindow: 2_000, contextWindow: 100_000 }, { now: at(14, 32), reason: "a test collapse" });
 		const payload = { messages: [{ role: "user", content: `${front.text}\n\nWhere are we?` }] };
-		const sent = { task: false, payload, reply: undefined, results: new Map(), at: Date.now(), count: 3, used: 4000, collapsedSince: false };
-		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir, edits: new Map(), deleted: new Set() });
-		const keys = view.items.map((item) => item.key);
-		const keptAt = keys.indexOf("kept");
-		assert.ok(keptAt >= 0, "the kept block stands as one folder");
-		assert.equal(view.items[keptAt].folder, true);
-		assert.equal(view.items[keptAt].editKind, "store", "e on the folder still opens the raw store");
-		assert.ok(keys.join(" ").includes("kept:meta"), "the preamble is the first row inside");
-		assert.deepEqual(keys.slice(keptAt + 1, keptAt + 5), ["kept:meta", "report:s3", "entry:n1", "shelf:sh1"], "the shelf row keys by the id, not the label");
-		// The talk rows are the chat objects: e and d work on them as elsewhere.
-		const talk = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("talk:"));
-		assert.equal(talk.length, 2, "both sayings stand inside the block");
-		assert.deepEqual([talk[0].editKind, talk[1].editKind], ["chat-you", "chat-agent"]);
-		assert.equal(talk[0].chat, "please add the wrist throw", "the row carries the words, for the edit machinery");
-		assert.equal(talk[0].head[1][0], USER_NAME, "the kept-talk row uses the configured speaker");
-		// The calls rows are the block's history: visible, copyable, not editable.
-		const calls = view.items.filter((item) => typeof item.key === "string" && item.key.startsWith("call:"));
-		assert.equal(calls.length, 2);
-		assert.ok(calls.every((item) => item.editKind === undefined), "history is not editable");
-		// The parent says what it holds.
-		assert.match(view.items[keptAt].head.map(([part]) => part).join(""), /1 task.*1 note.*1 shelf item.*2 talk.*2 calls/);
-		// A saying the user has deleted stands out of the block's rows as well.
-		const gone = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir, edits: new Map(), deleted: new Set(["please add the wrist throw"]) });
-		const left = gone.items.filter((item) => typeof item.key === "string" && item.key.startsWith("talk:"));
-		assert.deepEqual(left.map((item) => item.chat), ["on it"], "the deleted saying is out of the rows, the rest stands");
-		assert.deepEqual(left.map((item) => item.key), ["talk:1:" + at(13, 12)], "deleting the middle saying does not renumber the rest");
-		// A store that cannot be read still renders the kept folder instead of blanking the tab.
-		const noStore = join(root, "no-store");
-		mkdirSync(noStore, { recursive: true });
-		const bare = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", root, brainDir: join(noStore, ".brain"), edits: new Map(), deleted: new Set() });
-		assert.ok(bare.items.some((item) => item.key === "kept"), "the folder renders even with no store at all");
-		assert.match(bare.items.find((item) => item.key === "kept").head.map(([part]) => part).join(""), /not readable|empty|calls/, "and it carries a summary instead of throwing");
+		const sent = { task: false, requestId: "main:3", payload, reply: undefined, results: new Map(), at: Date.now(), count: 3, collapsedSince: false };
+		// These are later current-brain changes. A historical sent request must not gain either one.
+		noteChat(brainDir, "user", at(15, 0), "words added after send");
+		updateContext(brainDir, (store) => { store.front.text = "replaced current front"; });
+		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept" });
+		const kept = view.items.find((item) => item.head?.[2]?.[0]?.includes("What the last collapse kept"));
+		assert.ok(kept, "the sent collapse block remains one frozen payload part");
+		assert.match(kept.body, /words at collapse/, "it shows the bytes that were sent");
+		assert.doesNotMatch(kept.body, /words added after send|replaced current front/, "it never rebuilds from mutable current brain state");
+		assert.equal(kept.editKind, undefined, "a frozen collapse block has no edit route");
+		assert.equal(view.items.some((item) => String(item.key).startsWith("talk:")), false, "no current talk rows are injected under the sent snapshot");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -1996,8 +2550,14 @@ test("brain: an outcome of a settled entry is editable; the lists refuse what ma
 	saveLedger(brainDir, { version: 1, next: 3, items: [{ id: "g2", kind: "goal", text: "Open goal", doneWhen: "It is done", status: "open" }] });
 	const ledgerOpen = loadLedger(brainDir).ledger;
 	assert.throws(() => applyOp(ledgerOpen, { action: "edit", id: "g2", outcome: "not closed" }, now), LedgerError, "an outcome on an open goal is refused");
-	// The plan: the same again.
-	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: "Map the thing", status: "done", outcome: "mapped" }] });
+	// The plan: the same again, with a completed child move rather than a broad done item.
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "look", text: "Map the thing", doneWhen: "The map is recorded.", status: "done", revision: 1, outcome: "mapped", closed: now }],
+		moves: [{ id: "m1", parent: "p1", action: "Read the entry point", text: "Read the entry point", doneWhen: "The entry point is reported.", capabilities: { files: false, commands: false, network: false }, budget: { replies: 4, fileOps: 0, commandStarts: 0 }, turns: 4, revision: 1, parentRevision: 1, status: "done", outcome: "accepted after report t1", closed: now, reported: { id: "t1", claimed: true, proof: "The entry point was read." } }],
+	});
 	const { plan } = loadPlan(brainDir);
 	const planEdited = applyPlanOp(plan, { action: "edit", id: "p1", outcome: "mapped, with a diagram" }, now);
 	assert.equal(planEdited.line.includes("changed"), true);
@@ -2045,6 +2605,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		assert.ok(view.items.some((item) => item.plain !== true && exposed(item).includes(flatNeedle)), `${name}: the text is nowhere to be found`);
 	};
 	const LONG = "word ".repeat(70).trim(); // about 350 characters, longer than any head row at a usual width
+	const PLAN_LONG = "word ".repeat(55).trim(); // below the plan's 300-character contract limit, still longer than a head row
 	saveLedger(brainDir, { version: 1, next: 3, items: [
 		{ id: "q1", kind: "question", text: LONG, status: "open", added: 1 },
 		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },
@@ -2052,14 +2613,20 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	expectReachable("ledger question", ledgerView({ brainDir }), LONG);
 	expectReachable("ledger goal done-when", ledgerView({ brainDir }), LONG);
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
-	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p1", mode: "look", text: LONG, status: "open", added: 1 }] });
-	expectReachable("plan item", planView({ brainDir, yolo: false }), LONG);
+	savePlan(brainDir, { version: 2, next: 2, nextMove: 1, items: [{ id: "p1", mode: "look", text: PLAN_LONG, status: "open", revision: 1 }], moves: [] });
+	expectReachable("plan envelope", planView({ brainDir, yolo: false }), PLAN_LONG);
 	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
 	expectReachable("atlas gist", atlasView({ root, brainDir }), LONG.slice(0, 200));
 	expectReachable("atlas detail", atlasView({ root, brainDir }), LONG);
-	savePlan(brainDir, { version: 1, next: 2, items: [{ id: "p2", mode: "change", text: LONG, status: "open", added: 1 }] });
-	expectReachable("approval request", requestsView({ brainDir, yolo: false }), LONG);
-	savePlan(brainDir, { version: 1, next: 2, items: [] });
+	savePlan(brainDir, {
+		version: 2,
+		next: 2,
+		nextMove: 2,
+		items: [{ id: "p1", mode: "change", text: "Apply the narrow update.", doneWhen: "The update is checked.", status: "open", revision: 1 }],
+		moves: [{ id: "m1", parent: "p1", action: PLAN_LONG, text: PLAN_LONG, doneWhen: "The narrow update is checked.", capabilities: { files: true, commands: true, network: false }, budget: { replies: 6, fileOps: 4, commandStarts: 2 }, turns: 6, revision: 1, parentRevision: 1, status: "open", targets: ["src/main.js"], proof: "The focused check passes." }],
+	});
+	expectReachable("approval request", requestsView({ brainDir, yolo: false }), PLAN_LONG);
+	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
 	const session = { windows: { list: () => [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] } };
 	expectReachable("shell command", shellsView({ session }), LONG);
 });

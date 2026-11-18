@@ -15,16 +15,17 @@
 //   reports the main agent dropped      one line each
 //   a task's own steps                  collapsed steps as one block, dropped results as one line, large results
 //                                       marked with their id and size
-//   read results                        ephemeral: every read but the newest as one line, the newest's content at
-//                                       the very end of the request, after the state and windows blocks
+//   read results                        ephemeral: the newest successful reply's read batch at the very end of the
+//                                       request, after the state and windows blocks; every earlier batch as one line
 import { POLICY } from "./config.mjs";
 import { contextLines, dressMain, dressReads, dressTask, isFront, loadContext, textOf, withReadTail, withoutFront, withoutReadTail, withoutTags } from "./context.mjs";
-import { dressShelfAsk } from "./shelf-ask.mjs";
+import { withoutShelfAsk } from "./read-batch.mjs";
 import { isNote, withoutQuietWakes } from "./wake.mjs";
 import { stateBlock, windowsBlock, withoutState, withoutWindows, withState } from "./state.mjs";
 import { STAMP, stamp, took } from "./time.mjs";
 import { loadTop, withoutTop, withTop } from "./top.mjs";
 import { USER_NAME } from "./user.mjs";
+import { FOCUS_START, TASK_HEADER } from "./prompt.mjs";
 
 const USER_SPEAKER = `${USER_NAME}: `;
 
@@ -93,34 +94,69 @@ const TIMES = new RegExp(`\\n\\n\\[((?:sent|noted) ${STAMP}|task ended ${STAMP},
 
 /** Text as it is stored: without anything this file adds. */
 export function withoutAdditions(text) {
-	const stripped = withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, ""));
+	const stripped = withoutShelfAsk(withoutTags(withoutFront(withoutWindows(withoutState(withoutTop(withoutReadTail(text))))).replace(TIMES, "")));
 	return stripped.startsWith(USER_SPEAKER) ? stripped.slice(USER_SPEAKER.length) : stripped;
 }
 
+/** Project a Durable focus fork into its local provider context. Fork lineage remains durable, but the provider sees
+ * only shared system messages, its prepared capsule, and its own subsequent work. */
+function focusProjection(messages) {
+	const briefAt = messages.findLastIndex((message) => message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER));
+	if (briefAt < 0) return messages;
+	const system = messages.slice(0, briefAt).filter((message) => message.role === "system");
+	const own = [messages[briefAt]];
+	let replied = false;
+	for (const message of messages.slice(briefAt + 1)) {
+		// Results for sibling calls made in the parent turn can sit beside the fork brief. They are neither local
+		// evidence nor task work, so do not leak them into this capsule.
+		if (!replied && message.role === "toolResult" && /^That call is a separate task\b/.test(textOf(message))) continue;
+		own.push(message);
+		if (message.role === "assistant") replied = true;
+	}
+	return [...system, ...own];
+}
+
 /**
- * @param {readonly any[]} messages  the request's messages, as stored
- * @param {{ brainDir: string, root: string, runner?: any, config?: any, windows?: any, wakes?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number }} input
- *   conversationId: whose request it is; note: for a task, a note for this one request; used: the server's count
- *   of tokens for the last reply
- *   main: the main agent's request; windows: the session's shell windows (src/windows.mjs); wakes: its wake
- *   triggers (src/wakes.mjs); gate: whether approval is off in this session
- *   replay: rebuilding the stored view for the screen (the Chat tab); nothing is consumed, so the next real
- *   request is built from the same state
+ * A non-mutating request plan. It reads the active conversation and shared brain as they stand, but never checks or
+ * consumes wakes, marks windows shown, advances an attempt, or retains a snapshot. The live send and the prospective
+ * inspector both consume this one plan.
+ * @param {readonly any[]} messages  the active Durable messages
+ * @param {{ brainDir: string, root: string, runner?: any, config?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, fired?: any[], wakeLines?: any, windowRows?: any[], sources?: any[] }} input
+ * @returns {{ messages: any[], parts: any[], main: boolean, conversationId?: string, task?: object }}
  */
-export function dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, replay }) {
-	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike (src/wake.mjs).
+export function planRequest(messages, { brainDir, root, runner, config, gate, main, conversationId, note, used, fired = [], wakeLines, windowRows, sources }) {
+	// Quiet turns that a later wake has overtaken are left out, for the main agent and its tasks alike. When Durable
+	// did not expose an unambiguous entry source, the plan says `unmapped` rather than inventing a positional or
+	// text-derived identity.
+	const fallbackSource = (index, kind = "active-message") => ({ id: `unmapped:${conversationId ?? "unknown"}:${index}`, kind, conversationId: String(conversationId ?? "unknown") });
+	const sourceAt = (index) => sources?.[index]?.id !== undefined ? { ...sources[index] } : fallbackSource(index);
+	const originalSources = new WeakMap();
+	for (const [index, message] of messages.entries()) if (message !== null && typeof message === "object") originalSources.set(message, sourceAt(index));
 	let kept = withoutQuietWakes(messages);
-	// What the main agent dropped is dropped for its tasks as well: a task's request begins as the main agent's does.
-	kept = dressMain(kept, brainDir);
-	// A one-shot question about shelving rides the results of a round of reads; once the agent has answered it, it is dressed out.
-	kept = dressShelfAsk(kept);
-	// Read results are ephemeral: every read but the newest as one line here, the newest's content at the very end.
-	const ephemeral = dressReads(kept);
-	kept = ephemeral.messages;
+	let keptSources = kept.map((message, index) => originalSources.get(message) ?? fallbackSource(index));
 	let focus;
-	if (!main) {
+	let ephemeral;
+	if (main) {
+		// Main requests retain their active conversation and live planning view.
+		kept = dressMain(kept, brainDir);
+		ephemeral = dressReads(kept);
+		kept = ephemeral.messages;
+	} else {
 		focus = conversationId === undefined ? undefined : loadContext(brainDir).tasks[conversationId];
+		const projectedSources = new WeakMap(kept.map((message, index) => [message, keptSources[index]]));
+		kept = focusProjection(kept);
+		keptSources = kept.map((message, index) => projectedSources.get(message) ?? fallbackSource(index, "focus-capsule"));
+		const beforeTask = kept;
+		const sourcesBeforeTask = new WeakMap(beforeTask.map((message, index) => [message, keptSources[index]]));
+		const resultSources = new Map(beforeTask.filter((message) => message.role === "toolResult").map((message, index) => [message.toolCallId, sourcesBeforeTask.get(message) ?? fallbackSource(index)]));
 		kept = dressTask(kept, focus);
+		// A task collapse can introduce one generated block and replace large results. Preserve an original object
+		// identity where it survives; name the other output as transformed rather than guessing from equal words.
+		keptSources = kept.map((message, index) => sourcesBeforeTask.get(message)
+			?? (message.role === "toolResult" ? resultSources.get(message.toolCallId) : undefined)
+			?? { id: `transformed-active:${conversationId ?? "unknown"}:${index}`, kind: "transformed-active", conversationId: String(conversationId ?? "unknown") });
+		ephemeral = dressReads(kept);
+		kept = ephemeral.messages;
 	}
 	// Only chat the person sent gets the speaker label. The task's one-request note is appended afterward.
 	let requestMessages = withSpeaker(withNotes(kept));
@@ -128,32 +164,106 @@ export function dressRequest(messages, { brainDir, root, runner, config, windows
 		const taskNote = { role: "user", content: [{ type: "text", text: note }] };
 		kept = [...kept, taskNote];
 		requestMessages = [...requestMessages, taskNote];
+		keptSources.push({ id: `task-note:${conversationId ?? "unknown"}`, kind: "task-note", conversationId: String(conversationId ?? "unknown") });
 	}
-	let dressed = withTop(withTimes(requestMessages), loadTop(brainDir)?.text);
-	if (main) {
-		// What fired while the agent worked is told in the block, so it needs no turn of its own.
-		let fired = [];
-		if (!replay) {
-			try {
-				wakes?.check();
-			} catch {
-				// A look that failed is taken again at the next tick.
-			}
-			fired = wakes?.noteShown() ?? [];
+	if (!main) {
+		// A Durable fork's prepared brief is a tool result. Some provider chat templates reject a tool-only prefix,
+		// so give it one explicit request-only user turn without restoring the parent conversation.
+		const capsuleAt = requestMessages.findIndex((message) => message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER));
+		if (capsuleAt >= 0) {
+			const start = { role: "user", content: [{ type: "text", text: FOCUS_START }] };
+			const source = { id: `focus-start:${conversationId ?? "unknown"}`, kind: "focus-start", conversationId: String(conversationId ?? "unknown") };
+			requestMessages = [...requestMessages.slice(0, capsuleAt), start, ...requestMessages.slice(capsuleAt)];
+			keptSources = [...keptSources.slice(0, capsuleAt), source, ...keptSources.slice(capsuleAt)];
 		}
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakes?.lines(), fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
-	} else {
-		// A focus is a live agent too: it gets the lines about the context itself (how full it is, the shelf) and what waits for its user. Wakes alone stay the main agent's — nothing in a focus can act on one.
-		dressed = withState(dressed, stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, requests: true, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0 }) }));
 	}
-	// The windows come before the newest read of all, in a task's request too: they change from one request to
+	// The frozen project-top copy is main working memory. A focus begins from its prepared capsule instead of replaying
+	// that broad orientation; Durable lineage still retains the parent fork.
+	const top = main ? loadTop(brainDir) : undefined;
+	let dressed = withTimes(requestMessages);
+	if (main) dressed = withTop(dressed, top?.text);
+	// Capture this plan's ordered sources before transient blocks are glued to the final message. These records are
+	// not a reconstruction of a provider payload: they name the active message or request-only addition that planned it.
+	const parts = [];
+	const firstMessage = dressed.findIndex((message) => message.role !== "system");
+	if (top?.text !== undefined && top.text !== "" && firstMessage >= 0 && dressed[firstMessage]?.role === "user") {
+		parts.push({ id: `part:${conversationId ?? "unknown"}:top`, kind: "brain-copy", source: "brain:top", lifecycle: "planned", message: firstMessage, fragment: top.text, ...(top.at === undefined ? {} : { sourceAt: top.at }) });
+	}
+	for (const [index, message] of dressed.entries()) {
+		const source = keptSources[index] ?? { id: `planned:${conversationId ?? "unknown"}:${index}`, kind: "planned", conversationId: String(conversationId ?? "unknown") };
+		const capsule = !main && message.role === "toolResult" && textOf(message).startsWith(TASK_HEADER);
+		const focusStart = !main && source.kind === "focus-start";
+		parts.push({ id: `part:${conversationId ?? "unknown"}:message:${index}`, kind: focusStart ? "focus-start" : capsule ? "focus-capsule" : "active-message", source: source.id, sourceRef: source, lifecycle: "planned", message: index, role: message.role, fragment: message });
+	}
+	let state;
+	if (main) {
+		state = stateBlock(brainDir, runner, { root, config, messages: kept, wakes: wakeLines, fired, yolo: gate?.yolo === true, requests: true, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: true, conversationId }) });
+	} else {
+		// A focus receives local operational state only. Requests, the main plan queue, Dispatch, and unrelated main
+		// shelf/report material stay with the orchestrating context.
+		state = stateBlock(brainDir, runner, { root, config, messages: kept, yolo: gate?.yolo === true, task: focus ?? {}, used, context: contextLines(brainDir, root, { used, window: config?.contextWindow ?? 0, main: false, conversationId }) });
+	}
+	const withPlannedState = withState(dressed, state);
+	if (withPlannedState !== dressed) {
+		dressed = withPlannedState;
+		parts.push({ id: `part:${conversationId ?? "unknown"}:state`, kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: state });
+	}
+	// The windows come before the current read batch, in a task's request too: they change from one request to
 	// the next, and a task that left a command running sees how it is doing each time it thinks.
 	const tail = config?.windowTail;
-	const block = windowsBlock(windows?.list(tail), { tail });
-	if (block !== "") dressed = withState(dressed, block);
+	const windows = windowsBlock(windowRows, { tail });
+	if (windows !== "") {
+		const withPlannedWindows = withState(dressed, windows);
+		if (withPlannedWindows !== dressed) {
+			dressed = withPlannedWindows;
+			parts.push({ id: `part:${conversationId ?? "unknown"}:windows`, kind: "generated-windows", source: "harness:windows", lifecycle: "planned", fragment: windows });
+		}
+	}
+	// The current read batch, at the very end of the request: after everything else, the blocks included.
+	if (ephemeral.tail !== undefined) {
+		dressed = withReadTail(dressed, ephemeral.tail);
+		parts.push({ id: `part:${conversationId ?? "unknown"}:read-tail`, kind: "transient-read-tail", source: "read-batch:current", lifecycle: "planned", fragment: ephemeral.tail });
+	}
+	return { messages: dressed, parts, main, ...(conversationId === undefined ? {} : { conversationId }), ...(focus === undefined ? {} : { task: { id: conversationId, mode: focus.mode, move: focus.move } }) };
+}
+
+/**
+ * The live request planner. Effects that make a real attempt different from a preview stay here, outside
+ * `planRequest`: wakes are checked and consumed once, and current window output is marked shown after it was copied.
+ * @param {readonly any[]} messages  the request's messages, as stored
+ * @param {{ brainDir: string, root: string, runner?: any, config?: any, windows?: any, wakes?: any, gate?: { yolo?: boolean }, main: boolean, conversationId?: string, note?: string, used?: number, replay?: boolean, sources?: any[] }} input
+ */
+export function prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId, note, used, replay, sources }) {
+	let fired = [];
+	if (main && !replay) {
+		try {
+			wakes?.check();
+		} catch {
+			// A look that failed is taken again at the next tick.
+		}
+		fired = wakes?.noteShown() ?? [];
+	}
+	const plan = planRequest(messages, {
+		brainDir,
+		root,
+		runner,
+		config,
+		gate,
+		main,
+		conversationId,
+		note,
+		used,
+		fired,
+		wakeLines: main ? wakes?.lines() : undefined,
+		windowRows: windows?.list(config?.windowTail),
+		sources,
+	});
 	// What the windows did up to now is in that block, so it is no longer news the main agent must be woken for.
 	if (main && !replay) windows?.noteShown();
-	// The newest read, at the very end of the request: after everything else, the blocks included.
-	if (ephemeral.tail !== undefined) dressed = withReadTail(dressed, ephemeral.tail);
-	return dressed;
+	return plan;
+}
+
+/** The legacy message-array door used by request fixtures and callers that do not need the plan facts. */
+export function dressRequest(messages, input) {
+	return prepareRequest(messages, input).messages;
 }

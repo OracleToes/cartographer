@@ -13,7 +13,8 @@
 //                         item) are the background moved a step toward the text colour; the more a thing is
 //                         chrome and the less it is content, the further.
 //
-// Prominence is strength: the mode's name and the tab that shows are the only filled, saturated shapes.
+// Prominence is strength: the mode's name, the tab that shows, and a selected row are the only filled, saturated
+// surfaces; everything else earns attention through alignment, spacing, or a small semantic rail.
 //
 // The hues are made in OKLCH with pi-tui's colour functions, where equal lightness looks equal. The terminal is
 // asked for its background and text colours (OSC 11 and 10); when it does not answer, a dark or light default is
@@ -130,17 +131,19 @@ export function makeTheme({ mode = "none", background, foreground, scheme } = {}
 	const luma = ([r, g, b]) => (r * 299 + g * 587 + b * 114) / 1000;
 	const room = Math.max(0.45, Math.min(1, Math.abs(luma(fgRgb) - luma(bgRgb)) / 185));
 	const bgs = {
-		// Whose block it is: the hue, faintly.
-		bgUser: toward(bg, hue.user, (dark ? 0.17 : 0.13) * room),
-		bgTool: toward(bg, hue.tool, (dark ? 0.095 : 0.08) * room),
-		bgNote: toward(bg, hue.note, 0.045 * room),
-		// Where it is: the background, a step toward the text.
-		bgPanel: toward(bg, fg, 0.06),
-		bgInput: toward(bg, fg, 0.045),
-		bgBar: toward(bg, fg, 0.105),
-		// What is selected, and the tab that shows.
-		bgSel: toward(bg, hue.user, (dark ? 0.34 : 0.26) * room),
-		bgTab: toward(bg, hue.user, (dark ? 0.5 : 0.4) * room),
+		// Whose block it is: the hue, deliberately faint. The rail beside a block carries the identity; the fill
+		// only holds its rows together, so long Work transcripts stay calm.
+		bgUser: toward(bg, hue.user, (dark ? 0.15 : 0.11) * room),
+		bgTool: toward(bg, hue.tool, (dark ? 0.075 : 0.065) * room),
+		bgNote: toward(bg, hue.note, 0.035 * room),
+		// Where it is: a restrained neutral step. The closer something is to content, the less it competes with it.
+		bgPanel: toward(bg, fg, 0.052),
+		bgInput: toward(bg, fg, 0.032),
+		bgBar: toward(bg, fg, 0.085),
+		// What is selected, and the tab that shows. These remain the strongest surfaces, but are no longer louder
+		// than the text they are helping someone find.
+		bgSel: toward(bg, hue.user, (dark ? 0.27 : 0.22) * room),
+		bgTab: toward(bg, hue.user, (dark ? 0.36 : 0.31) * room),
 	};
 	const rgb = { bg: bgRgb, fg: fgRgb, ...fgs, ...bgs, chip: out(hue.warn) };
 	if (mode !== "truecolor" && mode !== "256") return { mode: "none", scheme: kind, known, rgb, styles: undefined };

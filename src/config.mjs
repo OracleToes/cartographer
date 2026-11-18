@@ -24,7 +24,7 @@ const freezeTree = (value) => {
 	return value;
 };
 
-const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close", rename: "rename" });
+const ACTION = freezeTree({ add: "add", edit: "edit", done: "done", remove: "remove", archive: "archive", unarchive: "unarchive", restore: "restore", delete: "delete", before: "before", clear: "clear", recall: "recall", shelve: "shelve", unshelve: "unshelve", fold: "fold", note: "note", collapse: "collapse", set: "set", focus: "focus", unfocus: "unfocus", link: "link", unlink: "unlink", confirm: "confirm", look: "look", tree: "tree", run: "run", read: "read", wait: "wait", send: "send", stop: "stop", close: "close", rename: "rename" });
 const LEDGER_KIND = freezeTree({ goal: "goal", question: "question", note: "note" });
 const PLAN_MODE = freezeTree({ look: "look", change: "change" });
 const WAKE_KIND = freezeTree({ time: "time", file: "file", window: "window" });
@@ -35,23 +35,16 @@ export const DEFAULTS = freezeTree({
 	model: undefined,
 	// Which name the agent calls you by, in its notes, prompts and messages. Nothing set: the OS user who launched carto.
 	user: undefined,
-	// What the server was started with (-c). Cartographer never asks for more than this.
+	// Cap on the context Cartographer keeps for a request. When a server reports a smaller total capacity (-c), that
+	// capacity is the active context window; Cartographer does not carve out a fixed reply reserve from it.
 	contextWindow: 100000,
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
-	// how long a file one `write` call can hold.
+	// how long a file one `write` call can hold. The provider reduces this only when an actual near-full request needs it.
 	maxTokens: 32768,
-	// One question to the storyteller (Mythos-nano), a small long-reasoning model served by the same endpoint. llama-swap
-	// swaps it in for the agent's model for the duration; the call itself takes as long as the story takes. Empty switches it off.
-	consultModel: "Mythos-nano",
-	// The most Mythos-nano is asked to write: the model card's own ceiling for hard problems.
-	consultMaxTokens: 40960,
-	// The model card's recommended sampling for single-shot reasoning.
-	consultTemperature: 0.6,
-	// How long a `consult` call may wait before it gives up; at the ceiling above, generation alone can take that long.
-	consultTimeoutSeconds: 1800,
-	// Tool rounds one run may take before it stops and says so. Carrying out a plan takes about two per item.
+	// Tool rounds one run may take before it stops and says so. A focus is a small execution move;
+	// the configured ceiling can never exceed the fixed move ceiling below.
 	mainTurns: 40,
-	taskTurns: 30,
+	taskTurns: 6,
 	// Seconds a `shell` call waits for its command before it returns and leaves the command running in its window.
 	shellWait: 30,
 	// Lines of output the agent is shown for each busy shell window, at the end of every request.
@@ -71,15 +64,11 @@ export const DEFAULTS = freezeTree({
 	colors: "auto",
 	// "auto" asks the terminal for its background; "dark" or "light" says it.
 	theme: "auto",
-	// Building from the ground up: `write` creates a new file only, and no longer than this many lines,
-	// so a project is assembled one small, exact edit at a time. Adjustable per install/project.
-	writeLines: 60,
-	writeCreatesOnly: true,
 	// Whether the agent starts working on its own when carto starts, without waiting to be addressed: it looks
 	// around, keeps the map and works what is approved, or sleeps when there is nothing to do. /initiate switches
 	// it while carto runs, and that switch is never remembered.
 	initiate: true,
-	// Whether change items run without asking for approval. --yolo overrides for one run; /yolo switches it
+	// Whether declared change moves run without asking for approval. --yolo overrides for one run; /yolo switches it
 	// while carto runs, and that switch is never remembered.
 	yolo: false,
 	// Whether the tasks' commands run in the bubblewrap sandbox. --no-bwrap overrides for one run; /bwrap
@@ -115,8 +104,14 @@ export const DEFAULTS = freezeTree({
 export const POLICY = freezeTree({
 	limits: {
 		ledger: { textChars: 400, openEntries: 40, closedEntriesKept: 50 },
-		plan: { itemChars: 300, items: 30 },
-		atlas: { nameChars: 80, gistChars: 400, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000 },
+		plan: { itemChars: 300, items: 30, moves: 120, targets: 4, proofChars: 300, moveTurns: { look: 4, change: 6, max: 8 }, moveBudget: { fileOps: 4, commandStarts: 2 } },
+		atlas: {
+			nameChars: 80, gistChars: 400, detailChars: 2000, nodes: 200, links: 12, files: 12, listedNodes: 40, outlineChars: 6000, bigFileBytes: 5_000_000,
+			// Attention is part of the atlas, not a user-tuned feature. Work epochs advance only at a meaningful
+			// completed observation batch; the numbers keep the active map small without exposing another control panel.
+			attention: { focusReasonChars: 240, gaps: 32, hotEpochs: 1, warmEpochs: 6, candidateEpochs: 12, listed: 8, candidates: 6 },
+		},
+
 		assessment: { textChars: 3000 },
 		context: { callsTokens: 1000, recordTokens: 3000, collapseFloorTokens: 1500, resultChars: 16_000, resultTagChars: 1200, shelfLines: 1000, summaryChars: 400, recordSummaryChars: 180, briefChars: 140, searchPatternChars: 40, shellCommandChars: 60, operationChars: 40, bookWordsChars: 60, genericCallChars: 60, operationReplay: 256, resultRows: 60, resultFirstChars: 90, keptNotesTokens: 4000, largeResultTokens: 300, usefulResultTokens: 400, reuseRatio: 8 },
 		git: { errorChars: 400, maxBufferBytes: 256 * 1024 * 1024, checkoutBatchItems: 200, undoTimestampToleranceMs: 1000, checkpointBufferBytes: 64 * 1024 * 1024 },
@@ -126,13 +121,19 @@ export const POLICY = freezeTree({
 		look: { readDefaultLines: 1024, readMaxLines: 2048, readMaxFiles: 8, lineChars: 2000, readTokenCeiling: 8192, fileBytes: 2_000_000, binaryProbeChars: 8000, searchDefault: 60, searchMax: 200, searchHitChars: 240, listLines: 400, walkFiles: 20_000, maxBufferBytes: 64 * 1024 * 1024 },
 		taskDisplay: { listedNodes: 20, staleNodes: 12 },
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
-		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300 },
+		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8, handoffChars: 1200, evidenceItems: 8, evidenceChars: 32_000 },
+		// Consult-local caps. A conference is advisory and isolated from project/shell/shared-brain authority.
+		conference: { questionChars: 2400, personaChars: 3200, contextChars: 64_000, sourceChars: 32_000, bookChars: 32_000, selectorChars: 24_000, files: 8, turns: 12, debateTurns: 2, debateParticipants: 2, runtimeMs: 30_000_000, returnChars: 12_000, returnItems: 16, sourceSearchHits: 80, sourceResultChars: 24_000, activityChars: 24_000, activities: 96, toolReceipts: 96, requestPlans: 64, childLookup: 8, childEntryLookup: 8 },
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
 		book: { listCap: 200, listCursorTokens: 64 },
-		change: { contentBytes: 1_000_000, binaryProbeChars: 8000 },
-		consult: { contextChars: 64_000, modelChars: 128, bodyChars: 400 },
+		// One fixed direct-file changed-surface allowance per focus. This is deliberately policy, not configuration:
+		// it is visible to the focus and measured before every direct mutation.
+		change: { contentBytes: 1_000_000, binaryProbeChars: 8000, surfaceBytes: 24_000, surfaceLines: 240 },
+		// A normal command stage is a bounded disposable source copy, not a second project. These are fixed so a
+		// command cannot turn a small approved move into an unbounded materialization or candidate diff.
+		stage: { sourceFiles: 5000, sourceBytes: 32_000_000, fileBytes: 8_000_000, storageBytes: 40_000_000, candidateFiles: 32 },
 		shellOutput: { maxBytes: 64_000, maxLines: 1000, pendingChars: 64_000 },
 		windows: { open: 4, waitSeconds: 300, keptLines: 2000, outputReadDefaultLines: 40, outputReadMaxLines: 400, commandSummaryChars: 80, partialChars: 64_000, markerChars: 4200, askLineChars: 200, startupErrorLines: 3, ptyColumns: 120, ptyRows: 40, commandPreviewLines: 5 },
 		wakes: { noteChars: 300, noteSummaryChars: 80, pendingChars: 200, intervalSeconds: 7 * 24 * 3600, watchedFiles: 2000, pathExamples: 3 },
@@ -157,7 +158,7 @@ export const POLICY = freezeTree({
 				shellLast: 70, context: 110, refusal: 110, atlas: 90, search: 80, list: 80, write: 80,
 				taskStream: 110, atlasWritten: 80, atlasRemoved: 60, atlasStale: 60,
 				contextChange: 160, wakeChange: 160, atlasChange: 150, runFailure: 300,
-				taskReason: 80, handoffFallback: 160, readAheadError: 160, reportLine: 150, windowCommand: 80,
+				taskReason: 80, readAheadError: 160, reportLine: 150, windowCommand: 80,
 			},
 		},
 		state: { freeWindowTail: 3, listedNames: 12, commandSummaryChars: 80, outputLineChars: 200 },
@@ -172,7 +173,7 @@ export const POLICY = freezeTree({
 			oscChars: 100_000, copyTimeoutMs: 3000, windowsListed: 200, shellViewLines: 400,
 			contextWarnPercent: 80, wheelScrollLines: 3,
 			viewSummaryChars: 70, contextSummaryChars: 160, consoleErrorChars: 300, taskErrorChars: 200, jsonLongValueChars: 80,
-			activeCallChars: 50, notePreviewLines: 2, typedDraftChars: 40, rowWrapChars: 100,
+			activeCallChars: 50, notePreviewLines: 5, typedDraftChars: 40, rowWrapChars: 100,
 		},
 	},
 	timing: {
@@ -182,6 +183,9 @@ export const POLICY = freezeTree({
 		escapeSequenceMs: 40,
 		reaperPollMs: 400,
 		modelCheckMs: 5000,
+		// Native GBNF is Cartographer's required control-plane boundary. The first model turn may need to wake a large
+		// local model, unlike /models, so the same bound covers lazy route proof and host-owned choices.
+		nativeGrammar: { timeoutMs: 60_000 },
 		gracefulExitMs: 50,
 		terminal: {
 			inputFlushMs: 20, taskFlushMs: 5, retryMinimumMs: 50, inputPollMs: 100,
@@ -205,7 +209,7 @@ export const POLICY = freezeTree({
 		engine: { readAheadSeconds: 600 },
 		sandbox: { toolchainProbeMs: 10_000 },
 	},
-	protocol: { askTemperature: 0, askStream: false, askThinking: false, noToolChoice: "none" },
+	protocol: { askTemperature: 0, askThinking: false },
 	estimation: { charsPerToken: 4, emaMin: 2.5, emaMax: 6, emaAlpha: 0.3 },
 	enums: {
 		actions: ACTION,
@@ -216,12 +220,13 @@ export const POLICY = freezeTree({
 		ledgerKinds: Object.values(LEDGER_KIND),
 		planMode: PLAN_MODE,
 		planModes: Object.values(PLAN_MODE),
+		moveStatus: { open: "open", running: "running", reported: "reported", done: "done", blocked: "blocked", superseded: "superseded" },
 		wakeKinds: WAKE_KIND,
 		windowStates: { starting: "starting", idle: "idle", busy: "busy", closed: "closed", gone: "gone" },
 		windowWaitReasons: WINDOW_WAIT_REASON,
 		ledgerNonGoalKinds: [LEDGER_KIND.question, LEDGER_KIND.note],
 		wakeActions: [ACTION.set, ACTION.remove],
-		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree, rename: ACTION.rename },
+		atlasActions: { add: ACTION.add, edit: ACTION.edit, link: ACTION.link, unlink: ACTION.unlink, confirm: ACTION.confirm, remove: ACTION.remove, look: ACTION.look, tree: ACTION.tree, rename: ACTION.rename, focus: ACTION.focus, unfocus: ACTION.unfocus, archive: ACTION.archive, restore: ACTION.restore },
 		atlasAuthors: { main: "main", task: "task", user: "user" },
 		shellAction: { run: ACTION.run, read: ACTION.read, wait: ACTION.wait, send: ACTION.send, stop: ACTION.stop, close: ACTION.close },
 		shellActions: [ACTION.run, ACTION.read, ACTION.wait, ACTION.send, ACTION.stop, ACTION.close],
@@ -236,6 +241,7 @@ export const POLICY = freezeTree({
 		report: "t",
 		ledger: { goal: "g", question: "q", note: "n" },
 		plan: "p",
+		move: "m",
 		wake: "w",
 		taskStep: "s",
 		atlas: "c",
@@ -245,6 +251,7 @@ export const POLICY = freezeTree({
 		reportId: "^t\\d+$",
 		ledgerId: "^[gqn]\\d+$",
 		planId: "^p\\d+$",
+		moveId: "^m\\d+$",
 		atlasId: "^c\\d+$",
 		questionId: "^q\\d+$",
 		wakeIdOrAll: "^(all|w[0-9]+)$",
@@ -271,15 +278,41 @@ export const POLICY = freezeTree({
 		nonEmptyArrayMinItems: 1,
 		planIdMinLength: 2,
 		minimumTokenSetting: 500,
-		reservedContextDivisor: 2,
+		chatWindowDivisor: 2,
 		collapsePercent: { min: 30, max: 95 },
 		windowTailMax: 40,
-		writeLinesMin: 1,
 		nonNegativeMin: 0,
 		prefillTokensMin: 0,
 		userChars: 80,
 	},
 });
+
+/**
+ * Read the actual total request capacity from an OpenAI-style model listing. llama-swap now publishes its
+ * discovered value at the top level as `context_length` (and mirrors it as `context_window`); older llama.cpp
+ * listings expose the same runtime value as `meta.n_ctx`. Do not use `n_ctx_train`: that is the model's training
+ * limit, not necessarily the window its running server accepts.
+ */
+export function modelContextWindow(entry) {
+	const values = [entry?.context_length, entry?.context_window, entry?.meta?.n_ctx];
+	return values.find((value) => Number.isInteger(value) && value > 0);
+}
+
+/**
+ * Apply a server's total request capacity directly to Cartographer's context plan. A listing's
+ * `context_length`/`context_window` or legacy `meta.n_ctx` covers prompt and reply together, but Cartographer
+ * intentionally does not reserve a fixed reply allotment: its collapse engine works against the whole advertised
+ * window. The provider still reduces an individual reply ceiling when the actual prompt leaves too little room.
+ */
+export function contextWindowLimits(configuredContextWindow, serverContextWindow) {
+	const limits = { configuredContextWindow, usableContextWindow: configuredContextWindow };
+	if (!Number.isInteger(serverContextWindow) || serverContextWindow <= 0) return limits;
+	return {
+		...limits,
+		serverContextWindow,
+		usableContextWindow: Math.min(configuredContextWindow, serverContextWindow),
+	};
+}
 
 export class ConfigError extends Error {}
 
@@ -302,22 +335,38 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	// checkout with settings of its own (the tests, or a second install sharing one copy) can read none at all.
 	const corePath = env.CARTO_CONFIG ? env.CARTO_CONFIG : join(CORE_DIR, "config.json");
 	const projectPath = join(brainDir, "config.json");
+	const coreSettings = readJson(corePath);
+	const projectSettings = readJson(projectPath);
+	const retiredConsultSettings = ["consultModel", "consultMaxTokens", "consultTemperature", "consultTimeoutSeconds"];
+	const retiredAt = [
+		...retiredConsultSettings.filter((key) => Object.hasOwn(coreSettings, key)).map((key) => `${corePath}:${key}`),
+		...retiredConsultSettings.filter((key) => Object.hasOwn(projectSettings, key)).map((key) => `${projectPath}:${key}`),
+	];
+	if (retiredAt.length > 0) {
+		throw new ConfigError(`Removed external-consult setting(s): ${retiredAt.join(", ")}. C5 uses the caller's resolved model only; remove these settings instead of expecting a fallback model.`);
+	}
+	const retiredGrammarSettings = ["consultGrammar"];
+	const retiredGrammarAt = [
+		...retiredGrammarSettings.filter((key) => Object.hasOwn(coreSettings, key)).map((key) => `${corePath}:${key}`),
+		...retiredGrammarSettings.filter((key) => Object.hasOwn(projectSettings, key)).map((key) => `${projectPath}:${key}`),
+	];
+	if (retiredGrammarAt.length > 0) {
+		throw new ConfigError(`Removed native-grammar compatibility setting(s): ${retiredGrammarAt.join(", ")}. Native llama.cpp GBNF enforcement is required for Cartographer; remove these settings instead of selecting an adapter.`);
+	}
+	if (env.CARTO_CONSULT_MODEL !== undefined) {
+		throw new ConfigError("CARTO_CONSULT_MODEL was removed by the C5 consult cutover. A conference uses the caller's resolved model only; unset this environment variable instead of setting it empty.");
+	}
 	const config = {
 		...DEFAULTS,
 		shellRead: [...DEFAULTS.shellRead],
-		...readJson(corePath),
-		...readJson(projectPath),
+		...coreSettings,
+		...projectSettings,
 		...(env.CARTO_SERVER ? { server: env.CARTO_SERVER } : {}),
 		...(env.CARTO_MODEL ? { model: env.CARTO_MODEL } : {}),
 		...(env.CARTO_USER !== undefined && env.CARTO_USER !== "" ? { user: env.CARTO_USER } : {}),
 		...(flags.url ? { server: flags.url } : {}),
 		...(flags.model ? { model: flags.model } : {}),
 	};
-	// The write limit may be overridden for one run (the stand-in tests exercise the old create-or-replace
-	// behaviour, so they relax it); real runs keep the strict default above.
-	if (env.CARTO_WRITE_LINES !== undefined && env.CARTO_WRITE_LINES !== "") config.writeLines = Number(env.CARTO_WRITE_LINES);
-	if (env.CARTO_CONSULT_MODEL !== undefined && env.CARTO_CONSULT_MODEL !== "") config.consultModel = env.CARTO_CONSULT_MODEL.trim();
-	if (env.CARTO_WRITE_CREATES_ONLY !== undefined && env.CARTO_WRITE_CREATES_ONLY !== "") config.writeCreatesOnly = env.CARTO_WRITE_CREATES_ONLY === "1" || env.CARTO_WRITE_CREATES_ONLY === "true";
 	if (typeof config.server !== "string" || typeof config.model !== "string") {
 		throw new ConfigError(
 			[
@@ -339,20 +388,14 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	for (const key of ["contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "treeDepth", "windowTail", "wakeMin", "wakesMax"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
 	}
-	if (typeof config.consultModel !== "string") throw new ConfigError("config: consultModel must be a string — the name llama-swap serves the consult model under; empty switches the consult tool off");
-	if (config.consultModel.length > POLICY.limits.consult.modelChars) throw new ConfigError(`config: consultModel must be ${POLICY.limits.consult.modelChars} characters or fewer`);
-	if (/[\r\n]/.test(config.consultModel)) throw new ConfigError("config: consultModel must be one name on one line");
-	if (!Number.isInteger(config.consultMaxTokens) || config.consultMaxTokens < 1 || config.consultMaxTokens > 131072) throw new ConfigError("config: consultMaxTokens must be a whole number of tokens, 1 to 131072");
-	if (typeof config.consultTemperature !== "number" || !Number.isFinite(config.consultTemperature) || config.consultTemperature < 0 || config.consultTemperature > 2) throw new ConfigError("config: consultTemperature must be a number from 0 to 2");
-	if (!Number.isInteger(config.consultTimeoutSeconds) || config.consultTimeoutSeconds < 1) throw new ConfigError("config: consultTimeoutSeconds must be a whole number of seconds, 1 or more");
+	if (config.taskTurns > POLICY.limits.plan.moveTurns.max) throw new ConfigError(`config: taskTurns must be ${POLICY.limits.plan.moveTurns.max} or fewer: one focus is one small execution move`);
 	for (const key of ["chatWindow", "collapseTokens"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.minimumTokenSetting) throw new ConfigError(`config: ${key} must be a whole number of tokens, ${POLICY.validation.minimumTokenSetting} or more`);
 	}
-	if (config.chatWindow > config.contextWindow / POLICY.validation.reservedContextDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
+	if (config.chatWindow > config.contextWindow / POLICY.validation.chatWindowDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
 	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
 	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
-	for (const key of ["screen", "repeatCut", "prefill", "writeCreatesOnly", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
-	if (!Number.isInteger(config.writeLines) || config.writeLines < POLICY.validation.writeLinesMin) throw new ConfigError(`config: writeLines must be a whole number of lines, ${POLICY.validation.writeLinesMin} or more`);
+	for (const key of ["screen", "repeatCut", "prefill", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
 	if (!POLICY.enums.colors.includes(config.colors)) throw new ConfigError(`config: colors must be ${POLICY.enums.colors.slice(0, -1).map((color) => JSON.stringify(color)).join(", ")} or ${JSON.stringify(POLICY.enums.colors.at(-1))}`);
 	if (!POLICY.enums.themes.includes(config.theme)) throw new ConfigError(`config: theme must be ${POLICY.enums.themes.slice(0, -1).map((theme) => JSON.stringify(theme)).join(", ")} or ${JSON.stringify(POLICY.enums.themes.at(-1))}`);
 	if (!Number.isInteger(config.prefillTokens) || config.prefillTokens < POLICY.validation.prefillTokensMin) throw new ConfigError(`config: prefillTokens must be a whole number of tokens, ${POLICY.validation.prefillTokensMin} or more`);

@@ -13,9 +13,10 @@
 // waits for its user; its working conversation will be forgotten when it leaves view.
 import { DEFAULTS, POLICY } from "./config.mjs";
 import { loadAssessment, textHash } from "./assessment.mjs";
-import { fileMarks, linkedCount, loadAtlas, staleNodes } from "./atlas.mjs";
-import { loadLedger, open, renderLedger } from "./ledger.mjs";
-import { awaitsApproval, loadPlan, openItems, openOnce, openStanding, renderPlan } from "./plan.mjs";
+import { activeMoveOverlays, attentionSnapshot, fileMarks, linkedCount, loadAtlas, nodesForPath, renderAttention } from "./atlas.mjs";
+import { loadLedger, open, renderLedger, salientNotes } from "./ledger.mjs";
+import { awaitsApproval, loadPlan, movesOf, reportedMoves, runnableMoves, renderPlan } from "./plan.mjs";
+import { loadContext, shelfFreshness, shelfLabel } from "./context.mjs";
 import { requestLines } from "./requests.mjs";
 import { eventLine } from "./wake.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -33,62 +34,108 @@ const CLOSE = POLICY.markup.state.close;
 /** The block's first line. Together with the tag it tells a real block from a mention of the tags. */
 const HEAD = `${RECORD} This is the current state; it supersedes any earlier copy I carry.`;
 
-const FIRST = `${USER_HEAD}'s newest message comes first.`;
-/** What the agent may do when nothing else is asked of it. It decides what deserves a node, and when to stop. */
-const MAP =
-	"I need not sit idle meanwhile: in the same reply I may start a task (no item, only reading) that maps a part of the project the graph says nothing about, and have what it finds recorded as nodes. What deserves a node, and when the graph is good enough to stop and wait, is mine to decide.";
 const names = (list, max = POLICY.limits.state.listedNames) => `${list.slice(0, max).join(", ")}${list.length > max ? `, and ${list.length - max} more` : ""}`;
 
-/** What the block says to do next. One situation, one instruction; a session with approval off is told only the workflow of that session, as plain state. */
-function direction(ledger, plan, yolo = false) {
-	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length > 0;
-	if (plan === undefined || plan.items.length === 0) {
-		if (goals) {
-			return `${FIRST} Beyond that, I work toward the open goals. If reaching one needs changes to the project, I find out what I need with read-only tasks, then write the plan. When a goal is reached, I close it and tell ${USER_NAME} what was achieved.`;
+const clip = (text, max = 180) => {
+	const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+	return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
+};
+
+/** A main-only facts projection. It deliberately describes state without selecting or delegating work. */
+function dispatch(ledger, plan, brainDir, root, yolo = false) {
+	const lines = ["Dispatch"];
+	const goals = open(ledger, POLICY.enums.ledgerKind.goal).length;
+	const salient = salientNotes(ledger);
+	lines.push(`Goals: ${goals === 0 ? "none open" : `${goals} open`}.`);
+	if (salient.length > 0) lines.push(`Salient notes: ${salient.map((note) => `${note.id} ${clip(note.text, 120)}`).join("; ")}.`);
+	let shelf = [];
+	let atlas;
+	let attention;
+	if (root !== undefined) {
+		try { shelf = Array.isArray(loadContext(brainDir).shelf) ? loadContext(brainDir).shelf : []; } catch { shelf = []; }
+		try {
+			atlas = loadAtlas(brainDir).atlas;
+			if (atlas !== undefined) attention = attentionSnapshot(root, atlas, { active: activeMoveOverlays(plan) });
+		} catch { atlas = undefined; }
+	}
+	const shelfFacts = (path) => shelf.filter((item) => item.ref === undefined && item.path === path).map((item) => {
+		const freshness = root === undefined ? "captured" : shelfFreshness(root, item, brainDir).state;
+		return `${item.id} ${freshness === "current" ? "current" : `${freshness} snapshot`}`;
+	});
+	const atlasFacts = (path) => {
+		if (atlas === undefined) return "atlas unavailable";
+		const nodes = nodesForPath(atlas, path);
+		const ids = new Set(nodes.map((node) => node.id));
+		const states = [];
+		if (attention?.focus?.target?.kind === "path" && attention.focus.target.path === path) states.push(`focus ${attention.focus.label}`);
+		if (attention?.focus?.target?.kind === "node" && ids.has(attention.focus.target.id)) states.push(`focus ${attention.focus.label}`);
+		if (attention?.hot?.some((entry) => ids.has(entry.node.id))) states.push("direct-hot");
+		if (attention?.warm?.some((entry) => ids.has(entry.node.id))) states.push("nearby/warm");
+		if (attention?.care?.some((entry) => ids.has(entry.node.id))) states.push("needs checking");
+		if (attention?.gaps?.some((entry) => entry.path === path)) states.push("mapping gap");
+		const mapped = nodes.length === 0 ? "unmapped" : `nodes ${nodes.map((node) => node.id).join(", ")}`;
+		return `${mapped}${states.length > 0 ? `; ${states.join(", ")}` : ""}`;
+	};
+	if (plan === undefined) {
+		lines.push("Plan: unreadable; no move can run until it is repaired.");
+	} else if (plan.items.length === 0) {
+		lines.push("Plan: no envelopes or moves.");
+	} else {
+		const reports = reportedMoves(plan);
+		const blocked = plan.moves.filter((move) => move.status === POLICY.enums.moveStatus.blocked && move.archived !== true);
+		const ready = runnableMoves(plan, { yolo });
+		const waiting = awaitsApproval(plan) && !yolo;
+		lines.push(`Moves: ${ready.length} ready${ready.length ? ` (${names(ready.map((move) => move.id))})` : ""}; ${reports.length} reported; ${blocked.length} blocked; ${waiting ? "approval waits" : "no approval wait"}.`);
+		if (reports.length > 0) {
+			lines.push("Review before acceptance:");
+			for (const move of reports.slice(0, POLICY.limits.state.listedNames)) {
+				const checkpoints = move.reported?.checkpoints;
+				const gap = typeof move.reported?.closureGap === "string" && move.reported.closureGap.trim() !== "" ? `gap ${clip(move.reported.closureGap, 120)}` : "no recorded gap";
+				lines.push(`  ${move.id}: report ${move.reported?.id ?? "missing"}; checkpoints ${checkpoints?.before && checkpoints?.after ? `${checkpoints.before} → ${checkpoints.after}` : "missing"}; proof ${move.reported?.proof ? "stated" : "missing"}; ${gap}; targets ${(move.targets ?? []).join(", ") || "none"}.`);
+			}
 		}
-		return [
-			"No goal is set. Looking and answering questions is fine without one.",
-			`I find out what ${USER_NAME} wants to achieve. When we agree on it, I record it as a goal with a done-when line.`,
-			MAP,
-		].join(" ");
+		if (blocked.length > 0) lines.push(`Blocked: ${blocked.map((move) => `${move.id}${typeof move.reported?.closureGap === "string" && move.reported.closureGap.trim() !== "" ? ` (closure gap: ${clip(move.reported.closureGap, 100)})` : ""}`).join(", ")}.`);
+		const undeclared = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && movesOf(plan, item.id).length === 0);
+		if (undeclared.length > 0) lines.push(`Needs executable moves: ${names(undeclared.map((item) => item.id))}.`);
+		if (ready.length > 0) {
+			lines.push("Eligible move facts:");
+			for (const move of ready.slice(0, POLICY.limits.state.listedNames)) {
+				const approval = move.capabilities?.files === true || move.capabilities?.commands === true ? (move.approvedRevision === move.revision || yolo ? "approved/current" : "awaits approval") : "read-only";
+				lines.push(`  ${move.id} revision ${move.revision} · ${approval}`);
+					lines.push(`    Action: ${clip(move.action ?? move.text)}.`);
+				lines.push(`    Closure facts — boundary: ${(move.targets ?? []).join(", ") || "none"}. Claim: ${clip(move.doneWhen).replace(/[.!?]+$/, "")}. Witness: ${clip(move.proof ?? "none").replace(/[.!?]+$/, "")}.`);
+				lines.push(`    Capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}.`);
+				for (const path of move.targets ?? []) {
+					const matched = shelfFacts(path);
+					lines.push(`    ${path}: ${atlasFacts(path)}; shelf ${matched.length > 0 ? matched.join(", ") : "no matching placement"}.`);
+				}
+			}
+		}
 	}
-	// A plan stands for a goal. One without is possible (the user closed the goal, or wrote the plan by hand).
-	const noGoal = goals ? "" : ` No goal is recorded for this plan: I agree one with ${USER_NAME} and record it with a done-when line.`;
-	// A standing item is a duty: it is never "next", and it does not keep the plan from being finished otherwise.
-	const duties = openStanding(plan);
-	const standing =
-		duties.length === 0
-			? ""
-			: ` ${duties.length === 1 ? `${duties[0].id} is a standing duty` : `${names(duties.map((item) => item.id))} are standing duties`}: I start a task for ${duties.length === 1 ? "it" : "one"} whenever its text calls for it, as often as that is, and I do not mark it done while the duty lasts. A wake set with \`wake\` brings me back to check on it.`;
-	const next = openOnce(plan)[0];
-	const waits = awaitsApproval(plan) && !yolo;
-	if (next === undefined && duties.length > 0) {
-		if (waits) return `${FIRST} Change items wait for ${USER_NAME}: I show them the plan in a few lines and ask them to type /approve. I do not start ${duties[0].id} before that.${noGoal} ${MAP}`;
-		return `${FIRST} Beyond that, nothing of the plan is left to do once.${standing}${noGoal}`;
-	}
-	if (next === undefined) {
-		const check = goals ? ` I check each open goal against its done-when line. Before I close one, I rewrite the assessment with \`book\` (target=assessment, action=write) if the work changed my picture of the project: the copy at the top of my context is rewritten when a goal closes. I close the goals that are reached, tell ${USER_NAME} what was achieved and how to try it, and clear the plan.` : ` I tell ${USER_NAME} what was done and how to try it, and clear the plan.`;
-		return `${FIRST} Every item of the plan is done.${check} If something is still missing, I add items for it.`;
-	}
-	if (waits) {
-		const wait = `Change items wait for ${USER_NAME}: I show them the plan in a few lines and ask them to type /approve.`;
-		if (next.mode === POLICY.enums.planMode.look) return `${FIRST} Beyond that, I carry out ${next.id} with \`task\`: look items need no authorization. ${wait}${noGoal}`;
-		return `${FIRST} ${wait} I do not start ${next.id} before that.${noGoal} ${MAP}`;
-	}
-	return `${FIRST} Beyond that, I carry out the plan: ${next.id} is next. I call \`task\` with its id and a brief, and mark it done when the report and the record of changed files show that it is.${standing}${noGoal}`;
+	if (shelf.length > 0) {
+		const entries = shelf.slice(0, POLICY.limits.state.listedNames).map((item) => {
+			const freshness = root === undefined ? "captured" : shelfFreshness(root, item, brainDir).state;
+			return `${item.id} ${shelfLabel(item)}${freshness === "current" ? "" : ` (${freshness} snapshot)`}`;
+		});
+		lines.push(`Main shelf: ${entries.join("; ")}${shelf.length > entries.length ? `; and ${shelf.length - entries.length} more` : ""}.`);
+	} else lines.push("Main shelf: empty.");
+	lines.push("Before a focus, I decide whether one local outcome can close here: a current claim, a boundary that can realize it, and a reachable witness. If not, I read, map, or revise first. I choose selected shelf evidence and a narrowing boundary. This lens neither delegates work nor approves a move.");
+	return lines.join("\n");
 }
 
 /** The current purpose and forget boundary for a focused context. */
 function focusDirection(task) {
 	const purpose = String(task?.purpose ?? task?.brief ?? "the assigned work").replace(/\s+/g, " ").trim();
-	const item = task?.item === undefined ? "" : ` Assigned plan item: ${task.item}.`;
-	return `Focus${item}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan.`;
+	const item = task?.item === undefined ? "" : ` Envelope: ${task.item}.`;
+	const move = task?.move === undefined ? "" : ` Move: ${task.move} revision ${task.revision}.`;
+	const limits = task?.budget === undefined ? "" : ` Budget: ${task.budget.replies} replies, ${task.budget.fileOps} file operations, ${task.budget.commandStarts} command starts.`;
+	return `Focus${item}${move}${limits}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan and accepts a reported move.`;
 }
 
 /** Said only while approval is off, as the plain state of how this session runs. Here and not in the system prompt, because the user can change it while the session runs, and the present state is all the prompt needs to carry. */
 function approval(yolo) {
 	if (!yolo) return "";
-	return `Approval\nChange items may run without /approve, also ones marked network or standing; I do not ask for /approve. Every change still needs a plan item: I write the item, then start its task. I keep items small, so that ${USER_NAME} can follow each step and take one back with /undo.\n\n`;
+	return `Approval\nDeclared change moves may run without /approve. This bypasses only the human decision: each focus still receives one move revision, its targets, capabilities and hard budget; checkpoints, scope review, reporting and explicit acceptance still apply. New moves do not inherit anything from earlier ones.\n\n`;
 }
 
 /**
@@ -109,7 +156,7 @@ function wakesText(lines = [], fired = []) {
  */
 function commands(runner) {
 	if (runner?.mode === "direct") {
-		return `Commands\nCommands of a change task run directly on this machine, as ${USER_NAME}: they can read and change files outside the project directory, and they reach the network. Only the project directory is in my checkpoints, so what a command does outside it cannot be undone. I keep the work inside the project directory unless ${USER_NAME} asks for something outside it, and then I name the path in the brief. I myself may still run commands in this session, always in a read-only window, when bubblewrap works; when it does not, I run none at all.\n\n`;
+		return `Commands\nCommands of a declared change move run directly on this machine, as ${USER_NAME}: they can read and change files outside the project directory, and they reach the network. Only the project directory is checkpointed; what a command changes outside it cannot be undone. Inside the project, Cartographer compares the final checkpoint diff with the move's declared targets and blocks a breach after the fact; direct mode does not confine shell writes to those paths. Inline commands remain read-only when bubblewrap works; when it does not, none run.\n\n`;
 	}
 	if (runner?.mode === "none") {
 		return `Commands\nNo command can be run in this session: ${runner.available.why}. \`shell\` is refused. After a change, I tell ${USER_NAME} how to run or try what was written, and say plainly that it has not been run. Whether a done-when line that needs a run is met is for ${USER_NAME} to confirm.\n\n`;
@@ -243,7 +290,7 @@ export function windowLines(windows, tail = {}) {
 }
 
 /** The tree, and what the atlas holds that the copy at the top of the context does not. */
-function atlasText(brainDir, root, config, now) {
+function atlasText(brainDir, root, config, now, task) {
 	const { atlas, error } = loadAtlas(brainDir);
 	const tree = treeSection(root, atlas?.view, { marks: atlas ? fileMarks(atlas) : undefined, depth: config?.treeDepth });
 	const head = `Tree\n${tree.text}\n\nAtlas\n`;
@@ -253,7 +300,7 @@ function atlasText(brainDir, root, config, now) {
 	const linked = atlas.nodes.length === 0 ? "" : ` Files a node links to: ${linkedCount(atlas, tree.files)} of ${tree.files.length}.`;
 	lines.push(
 		`Graph: ${atlas.nodes.length === 0 ? "no nodes yet" : atlas.nodes.length === 1 ? "1 node" : `${atlas.nodes.length} nodes`}.${linked} Assessment: ${
-			assessment.text === "" ? "none yet. I write one with `book` (target=assessment, action=write, operation { text }) once I know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
+			assessment.text === "" ? "none yet. I write one with `book` (target=assessment, action=write, text) once I know what the project is and how it is built." : `written ${ago(now - (assessment.written ?? now))}.`
 		}`,
 	);
 	const since = sinceTop(brainDir, atlas, assessment.text);
@@ -266,10 +313,10 @@ function atlasText(brainDir, root, config, now) {
 		if (loadTop(brainDir)?.assessed === textHash(assessment.text)) lines.push("I rewrote the assessment since that copy: my `book` call holds the text that counts.");
 		else lines.push(`The assessment was edited outside this conversation since that copy, probably by ${USER_NAME}. It now reads:\n${assessment.text}`);
 	}
-	const stale = staleNodes(root, atlas, now);
-	if (stale.length > 0) {
-		lines.push(`May be out of date: ${stale.slice(0, POLICY.limits.terminal.staleNodes).map((node) => `${node.name} (${node.why.join(", ")})`).join("; ")}${stale.length > POLICY.limits.terminal.staleNodes ? `; and ${stale.length - POLICY.limits.terminal.staleNodes} more` : ""}. I have a task check each against its files, then rewrite the node, or confirm it when it still holds.`);
-	}
+	const { plan } = loadPlan(brainDir);
+	const active = activeMoveOverlays(plan);
+	const local = renderAttention(attentionSnapshot(root, atlas, { active, now }), { idle: active.length === 0 && task === undefined });
+	if (local !== "") lines.push(local);
 	return `${head}${lines.join("\n")}\n\n`;
 }
 
@@ -287,21 +334,25 @@ export function stateBlock(brainDir, runner, more = {}) {
 	const now = more.now ?? Date.now();
 	const { ledger, error } = loadLedger(brainDir);
 	const { plan, error: planError } = loadPlan(brainDir);
-	const front = `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now)}`;
+	// The main state is a broad live dispatch view. A focus instead gets its local capsule plus compact operational
+	// facts; it must not replay the parent atlas/tree/plan environment.
+	const front = more.task === undefined ? `${clock(more.messages, now)}\n\n${more.root === undefined ? "" : atlasText(brainDir, more.root, more.config, now, more.task)}` : "";
 	let body;
-	if (ledger === undefined) {
+	if (more.task !== undefined) {
+		body = `${commands(runner)}${focusDirection(more.task)}`;
+	} else if (ledger === undefined) {
 		body = `The ledger cannot be read: ${error}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, the ledger cannot be shown or changed.`;
 		} else {
 			// No plan, no section: the instruction below says when to write one.
 			let planText = "";
-			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, no plan item can run.\n\n`;
+			if (plan === undefined) planText = `Plan\nThe plan cannot be read: ${planError}. It was probably edited by hand. Tell ${USER_NAME}; until they repair the file, no plan move can run.\n\n`;
 			else if (plan.items.length > 0) planText = `Plan\n${renderPlan(plan, { yolo: more.yolo === true })}\n\n`;
-			// What waits for the user: approvals of change items, questions of taste, and proposed edits to the
+			// What waits for the user: approvals of change moves, questions of taste, and proposed edits to the
 			// prompt. Put at the very end, so the shape of the block before it stays as it was. The agent keeps
 			// working on whatever does not depend on one.
 			const waiting = more.requests === true ? requestLines(brainDir, { yolo: more.yolo === true }) : "";
 			const requests = waiting === "" ? "" : `\n\nRequests\nThese wait for ${USER_NAME}; carry on with what does not depend on them:\n${waiting}\n`;
-			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${more.task === undefined ? direction(ledger, plan, more.yolo === true) : focusDirection(more.task)}${requests}`;
+			body = `Ledger\n${renderLedger(ledger, { now })}\n\n${planText}${approval(more.yolo === true)}${commands(runner)}${wakesText(more.wakes, more.fired)}${dispatch(ledger, plan, brainDir, more.root, more.yolo === true)}${requests}`;
 		}
 	// How full the context is and what on the shelf is not as shown (src/context.mjs).
 	return `${OPEN}\n${HEAD}\n\n${front}${more.context ?? ""}${body}\n${CLOSE}`;

@@ -6,24 +6,25 @@
 // tool calls among them are made together in one turn:
 //   say: TEXT            answer TEXT
 //   task: BRIEF          call `task` with BRIEF; when the report is back, answer "Report received: <report>"
-//   task(p2): BRIEF      the same for plan item p2
+//   task(m2): BRIEF      run declared move m2; the stored move contract supplies the brief
 //   look: DIRECTIVE      call a look or change tool itself (the harness should refuse it)
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
 //   atlas: [OPS]         the same with `atlas`
-//   assess: TEXT         call `book` with target=assessment, action=write, operation { text: TEXT }
+//   assess: TEXT         call `book` with target=assessment, action=write, text: TEXT
 //   cut                  start a `task` call and run into the output limit in the middle of it
-//   context: {JSON}      call `context` with these arguments (a task can, too)
+//   book: {JSON}         call flat `book` with these arguments; `book context: {JSON}` selects target=context
 //   ON COLLAPSE: DIRECTIVE   planted: asked before a collapse, it answers that it wants a turn first, and in that
 //                        turn it does DIRECTIVE. Without it the answer is no.
 //   AFTER COLLAPSE: DIRECTIVE  planted: what it does when a collapse came in the middle of its turn
 //
-// A request that is not streamed is one of Cartographer's own (src/engine.mjs): the question before a collapse,
-// or the read-ahead after one. Those are kept in `asides`, not in `requests`.
+// A non-streaming native-grammar request is a host control decision (capability proof, conference routing, or a
+// collapse question) and is kept in `nativeRequests`, not `requests`. Other non-streaming Cartographer work such
+// as read-ahead is kept in `asides`.
 //
-// As a task (the newest message begins "You are now the task") it obeys the brief,
+// As a task (the newest message begins with TASK_HEADER) it obeys the brief,
 // one line per turn:
-//   read: a.js, b.js   |  read: a.js @40+20   (from line 40, 20 lines)
+//   read: a.js +++ read: b.js   |  read: a.js @40+20   (from line 40, 20 lines)
 //   search: PATTERN    |  search: PATTERN in src
 //   list: PATH
 //   write: PATH <<< TEXT           (a \n in TEXT, OLD and NEW stands for a line break)
@@ -54,6 +55,7 @@
 import { createServer } from "node:http";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
+import { TASK_HEADER } from "../src/prompt.mjs";
 
 /** The first line of every block the harness writes to the model; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -73,6 +75,7 @@ const textOf = (message) => {
 		.replace(new RegExp(`<context>\n${ESC}[\\s\\S]*?\n</context>\n*`, "g"), "")
 		.replace(/\n\n\[s\d+ · about [\d,]+ tokens\]$/g, "")
 		.replace(/\n\nThis report is kept as t\d+\./g, "")
+		.replace(/\n*<read-tail>\n[\s\S]*$/g, "")
 		.replace(new RegExp(`\n*<windows>\n${ESC}[\\s\\S]*?\n</windows>`, "g"), "")
 		.replace(new RegExp(`\n*<state>\n${ESC}[\\s\\S]*?\n</state>`, "g"), "")
 		.replace(new RegExp(`<project>\n${ESC}[\\s\\S]*?\n</project>\n*`, "g"), "")
@@ -84,7 +87,16 @@ function lookCall(directive) {
 	const shell = /^shell(?:\[([^\]]*)\])?:\s*(.*)$/s.exec(directive.trim());
 	if (shell) {
 		const options = Object.fromEntries((shell[1] ?? "").split(",").filter(Boolean).map((pair) => pair.split("=")));
-		return { name: "shell", args: { command: shell[2].replaceAll("\\n", "\n"), ...(options.window ? { window: options.window } : {}), ...(options.wait ? { wait: Number(options.wait) } : {}) } };
+		const action = typeof options.action === "string" && options.action !== "" ? options.action : undefined;
+		return {
+			name: "shell",
+			args: {
+				...(action === undefined || action === "run" ? { command: shell[2].replaceAll("\\n", "\n") } : {}),
+				...(action === undefined ? {} : { action }),
+				...(options.window ? { window: options.window } : {}),
+				...(options.wait ? { wait: Number(options.wait) } : {}),
+			},
+		};
 	}
 	// window: NAME ACTION, window: repl send some text, window[seconds=5]: server wait ready, window[lines=3]: main read
 	const window = /^window(?:\[([^\]]*)\])?:\s*(\S+)\s+(\S+)\s?(.*)$/s.exec(directive.trim());
@@ -103,7 +115,7 @@ function lookCall(directive) {
 			},
 		};
 	}
-	const [, name, rest] = /^(read|search|list|write|edit|task|ledger|plan|atlas|assess|wake|sleep|chat|ask|return|context|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
+	const [, name, rest] = /^(read|shelf|search|list|write|edit|task|ledger|plan|atlas|assess|book|wake|sleep|chat|ask|return|loop|silent)\b:?\s*(.*)$/s.exec(directive.trim()) ?? [];
 	const breaks = (text) => text.replaceAll("\\n", "\n");
 	if (name === "write") {
 		const [path, content = ""] = rest.split(" <<< ");
@@ -115,11 +127,15 @@ function lookCall(directive) {
 		return { name: "edit", args: { path: path.trim(), old_text: breaks(oldText), new_text: breaks(newText) } };
 	}
 	if (name === "plan" || name === "atlas") return { name, args: { ops: JSON.parse(rest) } };
-	if (name === "assess") return { name: "book", args: { target: "assessment", action: "write", operation: { text: breaks(rest) } } };
+	if (name === "assess") return { name: "book", args: { target: "assessment", action: "write", text: breaks(rest) } };
 	// wake: {"action":"set","note":"look at the log","every":60}
 	if (name === "wake") return { name: "wake", args: JSON.parse(rest) };
-	// context: {"action":"shelve","path":"a.txt"}
-	if (name === "context") return { name: "context", args: JSON.parse(rest) };
+	// book: {"target":"context","action":"note","text":"finding"}, or book context: {"action":"note","text":"finding"}
+	if (name === "book") {
+		const context = /^context:\s*(.*)$/s.exec(rest);
+		return { name: "book", args: context ? { target: "context", ...JSON.parse(context[1]) } : JSON.parse(rest) };
+	}
+	if (name === "shelf") return { name: "shelf", args: JSON.parse(rest) };
 	if (name === "sleep") return { name: "sleep", args: {} };
 	if (name === "chat") return { name: "chat", args: { text: rest } };
 	if (name === "ask") {
@@ -128,10 +144,13 @@ function lookCall(directive) {
 	}
 	if (name === "return") return { name: "return", args: JSON.parse(rest) };
 	if (name === "read") {
-		const [, paths, offset, limit] = /^(.*?)(?:\s+@(\d+)(?:\+(\d+))?)?$/.exec(rest);
+		const [, target, offset, limit] = /^(.*?)(?:\s+@(\d+)(?:\+(\d+))?)?$/.exec(rest);
+		const start = offset ? Number(offset) : undefined;
+		const end = start !== undefined && limit ? start + Number(limit) - 1 : start;
+		const range = start !== undefined ? `${start}-${end}` : undefined;
 		return {
 			name: "read",
-			args: { paths: paths.split(",").map((path) => path.trim()), ...(offset ? { offset: Number(offset) } : {}), ...(limit ? { limit: Number(limit) } : {}) },
+			args: { path: target.trim(), ...(range ? { range } : {}) },
 		};
 	}
 	if (name === "search") {
@@ -151,9 +170,16 @@ function mainCalls(text) {
 	for (const part of text.split(" || ").map((entry) => entry.trim())) {
 		const task = /^task(?:\((\w+)\))?:(.*)$/s.exec(part);
 		// A \n in the brief is a line break, a \\n stays a \n for the task's own directives.
-		if (task) calls.push({ name: "task", args: { brief: task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n"), ...(task[1] ? { item: task[1] } : {}) } });
+		if (task) {
+			const brief = task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n");
+			calls.push({ name: "task", args: task[1] ? { move: task[1] } : { brief, done_when: "The requested observation is stated in the report." } });
+		}
+		else if (part.startsWith("consult:")) {
+			const requested = part.slice(8).trim();
+			calls.push({ name: "consult", args: JSON.parse(requested) });
+		}
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
-		else if (/^(ledger|plan|atlas|assess|window|wake|context|ask|return)[:[]/.test(part)) calls.push(lookCall(part));
+		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));
 		else if (part === "sleep") calls.push({ name: "sleep", args: {} });
 	}
 	return calls.filter((call) => call !== undefined);
@@ -163,29 +189,42 @@ function mainCalls(text) {
 const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
-export function decide(messages) {
+export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof } = {}) {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		const text = textOf(message);
 		const later = messages.slice(i + 1);
 		const raw = rawOf(message);
+		// The isolated conference fixture gives Cartographer and then a second persona one bounded contribution.
+		// The host's next raw native-GBNF decision authorizes Cartographer's final report; only that report calls
+		// consult_return, so the fixture exercises the same terminal gate as production.
+		if (message.role === "user" && text.startsWith("Active participant packet")) {
+			const participant = /You are [^(]+\(([^)]+)\)/.exec(text)?.[1];
+			const finalReport = participant === "cartographer" && messages.some((entry) => entry.role === "user" && /Native GBNF authorized Cartographer to write the final advisory report/.test(textOf(entry)));
+			if (finalReport) return { calls: [{ name: "consult_return", args: { outcome: "answered", synthesis: "CONFERENCE RETURN FROM cartographer", evidence: [{ source: "c0", claim: "fixture source was captured" }], uncertainties: ["fixture-only result"] } }] };
+			return { text: participant === "cartographer" ? "OPENING CONFERENCE CONTRIBUTION" : `${String(participant ?? "participant").toUpperCase()} CONFERENCE CONTRIBUTION` };
+		}
 		// A task that said yes to the question before its steps collapse: it notes what its results began with.
 		if (message.role === "user" && raw.includes("Your steps will be collapsed after this reply")) {
 			const found = messages.slice(0, i).filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "context", args: { action: "note", text: `NOTED ${found.slice(-3).join(" | ")}` } }] };
+			return { calls: [{ name: "book", args: { target: "context", action: "note", text: `NOTED ${found.slice(-3).join(" | ")}` } }] };
 		}
 		// What follows a note inside a task is not a message to obey: the brief goes on.
-		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith("You are now the task"))) continue;
+		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith(TASK_HEADER))) continue;
 		// The block that stands for a task's collapsed steps is not a message to obey.
 		if (message.role === "user" && /steps up to here \(\d+ repl/.test(raw)) continue;
-		if (message.role === "tool" && text.startsWith("You are now the task")) {
+		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
+			const contractAt = text.indexOf("Move contract:\n");
+			const briefAt = text.indexOf("Brief:\n");
 			const given = text
-				.slice(text.indexOf("Brief:\n") + 7)
+				.slice(contractAt >= 0 ? contractAt + "Move contract:\n".length : briefAt >= 0 ? briefAt + "Brief:\n".length : 0)
+				.replaceAll(/\s+\|\|\|\s+/g, "\n")
 				.split("\n")
 				.map((line) => line.trim())
 				.filter((line) => line !== "" && !line.startsWith("ON COLLAPSE"));
-			const undone = given.includes("undone");
-			const lines = given.filter((line) => line !== "undone");
+			const scripted = Array.isArray(forcedFocusSteps) ? forcedFocusSteps.map((step) => String(step).trim()).filter((step) => step !== "") : given;
+			const undone = scripted.includes("undone");
+			const lines = scripted.filter((line) => line !== "undone");
 			// Replies that a collapse took out of view still count: the brief goes on where it was.
 			const collapsed = later.map((entry) => /steps up to here \((\d+) repl/.exec(entry.role === "user" ? rawOf(entry) : "")?.[1]).find((found) => found !== undefined);
 			const turns = later.filter((entry) => entry.role === "assistant").length + Number(collapsed ?? 0);
@@ -195,6 +234,11 @@ export function decide(messages) {
 			if (lines.includes("mumble")) return { text: "Mumble." };
 			if (turns < lines.length && lines[turns].startsWith("spam:")) return { text: `${lines[turns].slice(5).trim()} `.repeat(400) };
 			if (turns < lines.length && lines[turns].startsWith("note:")) return { text: lines[turns].slice(5).trim() };
+			if (turns < lines.length && lines[turns].startsWith("closure_gap:")) {
+				const closureGap = lines[turns].slice("closure_gap:".length).trim();
+				const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
+				return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, proof: "Stand-in observed the task results above.", done: false, closure_gap: closureGap } }] };
+			}
 			if (lines[turns] === "cut") return { calls: [{ name: "write", args: { path: "cut-off.txt", content: "text ".repeat(60) } }], cut: true };
 			if (turns < lines.length) {
 				// `saying WORDS >> directive`: text and a call in one reply. Several directives joined by ` +++ ` are several calls.
@@ -203,7 +247,8 @@ export function decide(messages) {
 				if (calls.length > 0) return { calls, ...(words !== undefined ? { say: words } : {}) };
 			}
 			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, done: !undone } }] };
+			const closureGap = forcedClosureGap ?? lines.find((line) => line.startsWith("closure_gap:"))?.slice("closure_gap:".length).trim();
+			return { calls: [{ name: "return", args: { report: `REPORT\n${results.join("\n")}`, proof: forcedReturnProof ?? "Stand-in observed the task results above.", done: !undone && closureGap === undefined, ...(closureGap === undefined ? {} : { closure_gap: closureGap }) } }] };
 		}
 		if (message.role === "user") {
 			// The main agent speaks to the user with `chat`; plain text is its own.
@@ -229,8 +274,12 @@ export function decide(messages) {
 			const thinkAfter = text.startsWith("<cartographer>")
 				? /ON (EVERY )?WAKE: .*\|\| then think\b/m.test(messages.slice(0, i).filter((entry) => entry.role === "user").map(textOf).join("\n"))
 				: /\|\| then think\b/.test(text);
-			if (results.length > 0 && thinkAfter) return { text: "Noted for myself." };
-			if (results.length > 0) return chat(`Report received: ${results.map(textOf).join(" ++ ")}`);
+				if (results.length > 0 && thinkAfter) return { text: "Noted for myself." };
+				// A same-model consult already has its own terminal child lifecycle. Once its bounded final/error
+				// receipt reaches the caller, the fixture rests instead of treating it like a task report and calling
+				// chat repeatedly. This makes the full child-to-parent smoke path settle at the root as production does.
+				if (results.some((entry) => /^Consult conference co\d+ (?:returned|ended)\b/.test(textOf(entry)))) return { calls: [{ name: "sleep", args: {} }] };
+				if (results.length > 0) return chat(`Report received: ${results.map(textOf).join(" ++ ")}`);
 			// The note that follows a reply without a call. `think then chat: WORDS` in the message before it: say them now.
 			if (text.startsWith(NOTED)) {
 				const before = messages.slice(0, i).filter((entry) => entry.role === "user" && !textOf(entry).startsWith(NOTED)).map(textOf).at(-1) ?? "";
@@ -293,25 +342,35 @@ export function decide(messages) {
 }
 
 /**
- * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
+ * @param {{ tokenDelayMs?: number, models?: (string | object)[] | ((state: { requests: any[], nativeRequests: any[] }) => (string | object)[]), holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, ignoreNativeGrammar?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   releaseAfterMs: a held reply lets itself go after this many milliseconds, without anyone calling `release()`.
  *   progress: { total, cache, steps, stepMs }: before each reply, say in `steps` steps how far the prompt is read.
  *   refuseSchema: answer 400 to a request that names the shape of its answer, as llama.cpp does with some chat templates.
  *   refuseAsides: answer Cartographer's own requests with an error, as a server would that cannot take them.
- *   models: what GET /models lists; a name, or a whole entry as the server would give it.
+ *   models: what GET /models lists; a name, a whole entry as the server would give it, or a callback that can
+ *     vary the listing after a native request has caused lazy llama-swap capability discovery.
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
+ *   closureGap: when set, a focused task's automatic return reports this exact durable closure gap.
+ *   focusSteps: a fixed sequence of focused-task directives, used instead of what a capsule's brief says.
+ *   returnProof: the proof text for that focused task's automatic return.
  */
 export async function startStandIn(options = {}) {
 	const tokenDelayMs = options.tokenDelayMs ?? 1;
+	const closureGap = typeof options.closureGap === "string" && options.closureGap.trim() !== "" ? options.closureGap.trim() : undefined;
+	const focusSteps = Array.isArray(options.focusSteps) ? options.focusSteps : undefined;
+	const returnProof = typeof options.returnProof === "string" && options.returnProof.trim() !== "" ? options.returnProof.trim() : undefined;
 	const requests = [];
+	const nativeRequests = [];
 	const asides = [];
 	const held = [];
 	let counter = 0;
 	const server = createServer(async (request, response) => {
 		if (request.method === "GET" && request.url?.endsWith("/models")) {
+			const source = typeof options.models === "function" ? options.models({ requests, nativeRequests }) : options.models;
+			const models = source ?? ["stand-in"];
 			response.writeHead(200, { "content-type": "application/json" });
-			response.end(JSON.stringify({ object: "list", data: (options.models ?? ["stand-in"]).map((entry) => (typeof entry === "string" ? { id: entry, object: "model" } : entry)) }));
+			response.end(JSON.stringify({ object: "list", data: models.map((entry) => (typeof entry === "string" ? { id: entry, object: "model" } : entry)) }));
 			return;
 		}
 		if (request.method !== "POST" || !request.url?.endsWith("/chat/completions")) {
@@ -321,6 +380,27 @@ export async function startStandIn(options = {}) {
 		const chunks = [];
 		for await (const chunk of request) chunks.push(chunk);
 		const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+		// Every Cartographer host-owned control decision is a plain non-streaming native GBNF request: no tools,
+		// no provider custom-tool adapter, and no fallback parser. Keep these separate from streamed agent requests
+		// so normal request-count assertions do not mistake the mandatory capability proof for agent work.
+		const nativeGrammarChoices = typeof body.grammar === "string"
+			? [...body.grammar.matchAll(/"((?:\\.|[^"\\])*)"/g)].map((match) => JSON.parse(`"${match[1]}"`))
+			: [];
+		if (body.stream !== true && nativeGrammarChoices.length > 0) {
+			nativeRequests.push(body);
+			const texts = (body.messages ?? []).filter((entry) => entry.role === "user" || entry.role === "tool").map(textOf);
+			const wantsHandoff = texts.some((entry) => /ON COLLAPSE/.test(entry));
+			const handoffChoice = nativeGrammarChoices.includes('{"handoff": true}') && nativeGrammarChoices.includes('{"handoff": false}')
+				? JSON.stringify({ handoff: wantsHandoff })
+				: nativeGrammarChoices.includes("report:cartographer")
+					? "report:cartographer"
+					: nativeGrammarChoices[0];
+			const content = options.ignoreNativeGrammar === true ? "outside-the-allowed-selector-set" : handoffChoice;
+			const prompt = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ id: `chatcmpl-native-grammar-${++counter}`, object: "chat.completion", model: body.model, choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: prompt, completion_tokens: 1, total_tokens: prompt + 1 } }));
+			return;
+		}
 		// One of Cartographer's own requests: the question before a collapse (it names the reply's shape), or the
 		// read-ahead after one (a single token of answer).
 		if (body.stream !== true) {
@@ -347,7 +427,7 @@ export async function startStandIn(options = {}) {
 			return;
 		}
 		requests.push(body);
-		const decision = decide(body.messages ?? []);
+		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof });
 		const promptTokens = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 
 		response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
@@ -408,6 +488,7 @@ export async function startStandIn(options = {}) {
 	return {
 		url: `http://127.0.0.1:${server.address().port}/v1`,
 		requests,
+		nativeRequests,
 		asides,
 		heldCount: () => held.length,
 		release: () => {

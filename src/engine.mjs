@@ -2,11 +2,10 @@
 // before it, and the read-ahead after it. What a collapse keeps is in src/context.mjs.
 //
 // Before a context is collapsed the agent is asked one question, and it can answer
-// only {"handoff": true} or {"handoff": false}: the request names that shape as the
-// only reply the server may produce, and switches thinking off for it. True buys
-// one turn to write down what would be lost; false collapses at once. The question
-// is not stored. It is sent after the very request the server read last, so the
-// server reads only the question.
+// only {"handoff": true} or {"handoff": false}: a no-tools llama.cpp native GBNF
+// grammar is the only reply boundary, with thinking off. True buys one turn to
+// write down what would be lost; false collapses at once. The question is not
+// stored. It is sent after the very request the server read last.
 //
 // After a collapse made while the agent rests, the new and much shorter context is
 // sent once with room for a single token of answer. The server reads it then, and
@@ -16,6 +15,7 @@
 // conversation: they need what the conversation's requests must never have, a fixed
 // reply shape and a different end.
 import { POLICY } from "./config.mjs";
+import { createHash } from "node:crypto";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { describeCall, describeResult } from "./terminal.mjs";
 import { createRefDescriber } from "./refs.mjs";
@@ -24,16 +24,37 @@ import { calibrate } from "./calibrate.mjs";
 import { ASK_MAIN, ASK_TASK, HANDOFF_IN_TURN, TASK_HANDOFF } from "./prompt.mjs";
 import { withTimes } from "./request.mjs";
 import { loadTop, pin, withTop } from "./top.mjs";
+import { nativeLiteralGrammar, requestNativeGrammar, validateNativeGrammarResult } from "./native-grammar.mjs";
 
-const SCHEMA = {
-	type: "json_schema",
-	json_schema: { name: "handoff", strict: true, schema: { type: "object", properties: { handoff: { type: "boolean" } }, required: ["handoff"], additionalProperties: false } },
-};
+const HANDOFF_VALUES = Object.freeze([JSON.stringify({ handoff: true }), JSON.stringify({ handoff: false })]);
+const HANDOFF_GRAMMAR = nativeLiteralGrammar(HANDOFF_VALUES);
 /** Seconds the question may take. More than this means the server is reading the whole context again. */
 const ASK_SECONDS = POLICY.timing.context.handoffQuestionSeconds;
 const NOTE_TAG = new RegExp(`(?:${POLICY.markup.note.open}|${POLICY.markup.note.close})\\n?`, "g");
 
 const callsOf = (message) => (Array.isArray(message?.content) ? message.content.filter((part) => part.type === "toolCall") : []);
+
+/** A JSON-shaped value copied away from a live provider or Durable object. */
+const copyJson = (value) => {
+	try { return structuredClone(value); } catch {
+		try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+	}
+};
+/** The provider body as it stood at the last hook before dispatch. JSON is both the durable comparison form and the
+ * closest local account of what the HTTP client serializes; a provider may still apply its own transport details. */
+const snapshotPayload = (payload) => {
+	try {
+		const json = JSON.stringify(payload);
+		return { payload: JSON.parse(json), json, hash: createHash("sha256").update(json).digest("hex").slice(0, 16) };
+	} catch {
+		return { payload: copyJson(payload), json: undefined, hash: undefined };
+	}
+};
+const modelRef = (model) => ({
+	...(typeof model?.provider === "string" ? { provider: model.provider } : {}),
+	...(typeof model?.api === "string" ? { api: model.api } : {}),
+	...(typeof model?.id === "string" ? { id: model.id } : {}),
+});
 
 /** A stored reply in the shape the server is sent. */
 function replyForServer(message, results) {
@@ -68,8 +89,6 @@ export function createEngine({ root, brainDir, config }) {
 	};
 	// The conversation that sent the newest request.
 	let newest;
-	// Whether the server has refused the answer's schema in this run of carto: the question is then asked without it.
-	let noSchema = false;
 	/** A collapse of the main context that is wanted: { reason, asked?, byAgent?, forced?, round? }. */
 	let due;
 	const full = () => Math.floor((config.contextWindow * config.collapseFull) / 100);
@@ -107,40 +126,30 @@ export function createEngine({ root, brainDir, config }) {
 		if (state.payload === undefined) return { handoff: false, skipped: true, ms: 0 };
 		const returned = new Map(state.results);
 		for (const result of results) returned.set(result.toolCallId, textOf(result));
-		const { stream_options: _dropped, ...base } = state.payload;
-		const body = {
-			...base,
-			messages: [...state.payload.messages, ...(state.reply === undefined ? [] : replyForServer(state.reply, returned)), { role: "user", content: task ? ASK_TASK(reason) : ASK_MAIN(reason) }],
-			stream: POLICY.protocol.askStream,
-			max_tokens: POLICY.limits.engine.askMaxTokens,
-			temperature: POLICY.protocol.askTemperature,
-			// Thinking off for this one request: the answer is one word.
-			chat_template_kwargs: { enable_thinking: POLICY.protocol.askThinking },
-			// The tools stay in the request, because the server has read them as part of the prompt. But no call can
-			// be the answer, and with some chat templates llama.cpp cannot build the grammar for "this JSON or a call
-			// of any of these tools" at all: it answers 400 "failed to parse grammar" (seen with the Qwen3.8 template
-			// on build 11913; with tool_choice none the same request is accepted and the prompt is not read again).
-			...(Array.isArray(base.tools) && base.tools.length > 0 ? { tool_choice: POLICY.protocol.noToolChoice } : {}),
-		};
-		// A server that will not take the schema is asked the same question without it, from then on.
-		let answer = noSchema ? undefined : await post({ ...body, response_format: SCHEMA }, { seconds: config.askSeconds ?? ASK_SECONDS });
-		let fallback;
-		if (answer?.error !== undefined && /answered 4\d\d/.test(answer.error)) {
-			noSchema = true;
-			fallback = answer.error;
-		}
-		if (answer === undefined || fallback !== undefined) answer = await post(body, { seconds: config.askSeconds ?? ASK_SECONDS });
-		const also = fallback === undefined ? {} : { fallback };
-		if (answer.error !== undefined) return { handoff: false, error: answer.error, ms: answer.ms, ...also };
-		const said = answer.json?.choices?.[0]?.message?.content ?? "";
-		let handoff;
+		const messages = [...state.payload.messages, ...(state.reply === undefined ? [] : replyForServer(state.reply, returned)), { role: "user", content: task ? ASK_TASK(reason) : ASK_MAIN(reason) }];
+		const modelId = typeof state.payload.model === "string" && state.payload.model !== "" ? state.payload.model : config.model;
+		let answer;
 		try {
-			handoff = JSON.parse(said)?.handoff;
-		} catch {
-			handoff = /"handoff"\s*:\s*true/.test(said) ? true : /"handoff"\s*:\s*false/.test(said) ? false : undefined;
+			// This is a host-owned binary control decision. It intentionally has no tools, response_format fallback,
+			// or prompt-only parser: llama.cpp native GBNF is the required output boundary.
+			answer = await requestNativeGrammar({
+				server: config.server,
+				modelId,
+				messages,
+				grammar: HANDOFF_GRAMMAR,
+				maxTokens: POLICY.limits.engine.askMaxTokens,
+				temperature: POLICY.protocol.askTemperature,
+				thinking: POLICY.protocol.askThinking,
+				timeoutMs: Math.max(1, Math.round(Number(config.askSeconds ?? ASK_SECONDS) * 1000)),
+			});
+		} catch (error) {
+			return { handoff: false, error: `the required native grammar handoff request could not be made: ${error.message ?? error}`, ms: 0 };
 		}
-		if (typeof handoff !== "boolean") return { handoff: false, error: `the answer was not the JSON asked for: ${JSON.stringify(String(said).slice(0, POLICY.limits.engine.handoffErrorChars))}`, ms: answer.ms, ...also };
-		return { handoff, ms: answer.ms, ...also };
+		const checked = validateNativeGrammarResult(answer, { eligible: HANDOFF_VALUES });
+		if (!checked.ok) return { handoff: false, error: `the required native grammar handoff decision failed: ${checked.reason}`, ms: answer.elapsedMs };
+		const handoff = JSON.parse(checked.value).handoff;
+		if (typeof handoff !== "boolean") return { handoff: false, error: `the native grammar handoff value was malformed: ${JSON.stringify(checked.value.slice(0, POLICY.limits.engine.handoffErrorChars))}`, ms: answer.elapsedMs };
+		return { handoff, ms: answer.elapsedMs };
 	}
 
 	/**
@@ -215,21 +224,39 @@ export function createEngine({ root, brainDir, config }) {
 		seen(conversationId, messages) {
 			of(conversationId).messages = messages;
 		},
+		/** The pure request plan built for this generation attempt, before pi-ai formats its provider payload. */
+		planned(conversationId, plan) {
+			of(conversationId).nextPlan = copyJson(plan);
+		},
 		messagesOf: (conversationId) => of(conversationId).messages,
-		/** The body of a request as it is sent. */
-		sending(conversationId, payload) {
+		/** The provider body at the last hook before dispatch. It is copied now: a screen view may never acquire later
+		 * provider, response, or brain changes and still call itself a sent request. */
+		sending(conversationId, payload, model) {
 			const state = of(conversationId);
+			const frozen = snapshotPayload(payload);
 			newest = conversationId;
 			state.sentAt = Date.now();
 			state.sent = (state.sent ?? 0) + 1;
-			state.payload = payload;
+			state.requestId = `${conversationId}:${state.sent}`;
+			state.payload = frozen.payload;
+			state.payloadJson = frozen.json;
+			state.payloadHash = frozen.hash;
+			state.model = modelRef(model);
+			// The semantic plan and its provenance are frozen beside the provider body. A later preview has its own
+			// plan; it cannot edit or fill in this one. Clear the pending plan so an unusual direct send cannot inherit
+			// a previous request's source facts.
+			state.plan = copyJson(state.nextPlan);
+			state.nextPlan = undefined;
 			state.reply = undefined;
+			state.usage = undefined;
 			state.results = new Map();
 		},
-		/** The reply to it. */
+		/** The reply to it. Usage is preserved as the provider reported it; `used` remains the existing collapse
+		 * accounting total (input + cache read + output), not a claim that the sent input has that size. */
 		replied(conversationId, message) {
 			const state = of(conversationId);
-			state.reply = message;
+			state.reply = copyJson(message);
+			state.usage = copyJson(message.usage);
 			state.results = new Map();
 			const used = (message.usage?.input ?? 0) + (message.usage?.cacheRead ?? 0) + (message.usage?.output ?? 0);
 			if (used > 0) state.used = used;
@@ -243,10 +270,11 @@ export function createEngine({ root, brainDir, config }) {
 		},
 		usedBy: (conversationId) => of(conversationId).used,
 		/**
-		 * What an agent was last sent, exactly as the server got it, and what has come since: for the screen's
-		 * Context tab. `which` is "main" for the main agent, anything else for whoever asked last (a task while
-		 * one runs). undefined before the first request of this run of carto.
-		 * @returns {undefined | { task: boolean, payload: any, reply?: any, results: Map<string, string>, at: number, count: number, used?: number, collapsedSince: boolean }}
+		 * The latest frozen provider request for a conversation, plus response material that arrived after it. The
+		 * response is deliberately separate from `payload`: it belongs to a possible later request, never to the one
+		 * already sent. `which` is "main" for the main agent, anything else for the newest conversation. Undefined
+		 * before the first request of this run of carto.
+		 * @returns {undefined | { task: boolean, conversationId: string, requestId: string, payload: any, payloadJson?: string, payloadHash?: string, model: object, plan?: object, reply?: any, results: Map<string, string>, at: number, count: number, usage?: object, used?: number, collapsedSince: boolean }}
 		 */
 		window(which) {
 			const id = which === "main" || newest === undefined ? ROOT_CONVERSATION_ID : newest;
@@ -254,7 +282,23 @@ export function createEngine({ root, brainDir, config }) {
 			if (state.payload === undefined) return undefined;
 			const at = id === ROOT_CONVERSATION_ID ? loadContext(brainDir).front?.at : undefined;
 			const front = typeof at === "number" ? at : Date.parse(at ?? "");
-			return { task: id !== ROOT_CONVERSATION_ID, payload: state.payload, reply: state.reply, results: state.results ?? new Map(), at: state.sentAt, count: state.sent, used: state.used, collapsedSince: Number.isFinite(front) && front > state.sentAt };
+			return {
+				task: id !== ROOT_CONVERSATION_ID,
+				conversationId: id,
+				requestId: state.requestId ?? `${id}:${state.sent ?? 0}`,
+				payload: copyJson(state.payload),
+				...(state.payloadJson === undefined ? {} : { payloadJson: state.payloadJson }),
+				...(state.payloadHash === undefined ? {} : { payloadHash: state.payloadHash }),
+				model: copyJson(state.model ?? {}),
+				...(state.plan === undefined ? {} : { plan: copyJson(state.plan) }),
+				...(state.reply === undefined ? {} : { reply: copyJson(state.reply) }),
+				results: new Map(state.results ?? []),
+				at: state.sentAt,
+				count: state.sent,
+				...(state.usage === undefined ? {} : { usage: copyJson(state.usage) }),
+				...(state.used === undefined ? {} : { used: state.used }),
+				collapsedSince: Number.isFinite(front) && front > state.sentAt,
+			};
 		},
 		/** What the last collapse did, for the screen; read once. */
 		takeCollapsed() {
@@ -371,7 +415,7 @@ export function createEngine({ root, brainDir, config }) {
 			return undefined;
 		},
 
-		/** After a task's `read`: earlier copies of the same lines become one line each. Returns their ids. */
+		/** After a task's `read`: earlier copies of the same lines become one line each. It only drops redundant task steps; it never schedules a collapse. Returns their ids. */
 		afterTaskRead(conversationId, args) {
 			const messages = of(conversationId).messages;
 			const steps = messages === undefined ? undefined : stepsOf(messages);

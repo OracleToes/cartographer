@@ -284,25 +284,6 @@ const text = (value) => ({ output: [{ type: "text", text: value }] });
 export function lookTools(root) {
 	return [
 		defineTool({
-			name: "read",
-			description: `Read text files of the project exactly as they are, with no line numbers. Up to ${READ_MAX_FILES} files in one call; ${READ_DEFAULT_LINES} lines of each unless I set \`limit\` (at most ${READ_MAX_LINES}). One call returns about ${READ_TOKEN_CEILING} tokens at most: a huge file is read in window-sized calls. A line longer than ${LINE_MAX_CHARS} characters is cut, and the cut says so.`,
-			parameters: obj({
-				paths: arr(str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S" }), { minItems: POLICY.validation.nonEmptyArrayMinItems, maxItems: READ_MAX_FILES, description: "Paths relative to the project directory" }),
-				offset: opt(int({ minimum: POLICY.validation.positiveIntegerMin, description: `First line to read, counting from ${POLICY.validation.positiveIntegerMin}. Default ${POLICY.validation.positiveIntegerMin}.` })),
-				limit: opt(int({ minimum: POLICY.validation.positiveIntegerMin, maximum: READ_MAX_LINES, description: `How many lines of each file. Default ${READ_DEFAULT_LINES}, at most ${READ_MAX_LINES}.` })),
-			}),
-			callers: ["tools"], // Internal primitive for book; the model uses target=file, action=read.
-			replay: POLICY.enums.toolReplay.safe,
-			execute: async (args) => {
-				const paths = (Array.isArray(args.paths) ? args.paths : [args.paths]).filter((path) => typeof path === "string" && path !== "");
-				if (paths.length === 0) return { ...text("`paths` is empty: name at least one file."), isError: true };
-				const taken = paths.slice(0, READ_MAX_FILES);
-				const parts = taken.map((path) => readOne(root, path, args.offset, args.limit));
-				if (paths.length > taken.length) parts.push(`(${paths.length - taken.length} more paths were not read: at most ${READ_MAX_FILES} per call)`);
-				return text(parts.join("\n\n"));
-			},
-		}),
-		defineTool({
 			name: "search",
 			description:
 				"Search the text of the project's files for a regular expression. Returns matching lines as path:line: text. Files that git ignores are not searched.",

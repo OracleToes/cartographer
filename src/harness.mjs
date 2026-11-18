@@ -1,6 +1,6 @@
 // Opens one project's session: the Durable harness over `.brain/session.sqlite`,
 // the model provider, and the tools with the rule of who may call what.
-import { POLICY } from "./config.mjs";
+import { contextWindowLimits, modelContextWindow, POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -13,29 +13,116 @@ import { createAsks } from "./asks.mjs";
 import { askTool } from "./tools/ask.mjs";
 import { loadPrepend } from "./prepend.mjs";
 import { bookTool } from "./tools/book.mjs";
+import { readTool } from "./tools/read.mjs";
+import { shelfTool } from "./tools/shelf.mjs";
 import { returnTool } from "./tools/return.mjs";
 import { stamp } from "./time.mjs";
 import { chatTool } from "./tools/chat.mjs";
 import { isFront, loadContext, noteChat, noteUserMessages } from "./context.mjs";
 import { createEngine } from "./engine.mjs";
 import { isNoChat, isNote, noted, noteKey } from "./wake.mjs";
-import { dressRequest } from "./request.mjs";
-import { beginShelfGate, readGateCheck, settleShelfAsk, takeShelfAsk } from "./shelf-ask.mjs";
+import { planRequest, prepareRequest } from "./request.mjs";
+import { bridgeRequestSources } from "./request-sources.mjs";
+import { beginReadBatch, readBatchCheck } from "./read-batch.mjs";
 import { loadTop, pin } from "./top.mjs";
 import { changeTools } from "./tools/change.mjs";
 import { lookTools } from "./tools/look.mjs";
 import { shellTool } from "./tools/shell.mjs";
 import { consultTool } from "./tools/consult.mjs";
+import { createConferenceExtension } from "./conference-extension.mjs";
+import { endConference, findConferenceByCaller } from "./conference.mjs";
 import { taskTool } from "./tools/task.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
+import { cleanupStaleStages } from "./stage.mjs";
 import { traceFile, watchTrace } from "./trace.mjs";
 import { createStreamFreeze } from "./stream.mjs";
+import { loadAtlas, observeAtlas, saveAtlas } from "./atlas.mjs";
 import { USER_NAME, USER_HEAD } from "./user.mjs";
+import { NativeGrammarError, requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit", "rm"]);
+
+/** A model-server transport failure is recoverable at the terminal: Cartographer itself stays usable offline. */
+export class ModelServerUnavailableError extends Error {
+	constructor(server, detail) {
+		super(`Could not connect to the model server at ${server}${detail ? ` (${detail})` : ""}. Cartographer is still open; start or repair the server, then send a message to retry.`);
+		this.name = "ModelServerUnavailableError";
+		this.server = server;
+	}
+}
+
+/** A server that did answer /models must not silently accept a misspelled configured route. */
+export class ModelRouteError extends Error {
+	constructor(modelId, models) {
+		super(`The model server has no model named "${modelId}". It has: ${models.join(", ")}.`);
+		this.name = "ModelRouteError";
+	}
+}
+
+const connectionDetail = (error) => {
+	const code = error?.cause?.code;
+	if (typeof code === "string" && code !== "") return code;
+	if (error?.name === "TimeoutError") return "timed out";
+	const message = typeof error?.message === "string" ? error.message : String(error ?? "");
+	return message === "" ? undefined : message;
+};
+
+/**
+ * Read a model listing without ever waking a model. An unavailable endpoint is a distinct, recoverable terminal
+ * state; a 404/non-listing endpoint remains compatible with the first native request deciding its route.
+ */
+async function listedModels(server) {
+	let response;
+	try {
+		response = await fetch(`${server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
+	} catch (error) {
+		throw new ModelServerUnavailableError(server, connectionDetail(error));
+	}
+	if (!response.ok) return undefined;
+	const body = await response.json().catch(() => undefined);
+	const entries = Array.isArray(body?.data) ? body.data.filter((entry) => typeof entry?.id === "string") : [];
+	return { entries, models: entries.map((entry) => entry.id) };
+}
+
+const listedModel = (listing, modelId) => {
+	if (listing === undefined) return undefined;
+	const exact = listing.entries.find((entry) => entry.id === modelId);
+	// A bare llama-server reports its filename but accepts the configured route name.
+	const lone = listing.entries.length === 1 && listing.entries[0].owned_by === "llamacpp" ? listing.entries[0] : undefined;
+	return exact ?? lone;
+};
+
+const unavailableFromNativeGrammar = (server, error) => {
+	if (!(error instanceof NativeGrammarError)) return undefined;
+	const record = error.record;
+	if (record?.transport !== undefined) return new ModelServerUnavailableError(server, connectionDetail(record.transport));
+	if (Number.isInteger(record?.response?.status) && record.response.status >= 500) return new ModelServerUnavailableError(server, `HTTP ${record.response.status}`);
+	return undefined;
+};
+
+/**
+ * Put native-GRAMMAR verification directly in front of provider transport as a last line of defense. Terminal
+ * requests normally await the same gate earlier so their context capacity can be refreshed before payload sizing;
+ * this guard keeps direct Harness users and resumed work fail-closed too.
+ */
+function guardProviderModelRequests(provider, ensureModel) {
+	for (const name of ["stream", "streamSimple"]) {
+		const inner = provider[name]?.bind(provider);
+		if (inner === undefined) continue;
+		provider[name] = (model, request, options = {}) =>
+			inner(model, request, {
+				...options,
+				onPayload: async (payload, currentModel) => {
+					await ensureModel(currentModel?.id ?? model?.id);
+					return await options.onPayload?.(payload, currentModel);
+				},
+			});
+	}
+}
+
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
 const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run || call.arguments?.action === POLICY.enums.shellAction.send);
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
@@ -45,10 +132,29 @@ const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes
 const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
+ * Restore the limited execution contract stored with a focus. It is read after a
+ * restart, so an inspect focus must remain inspect rather than falling through to
+ * a change default. Fields not needed at the authority boundary stay out.
+ */
+export function runFromBrief(stored) {
+	if (stored?.mode !== POLICY.enums.planMode.change && stored?.mode !== POLICY.enums.planMode.look) {
+		return { mode: POLICY.enums.planMode.look };
+	}
+	return {
+		mode: stored.mode,
+		...(stored.network === true ? { network: true } : {}),
+		...(typeof stored.move === "string" ? { move: stored.move } : {}),
+		...(Number.isInteger(stored.revision) ? { revision: stored.revision } : {}),
+		...(Array.isArray(stored.targets) ? { targets: stored.targets } : {}),
+		...(Number.isInteger(stored.turns) ? { turns: stored.turns } : {}),
+	};
+}
+
+/**
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
  * network. The brief entry at the start of the conversation says it (src/tools/task.mjs); `runs` remembers the
  * answer for this run of the program.
- * @returns {Promise<{ mode: "look" | "change", network?: boolean }>}
+ * @returns {Promise<{ mode: "look" | "change", network?: boolean, move?: string, revision?: number, targets?: string[], turns?: number }>}
  */
 async function runOf(runs, api, context) {
 	const known = runs.get(api.conversationId);
@@ -61,7 +167,7 @@ async function runOf(runs, api, context) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
 			if (entry.kind === "carto.brief") {
-				if (entry.data?.mode === POLICY.enums.planMode.change) run = { mode: POLICY.enums.planMode.change, network: entry.data.network === true };
+				run = runFromBrief(entry.data);
 				break search;
 			}
 		}
@@ -75,13 +181,16 @@ async function runOf(runs, api, context) {
 /**
  * @param {{ root: string, brainDir: string, config: ReturnType<typeof import("./config.mjs").loadConfig>, runner: ReturnType<typeof import("./sandbox.mjs").createRunner> }} input
  *   runner: how commands run in this session; the terminal changes it when the user types /bwrap
- *   gate: `{ yolo }`, whether change items run without /approve; the terminal changes it when the user types /yolo
+ *   gate: `{ yolo }`, whether declared change moves run without /approve; the terminal changes it when the user types /yolo
  */
-export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, trace, configuredContextWindow }) {
+export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, servedContextWindow, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
-	// What the settings asked for, whatever the server said at the start. /model re-applies it per model: the
-	// effective window is never more than this, and never more than what the model's server reports (meta.n_ctx).
+	// Opening a project is deliberately local: a stopped or unavailable model server must not keep Cartographer's
+	// terminal, ledger, plan, atlas, or shell controls from opening. The required native-GRAMMAR proof happens just
+	// before model work (and is also guarded at provider transport below), never as an eager launch request.
 	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
+	const initialLimits = contextWindowLimits(windowCeiling, servedContextWindow);
+	config.contextWindow = initialLimits.usableContextWindow;
 	const model = {
 		id: config.model,
 		name: config.model,
@@ -92,7 +201,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: config.contextWindow,
+		// pi-ai receives the full advertised capacity, matching Cartographer's context plan. It dynamically lowers
+		// an individual response ceiling only when the actual prompt is near that real server limit.
+		contextWindow: initialLimits.serverContextWindow ?? initialLimits.usableContextWindow,
 		maxTokens: config.maxTokens,
 		compat: {
 			supportsStore: false,
@@ -105,20 +216,32 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		},
 	};
 	const models = createModels();
-	// The provider knows every model the server serves, not only the configured one: a session stored under
-	// an older model must still start (the conversation keeps the model it began with until /model changes
-	// it), and /model can switch to any of the others without a restart.
-	const known = [...new Set([config.model, ...(Array.isArray(servedModels) ? servedModels : [])])];
-	// One record per served model, kept by reference: a record's contextWindow is what pi-ai sizes the reply
-	// budget from, and /model updates the record it switches to (per request, not at conversation creation).
-	// A model that was never switched to starts at the ceiling; the configured one at the (possibly lowered)
-	// window the session opened with.
-	const providerModels = known.map((id) => (id === config.model ? model : { ...model, id, name: id, contextWindow: windowCeiling }));
+	// Model listings may arrive only after the terminal has opened, or only after llama-swap has started one model.
+	// Keep this mutable backing array: pi-ai's provider reads it whenever it resolves a model, so /model can learn
+	// routes without requiring a launch-time connection.
+	const known = [config.model];
+	const providerModels = [model];
+	const addKnownModels = (ids) => {
+		for (const id of ids ?? []) {
+			if (typeof id !== "string" || id === "" || known.includes(id)) continue;
+			known.push(id);
+			providerModels.push({ ...model, id, name: id, contextWindow: windowCeiling });
+		}
+	};
+	addKnownModels(servedModels);
+	const modelRecord = (id) => {
+		let found = providerModels.find((entry) => entry.id === id);
+		if (found !== undefined) return found;
+		addKnownModels([id]);
+		return providerModels.find((entry) => entry.id === id);
+	};
 	const provider = createProvider({
 		id: PROVIDER,
 		name: "local model server",
 		baseUrl: config.server,
 		auth: { apiKey: { name: "none", resolve: async () => ({ auth: { apiKey: "local" } }) } },
+		// createProvider asks this backing list whenever Models resolves a route. Keep it mutable so a late /models
+		// listing can make a discovered route selectable without requiring a launch-time connection.
 		models: providerModels,
 		api: openAICompletionsApi(),
 	});
@@ -134,9 +257,82 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			}
 		}
 	};
+	// A listing is a light health check, not a model request. Share one in-flight read between the opening screen,
+	// the first model turn, and /model so an offline endpoint produces one quick, intelligible failure instead of
+	// several concurrent connection attempts.
+	let listingFlight;
+	let activeModelId = config.model;
+	const readyModels = new Map();
+	const readyValues = new Map();
+	const readListing = async () => {
+		if (listingFlight !== undefined) return await listingFlight;
+		const pending = listedModels(config.server);
+		listingFlight = pending;
+		try {
+			const listing = await pending;
+			if (listing !== undefined) addKnownModels(listing.models);
+			return listing;
+		} finally {
+			if (listingFlight === pending) listingFlight = undefined;
+		}
+	};
+	const applyCapacity = (modelId, serverContextWindow) => {
+		// A transient listing failure after a successful proof must not inflate a previously discovered lower limit.
+		const remembered = readyValues.get(modelId)?.serverContextWindow;
+		const effective = contextWindowLimits(windowCeiling, serverContextWindow ?? remembered);
+		const target = modelRecord(modelId);
+		if (target !== undefined) target.contextWindow = effective.serverContextWindow ?? effective.usableContextWindow;
+		if (modelId === activeModelId) config.contextWindow = effective.usableContextWindow;
+		return effective;
+	};
+	const inspectServer = async (modelId = activeModelId) => {
+		const listing = await readListing();
+		const entry = listedModel(listing, modelId);
+		return { listing, entry, limits: applyCapacity(modelId, modelContextWindow(entry)) };
+	};
+	const ensureModelReady = async (modelId = activeModelId, fallbackContextWindow) => {
+		const knownReady = readyModels.get(modelId);
+		if (knownReady !== undefined) return await knownReady;
+		const pending = (async () => {
+			const before = await inspectServer(modelId);
+			if (before.listing?.entries.length > 0 && before.entry === undefined) throw new ModelRouteError(modelId, before.listing.models);
+			try {
+				await requireNativeGrammarCapability({ server: config.server, modelId });
+			} catch (error) {
+				throw unavailableFromNativeGrammar(config.server, error) ?? error;
+			}
+			// llama-swap can publish context_length only after the native proof has routed and loaded this model.
+			// A second-listing outage is non-fatal: the proof just established that the route itself is usable.
+			let after = before;
+			try { after = await inspectServer(modelId); } catch { /* Retain pre-proof metadata when only /models is transiently unavailable. */ }
+			const capacity = modelContextWindow(after.entry) ?? modelContextWindow(before.entry) ?? fallbackContextWindow;
+			const limits = applyCapacity(modelId, capacity);
+			readyValues.set(modelId, limits);
+			if (modelId === activeModelId) notify({ type: "model-ready", modelId, limits });
+			return limits;
+		})();
+		readyModels.set(modelId, pending);
+		try {
+			return await pending;
+		} catch (error) {
+			readyModels.delete(modelId);
+			readyValues.delete(modelId);
+			throw error;
+		}
+	};
+	// No provider stream is allowed to reach the model before the native capability proof, including resumed Durable
+	// work and integrations that call a conversation directly instead of going through the terminal's friendly gate.
+	guardProviderModelRequests(provider, async (modelId) => {
+		try {
+			return await ensureModelReady(modelId);
+		} catch (error) {
+			notify({ type: "model-error", modelId, error });
+			throw error;
+		}
+	});
 	if (config.prefill !== false) watchPrefill(provider, notify);
-	// CARTO_TRACE: one JSON line per model call, appended as it is answered. After the prefill watcher,
-	// whose fetch is then the one the trace records around. The health check in cli.mjs is not traced.
+	// CARTO_TRACE: one JSON line per provider model call, appended as it is answered. After the prefill watcher,
+	// whose fetch is then the one the trace records around. The /models health listing is deliberately not traced.
 	const tracePath = trace ?? traceFile({ root, brainDir });
 	if (tracePath !== undefined) watchTrace(provider, tracePath);
 	// The resume behind Ctrl-V: the response body of every model call goes through this gate, outside the other
@@ -193,17 +389,52 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const returning = new Set();
 	// What ended a conversation's stretch from here and not by its own doing: { why: "limit" | "same-note", ... }.
 	const ends = new Map();
-	// The task that runs now, and what the user typed while it runs: `said` is still to be told to the task,
-	// `heard` is all of it, for the task's result (src/tools/task.mjs).
-	const active = { id: undefined, said: [], heard: [] };
+	// The focused task that runs now, and what the user typed while it runs. `said` reaches its next result and
+	// `heard` becomes part of its returned report trail.
+	const active = { id: undefined, said: [], heard: [], kind: undefined };
 	const takeSaid = () => {
-		const lines = active.said.splice(0).map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
-		return lines.length === 0 ? undefined : [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
+		const entries = active.said.splice(0);
+		if (entries.length === 0) return undefined;
+		const lines = entries.map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
+		return [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
 	const withText = (result, text) => ({ ...result, output: [...(result.output ?? []), { type: "text", text: `${(result.output ?? []).length > 0 ? "\n\n" : ""}${text}` }] });
+	// Tools report plain, successful facts; the atlas alone maps a path to an existing node or keeps an unmapped
+	// path as a gap. This hook is deliberately the one publisher rather than a second score in each tool.
+	const atlasFacts = (call, result) => {
+		const details = result?.details ?? {};
+		if (call.name === "read" && result?.isError !== true && typeof details.path === "string") return [{ kind: "read", paths: [details.path] }];
+		if (call.name === "shelf" && call.arguments?.action === "add" && result?.isError !== true && Array.isArray(details.paths)) return [{ kind: "shelf", paths: details.paths }];
+		if (call.name === "task" && Array.isArray(details.changes) && details.changes.length > 0) return [{ kind: "checkpoint", paths: details.changes.map((change) => change?.path).filter((path) => typeof path === "string") }];
+		return [];
+	};
+	const atlasFactsInRound = new Map();
+	const publishAtlasFacts = (call, result, api) => {
+		const facts = atlasFacts(call, result);
+		const id = api.conversationId;
+		if (facts.length > 0) atlasFactsInRound.set(id, [...(atlasFactsInRound.get(id) ?? []), ...facts]);
+		// A response can call several reads or shelf adds. They are one factual batch and therefore one work epoch,
+		// even when Durable happens to complete their individual calls in a different order.
+		const last = [...(waiting.get(id) ?? new Map()).values()].every((open) => open <= 0);
+		if (!last) return;
+		const batch = atlasFactsInRound.get(id) ?? [];
+		atlasFactsInRound.delete(id);
+		if (batch.length === 0) return;
+		try {
+			const { atlas } = loadAtlas(brainDir);
+			if (atlas === undefined) return;
+			const observed = observeAtlas(atlas, batch, { at: new Date(api.now()).toISOString() });
+			if (observed.changed) saveAtlas(brainDir, atlas);
+		} catch {
+			// A map edited into an unreadable shape must not change whether the factual tool call itself succeeds.
+		}
+	};
 	const textOfAnswer = (message) => (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();
 	// The question the agent waits on (src/asks.mjs).
 	const asks = createAsks({ config });
+	// A prior crashed process leaves no usable stage: discard only its own dead-process disposable roots before
+	// this session can reconstruct a focus. Ordinary project and brain paths are never touched here.
+	cleanupStaleStages({ root });
 	// The shell windows of this session (src/windows.mjs). They end with the program.
 	const windows = createWindows({ root, brainDir, config, runner });
 	// The wake triggers the agent has set (src/wakes.mjs). They are kept from one start to the next.
@@ -246,6 +477,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			control: { ...POLICY.control.terminate },
 		};
 	};
+	// Installed once but selected only by independent consultation children. Its registration objects are passed to
+	// Durable agent configuration below; names alone are stored only after Durable validates the selection.
+	const conferenceExtension = createConferenceExtension({ brainDir, server: config.server });
 	// One flat list of tools for the main agent and every task: a fork shares the main conversation's
 	// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
 	// Tool descriptions are built into the tool definitions.
@@ -254,15 +488,21 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		askTool({ brainDir, asks }),
 		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
 		returnTool({ root, brainDir, config }),
+		readTool({ root, brainDir }),
+		shelfTool({ root, brainDir, config }),
 		bookTool({ root, brainDir, config, engine, gate }),
 		...lookTools(root),
-		...changeTools({ root, brainDir, write: { newOnly: config.writeCreatesOnly, maxLines: config.writeLines } }),
-		shellTool({ config, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-		consultTool({ root, brainDir, config }),
+		...changeTools({ root, brainDir, gate }),
+		shellTool({ root, config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
+		consultTool({ root, brainDir, conferenceExtension }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
 	].map((tool) => ({ ...tool, description: describe(tool.name) ?? tool.description }));
+	// The generation hooks are declared before Harness.open() creates these handles. They are assigned before any run
+	// can start, and let the hooks read the exact active Durable ContextView for provenance.
+	let sessionHarness;
+	let sessionMain;
 	const core = defineExtension({
 		name: "cartographer",
 		// The preamble never changes within a project; a change here makes the server read the whole prompt again.
@@ -279,8 +519,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// Every conversation is offered the same tools, so a task's prompt is the main agent's prompt.
 				// Who may call what is decided here, when the call is made.
 				beforeTool: async (call, api, hookContext) => {
-					// One read comes back per reply. A further file read of the same reply is refused with no content; the question that follows asks whether to shelf the lot (src/shelf-ask.mjs).
-					const readRefused = readGateCheck(api.conversationId, call);
+					// One reply may carry a bounded transient read batch; a ninth file is refused before disk is read (src/read-batch.mjs).
+					const readRefused = readBatchCheck(api.conversationId, call);
 					if (readRefused !== undefined) return { block: readRefused };
 					if (api.conversationId === ROOT_CONVERSATION_ID) {
 					if (CHANGE.has(call.name)) return { block: REFUSALS.mainChanges };
@@ -294,25 +534,46 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					}
 					// A task that reaches for a tool of the main agent is told so and goes on. It ends with `return`.
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
-					// Writing is for a task that carries out a change item of the authorized plan, and for no one else.
+					const run = await runOf(runs, api, hookContext);
+					// Writing is for a task that carries out a live approved change move revision, and for no one else.
 					// So is running a command. The answer is kept in `runs`, where the shell tool finds it.
-					if ((CHANGE.has(call.name) || types(call)) && (await runOf(runs, api, hookContext)).mode !== POLICY.enums.planMode.change) {
-						return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
+					if (CHANGE.has(call.name) || types(call)) {
+						if (run.mode !== POLICY.enums.planMode.change || typeof run.move !== "string" || !Number.isInteger(run.revision)) {
+							return { block: types(call) ? REFUSALS.lookTaskRuns : REFUSALS.lookTaskChanges };
+						}
 					}
 					return undefined;
 				},
-				afterTool: async (call, result, api) => {
-					if (call.parent !== undefined) return undefined;
-					const looped = loopCheck(call, result, api);
-					// The reply's reads are being answered one by one; the question, when it is asked, rides the read that came back.
-					const shelfAsk = takeShelfAsk(api.conversationId, call, result);
-					const out = shelfAsk === undefined ? (looped ?? result) : withText(looped ?? result, shelfAsk);
+					afterTool: async (call, result, api) => {
+						if (call.parent !== undefined) return undefined;
+						// The harness can end a running tool without returning through its execute() catch. Preserve the
+						// conference lifecycle in that situation rather than leaving an apparently-live private child after /stop.
+						if (call.name === "consult") {
+							const diagnostic = (result.diagnostics ?? []).find((entry) => ["aborted", "interrupted", "restart_limit", "abandoned"].includes(entry.code));
+							if (diagnostic !== undefined) {
+								const conference = findConferenceByCaller(brainDir, { taskId: api.taskId, callId: call.id });
+								if (conference !== undefined) {
+									const cancelled = diagnostic.code === "aborted" || diagnostic.code === "abandoned";
+									try {
+										endConference(brainDir, conference.id, cancelled ? "cancelled" : "interrupted", cancelled ? "The caller stopped the outer consult tool before a final consult_return." : "The outer consult tool was interrupted before a final consult_return.", api.now());
+									} catch {
+										// The record may already have returned or recorded a more specific terminal failure.
+									}
+								}
+							}
+						}
+						const looped = loopCheck(call, result, api);
+					const out = looped ?? result;
+					// Keep this synchronous with loopCheck: sibling calls in one reply share one mapping epoch.
+					publishAtlasFacts(call, out, api);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
 						const id = api.conversationId;
 						// A file read again: the earlier copy of the same lines becomes one line (src/context.mjs).
 						if (call.name === "read" && out.isError !== true) engine.afterTaskRead(id, call.arguments ?? {});
-						const left = config.taskTurns - (steps.get(id)?.n ?? 0);
+						const run = await runOf(runs, api, hookContext);
+						const taskLimit = Number.isInteger(run.turns) ? run.turns : config.taskTurns;
+						const left = taskLimit - (steps.get(id)?.n ?? 0);
 						const lastOfRound = [...(waiting.get(id) ?? new Map()).values()].every((open) => open <= 0);
 						let told = out;
 						// A round that holds `return` ends the task, whatever else it called. A `return` that was refused does not.
@@ -336,7 +597,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					// Whether the main agent's context collapses with this round of calls.
 					const pending = waiting.get(api.conversationId) ?? new Map();
 					const decided = await engine.afterMainCall({ last: [...pending.values()].every((left) => left <= 0), round: rounds.get(api.conversationId) ?? 0, turn: turns.get(api.conversationId) });
-					if (decided === undefined) return shelfAsk === undefined ? looped : out;
+					if (decided === undefined) return looped;
 					return {
 						...out,
 						...(decided.note !== undefined ? { output: [...(out.output ?? []), { type: "text", text: `${(out.output ?? []).length > 0 ? "\n\n" : ""}${decided.note}` }] } : {}),
@@ -349,6 +610,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// assessment and the graph in front, the times, and for the main agent the state block at the end.
 				beforeRequest: async ({ messages }, api) => {
 					const main = api.conversationId === ROOT_CONVERSATION_ID;
+					// Cache the durable move contract before its first reply so a focus that writes only notes
+					// still receives its move-specific reply ceiling.
+					if (!main) await runOf(runs, api, context);
 					rounds.set(api.conversationId, (rounds.get(api.conversationId) ?? 0) + 1);
 					const turn = turnOf(messages);
 					// One more reply in this stretch: a turn of the main agent (a collapse in the middle of it does not
@@ -360,23 +624,33 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					if (turns.get(api.conversationId)?.start !== turn.start) failures.delete(api.conversationId);
 					turns.set(api.conversationId, turn);
 					engine.seen(api.conversationId, messages);
+					// Durable gives its active entries beside their contributions. Re-read that view here so the planner and
+					// the talk store can keep entry ids through request dressing; a row with no unambiguous bridge stays unnamed.
+					let sources;
+					try {
+						const conversation = main ? sessionMain : await sessionHarness.conversation(api.conversationId, context);
+						if (conversation !== undefined) sources = bridgeRequestSources(messages, await conversation.context(context));
+					} catch {
+						// A request still runs when inspection cannot be read; its plan says that source is unmapped.
+					}
 					// What the user said is noted for the talk a collapse keeps. A task whose context is nearly full has
 					// its own steps collapsed here, after the one question (src/engine.mjs).
 					let note;
-					if (main) noteUserMessages(brainDir, messages);
+					if (main) noteUserMessages(brainDir, messages, sources);
 					else note = await engine.beforeTaskRequest(api.conversationId, messages);
-					return { messages: dressRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId) }) };
+					const planned = prepareRequest(messages, { brainDir, root, runner, config, windows, wakes, gate, main, conversationId: api.conversationId, note, used: engine.usedBy(api.conversationId), sources });
+					engine.planned(api.conversationId, planned);
+					return { messages: planned.messages };
 				},
 				// The request as it is sent: the question before a collapse is put behind exactly this.
 				beforeProviderRequest: ({ payload, model }, api) => {
-					// The declaration is static and flat; there is nothing to re-route here. `sending` keeps the collapse accounting honest.
-					engine.sending(api.conversationId, payload);
+					// The declaration is static and flat; there is nothing to re-route here. `sending` freezes this provider
+					// body for the Model view before pi-ai dispatches it; the collapse accounting uses the same snapshot.
+					engine.sending(api.conversationId, payload, model);
 					return { payload, model };
 				},
 				afterResponse: async (message, api) => {
-					// A question about the shelf asked with the last round of calls is answered by this reply: carry it out, if it said yes. Then plan this reply's reads for the gate.
-					settleShelfAsk(api.conversationId, message, { root, brainDir });
-					beginShelfGate(api.conversationId, message);
+					beginReadBatch(api.conversationId, message);
 					engine.replied(api.conversationId, message);
 					const pending = new Map();
 					for (const part of message.content ?? []) if (part.type === "toolCall") pending.set(keyOf(part), (pending.get(keyOf(part)) ?? 0) + 1);
@@ -403,7 +677,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					// A turn that a wake started and in which nothing was done is a rest already.
 					if (main && (turn === undefined || (turn.by === "note" && turn.calls === 0))) return undefined;
 					const step = steps.get(id) ?? { key: undefined, n: 0 };
-					const limit = main ? config.mainTurns : config.taskTurns;
+					const taskRun = main ? undefined : runs.get(id);
+					const limit = main ? config.mainTurns : (Number.isInteger(taskRun?.turns) ? taskRun.turns : config.taskTurns);
 					const text = textOfAnswer(answer);
 					// The same note, word for word (ignoring layout and case), written again and again: the run ends.
 					const key = noteKey(text);
@@ -431,6 +706,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	});
 	const registry = createRegistry();
 	registry.install(core);
+	// Conference children select this isolated profile explicitly. Installing it does not add its prompt or tools
+	// to the root, which stays on the ordinary Cartographer surface.
+	registry.install(conferenceExtension);
 	// The copy of the assessment and the graph that stands at the top of the context (src/top.mjs).
 	if (loadTop(brainDir) === undefined) pin(brainDir, { reason: "the first start" });
 
@@ -439,18 +717,22 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// A burst of user messages sent while a provider request or focus is busy belongs in the very next context
 	// boundary. The Durable default takes only one steer per boundary, needlessly leaving the rest queued for a
 	// later tool round (or even the next user turn) when the current response ends without more tools.
-	const harness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
-	const main = await harness.root(context, {
-		agent: { model: { provider: PROVIDER, modelId: config.model }, maxTurns: config.mainTurns },
+	const harness = sessionHarness = await Harness.open(storage, { models, registry, settings: { compaction: { enabled: false }, steeringMode: "all" } }, context);
+	const main = sessionMain = await harness.root(context, {
+		// Explicit selection prevents an installed consult-only extension from leaking its isolated tools into root requests.
+		agent: { model: { provider: PROVIDER, modelId: config.model }, extensions: [core], maxTurns: config.mainTurns },
 	});
 	// The settings say which model this session is on. A conversation keeps the model it began with, so a change
 	// in the settings would otherwise never take hold (the stored one won, or, if the server had dropped it, the
 	// run stopped with no_model). At the start, then, the conversation is set to the configured model; /model
-	// switches it for the rest of the run, and every model the server serves is registered so any of them resolves.
+	// switches it for the rest of the run, and late /models listings register additional routes as they arrive.
 	const held = (await main.agent(context)).model;
 	if (held === undefined || (held.provider === PROVIDER && held.modelId !== config.model)) {
 		await main.configure({ model: { provider: PROVIDER, modelId: config.model } }, context);
 	}
+	// Existing Durable roots predate the extension selection field. Pin them on every open so a stored root cannot
+	// accidentally retain the conference profile; only independent conference children receive it.
+	await main.configure({ extensions: [core] }, context);
 	return {
 		harness,
 		main,
@@ -462,40 +744,67 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		/**
 		 * Switch the model of the main conversation, and so of every task forked after.
 		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
-		 * @param {number} [limits.contextWindow]  its meta.n_ctx, when it says one
-		 * @returns {false | number} false when the name is not served; otherwise the effective context window it switches to
-		 *   (the smaller of the settings' ceiling and the model's own limit), which is also what the engine, the
-		 *   state block, the shelf's soft cap (half of it) and the display now use.
+		 * @param {number} [limits.contextWindow]  its advertised total request capacity, when the listing already has one
+		 * @returns {Promise<ReturnType<typeof contextWindowLimits>>} the model's active context window and reported
+		 *   capacity. A listing that explicitly lacks the name rejects with ModelRouteError. The active window is what
+		 *   the engine, state block, shelf's soft cap (half of it), display, and provider context sizing use.
 		 */
 		setModel: async (modelId, ctx = context, limits = {}) => {
-			if (!known.includes(modelId)) return false;
-			const reported = limits?.contextWindow;
-			const effective = Number.isInteger(reported) && reported > 0 ? Math.min(windowCeiling, reported) : windowCeiling;
+			// A selected route is proven before it is adopted. If Cartographer opened while offline, this is also the
+			// first time a freshly listed model becomes part of the provider registry.
+			const effective = await ensureModelReady(modelId, limits?.contextWindow);
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
-			config.contextWindow = effective;
-			const target = providerModels.find((entry) => entry.id === modelId);
-			if (target) target.contextWindow = effective;
+			activeModelId = modelId;
+			config.contextWindow = effective.usableContextWindow;
+			notify({ type: "model-ready", modelId, limits: effective });
 			return effective;
 		},
-		/** The model names the server was serving when the session opened. */
-		servedModels: [...known],
+		/** A non-blocking model-listing check for the terminal's offline status line; it never starts a model. */
+		checkServer: async () => await inspectServer(activeModelId),
+		/** Prove the active route immediately before model work. Any unavailable or grammar-invalid route rejects closed. */
+		ensureModelReady: async () => await ensureModelReady(activeModelId),
+		/** Whether this process has already proven the active route and refreshed its post-load capacity. */
+		isModelReady: () => readyValues.has(activeModelId),
+		/** The model names known so far. A getter keeps /model current after a late listing arrives. */
+		get servedModels() { return [...known]; },
 		windows,
 		wakes,
 		engine,
+		/** A pure main-agent request plan for the screen. It reads the active Durable context and current brain without
+		 * checking/consuming wakes, marking window output shown, starting an attempt, or retaining history. */
+		preview: async () => {
+			const view = await main.context(context);
+			return {
+				at: Date.now(),
+				plan: planRequest(view.messages, {
+					brainDir,
+					root,
+					runner,
+					config,
+					gate,
+					main: true,
+					conversationId: main.id,
+					used: engine.usedBy(main.id),
+					fired: [],
+					wakeLines: wakes.lines(),
+					windowRows: windows.list(config.windowTail),
+				}),
+			};
+		},
 		asks,
 		/** `listener` hears what is in no conversation: { type: "prefill" | "limit" | "same-note" | "told", ... }. */
 		on(listener) {
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		/** The conversation of the task that runs now, or undefined. */
-		activeTask: () => active.id,
+		/** The conversation of the ordinary task that runs now, or undefined. */
+		activeTask: () => active.kind === "task" ? active.id : undefined,
 		/**
 		 * What the user typed while a task runs: the task reads it with its next result, and it is kept as talk.
 		 * @returns {boolean} whether a task was there to tell
 		 */
 		tellTask(text) {
-			if (active.id === undefined) return false;
+			if (active.kind !== "task" || active.id === undefined) return false;
 			const entry = { text: String(text).trim(), at: Date.now() };
 			if (entry.text === "") return false;
 			active.said.push(entry);
@@ -503,6 +812,11 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			noteChat(brainDir, "user", entry.at, entry.text, { seen: false });
 			return true;
 		},
+		/** The terminal has one routing door while a private task runs. */
+		tellWork(text) {
+			return this.tellTask(text) ? { kind: "task" } : false;
+		},
+
 	};
 }
 

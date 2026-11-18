@@ -1,10 +1,10 @@
 // The full screen: tabs, a status strip that is always there, and a place to type.
 //
-//   1 Chat     the conversation; the agent's work folded into pointers (src/screen/chat.mjs)
-//   2 Carto    the agent's brain: Atlas, Ledger, Plan, Tree, Assessment, one at a time
+//   1 Chat     Conversation is user-directed exchange; Work is private shared-brain activity; Consult is its isolated conference audit (src/screen/chat.mjs)
+//   2 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
 //   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   4 Shells   the shell windows, live
-//   5 Context  what the agent sees: the request it was last sent, part by part, each of which opens
+//   5 Model    sent provider payloads, next-request preview, and current accounting
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -28,14 +28,14 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { contextPath, forgetChat, loadContext, reviseNote, shelveForUser } from "../context.mjs";
-import { readStory } from "../story.mjs";
+import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
+import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
-import { isAuthorized, loadPlan, openItems, planPath, waiting } from "../plan.mjs";
+import { applyPlanOp, isAuthorized, loadPlan, planPath, PlanError, savePlan, waiting } from "../plan.mjs";
 import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
@@ -46,26 +46,30 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, promptsSource, requestsView, shellsOutView, shellsView, textView, toolSource, treeView } from "./views.mjs";
+import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, rawPayloadView, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
-
-const USER_SPEAKER = `${USER_NAME}: `;
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
 	{ id: "carto", name: "Carto" },
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
-	{ id: "context", name: "Context" },
+	{ id: "context", name: "Model" },
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
-const VIEWS = {
+export const VIEWS = {
+	chat: [
+		{ id: "conversation", name: "Conversation" },
+		{ id: "work", name: "Work" },
+		{ id: "consult", name: "Consult" },
+	],
 	carto: [
 		{ id: "atlas", name: "Atlas" },
 		{ id: "ledger", name: "Ledger" },
 		{ id: "plan", name: "Plan" },
 		{ id: "requests", name: "Requests" },
 		{ id: "tree", name: "Tree" },
+		{ id: "hands", name: "Current shared brain" },
 	],
 	diff: [
 		{ id: "last", name: "Last step" },
@@ -77,14 +81,15 @@ const VIEWS = {
 		{ id: "out", name: "Output" },
 	],
 	context: [
-		{ id: "window", name: "Window" },
-		{ id: "main", name: "Main agent" },
-		{ id: "parts", name: "Parts" },
-		{ id: "hands", name: "Hands" },
+		{ id: "window", name: "Latest sent" },
+		{ id: "main", name: "Main sent" },
+		{ id: "raw", name: "Raw payload" },
+		{ id: "preview", name: "Next preview" },
+		{ id: "parts", name: "Current accounting" },
 	],
 };
-/** Every view of every tab but Chat, by the name it is kept under. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.parts", "context.hands"];
+/** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -94,27 +99,29 @@ const SPIN_MS = POLICY.timing.spinnerMs;
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
-	["requests", "what waits for you: change items, questions of taste, "],
+	["requests", "what waits for you: change moves, questions of taste, "],
 	["approve", "approve requests by id, or the whole plan as it stands"],
 	["deny", "turn a request down: /deny ID [why]"],
 	["answer", "answer a question of taste: /answer ID words"],
 	["plan", "the plan, whether it is authorized, and where the file is"],
 	["ledger", "goals, questions and notes, open and closed"],
-	["atlas", "the tree as the agent sees it, and the graph's nodes"],
+	["atlas", "the tree, local attention map, and graph's nodes"],
+	["focus", "set an explicit atlas focus: /focus NODE_OR_PATH reason"],
+	["unfocus", "clear the explicit atlas focus; a running move stays a temporary overlay"],
 	["assessment", "the agent's summary of the project"],
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
+	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
 	["context", "what the agent's context holds, and when it is next collapsed"],
 	["fold", "take a kept report out of the context's view, leaving its one line"],
-	["archive", "take a row out of what the agent reads: a report, ledger entry, plan item, or node"],
+	["archive", "take a row out of what the agent reads: a report, ledger entry, plan envelope or move, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["done", "settle a row the way the agent does: a ledger entry, a plan item, a node of the graph"],
-	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan item, or node"],
+	["done", "settle a row; a reported move opens an evidence-review prompt before it can be accepted"],
+	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan envelope or move, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
 	["unshelve", "take a shelved file off the shelf, or all of them"],
@@ -122,7 +129,7 @@ const COMMANDS = [
 	["collapse", "collapse the context now"],
 	["new", "start a fresh context with nothing kept in view"],
 	["pin", "rewrite the copy of assessment and graph at the top of the context"],
-	["yolo", "let change items run without /approve while you watch", ["on", "off"]],
+	["yolo", "let declared change moves run without /approve while you watch", ["on", "off"]],
 	["initiate", "whether the agent starts working on its own when carto starts; default on", ["on", "off"]],
 	["bwrap", "how tasks' commands run: with the sandbox or without", ["on", "off"]],
 	["shells", "the shell windows: what runs in each, and its newest lines"],
@@ -151,18 +158,18 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 5           go to a tab",
-	"  [ and ]          the previous and the next view inside Carto, Diff and Context (H and L do the same)",
+	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
+	"  [ and ]          the previous and the next view inside Chat, Carto, Diff and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Chat, Enter on a call goes to the tab where that work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Context), e is this same door: in Chat, a message of ${USER_NAME} or the agent (tool work cannot be edited); in Context, a tool where it is defined, a shelved file`,
-	"  f, v, d, x, t    the same keys on a row of any view but Chat: f folds a report out of view or brings it back (in Hands); v archives a row out of what the agent reads — a report, ledger entry, plan item, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a plan item done, a book entry settled, a node confirmed); in the Context window d takes a message of yours or the agent's out of the talk the collapse keeps; x takes a shelved file off the shelf (in Hands)",
-	"  n                a new ledger entry, plan item, book entry or node: the small box on a template, and what you save goes in through the same operations the agent uses (E opens the template in $EDITOR instead)",
-	"  a                in Hands, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
+	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
 	"  :                type a command",
@@ -275,9 +282,11 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// For a consult row in the Chat tab: the story is read from the brain under its thread, never from the session.
-	const readStoryRaw = (thread) => readStory(brainDir, thread);
-	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw });
+	// The Consult subview reads co<N> audit records directly and separately from parent talk/work. Discovering them
+	// never adds their private material to the parent conversation or its next request.
+	const readConferenceRaw = (id) => loadConference(brainDir, id).conference;
+	const listConferenceRaw = () => listConferences(brainDir);
+	const chat = createChat({ markdown, describeRef, readConference: readConferenceRaw, listConferences: listConferenceRaw });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -296,11 +305,11 @@ export async function runScreen(session, options, runTerminal) {
 
 	const state = {
 		tab: "chat",
-		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
+		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "window" },
 		shell: undefined, // the shell window whose output the Output view shows
-		deleteArm: undefined, // a report marked for deleting in Hands, waiting for the second d
+		deleteArm: undefined, // a report or Talk source marked for its second d
 		mode: "type",
-		selected: undefined, // a stop of the Chat tab
+		selected: undefined, // a stop of the Conversation, Work, or Consult projection
 		pending: "", // the first key of a command of two (z, then R)
 		prompt: "› ",
 		busySince: undefined,
@@ -308,6 +317,9 @@ export async function runScreen(session, options, runTerminal) {
 		rate: undefined,
 		prefill: undefined,
 		lastPrefill: undefined,
+		// Terminal core failures that must remain visible even when the chat has scrolled: an offline model server
+		// is recoverable, but it is not an idle Cartographer session.
+		modelError: undefined,
 		closed: false,
 	};
 	const draw = () => {
@@ -356,17 +368,17 @@ export async function runScreen(session, options, runTerminal) {
 			chat.block(label, text);
 			draw();
 		},
-		entry(depth, entry, printed) {
+		entry(depth, entry, printed, consult) {
 			chat.seal();
-			chat.entry(depth, entry, printed);
+			chat.entry(depth, entry, printed, consult);
 			draw();
 		},
-		live(depth, message) {
-			chat.live(depth, message);
+		live(depth, message, consult) {
+			chat.live(depth, message, consult);
 			draw();
 		},
-		liveTools(depth, slots) {
-			chat.liveTools(depth, slots);
+		liveTools(depth, slots, consult) {
+			chat.liveTools(depth, slots, consult);
 			draw();
 		},
 		attach(given) {
@@ -375,6 +387,17 @@ export async function runScreen(session, options, runTerminal) {
 		notice(text) {
 			syncThinking();
 			flash(text);
+		},
+		/** A required model-route gate failed. Keep it in the strip as well as the Chat notice. */
+		modelError(message) {
+			state.modelError = String(message);
+			draw();
+		},
+		/** A successful first-turn proof clears the stale unavailable-route status. */
+		modelReady() {
+			if (state.modelError === undefined) return;
+			state.modelError = undefined;
+			draw();
 		},
 	};
 	for (const line of options.intro ?? []) chat.print(`${line}\n`, { keep: true });
@@ -416,9 +439,10 @@ export async function runScreen(session, options, runTerminal) {
 			next.waits = requests.some((request) => request.kind === "approval");
 			const { plan } = loadPlan(brainDir);
 			if (plan !== undefined && plan.items.length > 0) {
-				const open = openItems(plan).length;
+				const open = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true).length;
 				const awaiting = waiting(plan).length;
-				next.plan = `plan ${plan.items.length - open}/${plan.items.length}${isAuthorized(plan) || awaiting === 0 ? " · approved" : ` · ${awaiting} awaiting`}`;
+				const ready = isAuthorized(plan);
+				next.plan = `plan ${plan.items.length - open}/${plan.items.length} envelopes · ${plan.moves.length} moves${awaiting > 0 ? ` · ${awaiting} awaiting` : ready ? " · move ready" : ""}`;
 			}
 			const { ledger } = loadLedger(brainDir);
 			if (ledger !== undefined) {
@@ -431,7 +455,7 @@ export async function runScreen(session, options, runTerminal) {
 		brain = next;
 		return brain;
 	};
-	/** The two rows of the strip, as spans. */
+	/** The activity, shared-state, and key-reminder rows of the strip, as spans. */
 	const status = () => {
 		const busy = core.busy();
 		if (busy && state.busySince === undefined) {
@@ -466,9 +490,11 @@ export async function runScreen(session, options, runTerminal) {
 
 		const second = [];
 		const size = core.contextSize();
-		// /model re-fits the window while running; options.config is the shared object that follows it.
+		// /model re-fits the window while running; options.config is the shared object that follows it. A route
+		// error takes precedence over ordinary accounting: the visible status must say why Cartographer is resting.
 		const windowSize = options.config?.contextWindow ?? options.contextWindow;
-		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
+		if (state.modelError !== undefined) second.push([`! ${cut(state.modelError, POLICY.limits.screen.consoleErrorChars)}`, "warn"]);
+		else second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
 		const { plan, ledger, waits, requests } = readBrain();
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
@@ -488,25 +514,29 @@ export async function runScreen(session, options, runTerminal) {
 
 	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
 	const LEGEND = {
-		chat: "j k move · Enter open · e edit · d forget · y copy",
+		"chat.conversation": "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
+		"chat.work": "j k move · Enter open · y copy",
+		"chat.consult": "j k move · Enter open · + all · y copy",
 		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
 		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
-		"carto.plan": "t done · n new · v archive · d delete · e edit",
+		"carto.plan": "t done/review · n new · v archive · d delete · e edit",
 		"carto.requests": "a approve · n deny · d forget · e edit",
 		"carto.tree": "Enter fold · y copy · e edit",
+		"carto.hands": "f fold · v archive · d delete · x unshelve · e edit",
 		"diff.last": "Enter open · y copy · e edit",
 		"diff.session": "Enter open · y copy · e edit",
 		"diff.git": "Enter open · y copy · e edit",
 		"shells.list": "Enter output · y copy",
 		"shells.out": "Enter back",
-		"context.window": "Enter open · d delete · e edit · y copy",
-		"context.main": "Enter open · d delete · e edit · y copy",
-		"context.parts": "Enter open · + all · e edit",
-		"context.hands": "f fold · v archive · d delete · x unshelve · e edit",
+		"context.window": "Enter open · y copy",
+		"context.main": "Enter open · y copy",
+		"context.raw": "Enter open · y copy",
+		"context.preview": "Enter open · y copy",
+		"context.parts": "Enter open · + all · y copy",
 	};
 	const legend = () => {
 		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
-		const id = state.tab === "chat" ? "chat" : viewId();
+		const id = viewId();
 		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
 	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
@@ -528,15 +558,17 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
 		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
 		if (id === "carto.tree") return treeView(env, isOpen);
+		if (id === "carto.hands") return handsView({ root, brainDir });
 		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
 		if (id === "shells.list") return shellsView(env);
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {
 			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
-			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, edits: messageEdits, deleted: messageDeleted, root, brainDir });
+			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
 		}
-		if (id === "context.parts") return textView(pageOf(id).text ?? "  …");
-		if (id === "context.hands") return handsView({ root, brainDir });
+		if (id === "context.raw") return rawPayloadView(session.engine?.window("newest"));
+		if (id === "context.preview") return previewView(pageOf(id).preview);
+		if (id === "context.parts") return accountingView(pageOf(id).text ?? "  …");
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -554,6 +586,22 @@ export async function runScreen(session, options, runTerminal) {
 		if (page === undefined) return;
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
+		if (id === "context.preview" && page.loading !== true) {
+			page.loading = true;
+			Promise.resolve(session.preview?.())
+				.then((preview) => {
+					page.loading = false;
+					page.preview = preview;
+					rebuild(id);
+					draw();
+				})
+				.catch((error) => {
+					page.loading = false;
+					page.preview = { error: error?.message ?? String(error) };
+					rebuild(id);
+					draw();
+				});
+		}
 		if (id === "context.parts") {
 			Promise.resolve(core.capture("/context"))
 				.then((text) => {
@@ -589,9 +637,9 @@ export async function runScreen(session, options, runTerminal) {
 		chat.seal();
 		draw();
 	};
-	const tabName = () => (state.tab === "chat" ? "the Chat tab" : `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`);
+	const tabName = () => `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`;
 	const copyTab = () => {
-		if (state.tab === "chat") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), "chat", tabName(), "txt");
+		if (state.tab === "chat") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), `chat-${state.view.chat}`, tabName(), "txt");
 		return copy(pageOf().list.text(), viewId().replace(".", "-"), tabName(), "txt");
 	};
 	const copyCommand = (argument) => {
@@ -603,7 +651,8 @@ export async function runScreen(session, options, runTerminal) {
 	};
 
 	// ─── Tabs, views and what scrolls ───────────────────────────────────────
-	const scrollOf = () => (state.tab === "chat" ? chatScroll : pageOf().scroll);
+	const chatTab = () => state.tab === "chat";
+	const scrollOf = () => (chatTab() ? chatScroll : pageOf().scroll);
 	const setTab = (id) => {
 		if (!TABS.some((tab) => tab.id === id)) return;
 		state.tab = id;
@@ -646,8 +695,9 @@ export async function runScreen(session, options, runTerminal) {
 		const text = given.trim();
 		if (text === "") return;
 		prompt.addToHistory(text);
-		// What is sent is answered in Chat, at its end.
+		// New user speech belongs in Chat's Conversation view, even when private Work was open.
 		if (state.tab !== "chat") setTab("chat");
+		if (state.view.chat !== "conversation") setView("conversation");
 		chatScroll.scrollToEnd();
 		const [name, argument] = text.slice(1).trim().split(/\s+/);
 		if (text.startsWith("/") && !text.includes("\n")) {
@@ -698,88 +748,43 @@ export async function runScreen(session, options, runTerminal) {
 		writeFileSync(file, `${text}\n`);
 		return file;
 	};
-	/** e in the Chat tab: the words of the user and of the agent can be said anew; tool work cannot. */
+	/** e in Conversation changes only a row that names the source it changes. Work and Consult are private/read-only. */
 	const editChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (!chat.editable(line.item)) {
-			return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : `tool work cannot be edited: e opens a message of ${USER_NAME} or the agent`);
-		}
+		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be edited");
 		const item = chat.items.find((entry) => entry.key === line.item);
+		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
+		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
+		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
 		const file = scratch("message.md", item.text);
 		if (!runEditor(file)) return;
 		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
 		if (now === item.text || now === "") return flash("the message stands as it was");
-		const was = item.text;
+		if (!reviseTalkSource(brainDir, item.source, now)) return flash("this source is no longer in the kept talk, so it is left unchanged");
 		inPlace(() => chat.revise(item.key, now));
-		// What the talk keeps is rewritten to match, so what comes after reads the edited words. A note of the
-		// agent stands nowhere in the talk, so for one the edit is in the tab only.
-		if (item.type !== "note") reviseNote(brainDir, was, now);
-		flash(item.type === "user" ? "your message is edited · what follows reads the edited words" : "the agent's words are edited · the talk the context keeps says the same");
+		flash(item.type === "user" ? "your future kept speech is edited · a later collapse may copy these words; active context and sent requests stay unchanged" : "the delivered agent speech is edited for future kept talk · a later collapse may copy it; sent requests stay as sent");
 	};
-	/** e in the Context tab: the system prompt's wording and the tools' descriptions are files of their own. */
-	/** What the user has said anew in the editor, by the text it was sent with. The tab shows the new words where the old stood; the sizes stay those of what was sent. */
-	const messageEdits = new Map();
-	/** What the user has deleted in the Context window, by the text it was sent with: the parts stand out of the list. */
-	const messageDeleted = new Set();
-	/** A message edited here is also edited in the Chat tab, when it stands there by the same words. */
-	const syncChat = (base, now, type) => {
-		const item = chat.items.findLast((entry) => (type === undefined || entry.type === type) && entry.text === base);
-		if (item !== undefined) chat.revise(item.key, now);
-	};
-	/** The Context tab's messages: surgery on what shows and on the talk the collapse keeps; the stored conversation is never rewritten. */
-	const editMessage = (item) => {
-		const full = item.copy ?? item.body;
-		if (typeof full !== "string" || full === "") return flash("nothing to edit here");
-		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to edit.
-		let base = full;
-		let prefix = "";
-		let suffix = "";
-		if (item.editKind === "chat-you") {
-			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) {
-				prefix = USER_SPEAKER;
-				base = base.slice(USER_SPEAKER.length);
-			}
-			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
-			if (found !== null) {
-				suffix = found[0];
-				base = base.slice(0, found.index);
-			}
+	/** Remove one selected source from a future collapse; it does not omit its Durable entry or rewrite a sent request. */
+	const removeChat = () => {
+		const line = chatBody.lines()[selectedRow()];
+		if (line === undefined) return flash("nothing is selected: j and k select");
+		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be removed from future kept talk");
+		const item = chat.items.find((entry) => entry.key === line.item);
+		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
+		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
+		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
+		const arm = `talk:${item.key}`;
+		if (state.deleteArm?.id !== arm || Date.now() - state.deleteArm.at >= POLICY.timing.screen.deleteConfirmMs) {
+			state.deleteArm = { id: arm, at: Date.now() };
+			return flash("Press d again: remove this source from future kept talk; sent requests and the active conversation stay unchanged");
 		}
-		// What the agent said to you, where the part is its words: the saying is edited, not the rendering of the call.
-		if (typeof item.chat === "string") base = item.chat;
-		const file = scratch("message.md", base);
-		if (!runEditor(file)) return;
-		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
-		if (now === base || now === "") return flash("the message stands as it was");
-		const shown = typeof item.chat === "string" ? full.split(base).join(now) : prefix + now + suffix;
-		messageEdits.set(full, shown);
-		reviseNote(brainDir, base, now);
-		syncChat(base, now, item.editKind === "chat-you" ? "user" : item.editKind === "chat-agent" ? "agent" : undefined);
-		refresh(viewId(), true);
-		flash(item.editKind === "chat-you" ? "your message is edited · what follows reads the edited words" : "edited where it shows, and in the talk the collapse keeps · what was sent stays as it was");
+		state.deleteArm = undefined;
+		if (!removeTalkSource(brainDir, item.source)) return flash("this source is no longer in the kept talk, so it is left unchanged");
+		inPlace(() => chat.forget(item.key));
+		flash("removed from future kept talk · the Durable transcript, active conversation, and sent requests stay unchanged");
 	};
-	/** d on a message of the Context window, yours or the agent's: it leaves the talk the collapse keeps, and the views. What was sent stays stored, and the agent reads it until the next collapse. */
-	const deleteChat = (item) => {
-		const full = item.copy ?? item.body;
-		if (typeof full !== "string" || full === "") return flash("nothing to delete here");
-		// In a Chat · You request part, its speaker label and sent stamp are request-time additions, not the words to delete.
-		let base = full;
-		if (item.editKind === "chat-you") {
-			if (typeof item.chat !== "string" && base.startsWith(USER_SPEAKER)) base = base.slice(USER_SPEAKER.length);
-			const found = /\n\n\[(?:sent|noted) [^\]]*\]$/.exec(base);
-			if (found !== null) base = base.slice(0, found.index);
-		}
-		if (typeof item.chat === "string") base = item.chat;
-		if (!forgetChat(brainDir, base)) return flash("the talk the collapse keeps does not hold it: a collapse may have dropped it already");
-		messageDeleted.add(full);
-		messageDeleted.add(base);
-		// Where the same words stand in the Chat tab, they go too.
-		const twin = chat.items.findLast((entry) => entry.text === base || entry.text === full);
-		if (twin !== undefined) inPlace(() => chat.forget(twin.key));
-		refresh(viewId(), true);
-		flash("deleted from the talk the collapse keeps, and from view · what was sent stays stored, and the agent reads it until the next collapse");
-	};
+	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
 	/** n in a book view: an editor opens on a template; on save the entry goes in through the same operations the agent uses. */
 	const newEntry = (book) => {
 		const template = addTemplate(book);
@@ -791,7 +796,8 @@ export async function runScreen(session, options, runTerminal) {
 		refresh(viewId(), true);
 	};
 	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
-	const editContext = () => {
+	/** e in Model, or on a Current shared brain record that has its own source. */
+	const editCurrent = () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
 		switch (item.editKind) {
@@ -823,7 +829,7 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			case "chat-you":
 			case "chat-agent":
-				return editMessage(item);
+				return flash("this is a frozen sent-request row. Open Chat's Conversation view to change a current kept source; sent requests stay as sent.");
 			case "reply":
 				return flash("the reply is being written; e on it works once it is done");
 			case "result":
@@ -837,7 +843,7 @@ export async function runScreen(session, options, runTerminal) {
 			default: {
 				// A kept row that is a ledger entry opens the small box on its fields, as in the Ledger view.
 				if (typeof item.key === "string" && item.key.startsWith("entry:")) return void openFieldBox(viewId(), item.key);
-				// Hands: a shelved file is its file; a report is its file in .brain/reports.
+				// Current shared brain: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
 					if (!existsSync(item.path)) return flash("the shelved file is not there");
 					if (!runEditor(item.path)) return;
@@ -857,7 +863,7 @@ export async function runScreen(session, options, runTerminal) {
 	// ─── The fields the small box edits ───────────────────────────────────────
 	// The book views open one of these on e; E keeps the editor on the entry's own JSON. The limits are the books'
 	// own, so the box never holds more than the book would; the counter shows how much of the field is used.
-	const ROW_KEY = /^(?:entry|item|node):/;
+	const ROW_KEY = /^(?:entry|item|envelope|move|node):/;
 	const boxWidth = (fields, cols) => {
 		const longest = Math.max(...fields.map((field) => Math.min(field.limit, 80)));
 		const single = !fields.some((field) => field.multiline);
@@ -877,11 +883,37 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		if (viewId_ === "carto.plan") {
 			const { plan } = loadPlan(brainDir);
-			const item = plan?.items.find((entry) => entry.id === id);
-			if (item === undefined) return undefined;
-			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: item.text }];
-			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
-			return { id, fields };
+			const envelope = plan?.items.find((entry) => entry.id === id);
+			if (envelope !== undefined) {
+				const fields = [
+					{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: envelope.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: envelope.doneWhen ?? "" },
+				];
+				if (envelope.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: envelope.outcome ?? "" });
+				return { id, fields };
+			}
+			const move = plan?.moves.find((entry) => entry.id === id);
+			if (move === undefined) return undefined;
+			const parent = plan?.items.find((entry) => entry.id === move.parent);
+			const changing = parent?.mode === POLICY.enums.planMode.change;
+			const budget = move.budget ?? { replies: move.turns, fileOps: 0, commandStarts: 0 };
+			return {
+				id,
+				fields: [
+					{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: move.action ?? move.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: move.doneWhen ?? "" },
+					{ id: "proof", label: changing ? "Required proof" : "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: move.proof ?? "" },
+					{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: (move.targets ?? []).join("\n") },
+					...(changing ? [
+						{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: String(move.capabilities?.files === true) },
+						{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: String(move.capabilities?.commands === true) },
+						{ id: "networkAllowed", label: "Network allowed", limit: 5, value: String(move.capabilities?.network === true) },
+						{ id: "replies", label: "Reply budget", limit: 1, value: String(budget.replies ?? move.turns ?? POLICY.limits.plan.moveTurns.change) },
+						{ id: "fileOps", label: "File-operation budget", limit: 1, value: String(budget.fileOps ?? POLICY.limits.plan.moveBudget.fileOps) },
+						{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(budget.commandStarts ?? POLICY.limits.plan.moveBudget.commandStarts) },
+					] : []),
+				],
+			};
 		}
 		if (viewId_ === "carto.atlas") {
 			const { atlas } = loadAtlas(brainDir);
@@ -917,6 +949,25 @@ export async function runScreen(session, options, runTerminal) {
 					flash("nothing was changed");
 					return true;
 				}
+				// Move targets are a list in the plan but a readable line-per-path field in the box.
+				if (viewId_ === "carto.plan" && rowKey.startsWith("move:")) {
+					if (changes.targets !== undefined) changes.targets = String(changes.targets).split(/[\n,]/).map((path) => path.trim()).filter((path) => path !== "");
+					const capabilities = {};
+					for (const [field, key] of [["filesAllowed", "files"], ["commandsAllowed", "commands"], ["networkAllowed", "network"]]) {
+						if (changes[field] === undefined) continue;
+						capabilities[key] = boolOf(String(changes[field]));
+						delete changes[field];
+					}
+					if (Object.keys(capabilities).length > 0) changes.capabilities = capabilities;
+					const budget = {};
+					for (const [field, key] of [["replies", "replies"], ["fileOps", "fileOps"], ["commandStarts", "commandStarts"]]) {
+						if (changes[field] === undefined) continue;
+						const raw = String(changes[field]).trim();
+						budget[key] = /^\d+$/.test(raw) ? Number(raw) : raw;
+						delete changes[field];
+					}
+					if (Object.keys(budget).length > 0) changes.budget = budget;
+				}
 				const said = editRow(brainDir, id, changes, root);
 				flash(said.replace(/\n+/g, " "));
 				if (said.startsWith("! ")) return false;
@@ -935,8 +986,9 @@ export async function runScreen(session, options, runTerminal) {
 			{ id: "salient", label: "Salient", limit: 5, value: "false" },
 		],
 		plan: () => [
-			{ id: "mode", label: "Mode", limit: 6, value: "look" },
-			{ id: "text", label: "Text", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "mode", label: "Mode", limit: 6, value: "change" },
+			{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: "" },
 			{ id: "network", label: "Network", limit: 5, value: "false" },
 			{ id: "standing", label: "Standing", limit: 5, value: "false" },
 		],
@@ -958,7 +1010,7 @@ export async function runScreen(session, options, runTerminal) {
 			return { kind: said("kind").trim(), text: said("text"), ...(said("doneWhen").trim() !== "" ? { done_when: said("doneWhen") } : {}), ...(bool("salient") !== undefined ? { salient: bool("salient") } : {}) };
 		}
 		if (book === "plan") {
-			return { mode: said("mode").trim(), text: said("text"), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
+			return { mode: said("mode").trim(), text: said("text"), ...(said("doneWhen").trim() !== "" ? { done_when: said("doneWhen") } : {}), ...(bool("network") !== undefined ? { network: bool("network") } : {}), ...(bool("standing") !== undefined ? { standing: bool("standing") } : {}) };
 		}
 		return { name: said("name"), gist: said("gist"), ...(said("detail").trim() !== "" ? { detail: said("detail") } : {}) };
 	};
@@ -982,6 +1034,67 @@ export async function runScreen(session, options, runTerminal) {
 			},
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
+	/** `n` on an envelope declares a child move through the same plan operation as the agent. */
+	const openMoveBox = (parentId) => {
+		const { plan } = loadPlan(brainDir);
+		const parent = plan?.items.find((item) => item.id === parentId);
+		if (parent === undefined) return flash("that envelope is no longer in the plan");
+		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) return flash(`${parent.id} is not an open envelope`);
+		const changing = parent.mode === POLICY.enums.planMode.change;
+		const fields = [
+			{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: "" },
+			{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: "" },
+			...(changing ? [
+				{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: "" },
+				{ id: "proof", label: "Required proof", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" },
+				{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: "true" },
+				{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: "true" },
+				{ id: "networkAllowed", label: "Network allowed", limit: 5, value: "false" },
+				{ id: "replies", label: "Reply budget", limit: 1, value: String(POLICY.limits.plan.moveTurns.change) },
+				{ id: "fileOps", label: "File-operation budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.fileOps) },
+				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
+			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
+		];
+		const handle = tui.showOverlay(new Box({
+			title: `new move under ${parent.id}`,
+			fields,
+			keyOf,
+			flash,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				const said = (key) => drafts.get(key) ?? "";
+				const number = (key) => {
+					const raw = said(key).trim();
+					return /^\d+$/.test(raw) ? Number(raw) : raw;
+				};
+				const op = {
+					action: "addMove",
+					parent: parent.id,
+					text: said("text"),
+					done_when: said("doneWhen"),
+					...(changing ? {
+						targets: said("targets").split(/[\n,]/).map((path) => path.trim()).filter((path) => path !== ""),
+						proof: said("proof"),
+						capabilities: { files: boolOf(said("filesAllowed")), commands: boolOf(said("commandsAllowed")), network: boolOf(said("networkAllowed")) },
+						budget: { replies: number("replies"), fileOps: number("fileOps"), commandStarts: number("commandStarts") },
+					} : said("proof").trim() !== "" ? { proof: said("proof") } : {}),
+				};
+				try {
+					const current = loadPlan(brainDir).plan;
+					if (current === undefined) return false;
+					const result = applyPlanOp(current, op, new Date().toISOString());
+					savePlan(brainDir, current);
+					flash(result.line);
+					brain.at = 0;
+					refresh(viewId(), true);
+					return true;
+				} catch (error) {
+					flash(error instanceof PlanError ? error.message : String(error.message ?? error));
+					return false;
+				}
+			},
+		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
+	};
 	/** The $EDITOR on the file of the row, or on the whole book by the row's line: the door Ctrl-O keeps open everywhere. */
 	const editTarget = () => {
 		const item = pageOf().list.selected();
@@ -994,8 +1107,8 @@ export async function runScreen(session, options, runTerminal) {
 		refresh(viewId(), true);
 	};
 	const edit = () => {
-		if (state.tab === "chat") return editChat();
-		if (state.tab === "context") return editContext();
+		if (chatTab()) return editChat();
+		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		if (BOOK_VIEWS[viewId()] !== undefined) {
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
@@ -1007,8 +1120,8 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
 	const editInEditor = () => {
-		if (state.tab === "chat") return editChat();
-		if (state.tab === "context") return editContext();
+		if (chatTab()) return editChat();
+		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		const book = BOOK_VIEWS[viewId()];
 		if (book !== undefined) {
 			const item = pageOf().list.selected();
@@ -1043,6 +1156,8 @@ export async function runScreen(session, options, runTerminal) {
 		change();
 		reveal(chatScroll, selectedRow() + chatBody.leadNow());
 	};
+	/** The shared chat model shown in Chat's Conversation, Work, or isolated Consult subtab. */
+	const chatProjection = () => (state.view.chat === "work" ? "work" : state.view.chat === "consult" ? "consult" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
 		if (all.length === 0) return;
@@ -1061,8 +1176,10 @@ export async function runScreen(session, options, runTerminal) {
 	const activate = ({ to, jump = false } = {}) => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
-		if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
-		else if (line.kind === "call" || line.kind === POLICY.enums.ledgerKind.note || line.kind === "detail") {
+		if (line.kind === "live") return void inPlace(() => chat.toggleLive(line.liveDepth, to));
+		else if (line.kind === "group" || line.kind === "block" || line.kind === "consult") inPlace(() => chat.toggle(line.item, to));
+		else if (line.kind === "consult-event") inPlace(() => chat.toggleRow(line.item, line.row, to));
+		else if (line.kind === "call" || line.kind === "note" || line.kind === "reasoning" || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
 			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
@@ -1076,7 +1193,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 	};
 	const copySelected = () => {
-		if (state.tab !== "chat") {
+		if (!chatTab()) {
 			const { list } = pageOf();
 			const item = list.selected();
 			if (item === undefined) return copyTab();
@@ -1084,7 +1201,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		copy(chat.textOf(line.item, line.row), "message", line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : "that message");
+		copy(chat.textOf(line.item, line.row), "message", line.kind === "consult" ? "that consultation" : line.kind === "consult-event" ? "that consultation activity" : line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : line.kind === "live" ? "that live reasoning" : "that message");
 	};
 
 	// ─── The commands mode ───────────────────────────────────────────────────
@@ -1095,7 +1212,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
-		const inChat = state.tab === "chat";
+		const inChat = chatTab();
 		const page = inChat ? undefined : pageOf();
 		const list = page?.list;
 		const scroll = scrollOf();
@@ -1108,28 +1225,34 @@ export async function runScreen(session, options, runTerminal) {
 			return second === undefined ? undefined : command(second);
 		}
 		if (key === "z") return void (state.pending = "z");
-		// The rows of the views, in every tab but Chat: the same keys do everywhere what they do in Hands — f
-		// folds a report, v archives a row out of what the agent reads, d deletes it for good, t settles it, x unshelves a file.
-		// They stand on whatever the view shows: a report or a shelved file in Hands, a node of the graph, a
-		// ledger entry, a plan item in Carto, a request in Requests, a message of the user or the agent in the
-		// Context window. The operations themselves are in src/ops.mjs, the same code the commands run.
+		// The rows of the views outside Talk and Work use the current record's own operations: f folds a report,
+		// v archives a row out of what the agent reads, d deletes it for good, t settles it, and x unshelves a file.
+		// They stand on a report or shelved file in Current shared brain, a graph node, a ledger entry, a plan envelope
+		// or move, or a request. Model rows are frozen or prospective and have no mutable-record action.
 		if (!inChat) {
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
-			const deletable = rowKey !== undefined && (/^(?:report|entry|item|node|request):/.test(rowKey) || item.editKind === "chat-you" || item.editKind === "chat-agent");
+			const deletable = rowKey !== undefined && /^(?:report|entry|item|envelope|move|node|request):/.test(rowKey);
 			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
 				const said = foldRow(brainDir, bookId);
 				flash(said.replace(/\n+/g, " "));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
 				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
 				refresh(viewId(), true);
 				return;
 			}
-			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|node):/.test(rowKey)) {
+			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
+				const move = rowKey.startsWith("move:") ? loadPlan(brainDir).plan?.moves.find((entry) => entry.id === bookId) : undefined;
+				if (move?.status === POLICY.enums.moveStatus.reported) {
+					setMode("type");
+					prompt.insertTextAtCursor(`/done ${bookId} -- `);
+					flash(`Write why ${bookId}'s reported proof witnesses its done-when, then press Enter.`);
+					return;
+				}
 				flash(settleRow(brainDir, bookId, root));
 				refresh(viewId(), true);
 				return;
@@ -1148,13 +1271,12 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "d" && deletable) {
 				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
 					state.deleteArm = undefined;
-					if (item.editKind === "chat-you" || item.editKind === "chat-agent") deleteChat(item);
-					else flash(dropRow(brainDir, bookId));
+					flash(dropRow(brainDir, bookId));
 					refresh(viewId(), true);
 					return;
 				}
 				state.deleteArm = { id: rowKey, at: Date.now() };
-				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : item.editKind === "chat-you" || item.editKind === "chat-agent" ? "Press d again: the message goes for good" : `Press d again: ${bookId} goes for good`);
+				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : `Press d again: ${bookId} goes for good`);
 				return;
 			}
 			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
@@ -1170,10 +1292,11 @@ export async function runScreen(session, options, runTerminal) {
 					return void submit(`/deny ${bookId}`);
 				}
 			}
-			// In a book view, n opens the box on a template for a new entry; E keeps the editor.
+			// In Plan, n on an envelope declares one child move; elsewhere it opens the book's new-entry box.
+			if (key === "n" && viewId() === "carto.plan" && rowKey?.startsWith("envelope:")) return void openMoveBox(bookId);
 			if (key === "n" && BOOK_VIEWS[viewId()] !== undefined) return void openAddBox(BOOK_VIEWS[viewId()]);
-			// In Hands, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
-			if (key === "a" && viewId() === "context.hands") {
+			// In Current shared brain, a puts /shelve in the prompt: shelving names a file, and the file is yours to name.
+			if (key === "a" && viewId() === "carto.hands") {
 				setMode("type");
 				prompt.insertTextAtCursor("/shelve ");
 				return;
@@ -1207,6 +1330,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "ctrl+e") return void scroll.scrollBy(1);
 		if (key === "ctrl+y") return void scroll.scrollBy(-1);
 		if (inChat) {
+			if (key === "d") return void removeChat();
 			if (key === "j" || key === "down") return void moveSelection(1);
 			if (key === "k" || key === "up") return void moveSelection(-1);
 			if (key === "g" || key === "home") return void (stops().length > 0 && showStop(stops()[0]));
@@ -1296,6 +1420,7 @@ export async function runScreen(session, options, runTerminal) {
 	const ui = {
 		state,
 		chat,
+		chatProjection,
 		tabs: TABS,
 		themeVersion: () => themeVersion,
 		chatRows: () => chatScroll.viewportHeight,
@@ -1309,7 +1434,7 @@ export async function runScreen(session, options, runTerminal) {
 		fileHint() {
 			if (state.tab === "context") return undefined;
 			const item = pageOf()?.list.selected();
-			const file = item?.target?.file ?? fileOf(viewId());
+			const file = item?.target?.file ?? item?.path ?? fileOf(viewId());
 			if (file === undefined) return undefined;
 			const rel = relative(root, file) || ".";
 			// Where e opens the small box on the row's fields (said in the strip below), the editor is E; anywhere else, e is the editor.
@@ -1337,16 +1462,28 @@ export async function runScreen(session, options, runTerminal) {
 			const question = session.asks?.pending();
 			const typed = prompt.getText();
 			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
-			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to type";
-			return [[" COMMANDS ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
+			let hint = "Esc or i to write";
+			if (question !== undefined) hint = "the agent waits for your answer: Esc, then type it";
+			if (state.pending !== "") hint = `${state.pending}…`;
+			return [[" COMMAND MODE ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
 		prompt() {
 			const question = session.asks?.pending();
-			if (question !== undefined) return { text: "? ", style: "warn bold" };
-			// What is switched off is in the strip; here stands only where the words go.
-			return { text: session.activeTask?.() !== undefined && core.busy() ? "→ task › " : "› ", style: "user bold" };
+			if (question !== undefined) return { text: "Answer › ", style: "warn bold" };
+			// Keep the terminal core's safety marks at the place someone acts, but give the words a stable human role
+			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
+			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
+			const task = session.activeTask?.() !== undefined && core.busy();
+			const role = task ? "Task" : "You";
+			if (marks !== "") return { text: `${marks} ${role} › `, style: "warn bold" };
+			if (task) return { text: "Task › ", style: "tool bold" };
+			return { text: "You › ", style: "user bold" };
 		},
-		placeholder: () => (session.asks?.pending() !== undefined ? "your answer" : core.busy() ? "type to speak to the agent while it works · Esc for commands" : "type a message, or /help · Esc for commands"),
+		placeholder: () => {
+			if (session.asks?.pending() !== undefined) return "Write the answer";
+			if (core.busy()) return "Message the agent while it works · Esc for commands";
+			return "Message Cartographer, or /help · Esc for commands";
+		},
 	};
 	const chatBody = new ChatBody(ui);
 	const scrollbar = { scrollbar: "auto", scrollbarTrackStyle: (text) => `${sgr("faint")}${text}\x1b[39m`, scrollbarThumbStyle: (text) => `${sgr("muted")}${text}\x1b[39m` };
@@ -1393,8 +1530,8 @@ export async function runScreen(session, options, runTerminal) {
 			new TabBar(ui),
 			{ component: new ViewBar(ui), visible: () => VIEWS[state.tab] !== undefined },
 			{ component: new Air(), visible: airy },
-			{ component: chatScroll, ...full, visible: () => state.tab === "chat" },
-			...PAGES.map((id) => ({ component: pages.get(id).scroll, ...full, visible: () => state.tab !== "chat" && viewId() === id })),
+			{ component: chatScroll, ...full, visible: () => chatTab() },
+			...PAGES.map((id) => ({ component: pages.get(id).scroll, ...full, visible: () => !chatTab() && viewId() === id })),
 			{ component: new Air(), visible: airy },
 			new Strip(ui),
 			{ component: prompt, basis: "auto" },
@@ -1471,7 +1608,8 @@ export async function runScreen(session, options, runTerminal) {
 		if (state.closed) return;
 		measure();
 		syncThinking();
-		if (state.tab !== "chat") refresh();
+		if (!chatTab()) refresh();
+		else if (state.view.chat === "consult" && chat.refreshConsult()) draw();
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();

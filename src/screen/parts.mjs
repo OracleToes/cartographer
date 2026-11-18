@@ -12,13 +12,60 @@ import { CURSOR_MARKER, Editor, renderFakeCursor, truncateToWidth, visibleWidth 
 import { POLICY } from "../config.mjs";
 import { cut, paint, paintStyled, sgr, width as cells, wrap } from "./text.mjs";
 
-/** Empty cells at the left and right edge of the screen; none on a screen too narrow to spare them. */
-export const marginOf = (width) => (width >= 30 ? 2 : 0);
+/**
+ * Empty cells at the left and right edge of the screen. Wide terminals get a calmer reading column; narrow ones
+ * give those cells back to the content instead of making every row feel needlessly cramped.
+ */
+export const marginOf = (width) => {
+	if (width < 36) return 0;
+	if (width < 72) return 1;
+	if (width < 120) return 2;
+	if (width < 160) return 4;
+	return 6;
+};
 /** From how many rows on the screen has an empty row under the tabs, above the strip and under what is typed. */
 export const AIRY_ROWS = POLICY.limits.screen.airyRows;
 
 
 const widthOf = (text) => visibleWidth(text);
+const BLOCK_RAILS = {
+	bgUser: ["▎", "user"],
+	bgTool: ["│", "tool"],
+	bgNote: ["┊", "note"],
+};
+const EMPTY_RAIL = [" ", ""];
+const TAB_BRAND = " Cartographer ";
+const VIEW_PREFIX = " views ";
+const COMPACT_VIEW_NAMES = {
+	"Current shared brain": "Brain",
+	"Last step": "Last",
+	"This session": "Session",
+	"git HEAD": "HEAD",
+	"Latest sent": "Latest",
+	"Main sent": "Main",
+	"Raw payload": "Raw",
+	"Next preview": "Preview",
+	"Current accounting": "Accounting",
+};
+const ROOMY_VIEW_NAV = { compact: false, separator: " · ", switchHint: "  [ ] switch" };
+const COMPACT_VIEW_NAV = { compact: true, separator: "·", switchHint: " [ ]" };
+const tabLabels = (tabs, compact = false) =>
+	tabs.map((tab, index) => (compact ? ` ${index + 1} ` : ` ${index + 1} ${tab.name} `));
+const labelsWidth = (labels) => labels.reduce((sum, label) => sum + widthOf(label), 0);
+const compactViewName = (view) => COMPACT_VIEW_NAMES[view.name] ?? view.name;
+const viewLabel = (view, compact) => ` ${compact ? compactViewName(view) : view.name} `;
+const viewNavigationWidth = (views, layout) =>
+	widthOf(VIEW_PREFIX) +
+	widthOf(layout.switchHint) +
+	views.reduce(
+		(sum, view, index) => sum + widthOf(viewLabel(view, layout.compact)) + (index === 0 ? 0 : widthOf(layout.separator)),
+		0,
+	);
+function viewNavigation(views, inner) {
+	if (viewNavigationWidth(views, ROOMY_VIEW_NAV) <= inner) return ROOMY_VIEW_NAV;
+	if (viewNavigationWidth(views, COMPACT_VIEW_NAV) <= inner) return COMPACT_VIEW_NAV;
+	return undefined;
+}
 const SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 /** The code-unit offset where the grapheme before `at` starts: edits never cut a sign in two. */
 const beforeAt = (text, at) => {
@@ -93,9 +140,12 @@ export function contentRow(line, width, chosen = false) {
 	const inner = width - 2 * marginOf(width);
 	if (line === undefined) return " ".repeat(width);
 	if (line.styled !== undefined) return `${edge(width)}${paintStyled(line.styled, line.cells, inner, chosen ? "bgSel" : "")}${edge(width)}`;
-	// A block's text stands a cell in from its edge; what you said has that edge drawn, in your colour.
-	const lead = line.pad ? [[line.bg === "bgUser" ? "▎" : " ", "user"]] : [];
-	return `${edge(width)}${paint([...lead, ...line.spans], inner, chosen ? "bgSel" : (line.bg ?? ""))}${edge(width)}`;
+	// A block gets one quiet, consistent rail. It groups a multi-line message without making every line compete for
+	// attention: your words have a blue edge, tool work a teal one, and private notes a violet one.
+	const rail = line.pad ? (BLOCK_RAILS[line.bg] ?? EMPTY_RAIL) : undefined;
+	const spans = rail === undefined ? line.spans : [rail, ...line.spans];
+	const background = chosen ? "bgSel" : (line.bg ?? "");
+	return `${edge(width)}${paint(spans, inner, background)}${edge(width)}`;
 }
 /** A line that pi-tui will take: never wider than it was asked for, whatever went into it. */
 const safe = (line, width) => (visibleWidth(line) > width ? truncateToWidth(line, width, "…") : line);
@@ -123,14 +173,29 @@ export class TabBar {
 		return guarded(width, () => {
 			const { ui } = this;
 			const inner = width - 2 * marginOf(width);
+			const full = tabLabels(ui.tabs);
+			const compact = tabLabels(ui.tabs, true);
+			const fullWidth = labelsWidth(full);
+			const brandWidth = widthOf(TAB_BRAND);
+			// The product name is useful orientation when there is room. On smaller terminals, preserve the tab names;
+			// if those do not fit either, the numbered tabs stay whole rather than being cut halfway through a name.
+			const showBrand = brandWidth + 1 + fullWidth <= inner;
+			const labels = fullWidth <= inner ? full : compact;
 			const spans = [];
 			this.spans = [];
 			let x = 0;
+			if (showBrand) {
+				spans.push([TAB_BRAND, "carto bold"]);
+				x += brandWidth;
+				spans.push([" ", ""]);
+				x++;
+			}
 			for (const [index, tab] of ui.tabs.entries()) {
-				const label = ` ${index + 1} ${tab.name} `;
-				this.spans.push({ id: tab.id, from: marginOf(width) + x, to: marginOf(width) + x + label.length });
+				const label = labels[index];
+				const cells = widthOf(label);
+				this.spans.push({ id: tab.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
 				spans.push([label, tab.id === ui.state.tab ? "bgTab" : "muted"]);
-				x += label.length;
+				x += cells;
 			}
 			return [barRow(spans, width, "bgBar")];
 		});
@@ -154,20 +219,41 @@ export class ViewBar {
 		return guarded(width, () => {
 			const { ui } = this;
 			const views = ui.views();
-			const spans = [[" ", ""]];
-			this.spans = [];
-			let x = 1;
-			for (const view of views) {
-				const label = ` ${view.name} `;
-				this.spans.push({ id: view.id, from: marginOf(width) + x, to: marginOf(width) + x + label.length });
-				spans.push([label, view.id === ui.view() ? "user bold under" : "muted"]);
-				x += label.length;
-			}
+			const inner = width - 2 * marginOf(width);
+			if (views.length === 0) return [barRow([], width, "bgPanel")];
+			const active = views.find((view) => view.id === ui.view()) ?? views[0];
+			const layout = viewNavigation(views, inner);
 			const file = ui.fileHint();
-			spans.push(["   [ ] change view", "faint"]);
-			x += widthOf("   [ ] change view");
-			// The file goes in only whole; a hint cut in half says where e goes nowhere.
-			if (file !== undefined && x + widthOf(` · ${file}`) <= width - 2 * marginOf(width)) spans.push([` · ${file}`, "faint"]);
+			const fileHint = file === undefined ? "" : ` · ${file}`;
+			const spans = [[VIEW_PREFIX, "faint"]];
+			this.spans = [];
+			let x = widthOf(VIEW_PREFIX);
+			if (layout !== undefined) {
+				for (const [index, view] of views.entries()) {
+					if (index > 0) {
+						spans.push([layout.separator, "faint"]);
+						x += widthOf(layout.separator);
+					}
+					const label = viewLabel(view, layout.compact);
+					const cells = widthOf(label);
+					this.spans.push({ id: view.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
+					spans.push([label, view.id === active.id ? "user bold under" : "muted"]);
+					x += cells;
+				}
+				spans.push([layout.switchHint, "faint"]);
+				x += widthOf(layout.switchHint);
+				// The file goes in only whole; a hint cut in half says where e goes nowhere.
+				if (fileHint !== "" && x + widthOf(fileHint) <= inner) spans.push([fileHint, "faint"]);
+			} else {
+				// At a narrow width, one clear current view beats a ragged, half-visible row of alternatives. The
+				// persistent [ ] cue keeps the complete view switcher discoverable without pretending hidden labels fit.
+				const room = Math.max(1, inner - x - widthOf(COMPACT_VIEW_NAV.switchHint) - 2);
+				const label = ` ${cut(compactViewName(active), room)} `;
+				const cells = widthOf(label);
+				this.spans.push({ id: active.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
+				spans.push([label, "user bold under"]);
+				spans.push([COMPACT_VIEW_NAV.switchHint, "faint"]);
+			}
 			return [barRow(spans, width, "bgPanel")];
 		});
 	}
@@ -207,7 +293,8 @@ export class ChatBody {
 	/** The model's lines at the width last drawn. */
 	lines() {
 		const { chat } = this.ui;
-		if (this.made === undefined || this.made.version !== chat.version || this.made.cols !== this.cols) this.made = { version: chat.version, cols: this.cols, lines: chat.lines(this.cols) };
+		const projection = this.ui.chatProjection();
+		if (this.made === undefined || this.made.version !== chat.version || this.made.cols !== this.cols || this.made.projection !== projection) this.made = { version: chat.version, cols: this.cols, projection, lines: chat.lines(this.cols, projection) };
 		return this.made.lines;
 	}
 	/** How many empty rows stand above the conversation as it is now. */
@@ -223,7 +310,7 @@ export class ChatBody {
 			// A short conversation stands at the bottom of its window, next to where it is continued.
 			this.rows = ui.chatRows();
 			this.lead = Math.max(0, this.rows - lines.length);
-			const key = `${ui.chat.version}|${width}|${chosen ?? ""}|${ui.themeVersion()}|${this.lead}`;
+			const key = `${ui.chat.version}|${ui.chatProjection()}|${width}|${chosen ?? ""}|${ui.themeVersion()}|${this.lead}`;
 			if (this.painted?.key !== key) {
 				// A line is painted once and kept with it: the model keeps the lines of what did not change.
 				const how = `${width}|${ui.themeVersion()}`;
@@ -273,14 +360,19 @@ export class ListBody {
 	}
 }
 
-/** The strip: what the agent is doing, and how things stand. `ui.status()` gives its two rows as spans. */
+/** The strip: what the agent is doing, shared state, and the current key reminder. `ui.status()` gives its rows as spans. */
 export class Strip {
 	constructor(ui) {
 		this.ui = ui;
 	}
 	invalidate() {}
 	render(width) {
-		return guarded(width, () => this.ui.status().map((spans) => barRow(spans, width, "bgBar")));
+		return guarded(width, () => {
+			// The strip reads from now to later: immediate activity, quieter shared state, then the key reminder next
+			// to the input. Giving those rows descending chrome makes the information order visible without extra rules.
+			const grounds = ["bgBar", "bgPanel", "bgInput"];
+			return this.ui.status(width).map((spans, index) => barRow(spans, width, grounds[index] ?? "bgPanel"));
+		});
 	}
 }
 
@@ -644,6 +736,6 @@ export class Farewell {
 	}
 	invalidate() {}
 	render(width) {
-		return guarded(width, () => this.ui.chat.lines(Math.max(8, width - 2 * marginOf(width))).map((line) => contentRow(line, width)));
+		return guarded(width, () => this.ui.chat.lines(Math.max(8, width - 2 * marginOf(width)), "talk").map((line) => contentRow(line, width)));
 	}
 }
