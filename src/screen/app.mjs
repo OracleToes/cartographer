@@ -27,7 +27,6 @@ import { EventEmitter } from "node:events";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
@@ -272,11 +271,18 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// The Consult subview reads co<N> audit records directly and separately from parent talk/work. Discovering them
-	// never adds their private material to the parent conversation or its next request.
-	const readConferenceRaw = (id) => loadConference(brainDir, id).conference;
-	const listConferenceRaw = () => listConferences(brainDir);
-	const chat = createChat({ markdown, describeRef, readConference: readConferenceRaw, listConferences: listConferenceRaw });
+	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
+	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
+	let consultProjection = { at: 0, generation: 0, loading: false, conferences: [] };
+	const readConferenceRaw = (id) => consultProjection.conferences.find((entry) => entry.id === id)?.conference;
+	const listConferenceRaw = () => consultProjection.conferences;
+	const chat = createChat({
+		markdown,
+		describeRef,
+		readConference: readConferenceRaw,
+		listConferences: listConferenceRaw,
+		consultStatus: () => ({ loading: consultProjection.loading, error: consultProjection.error }),
+	});
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -557,6 +563,35 @@ export async function runScreen(session, options, runTerminal) {
 	const queries = application.queries;
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
 	const talk = Object.freeze({ execute: application.execute });
+	/** Consult records are loaded only through the application facade and stay in Chat · Consult's private cache. */
+	const refreshConsultProjection = (force = false) => {
+		if (consultProjection.loading && !force) return;
+		if (!force && Date.now() - consultProjection.at < (EVERY.chat ?? POLICY.timing.screenRefreshMs.fallback)) return;
+		consultProjection.controller?.abort();
+		const generation = consultProjection.generation + 1;
+		const controller = new AbortController();
+		consultProjection = { ...consultProjection, at: Date.now(), generation, loading: true, error: undefined, controller };
+		void queries.consult.list({ signal: controller.signal })
+			.then((result) => {
+				if (consultProjection.generation !== generation) return;
+				if (result.ok) consultProjection = { ...consultProjection, loading: false, controller: undefined, conferences: result.data.conferences };
+				else if (result.error.kind === "cancelled") consultProjection = { ...consultProjection, loading: false, controller: undefined };
+				else consultProjection = { ...consultProjection, loading: false, controller: undefined, error: result.error };
+				chat.refreshConsult();
+				if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
+			})
+			.catch((error) => {
+				if (consultProjection.generation !== generation) return;
+				consultProjection = { ...consultProjection, loading: false, controller: undefined, error: { message: error?.message ?? String(error) } };
+				chat.refreshConsult();
+				if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
+			});
+	};
+	const cancelConsultProjection = () => {
+		if (consultProjection.loading !== true) return;
+		consultProjection.controller?.abort();
+		consultProjection = { ...consultProjection, generation: consultProjection.generation + 1, loading: false, controller: undefined };
+	};
 	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
 	const DEFERRED_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
@@ -688,6 +723,11 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
+		if (id === "chat.consult") {
+			refreshConsultProjection(force);
+			if (chat.refreshConsult()) draw();
+			return;
+		}
 		const page = pageOf(id);
 		if (page === undefined) return;
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
@@ -790,7 +830,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (!TABS.some((tab) => tab.id === id)) return;
 		const previous = viewId();
 		state.tab = id;
-		if (previous !== viewId()) cancelProjection(previous);
+		if (previous !== viewId()) {
+			cancelProjection(previous);
+			if (previous === "chat.consult") cancelConsultProjection();
+		}
 		tui.resetTextSelection();
 		refresh(viewId(), true);
 		draw();
@@ -800,7 +843,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (VIEWS[state.tab] === undefined) return;
 		const previous = viewId();
 		state.view[state.tab] = id;
-		if (previous !== viewId()) cancelProjection(previous);
+		if (previous !== viewId()) {
+			cancelProjection(previous);
+			if (previous === "chat.consult") cancelConsultProjection();
+		}
 		tui.resetTextSelection();
 		refresh(viewId(), true);
 		draw();
@@ -1708,7 +1754,7 @@ export async function runScreen(session, options, runTerminal) {
 		measure();
 		syncThinking();
 		if (!chatTab()) refresh();
-		else if (state.view.chat === "consult" && chat.refreshConsult()) draw();
+		else if (state.view.chat === "consult") refresh("chat.consult");
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
@@ -1725,6 +1771,7 @@ export async function runScreen(session, options, runTerminal) {
 		stopped = true;
 		stopApplicationEvents();
 		for (const id of projections.keys()) cancelProjection(id);
+		cancelConsultProjection();
 		clearInterval(tick);
 		process.stdin.off("data", watchInput);
 		// What stays on the terminal: the conversation, as it stood. A process that is going down in a hurry

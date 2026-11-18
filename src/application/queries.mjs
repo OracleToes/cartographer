@@ -6,6 +6,7 @@
 import { assessmentPath } from "../assessment.mjs";
 import { activeMoveOverlays, atlasPath, attentionSnapshot, fileMarks, loadAtlas } from "../atlas.mjs";
 import { changeSince, lastChange, uncommitted } from "../checkpoints.mjs";
+import { listConferences } from "../conference.mjs";
 import { composedRows, contextPath, loadContext, loadReport, shelfText } from "../context.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
@@ -31,6 +32,10 @@ export const REVIEW_QUERY = Object.freeze({
 	last: "review.last",
 	session: "review.session",
 	git: "review.git",
+});
+
+export const CONSULT_QUERY = Object.freeze({
+	list: "consult.list",
 });
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -78,6 +83,7 @@ const afterCurrentTurn = () => new Promise((resolve) => queueMicrotask(resolve))
 
 const DEFAULT_READERS = Object.freeze({ loadAtlas, loadLedger, loadPlan, loadContext });
 const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommitted });
+const DEFAULT_CONSULT_READERS = Object.freeze({ listConferences });
 
 /**
  * @param {{
@@ -85,10 +91,11 @@ const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommit
  *   root?: string,
  *   readers?: typeof DEFAULT_READERS,
  *   reviewReaders?: typeof DEFAULT_REVIEW_READERS,
+ *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -323,6 +330,24 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 	};
 	const review = Object.freeze({ last: reviewLast, session: reviewSession, git: reviewGit });
 
+	const consultList = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			// Full co<N> records remain a Consult-only projection. The screen cache passes these only to its isolated
+			// Consult renderer; they never join Conversation, Work, or a request/context projection.
+			return uiSuccess({ conferences: consultReaders.listConferences(brainDir) }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read consultation conferences.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const consult = Object.freeze({ list: consultList });
+
 	const entry = async (input, options = {}) => {
 		const ready = await prepare(options);
 		if (ready.result !== undefined) return ready.result;
@@ -362,5 +387,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, review, entry });
+	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, review, consult, entry });
 }

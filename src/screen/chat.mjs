@@ -122,12 +122,13 @@ const resultSignature = (record) => {
 };
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readConference?: (id: string) => object | undefined, listConferences?: () => { id: string, conference?: object }[] }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readConference?: (id: string) => object | undefined, listConferences?: () => { id: string, conference?: object }[], consultStatus?: () => { loading?: boolean, error?: { message?: string } } }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readConference/listConferences: read consult-local co<N> audit records only for the dedicated Consult
+ *   readConference/listConferences: use consult-local co<N> audit records only for the dedicated Consult
  *   projection. Their private material is never copied into a parent conversation or ordinary Work projection.
+ *   consultStatus: reports the screen-owned asynchronous Consult projection cache; it never reads the audit itself.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef, readConference, listConferences } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readConference, listConferences, consultStatus } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -502,8 +503,11 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		const inner = cols - 2;
 		const add = (spans, ref = {}) => out.push({ spans, ...ref, ...(ref.bg !== undefined ? { pad: 1 } : {}) });
 		const blank = () => { if (out.length > 0 && out.at(-1).spans.length > 0) out.push(BLANK); };
+		const projection = typeof consultStatus === "function" ? consultStatus() ?? {} : {};
+		if (projection.error?.message) add([[`! ${projection.error.message}`, "err"]], { kind: "consult-status", bg: "bgTool" });
+		else if (projection.loading && consultations.size > 0) add([["Refreshing consultation conferences…", "muted"]], { kind: "consult-status", bg: "bgTool" });
 		if (consultations.size === 0) {
-			add([["No consultation conferences yet", "muted"]], { kind: "consult-empty", bg: "bgTool" });
+			add([[projection.loading ? "Loading consultation conferences…" : "No consultation conferences yet", "muted"]], { kind: "consult-empty", bg: "bgTool" });
 			add([["When Cartographer runs consult, its isolated member activity appears here — never in parent Conversation or Work.", "faint"]], { kind: "consult-empty", bg: "bgTool" });
 			return out;
 		}

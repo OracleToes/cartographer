@@ -474,6 +474,45 @@ test("application: review queries defer checkpoint and Git projections", async (
 	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
 });
 
+test("application: consult projection defers its isolated audit list", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let reads = 0;
+	const conference = { id: "co1", question: "Does the cache stay private?", status: "running" };
+	const queries = createWorkspaceQueries({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		consultReaders: { listConferences: () => { reads++; return [{ id: "co1", conference }]; } },
+	});
+	const pending = queries.consult.list({ requestId: "consult-list" });
+	assert.equal(reads, 0, "Consult audit discovery leaves the active render/key stack before its legacy reader runs");
+	const listed = await pending;
+	assert.equal(listed.ok, true);
+	if (!listed.ok) throw new Error(listed.error.message);
+	assert.deepEqual(listed.data.conferences, [{ id: "co1", conference }]);
+	assert.equal(listed.meta.requestId, "consult-list");
+	const controller = new AbortController();
+	controller.abort();
+	const cancelled = await queries.consult.list({ signal: controller.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled Consult projection must not inspect its audit directory");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(reads, 1);
+	const cache = { loading: true, conferences: [] };
+	const chat = createChat({
+		listConferences: () => cache.conferences,
+		readConference: (id) => cache.conferences.find((entry) => entry.id === id)?.conference,
+		consultStatus: () => cache,
+	});
+	const chatText = (projection) => chat.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
+	assert.match(chatText("consult"), /Loading consultation conferences/, "Consult names its asynchronous cache state rather than reading audit files while it renders");
+	cache.loading = false;
+	cache.conferences = [{ id: "co1", conference }];
+	chat.refreshConsult();
+	assert.match(chatText("consult"), /Consultation co1/);
+	assert.doesNotMatch(chatText("work"), /Does the cache stay private/, "a cached conference remains exclusive to Consult");
+});
+
 test("application: composed facade dispatches actions and publishes cache-invalidating facts", async (t) => {
 	const { brainDir, root } = fresh(t);
 	const events = [];
