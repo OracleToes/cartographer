@@ -1,8 +1,8 @@
 // Typed controls for mutable Runtime managers.
 //
-// Shell windows, wake schedules, and model routes stay owned by their established domain managers. This adapter
-// gives terminal and future Runtime controls the same deferred, capability-checked result boundary as durable
-// workspace actions; a renderer never needs to mutate a live manager directly.
+// Shell windows, wake schedules, private task messages, and model routes stay owned by their established domain
+// managers. This adapter gives terminal and future Runtime controls the same deferred, capability-checked result
+// boundary as durable workspace actions; a renderer never needs to mutate a live manager directly.
 import { POLICY } from "../config.mjs";
 import { WakeError } from "../wakes.mjs";
 import { WindowError } from "../windows.mjs";
@@ -16,6 +16,7 @@ export const RUNTIME_ACTION = Object.freeze({
 	closeShell: "runtime.shell.close",
 	closeAllShells: "runtime.shell.close-all",
 	removeWake: "runtime.wake.remove",
+	routeTaskMessage: "runtime.task.message",
 	ensureModel: "runtime.model.ensure",
 	selectModel: "runtime.model.select",
 });
@@ -51,6 +52,13 @@ export const RUNTIME_CAPABILITY_DEFINITIONS = Object.freeze([
 		intent: UI_ACTION_INTENT.destructive,
 		confirmation: UI_CONFIRMATION.acknowledge,
 		available: ({ wakes }) => typeof wakes?.remove === "function" ? true : { enabled: false, reason: "This session has no wake schedule." },
+	},
+	{
+		id: RUNTIME_ACTION.routeTaskMessage,
+		label: "Message active task",
+		category: "runtime",
+		intent: UI_ACTION_INTENT.mutate,
+		available: ({ work }) => typeof work?.tell === "function" ? true : { enabled: false, reason: "This session has no active-task message router." },
 	},
 	{
 		id: RUNTIME_ACTION.ensureModel,
@@ -114,6 +122,11 @@ const checkedInput = (action, input, meta) => {
 		if (id === undefined) return { result: invalidInput("Choose a wake before removing it.", meta, "id") };
 		return { value: { id } };
 	}
+	if (action === RUNTIME_ACTION.routeTaskMessage) {
+		const text = nonEmpty(input.text);
+		if (text === undefined) return { result: invalidInput("A task message cannot be empty.", meta, "text") };
+		return { value: { text } };
+	}
 	if (action === RUNTIME_ACTION.ensureModel) return { value: {} };
 	if (action === RUNTIME_ACTION.selectModel) {
 		const modelId = nonEmpty(input.modelId);
@@ -174,13 +187,14 @@ const modelFailure = (error, meta) => {
  * @param {{
  *   windows?: { send?: (name: string, line: string, options?: { waitMs?: number, signal?: AbortSignal }) => Promise<any>, close?: (name: string, options?: { why?: string }) => object, closeAll?: (options?: { why?: string }) => string[] },
  *   wakes?: { remove?: (id: string) => any[] },
+ *   work?: { tell?: (text: string) => boolean | { kind?: string } | Promise<boolean | { kind?: string }> },
  *   models?: { ensure?: () => Promise<object>, select?: (modelId: string, limits?: { contextWindow?: number }) => Promise<object | false> },
  *   shellSendWaitMs?: number,
  *   now?: () => number,
  * }} options
  */
-export function createRuntimeApplication({ windows, wakes, models, shellSendWaitMs = POLICY.timing.terminal.shellSendWaitMs, now = () => Date.now() } = {}) {
-	const context = { windows, wakes, models };
+export function createRuntimeApplication({ windows, wakes, work, models, shellSendWaitMs = POLICY.timing.terminal.shellSendWaitMs, now = () => Date.now() } = {}) {
+	const context = { windows, wakes, work, models };
 
 	const execute = async (action, input = {}, options = {}) => {
 		const meta = metadata(options, now);
@@ -208,6 +222,11 @@ export function createRuntimeApplication({ windows, wakes, models, shellSendWait
 			}), { meta, confirmation: request });
 		}
 		try {
+			if (action === RUNTIME_ACTION.routeTaskMessage) {
+				const route = await work.tell(checked.value.text);
+				const routed = route === true || route?.kind === "task";
+				return uiSuccess({ action, routed }, { meta, notices: routed ? [{ level: "success", message: "The message will reach the running task at its next step." }] : [] });
+			}
 			if (action === RUNTIME_ACTION.ensureModel) {
 				const limits = await models.ensure();
 				return uiSuccess({ action, limits }, { meta, notices: [{ level: "success", message: "The active model route is ready." }] });

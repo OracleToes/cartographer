@@ -588,6 +588,7 @@ export async function runScreen(session, options, runTerminal) {
 			wakes: session.wakes,
 			asks: session.asks,
 			activeTask: session.activeTask,
+			work: session.work,
 			model: session.models?.current ?? session.model,
 			models: session.models,
 			preview: session.preview,

@@ -110,6 +110,11 @@ export async function runTerminal(session, options) {
 		known: () => Array.isArray(session.servedModels) ? session.servedModels : [config.model].filter((id) => typeof id === "string" && id !== ""),
 		select: typeof session.setModel === "function" ? async (modelId, limits = {}) => await session.setModel(modelId, context, limits) : undefined,
 	});
+	// The task message port has the same compatibility shape: old test sessions retain their aliases, while normal
+	// terminal and Screen paths route their durable task steering through the application action below.
+	const workMessenger = session.work ?? Object.freeze({
+		tell: typeof session.tellWork === "function" ? session.tellWork.bind(session) : typeof session.tellTask === "function" ? session.tellTask.bind(session) : undefined,
+	});
 	const application = options.application ?? createApplication({
 		brainDir: options.brainDir,
 		root: options.root,
@@ -120,6 +125,7 @@ export async function runTerminal(session, options) {
 			engine,
 			windows,
 			wakes,
+			work: workMessenger,
 			model: modelManager.current,
 			models: modelManager,
 			preview: session.preview,
@@ -2255,11 +2261,16 @@ export async function runTerminal(session, options) {
 				}
 				const wasBusy = busy;
 				userSpoke();
-				// A private task owns its input while it runs and receives this line with its next result.
-				const routed = wasBusy
-					? (session.tellWork?.(text) ?? (session.tellTask?.(text) ? { kind: "task" } : false))
-					: false;
-				if (routed !== false && routed !== undefined) {
+				// A private task owns its input while it runs and receives this line with its next result. The action records
+				// that durable steering after leaving the input handler; a task that completed in the meantime falls through
+				// to the ordinary main-agent interruption below.
+				const routeAvailable = application.capabilities.availability(RUNTIME_ACTION.routeTaskMessage)?.enabled === true;
+				const routed = wasBusy && routeAvailable ? await runtimeAction(RUNTIME_ACTION.routeTaskMessage, { text }) : undefined;
+				if (routed !== undefined && !routed.ok) {
+					line(`! ${routed.error.message}`);
+					return;
+				}
+				if (routed?.data.routed === true) {
 					windows?.nudge();
 					line(dim("  (sent to the running task: it reads it at its next step, and the main agent is told with the report)"));
 					return;

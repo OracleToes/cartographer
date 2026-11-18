@@ -847,6 +847,10 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(unavailable.ok, false);
 	if (unavailable.ok) throw new Error("a session without windows must expose a typed unavailable action");
 	assert.equal(unavailable.error.code, UI_ERROR_CODE.policyBlocked);
+	const noTaskRouter = await noWindows.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Continue." });
+	assert.equal(noTaskRouter.ok, false);
+	if (noTaskRouter.ok) throw new Error("a session without a task router must expose a typed unavailable action");
+	assert.equal(noTaskRouter.error.code, UI_ERROR_CODE.policyBlocked);
 	const missingWake = createRuntimeApplication({ wakes: { remove: () => { throw new WakeError("No wake is set."); } } });
 	const missingAsked = await missingWake.execute(RUNTIME_ACTION.removeWake, { id: "w1" });
 	assert.equal(missingAsked.ok, false);
@@ -901,6 +905,39 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(grammar.ok, false);
 	if (grammar.ok) throw new Error("a grammar-invalid route must stay a typed native-grammar outcome");
 	assert.equal(grammar.error.code, UI_ERROR_CODE.nativeGrammarRequired);
+
+	const taskMessages = [];
+	const taskApp = createRuntimeApplication({ work: {
+		tell: async (text) => {
+			if (text === "Continue.") return false;
+			taskMessages.push(text);
+			return true;
+		},
+	} });
+	const taskPending = taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Follow the narrower contract." }, { requestId: "task-route" });
+	assert.deepEqual(taskMessages, [], "task steering leaves the terminal input stack before it touches private task state");
+	const taskRouted = await taskPending;
+	assert.equal(taskRouted.ok, true);
+	if (!taskRouted.ok) throw new Error(taskRouted.error.message);
+	assert.equal(taskRouted.meta.requestId, "task-route");
+	assert.equal(taskRouted.data.routed, true);
+	assert.deepEqual(taskMessages, ["Follow the narrower contract."]);
+	const noTask = await taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Continue." });
+	assert.equal(noTask.ok, true);
+	if (!noTask.ok) throw new Error(noTask.error.message);
+	assert.equal(noTask.data.routed, false, "a task that ended between keypress and deferred routing falls back to the main agent");
+	const stoppedTaskRoute = new AbortController();
+	const cancelledTaskRoute = taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Do not deliver this." }, { signal: stoppedTaskRoute.signal });
+	stoppedTaskRoute.abort();
+	const cancelledTask = await cancelledTaskRoute;
+	assert.equal(cancelledTask.ok, false);
+	if (cancelledTask.ok) throw new Error("a cancelled task message must not reach private task state");
+	assert.equal(cancelledTask.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual(taskMessages, ["Follow the narrower contract."], "cancellation leaves the task message queue untouched");
+	const blankTaskMessage = await taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "   " });
+	assert.equal(blankTaskMessage.ok, false);
+	if (blankTaskMessage.ok) throw new Error("a blank task message must be refused");
+	assert.equal(blankTaskMessage.error.field, "text");
 });
 
 test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
@@ -1349,6 +1386,7 @@ test("application: composed facade dispatches actions and publishes cache-invali
 		runtime: {
 			windows: { send: async () => ({ reason: "quiet" }), close: () => ({ name: "main" }), closeAll: () => ["main"] },
 			wakes: { remove: () => [{ id: "w1" }] },
+			work: { tell: (text) => text === "Tell the task." },
 			models: {
 				known: () => ["model-a", "model-b"],
 				inspect: async () => ({ listing: { entries: [{ id: "model-a", context_length: 4_096 }, { id: "model-b", context_length: 8_192 }] } }),
@@ -1369,6 +1407,10 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	const sent = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "continue" }, { requestId: "send-1" });
 	assert.equal(sent.ok, true);
 	assert.equal(sent.meta.requestId, "send-1");
+	const taskMessage = await app.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Tell the task." }, { requestId: "task-1" });
+	assert.equal(taskMessage.ok, true);
+	if (!taskMessage.ok) throw new Error(taskMessage.error.message);
+	assert.equal(taskMessage.data.routed, true);
 	const routes = await app.queries.runtime.models({ requestId: "routes-1" });
 	assert.equal(routes.ok, true);
 	if (!routes.ok) throw new Error(routes.error.message);
@@ -1389,6 +1431,8 @@ test("application: composed facade dispatches actions and publishes cache-invali
 		["projection.invalidated", REVIEW_ACTION.undo],
 		["action.completed", RUNTIME_ACTION.sendShell],
 		["projection.invalidated", RUNTIME_ACTION.sendShell],
+		["action.completed", RUNTIME_ACTION.routeTaskMessage],
+		["projection.invalidated", RUNTIME_ACTION.routeTaskMessage],
 		["action.completed", RUNTIME_ACTION.ensureModel],
 		["projection.invalidated", RUNTIME_ACTION.ensureModel],
 		["action.completed", RUNTIME_ACTION.selectModel],
@@ -1398,8 +1442,10 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	assert.equal(app.capabilities.get(WORKSPACE_ACTION.archive)?.label, "Archive");
 	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.label, "Undo last checkpoint change");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.sendShell)?.label, "Send shell input");
+	assert.equal(app.capabilities.get(RUNTIME_ACTION.routeTaskMessage)?.label, "Message active task");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.selectModel)?.label, "Select model route");
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
+	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
 	const unknown = await app.execute("workspace.unknown", {});
 	assert.equal(unknown.ok, false);

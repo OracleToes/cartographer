@@ -744,6 +744,17 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		notify({ type: "model-ready", modelId, limits: effective });
 		return effective;
 	};
+	const routeTaskMessage = (text) => {
+		if (active.kind !== "task" || active.id === undefined) return false;
+		const entry = { text: String(text).trim(), at: Date.now() };
+		if (entry.text === "") return false;
+		active.said.push(entry);
+		active.heard.push(entry);
+		noteChat(brainDir, "user", entry.at, entry.text, { seen: false });
+		return true;
+	};
+	/** The narrow task-message port records user steering without exposing task identity, messages, or lifecycle state. */
+	const work = Object.freeze({ tell: routeTaskMessage });
 	/** The presentation/application port for model state. It keeps terminal and Screen out of the session's transport helpers. */
 	const modelManager = Object.freeze({
 		current: currentModel,
@@ -812,23 +823,11 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		},
 		/** The conversation of the ordinary task that runs now, or undefined. */
 		activeTask: () => active.kind === "task" ? active.id : undefined,
-		/**
-		 * What the user typed while a task runs: the task reads it with its next result, and it is kept as talk.
-		 * @returns {boolean} whether a task was there to tell
-		 */
-		tellTask(text) {
-			if (active.kind !== "task" || active.id === undefined) return false;
-			const entry = { text: String(text).trim(), at: Date.now() };
-			if (entry.text === "") return false;
-			active.said.push(entry);
-			active.heard.push(entry);
-			noteChat(brainDir, "user", entry.at, entry.text, { seen: false });
-			return true;
-		},
-		/** The terminal has one routing door while a private task runs. */
-		tellWork(text) {
-			return this.tellTask(text) ? { kind: "task" } : false;
-		},
+		/** The application port for safely routing a user message to private task work. */
+		work,
+		/** Compatibility aliases for integrations that have not adopted `work` yet. */
+		tellTask: routeTaskMessage,
+		tellWork: (text) => routeTaskMessage(text) ? { kind: "task" } : false,
 
 	};
 }
