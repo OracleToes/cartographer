@@ -63,7 +63,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });
-	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, now });
+	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now });
 	const capabilities = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,

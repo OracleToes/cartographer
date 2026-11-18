@@ -24,9 +24,10 @@ import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
-import { CONTEXT_ACTION, createContextApplication } from "./application/context.mjs";
-import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
-import { REQUEST_ACTION, createRequestApplication } from "./application/requests.mjs";
+import { createApplication } from "./application/app.mjs";
+import { CONTEXT_ACTION } from "./application/context.mjs";
+import { WORKSPACE_ACTION } from "./application/workspace.mjs";
+import { REQUEST_ACTION } from "./application/requests.mjs";
 import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
@@ -209,9 +210,7 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
-	const contextApplication = createContextApplication({ brainDir: options.brainDir });
-	const workspace = createWorkspaceApplication({ brainDir: options.brainDir, root: options.root, config });
-	const requestsApplication = createRequestApplication({ brainDir: options.brainDir });
+	const application = options.application ?? createApplication({ brainDir: options.brainDir, root: options.root, config });
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -259,11 +258,11 @@ export async function runTerminal(session, options) {
 	};
 	/** The terminal adds its marker; application services provide the typed outcome and its safe message. */
 	const workspaceLine = async (action, input, actionOptions = {}) => {
-		const result = await workspace.execute(action, input, actionOptions);
+		const result = await application.execute(action, input, actionOptions);
 		return result.ok ? result.data.line : `! ${result.error.message}`;
 	};
-	const contextAction = (action, input, actionOptions = {}) => contextApplication.execute(action, input, actionOptions);
-	const requestAction = (action, input, actionOptions = {}) => requestsApplication.execute(action, input, actionOptions);
+	const contextAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	const requestAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
 	/** Run durable row mutations in order: each operation reads and writes the same book. */
 	const workspaceLines = async (action, ids, actionOptions = () => ({})) => {
 		const lines = [];

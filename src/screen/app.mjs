@@ -28,9 +28,9 @@ import { basename, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
-import { TALK_ACTION, createTalkApplication } from "../application/talk.mjs";
-import { createWorkspaceQueries } from "../application/queries.mjs";
-import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
+import { createApplication } from "../application/app.mjs";
+import { TALK_ACTION } from "../application/talk.mjs";
+import { WORKSPACE_ACTION } from "../application/workspace.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
@@ -547,9 +547,10 @@ export async function runScreen(session, options, runTerminal) {
 	const env = { root, brainDir, session, started };
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
-	const workspace = createWorkspaceApplication({ brainDir, root, config });
-	const queries = createWorkspaceQueries({ brainDir, root });
-	const talk = createTalkApplication({ brainDir });
+	const application = options.application ?? createApplication({ brainDir, root, config });
+	const queries = application.queries;
+	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
+	const talk = Object.freeze({ execute: application.execute });
 	/** Cached deferred Carto projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
 	const CARTO_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
@@ -631,6 +632,15 @@ export async function runScreen(session, options, runTerminal) {
 			projections.set(id, { ...projection, generation: projection.generation + 1, loading: false, controller: undefined, error: undefined });
 		}
 	};
+	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
+	const stopApplicationEvents = application.events.subscribe((event) => {
+		if (event.type !== "projection.invalidated") return;
+		const scopes = event.payload.scopes ?? [];
+		if (!scopes.some((scope) => ["workspace", "context", "requests"].includes(scope))) return;
+		invalidateBrain();
+		invalidateProjections();
+		refresh(viewId(), true);
+	});
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
@@ -705,11 +715,7 @@ export async function runScreen(session, options, runTerminal) {
 	/** Present one typed workspace outcome, then redraw the projection that started the action. */
 	const presentWorkspaceResult = (result, id = viewId()) => {
 		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
-		if (result.ok) {
-			invalidateBrain();
-			invalidateProjections();
-		}
-		refresh(id, true);
+		if (!result.ok) refresh(id, true);
 		draw();
 		return result.ok;
 	};
@@ -1703,6 +1709,7 @@ export async function runScreen(session, options, runTerminal) {
 	const stop = ({ farewell = false } = {}) => {
 		if (stopped) return;
 		stopped = true;
+		stopApplicationEvents();
 		for (const id of projections.keys()) cancelProjection(id);
 		clearInterval(tick);
 		process.stdin.off("data", watchInput);
@@ -1726,7 +1733,7 @@ export async function runScreen(session, options, runTerminal) {
 	tui.setTerminalColorSchemeNotifications(true);
 	tui.onTerminalColorSchemeChange(() => askColors());
 	try {
-		return await runTerminal(session, { ...options, interactive: true, screen });
+		return await runTerminal(session, { ...options, application, interactive: true, screen });
 	} finally {
 		state.closed = true;
 		stop({ farewell: true });
