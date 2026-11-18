@@ -15,7 +15,6 @@ import { POLICY } from "../config.mjs";
 import { join } from "node:path";
 import { changeSummary } from "../checkpoints.mjs";
 import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
-import { entryLine } from "../ledger.mjs";
 import { authorizationLine, itemLine, movesOf, planPath, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
 import { ago, stamp, took } from "../time.mjs";
@@ -37,50 +36,6 @@ const when = (value) => {
 };
 
 // ─── Carto ──────────────────────────────────────────────────────────────────
-
-/** The ledger: goals, questions and notes that are open, then what is closed. */
-export function ledgerView({ brainDir, ledger, lines, error } = {}) {
-	const file = join(brainDir, "carto-ledger.json");
-	if (ledger === undefined) return { header: [[[`! The ledger cannot be read: ${error ?? "its projection is not available"}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-	const now = Date.now();
-	const items = [];
-	const entry = (item) => ({
-		key: `entry:${item.id}`,
-		archived: item.archived === true,
-		head: [
-			[`${item.salient === true && item.status === POLICY.enums.entryStatus.open && item.kind === POLICY.enums.ledgerKind.note ? "● " : ""}${item.id}  `, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : "tool"],
-			[item.text, item.status === POLICY.enums.entryStatus.done || item.archived === true ? "muted" : ""],
-			[item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `  (done when: ${item.doneWhen})` : "", "muted"],
-			[item.salient === true && item.status === POLICY.enums.entryStatus.open ? "  · salient" : "", "ok"],
-			[item.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
-		],
-		body: [
-			item.text,
-			item.salient === true && item.kind === POLICY.enums.ledgerKind.note ? "salient: stands in every request, including the block a collapse keeps (edit the entry to drop it)" : undefined,
-			item.kind === POLICY.enums.ledgerKind.goal && item.doneWhen ? `done when: ${item.doneWhen}` : undefined,
-			item.status === POLICY.enums.entryStatus.done && item.outcome ? `outcome: ${item.outcome}` : undefined,
-			`${item.by === "user" ? "written by you" : "written by the agent"}${when(item.added) ? ` · added ${when(item.added)}` : ""}${item.status === POLICY.enums.entryStatus.done && when(item.closed) ? ` · closed ${when(item.closed)}` : ""}`,
-		]
-			.filter((line) => line !== undefined)
-			.join("\n"),
-		copy: entryLine(item, now),
-		target: { file, line: lines?.[item.id] },
-	});
-	for (const [kind, title] of [[POLICY.enums.ledgerKind.goal, "Goals"], [POLICY.enums.ledgerKind.question, "Questions for you"], [POLICY.enums.ledgerKind.note, "Notes"]]) {
-		const open = ledger.items.filter((item) => item.kind === kind && item.status === POLICY.enums.entryStatus.open);
-		if (open.length === 0) continue;
-		items.push(heading(title));
-		items.push(...open.map(entry));
-	}
-	const done = ledger.items.filter((item) => item.status !== POLICY.enums.entryStatus.open);
-	if (done.length > 0) {
-		items.push(heading("Closed"));
-		items.push(...done.map(entry));
-	}
-	if (items.length === 0) items.push(note("  The ledger is empty: no goal yet. Say what you want to achieve."));
-	const header = [];
-	return { header, items };
-}
 
 /** The plan: authorization envelopes, then their declared executable moves. */
 export function planView({ brainDir, yolo, plan, lines, error } = {}) {

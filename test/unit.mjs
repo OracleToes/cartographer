@@ -83,7 +83,7 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
-import { atlasView } from "../src/screen/workspace.mjs";
+import { atlasView, ledgerView } from "../src/screen/workspace.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -474,6 +474,38 @@ test("screen: Atlas renders settled workspace projections through its applicatio
 	const stale = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data, loading: true }, render });
 	assert.equal(rendered, 2, "cached Atlas data remains renderable while its replacement is in flight");
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above the Atlas empty state");
+});
+
+test("screen: Ledger renders settled workspace projections through its application presentation adapter", () => {
+	const presentation = createWorkspacePresentation().ledger;
+	const emptyData = { file: "/project/.brain/carto-ledger.json", ledger: { items: [] } };
+	const data = {
+		file: emptyData.file,
+		ledger: { items: [{ id: "g1", kind: "goal", text: "Ship the narrow change.", doneWhen: "The focused check passes.", status: "open", added: 0 }] },
+		lines: { g1: 4 },
+	};
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return ledgerView({ ...projection, presentation });
+	};
+	assert.throws(() => ledgerView({ file: data.file, ledger: data.ledger }), /presentation adapter/, "Ledger cannot fall back to direct domain classification or formatting");
+	const loading = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Ledger is not asked to invent data while its projection is loading");
+	assert.match(loading.header[0][0][0], /Ledger is loading/, "the shared boundary names Ledger loading");
+	const failed = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { error: { message: "The ledger is unavailable." } }, render });
+	assert.equal(rendered, 0, "a Ledger query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Ledger could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { data: emptyData }, render });
+	assert.equal(rendered, 1, "a settled empty projection reaches Ledger");
+	assert.match(empty.items[0].head[0][0], /ledger is empty/i, "Ledger owns its successful empty state");
+	const settled = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { data }, render });
+	assert.equal(rendered, 2, "a settled Ledger projection uses its adapter for grouped rows");
+	assert.equal(settled.items.find((item) => item.key === "entry:g1")?.target?.file, data.file);
+	assert.match(settled.items.find((item) => item.key === "entry:g1")?.body ?? "", /done when: The focused check passes/);
+	const stale = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached Ledger data remains renderable while its replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Ledger rows");
 });
 
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {

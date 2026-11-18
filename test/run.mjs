@@ -2652,7 +2652,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const [{ ledgerView, planView, requestsView, shellsView }, { atlasView }, { createWorkspacePresentation }] = await Promise.all([
+	const [{ planView, requestsView, shellsView }, { atlasView, ledgerView }, { createWorkspacePresentation }] = await Promise.all([
 		import("../src/screen/views.mjs"),
 		import("../src/screen/workspace.mjs"),
 		import("../src/application/workspace-presentation.mjs"),
@@ -2686,8 +2686,8 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },
 	] });
 	const ledger = await projection(queries.ledger());
-	expectReachable("ledger question", ledgerView({ brainDir, ledger: ledger.ledger, lines: ledger.lines }), LONG);
-	expectReachable("ledger goal done-when", ledgerView({ brainDir, ledger: ledger.ledger, lines: ledger.lines }), LONG);
+	expectReachable("ledger question", ledgerView({ file: ledger.file, ledger: ledger.ledger, lines: ledger.lines, presentation: workspacePresentation.ledger }), LONG);
+	expectReachable("ledger goal done-when", ledgerView({ file: ledger.file, ledger: ledger.ledger, lines: ledger.lines, presentation: workspacePresentation.ledger }), LONG);
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
 	savePlan(brainDir, { version: 2, next: 2, nextMove: 1, items: [{ id: "p1", mode: "look", text: PLAN_LONG, status: "open", revision: 1 }], moves: [] });
 	const plan = await projection(queries.plan());
