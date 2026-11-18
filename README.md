@@ -206,7 +206,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/recall ID …` | Bring a kept report back into view in full |
 | `/archive ID …`, `/unarchive ID …` | Take a row out of what the agent reads for good, or bring it back: a report's record line, a ledger entry, a plan envelope or move, a node of the graph. The row stays on disk either way |
 | `/done ID …` | Settle a row the way the agent does: a ledger entry is closed, a reported move is accepted after review, an envelope closes after its children, a node is confirmed |
-| `/delete ID …` | Remove a report for good: its record line and its file. Nothing recalls it again |
+| `/delete ID … --yes` | Remove a report for good: its record line and its file. Nothing recalls it again; Cartographer requires the explicit `--yes` acknowledgement |
 | `/shelve PATH [lines]`, `/unshelve PATH\|all` | Tend the shelf as the agent does: keep a file in view from the next collapse on, or take one off |
 | `/model`, `/model NAME` | The models the server serves, each with its reported server capacity where available, and which is on; a name or a number from the list switches. A task forked after runs on it too, and Cartographer states the active context limit |
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |

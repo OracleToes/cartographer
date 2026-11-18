@@ -1,10 +1,10 @@
 // The first application facade: typed, UI-safe workspace row actions.
 //
 // `src/ops.mjs` is the existing authoritative implementation. It still returns historical display lines and uses
-// synchronous storage internally, so this adapter intentionally contains that transitional seam. Screen code must
-// consume the structured result below rather than infer success from those lines; later async storage work stays
-// behind this facade instead of changing every presentation caller again.
-import { ShelfError } from "../context.mjs";
+// synchronous storage internally, so this adapter intentionally contains that transitional seam. Presentation
+// code consumes the structured result below rather than inferring success from those lines; later async storage
+// work stays behind this facade instead of changing every caller again.
+import { ShelfError, foldReports, recallReport } from "../context.mjs";
 import { ADD_BOOKS, addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
@@ -15,6 +15,8 @@ export const WORKSPACE_ACTION = Object.freeze({
 	unarchive: "workspace.unarchive",
 	delete: "workspace.delete",
 	fold: "workspace.fold",
+	recall: "workspace.recall",
+	toggleFold: "workspace.toggle-fold",
 	settle: "workspace.settle",
 	unshelve: "workspace.unshelve",
 	add: "workspace.add",
@@ -26,6 +28,8 @@ export const WORKSPACE_CAPABILITY_DEFINITIONS = Object.freeze([
 	{ id: WORKSPACE_ACTION.unarchive, label: "Restore", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.delete, label: "Delete", category: "workspace", intent: UI_ACTION_INTENT.destructive, confirmation: UI_CONFIRMATION.acknowledge },
 	{ id: WORKSPACE_ACTION.fold, label: "Fold report", category: "workspace", intent: UI_ACTION_INTENT.mutate },
+	{ id: WORKSPACE_ACTION.recall, label: "Recall report", category: "workspace", intent: UI_ACTION_INTENT.mutate },
+	{ id: WORKSPACE_ACTION.toggleFold, label: "Toggle report fold", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.settle, label: "Settle", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.unshelve, label: "Unshelve", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.add, label: "Add", category: "workspace", intent: UI_ACTION_INTENT.mutate },
@@ -40,7 +44,9 @@ const DEFAULT_OPERATIONS = Object.freeze({
 	archiveRow,
 	dropRow,
 	editRow,
+	foldReports,
 	foldRow,
+	recallReport,
 	settleRow,
 	unarchiveRow,
 	unshelveRow,
@@ -68,7 +74,7 @@ const idInput = (input, meta) => {
 };
 
 const checkedInput = (action, input, meta) => {
-	if (action === WORKSPACE_ACTION.archive || action === WORKSPACE_ACTION.unarchive || action === WORKSPACE_ACTION.delete || action === WORKSPACE_ACTION.fold || action === WORKSPACE_ACTION.unshelve) return idInput(input, meta);
+	if (action === WORKSPACE_ACTION.archive || action === WORKSPACE_ACTION.unarchive || action === WORKSPACE_ACTION.delete || action === WORKSPACE_ACTION.fold || action === WORKSPACE_ACTION.recall || action === WORKSPACE_ACTION.toggleFold || action === WORKSPACE_ACTION.unshelve) return idInput(input, meta);
 	if (action === WORKSPACE_ACTION.settle) {
 		const checked = idInput(input, meta);
 		if (checked.result !== undefined) return checked;
@@ -136,7 +142,7 @@ export function workspaceOutcome(action, target, line, meta) {
 			retryable: unavailable,
 		}), { meta });
 	}
-	if (/\balready\.?$|\bis not archived\.?$|\bcannot be archived\.?$/i.test(text)) return uiFailure(uiError({
+	if (/\balready\.?$|\bis already out of view\b|\bis not archived\.?$|\bcannot be archived\.?$/i.test(text)) return uiFailure(uiError({
 		code: UI_ERROR_CODE.conflict,
 		kind: UI_ERROR_KIND.conflict,
 		message: text,
@@ -194,7 +200,9 @@ export function createWorkspaceApplication({ brainDir, root, operations = DEFAUL
 				case WORKSPACE_ACTION.archive: line = operations.archiveRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.unarchive: line = operations.unarchiveRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.delete: line = operations.dropRow(brainDir, checked.value.id); break;
-				case WORKSPACE_ACTION.fold: line = operations.foldRow(brainDir, checked.value.id); break;
+				case WORKSPACE_ACTION.fold: line = operations.foldReports(brainDir, [checked.value.id]); break;
+				case WORKSPACE_ACTION.recall: line = operations.recallReport(brainDir, checked.value.id) ?? `There is no report ${checked.value.id}. /context lists the kept ones.`; break;
+				case WORKSPACE_ACTION.toggleFold: line = operations.foldRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.settle: line = operations.settleRow(brainDir, checked.value.id, root, checked.value.review); break;
 				case WORKSPACE_ACTION.unshelve: line = operations.unshelveRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.add: line = operations.applyAdd(brainDir, checked.value.book, checked.value.text, root); break;

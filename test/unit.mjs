@@ -263,7 +263,7 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	assert.equal(added.notices[0].level, "success");
 	const entry = loadLedger(brainDir).ledger.items[0];
 	assert.ok(entry, "the successful result comes from the same durable row operation the terminal already uses");
-	const cannotFold = await app.execute(WORKSPACE_ACTION.fold, { id: entry.id });
+	const cannotFold = await app.execute(WORKSPACE_ACTION.toggleFold, { id: entry.id });
 	assert.equal(cannotFold.ok, false);
 	if (cannotFold.ok) throw new Error("a ledger entry cannot be folded as a report");
 	assert.equal(cannotFold.error.code, UI_ERROR_CODE.actionRefused);

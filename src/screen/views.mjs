@@ -246,7 +246,7 @@ export function requestsView({ brainDir, yolo }) {
 		header: [
 			[[all.length === 1 ? "1 request waits for you" : `${all.length} requests wait for you`, "warn"]],
 			[["  a approves it · n turns it down (the agent is told) · d forgets it without a word to the agent", "muted"]],
-			[[approvals ? "  /approve ID ... · /deny ID [why] · /delete ID · /answer ID words" : "  /answer ID words · /deny ID [why] · /delete ID", "muted"]],
+			[[approvals ? "  /approve ID ... · /deny ID [why] · /delete ID --yes · /answer ID words" : "  /answer ID words · /deny ID [why] · /delete ID --yes", "muted"]],
 		],
 		items,
 	};

@@ -23,8 +23,8 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { bindTalkSource, clearFront, contextPath, FLOOR, foldReports, isFront, loadContext, loadReport, recallReport, recordLine, shelfLabel, shelveForUser, unshelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
-import { archiveRows, dropRows, settleRow, unarchiveRows } from "./ops.mjs";
+import { bindTalkSource, clearFront, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, shelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
+import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
 import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
@@ -207,6 +207,7 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
+	const workspace = createWorkspaceApplication({ brainDir: options.brainDir, root: options.root });
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -251,6 +252,17 @@ export async function runTerminal(session, options) {
 		if (midNotes) endLine();
 		out.write(text);
 		midLine = !text.endsWith("\n");
+	};
+	/** The terminal adds its marker; application services provide the typed outcome and its safe message. */
+	const workspaceLine = async (action, input, actionOptions = {}) => {
+		const result = await workspace.execute(action, input, actionOptions);
+		return result.ok ? result.data.line : `! ${result.error.message}`;
+	};
+	/** Run durable row mutations in order: each operation reads and writes the same book. */
+	const workspaceLines = async (action, ids, actionOptions = () => ({})) => {
+		const lines = [];
+		for (const id of ids) lines.push(await workspaceLine(action, { id }, actionOptions(id)));
+		return lines.join("\n  ");
 	};
 	// A server is optional while Cartographer opens: local commands remain available, and a later model turn retries
 	// this gate. Keep one clear failure on screen rather than making an unavailable endpoint look like a hung UI.
@@ -1276,7 +1288,7 @@ export async function runTerminal(session, options) {
 						"  /pin      rewrite the copy of assessment and graph at the top of the context now",
 						"  /requests what waits for you: declared move revisions and questions of taste",
 						"  /approve  /approve ID ... approves those requests; /approve alone snapshots every current waiting move revision",
-						"  /deny     /deny ID [why] turns a request down; /delete ID forgets one without a word to the agent",
+						"  /deny     /deny ID [why] turns a request down; /delete ID --yes forgets one without a word to the agent",
 						"  /answer   /answer ID words answers a question of taste",
 						"  /pause    hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream",
 						"  /yolo     /yolo on lets declared change moves run without /approve while you watch; /yolo off ends that",
@@ -1294,7 +1306,7 @@ export async function runTerminal(session, options) {
 						"  /recall ID  bring a kept report back in full; /shelve and /unshelve tend the shelf as the agent does",
 					"  /archive ID …, /unarchive ID …  take a row out of what the agent reads, or bring it back: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph; the row stays on disk either way",
 					"  /done ID …  settle rows; a reported move needs /done mN -- REVIEW saying why its proof witnesses its done-when",
-					"  /delete ID …  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
+					"  /delete ID … --yes  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
@@ -1932,8 +1944,7 @@ export async function runTerminal(session, options) {
 					line("  /fold ID takes a report out of view, leaving its one line: the same `fold` the agent does with `context`. /context lists what is in view.");
 					return true;
 				}
-				const said = foldReports(options.brainDir, ids);
-				line(`  ${said}`);
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.fold, ids)}`);
 				return true;
 			}
 			case "recall": {
@@ -1942,10 +1953,7 @@ export async function runTerminal(session, options) {
 					line("  /recall ID brings a kept report back in full, into view. /context lists the kept ones.");
 					return true;
 				}
-				for (const id of ids) {
-					const said = recallReport(options.brainDir, id);
-					line(said === undefined ? `  There is no report ${id}. /context lists the kept ones.` : `  ${said}`);
-				}
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.recall, ids)}`);
 				return true;
 			}
 			case "shelve":
@@ -1954,9 +1962,9 @@ export async function runTerminal(session, options) {
 					line(`  /${name} PATH [lines] ${name === "shelve" ? "saves a full backing snapshot and carries selected content through collapse" : "takes a shelf item off by path or stable ID (all takes every one)"}.`);
 					return true;
 				}
-				try {
-					const said = name === "shelve" ? shelveForUser(options.root, options.brainDir, config, argument, tail) : unshelveForUser(options.brainDir, argument);
-					line(`  ${said}`);
+				if (name === "unshelve") line(`  ${await workspaceLine(WORKSPACE_ACTION.unshelve, { id: argument })}`);
+				else try {
+					line(`  ${shelveForUser(options.root, options.brainDir, config, argument, tail)}`);
 				} catch (error) {
 					line(`! ${error.message}`);
 				}
@@ -1969,7 +1977,7 @@ export async function runTerminal(session, options) {
 					line(`  /${name} ID … ${name === "archive" ? "takes a row out of what the agent reads, keeping it on disk: a report's record line (t1), a ledger entry, a plan envelope or move, a node of the graph" : "brings an archived row back into what the agent reads"}.`);
 					return true;
 				}
-				line(`  ${name === "archive" ? archiveRows(options.brainDir, ids) : unarchiveRows(options.brainDir, ids)}`);
+				line(`  ${await workspaceLines(name === "archive" ? WORKSPACE_ACTION.archive : WORKSPACE_ACTION.unarchive, ids)}`);
 				return true;
 			}
 			case "done": {
@@ -1983,19 +1991,23 @@ export async function runTerminal(session, options) {
 						line("  /done mN -- REVIEW accepts one reported move. Put the exact evidence review after --.");
 						return true;
 					}
-					line(`  ${settleRow(options.brainDir, argument, options.root, parts.slice(2).join(" "))}`);
+					line(`  ${await workspaceLine(WORKSPACE_ACTION.settle, { id: argument, review: parts.slice(2).join(" ") })}`);
 					return true;
 				}
-				line(`  ${args.map((id) => settleRow(options.brainDir, id, options.root)).join("\n  ")}`);
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.settle, args)}`);
 				return true;
 			}
 			case "delete": {
-				const ids = args;
+				const ids = args.filter((id) => id !== "--yes");
 				if (ids.length === 0) {
-					line("  /delete ID … a row is gone for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan envelope or move, a node of the graph. /archive hides a row and keeps it.");
+					line("  /delete ID … --yes removes a row for good, and nothing of it is said to the agent (it forgets it): a report (t1), a ledger entry, a plan envelope or move, a node of the graph. /archive hides a row and keeps it.");
 					return true;
 				}
-				line(`  ${dropRows(options.brainDir, ids)}`);
+				if (!args.includes("--yes")) {
+					line(`  /delete is permanent. To remove ${ids.join(", ")}, run: /delete ${ids.join(" ")} --yes`);
+					return true;
+				}
+				line(`  ${await workspaceLines(WORKSPACE_ACTION.delete, ids, (id) => ({ confirmation: { actionId: WORKSPACE_ACTION.delete, target: id, acknowledged: true } }))}`);
 				return true;
 			}
 			case "send": {
