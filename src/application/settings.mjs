@@ -181,17 +181,21 @@ export function createSettingsReader({ config = {}, runner, gate, initiation, mo
 			routeIssue = nonEmpty(error?.message ?? error);
 		}
 		if (signal?.aborted === true) return undefined;
+		// The startup snapshot remains a legacy fallback, but a Settings repository is the authoritative current
+		// effective configuration after an edit/reset. Session policy is deliberately separate state; its displayed
+		// saved defaults must still follow the freshly resolved persisted sources rather than stale launch values.
+		const effectiveConfig = state?.config ?? config;
 		const configured = {
-			...configuration(config),
+			...configuration(effectiveConfig),
 			...(state === undefined ? {} : configurationProvenance(state, { schema })),
 		};
 		const currentRoutes = modelRoutes(routes);
 		return {
 			configuration: configured,
 			policy: {
-				approval: { yolo: gate?.yolo === true, defaultYolo: boolean(config.yolo, false) },
-				initiation: { on: initiation?.on !== false, defaultOn: boolean(config.initiate, true) },
-				sandbox: sandbox(runner, boolean(config.bwrap, true)),
+				approval: { yolo: gate?.yolo === true, defaultYolo: boolean(effectiveConfig.yolo, false) },
+				initiation: { on: initiation?.on !== false, defaultOn: boolean(effectiveConfig.initiate, true) },
+				sandbox: sandbox(runner, boolean(effectiveConfig.bwrap, true)),
 			},
 			provider: {
 				...(currentRoutes === undefined ? {} : { routes: currentRoutes }),

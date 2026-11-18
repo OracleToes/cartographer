@@ -6,7 +6,41 @@
 
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
 
-/** Settings, safety policy, provider setup, and native-grammar diagnostics from one settled projection. */
+/** The session-only safety and provider view. Persisted settings have their own Configuration collection. */
+export function settingsSafetyView({ settings, presentation } = {}) {
+	if (presentation === undefined || typeof presentation.describe !== "function") throw new TypeError("Safety needs its presentation adapter.");
+	const described = presentation.describe(settings);
+	const header = [
+		[["Safety", "bold"]],
+		[["Session policy is shown here, but authorization stays with the backend. Saved policy defaults take effect only in a future session; a listed provider route is not agent-ready until native llama.cpp GBNF validation passes.", "muted"]],
+	];
+	const items = [
+		{ key: "provider", plain: true, head: [["── Provider setup ──", "muted"]] },
+		{
+			key: "provider:endpoint",
+			head: [["Provider endpoint  ", "bold"], [described.provider.server ?? "not configured", described.provider.server === undefined ? "warn" : ""]],
+			body: `Configured model: ${described.provider.configuredModel ?? "not configured"}${described.provider.currentId === undefined ? "" : `\nActive route: ${described.provider.currentId}`}${described.provider.limits === undefined ? "" : `\n${described.provider.limits}`}`,
+			copy: [described.provider.server, described.provider.configuredModel, described.provider.currentId, described.provider.limits].filter((value) => value !== undefined).join("\n"),
+		},
+		{ key: "provider:diagnostics", plain: true, head: [["── Connection and native grammar ──", "muted"]] },
+		...described.provider.diagnostics.map((diagnostic) => ({
+			key: `diagnostic:${diagnostic.id}`,
+			head: [[`${diagnostic.label}  `, "bold"], [diagnostic.state, diagnostic.style]],
+			body: diagnostic.text,
+			copy: `${diagnostic.label}: ${diagnostic.state}\n${diagnostic.text}`,
+		})),
+		{ key: "policy", plain: true, head: [["── Session policy ──", "muted"]] },
+		...described.policy.map((policy) => ({
+			key: `policy:${policy.id}`,
+			head: [[`${policy.label}  `, "bold"], [policy.state, policy.style], [`  · ${policy.default}`, "muted"]],
+			body: policy.detail,
+			copy: `${policy.label}: ${policy.state}\n${policy.detail}\n${policy.default}`,
+		})),
+	];
+	return { header, items };
+}
+
+/** Compatibility renderer for callers that still show configuration and safety in one legacy overview. */
 export function settingsOverviewView({ settings, presentation } = {}) {
 	if (presentation === undefined || typeof presentation.describe !== "function") throw new TypeError("Settings & Safety needs its presentation adapter.");
 	const described = presentation.describe(settings);

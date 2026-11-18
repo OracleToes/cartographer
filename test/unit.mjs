@@ -90,7 +90,8 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
-import { settingsAssessmentView, settingsOverviewView } from "../src/screen/settings.mjs";
+import { settingsAssessmentView, settingsOverviewView, settingsSafetyView } from "../src/screen/settings.mjs";
+import { nextWritableSettingsScope, settingsConfigurationView, settingsEditorField, settingsWriteTarget } from "../src/screen/settings-editor.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -2311,6 +2312,9 @@ test("application: Settings & Safety is a deferred, fail-closed configuration an
 	assert.match(overviewText, /YOLO · approval off/);
 	assert.match(overviewText, /the agent waits/);
 	assert.match(overviewText, /no usable sandbox/);
+	const safety = settingsSafetyView({ settings: result.data, presentation: presentation.overview });
+	assert.match(JSON.stringify(safety), /Saved policy defaults take effect only in a future session/);
+	assert.doesNotMatch(JSON.stringify(safety), /── Active configuration ──/, "Safety keeps session policy and provider readiness separate from the editable configuration collection");
 	const loading = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
 	assert.match(loading.header[0][0][0], /Settings & Safety is loading/);
 	const stale = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { data: result.data, loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
@@ -2324,6 +2328,73 @@ test("application: Settings & Safety is a deferred, fail-closed configuration an
 	assert.match(assessment.items.find((item) => item.key === "assessment:text").body, /project is mapped/);
 	const emptyAssessment = settingsAssessmentView({ assessment: { assessment: { text: "" } }, presentation: presentation.assessment });
 	assert.match(JSON.stringify(emptyAssessment), /No assessment yet/, "an empty assessment remains a successful Settings state");
+});
+
+test("screen: Configuration renders settled provenance and produces only revision-aware saved-source targets", () => {
+	const value = (current) => Array.isArray(current) ? current.join(", ") : typeof current === "boolean" ? (current ? "on" : "off") : String(current);
+	const rows = CONFIGURATION_SCHEMA.details().map((detail) => ({
+		...detail,
+		effectiveValue: DEFAULTS[detail.key],
+		displayValue: value(DEFAULTS[detail.key]),
+		source: { layer: "default", writable: false },
+		contributors: [{ layer: "default", writable: false, value: DEFAULTS[detail.key] }],
+	}));
+	const server = rows.find((row) => row.key === "server");
+	server.effectiveValue = "http://command-line.test/v1";
+	server.displayValue = "http://command-line.test/v1";
+	server.source = { layer: "command-line", writable: false };
+	server.contributors = [
+		{ layer: "default", writable: false, value: DEFAULTS.server },
+		{ layer: "project", path: "/project/.brain/config.json", writable: true, revision: "sha256:project", value: "http://saved-project.test/v1" },
+		{ layer: "environment", writable: false, value: "http://environment.test/v1" },
+		{ layer: "command-line", writable: false, value: "http://command-line.test/v1" },
+	];
+	const shellRead = rows.find((row) => row.key === "shellRead");
+	shellRead.effectiveValue = ["~/notes", "/tmp/reference"];
+	shellRead.displayValue = "~/notes, /tmp/reference";
+	const settings = {
+		configuration: {
+			rows,
+			layers: [
+				{ layer: "default", writable: false },
+				{ layer: "install", path: "/install/config.json", writable: true, revision: "sha256:install" },
+				{ layer: "project", path: "/project/.brain/config.json", writable: true, revision: "sha256:project" },
+				{ layer: "environment", writable: false },
+				{ layer: "command-line", writable: false },
+			],
+			revisions: { install: "sha256:install", project: "sha256:project" },
+		},
+	};
+	const view = settingsConfigurationView({ settings, scope: "project" });
+	assert.equal(view.items.length, 30, "Configuration keeps one selectable row for every known persisted setting");
+	assert.match(JSON.stringify(view.header), /save target: project configuration/);
+	const serverItem = view.items.find((item) => item.key === "setting:server");
+	assert.match(serverItem.body, /Current source: command line/);
+	assert.match(serverItem.body, /A project configuration override is saved \(http:\/\/saved-project\.test\/v1\), but command line currently overrides it/);
+	assert.match(JSON.stringify(view.header), /Environment and command-line/, "the configuration header explains that process-owned overrides remain read-only");
+	const target = settingsWriteTarget(settings, server, "project");
+	assert.deepEqual(target, {
+		key: "server",
+		scope: "project",
+		label: "Provider endpoint",
+		writable: true,
+		path: "/project/.brain/config.json",
+		expectedRevision: "sha256:project",
+		hasOverride: true,
+		shadowed: true,
+		value: "http://saved-project.test/v1",
+	});
+	const serverField = settingsEditorField(server, target);
+	assert.equal(serverField.value, "http://saved-project.test/v1", "a selected saved override is edited instead of treating the command-line value as writable");
+	assert.match(serverField.help, /after the provider reconnects/);
+	const shellField = settingsEditorField(shellRead, settingsWriteTarget(settings, shellRead, "project"));
+	assert.equal(shellField.multiline, true);
+	assert.equal(shellField.value, "~/notes\n/tmp/reference");
+	assert.match(shellField.help, /typed confirmation/);
+	assert.equal(nextWritableSettingsScope(settings, "project"), "install");
+	assert.equal(nextWritableSettingsScope(settings, "install"), "project");
+	const projectReadOnly = { configuration: { ...settings.configuration, layers: settings.configuration.layers.map((source) => source.layer === "project" ? { ...source, writable: false } : source) } };
+	assert.equal(nextWritableSettingsScope(projectReadOnly, "project"), "install", "a source switch is explicit when the safe project target is read-only");
 });
 
 test("application: Settings provenance and persisted actions share revisions without mutating process overrides", async (t) => {
@@ -2421,6 +2492,21 @@ test("application: Settings provenance and persisted actions share revisions wit
 	assert.equal(invalid.ok, false);
 	if (invalid.ok) throw new Error("cross-setting validation must run in the action owner");
 	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	const savedYoloDefault = await app.execute(SETTINGS_ACTION.edit, {
+		key: "yolo",
+		value: "true",
+		scope: "project",
+		expectedRevision: shadowed.data.revision,
+	}, {
+		confirmation: { actionId: SETTINGS_ACTION.edit, target: "project:yolo", acknowledged: true },
+	});
+	assert.equal(savedYoloDefault.ok, true);
+	if (!savedYoloDefault.ok) throw new Error(savedYoloDefault.error.message);
+	const refreshedSettings = await app.queries.settings.status();
+	assert.equal(refreshedSettings.ok, true);
+	if (!refreshedSettings.ok) throw new Error(refreshedSettings.error.message);
+	assert.equal(refreshedSettings.data.policy.approval.yolo, false, "a saved policy default does not mutate the current session policy");
+	assert.equal(refreshedSettings.data.policy.approval.defaultYolo, true, "Safety refreshes the saved policy default from the effective Settings source after a write");
 
 	const broken = createSettingsApplication({
 		repository: createConfigurationRepository({
@@ -2435,7 +2521,7 @@ test("application: Settings provenance and persisted actions share revisions wit
 		key: "theme",
 		value: "dark",
 		scope: "project",
-		expectedRevision: shadowed.data.revision,
+		expectedRevision: savedYoloDefault.data.revision,
 	});
 	assert.equal(failed.ok, false);
 	if (failed.ok) throw new Error("a repository write failure must not look saved");
