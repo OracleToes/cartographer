@@ -1233,7 +1233,7 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 		placements: requestPlacement,
 		currentRoute: () => route,
 		navigate: (next) => { Object.assign(route, next); return true; },
-		targetsFor: () => ({ state: "ready", targets: [target], selected: undefined }),
+		targetsFor: () => ({ state: "ready", targets: [target], selected: "request:q1" }),
 		execute: async (action, input, options) => {
 			calls.push({ action, input, options });
 			return { ok: true, data: { line: "answered" }, meta: { requestId: options.requestId }, notices: [] };
@@ -1250,10 +1250,13 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 		defer: (work) => deferred.push(work),
 		requestId: () => "request-1",
 	});
-	assert.equal(await launcher.begin("request.answer"), true);
+	assert.equal(await launcher.begin("request.answer", { waitForResume: true }), true);
 	assert.deepEqual(route, { tab: "carto", view: "requests" }, "the launcher routes before it looks at a target");
+	assert.equal(launcher.onRouteSettled(route), true);
+	await Promise.resolve();
+	assert.equal(opened.picker, undefined, "a route settlement cannot stack a target picker above the palette that launched it");
 	assert.equal(await launcher.resume(), true);
-	assert.equal(opened.picker.targets[0].key, "request:q1");
+	assert.equal(opened.picker.targets[0].key, "request:q1", "a newly routed action asks for a fresh target instead of applying to a retained selection");
 	assert.equal(await opened.picker.choose(target), true);
 	assert.equal(opened.pickerClosed, true, "the target picker closes before a form can replace it");
 	deferred.shift()();
@@ -1380,6 +1383,7 @@ test("screen: shared selection retains identity across projection rebuilds and f
 
 	const list = createList();
 	list.set({ items: [{ key: "heading", plain: true, head: [["Heading", ""]] }, { key: "a", head: [["A", ""]] }, { key: "b", head: [["B", ""]] }] });
+	assert.deepEqual(list.items().map((item) => item.key), ["heading", "a", "b"], "a target picker can inspect the already-settled render rows without asking a projection owner again");
 	list.select("b");
 	list.set({ items: [{ key: "b", head: [["B refreshed", ""]] }, { key: "a", head: [["A refreshed", ""]] }] });
 	assert.equal(list.selected()?.key, "b", "the list consumes the same stable selection model across a projection rebuild");

@@ -25,6 +25,7 @@
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
 // everything Cartographer has to say, exactly as it does line by line.
 import { DEFAULTS, POLICY } from "../config.mjs";
+import { actionPlacementFor, assertActionPlacementParity } from "./action-placement.mjs";
 import { EventEmitter } from "node:events";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +48,10 @@ import { findExecutable, findTextSource, pathExists, readText, writeScratch } fr
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
 import { CommandPalette } from "./command-palette.mjs";
+import { ActionDialog } from "./action-dialog.mjs";
+import { ActionLauncher } from "./action-launcher.mjs";
 import { ConfirmDialog } from "./confirm-dialog.mjs";
+import { TargetPicker } from "./target-picker.mjs";
 import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
@@ -132,36 +136,39 @@ const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 /** How long each spinner mark stands; the status strip owns its visible marks. */
 const SPIN_MS = POLICY.timing.spinnerMs;
 
-// A palette may safely expose every registered capability before every feature has a dedicated control. Selecting an
-// item goes to the narrowest existing screen seam; only that screen's contextual action supplies target/input and
-// crosses the application action boundary. Unmigrated runtime controls stay discoverable with their terminal path.
+// Palette placement stays separate from capabilities: application metadata owns whether an action is available,
+// while this pure Screen registry says which settled route provides its target.
+const routeName = ({ tab, view }) => {
+	const tabName = TABS.find((entry) => entry.id === tab)?.name ?? tab;
+	const viewName = VIEWS[tab]?.find((entry) => entry.id === view)?.name ?? view;
+	return `${tabName} · ${viewName}`;
+};
 export const paletteDestinationFor = (id) => {
-	if (id.startsWith("talk.")) return { tab: "chat", view: "conversation", name: "Chat · Conversation", hint: "Choose kept talk, then use its contextual action." };
-	if (id.startsWith("workspace.")) return { tab: "carto", view: "atlas", name: "Carto", hint: "Choose the relevant record, then use its contextual action." };
-	if (id.startsWith("request.")) return { tab: "carto", view: "requests", name: "Carto · Requests", hint: "Choose a request, then approve, deny, answer, or forget it." };
-	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Inspect the latest checkpoint change, then use its contextual recovery action." };
-	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
-	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
-	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
-	if (id.startsWith("runtime.model.")) return { tab: "context", view: "routes", name: "Model · Routes", hint: "Choose a route, then connect or select it through the Runtime action boundary." };
-	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
-	if (id.startsWith("settings.")) return { tab: "settings", view: "configuration", name: "Settings · Configuration", hint: "Inspect the settled saved-source provenance before choosing a persisted setting action." };
-	return undefined;
+	const placement = actionPlacementFor(id);
+	if (placement === undefined) return undefined;
+	return {
+		...placement.route,
+		name: routeName(placement.route),
+		hint: placement.paletteText ?? "Continue with this action from the settled view.",
+	};
 };
 
-/** Turn an application capability into the entry the command palette presents. */
+/** Turn an application capability into an executable launcher entry, never a terminal-command fallback. */
 export const paletteItemForCapability = (capability) => {
+	const placement = actionPlacementFor(capability.id);
 	const destination = paletteDestinationFor(capability.id);
 	return {
 		id: `capability:${capability.id}`,
+		actionId: capability.id,
 		label: capability.label,
 		category: capability.category,
 		availability: capability.availability,
 		description: destination === undefined
-			? `${capability.id} is registered but remains on the terminal command surface until its focused screen control migrates.`
+			? "This registered action has no Screen placement yet."
 			: `${destination.name}. ${destination.hint}`,
-		keywords: capability.id,
+		keywords: [capability.id, placement?.shortcut, placement?.terminalPath].filter((value) => typeof value === "string" && value !== "").join(" "),
 		destination,
+		...(destination === undefined ? { disabled: true, disabledReason: "This action has no Screen placement yet." } : {}),
 	};
 };
 
@@ -692,6 +699,7 @@ export async function runScreen(session, options, runTerminal) {
 			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
 		},
 	});
+	assertActionPlacementParity(application.capabilities);
 	const queries = application.queries;
 	// Availability is a composition-time snapshot: opening the palette never consults a manager from a key handler
 	// or render pass. The registered capability remains its single metadata source, including disabled reasons.
@@ -762,6 +770,8 @@ export async function runScreen(session, options, runTerminal) {
 		"settings.assessment": "Assessment",
 	});
 	let settleProjection = () => {};
+	// Constructed after overlay helpers exist. Projection settlement may happen sooner, so this remains optional here.
+	let actionLauncher;
 	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
 	const projectionFor = (id) => projections.get(id);
 	const RUNTIME_ACTIVITY_PROJECTION = "runtime.activity";
@@ -875,7 +885,12 @@ export async function runScreen(session, options, runTerminal) {
 		if (state.closed) return;
 		if (id === RUNTIME_ACTIVITY_PROJECTION || id === RUNTIME_STATUS_PROJECTION) return void draw();
 		rebuild(id);
-		if (viewId() === id) draw();
+		if (viewId() === id) {
+			draw();
+			// A palette launch waits for this already-settled projection instead of asking a live manager for targets.
+			// The launcher ignores unrelated routes and any currently-open dialog/picker.
+			actionLauncher?.onRouteSettled(routes.current());
+		}
 	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
@@ -936,12 +951,98 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const cachedSettings = () => projectionFor("settings.configuration").data ?? projectionFor("settings.safety").data;
 	/** Configuration sources are explicit: a read-only project never silently becomes an install write. */
-	const settingsTarget = () => {
-		const row = selectedSetting();
+	const settingsTarget = ({ key, scope } = {}) => {
 		const settings = cachedSettings();
+		const rows = Array.isArray(settings?.configuration?.rows) ? settings.configuration.rows : [];
+		const row = typeof key === "string" && key !== "" ? rows.find((entry) => entry?.key === key) : selectedSetting();
 		if (row === undefined || settings === undefined) return undefined;
-		try { return { row, settings, target: settingsWriteTarget(settings, row, state.settingsScope) }; }
+		try { return { row, settings, target: settingsWriteTarget(settings, row, scope ?? state.settingsScope) }; }
 		catch { return undefined; }
+	};
+	/** A target picker sees only render rows or Chat's already-settled local transcript—never a manager. */
+	const actionTargetsFor = (placement, pending) => {
+		const source = placement.targetSource;
+		if (source === "none") return { state: "ready", targets: [] };
+		if (source === "kept-talk") {
+			const selectedLine = chatBody.lines()[selectedRow()];
+			const targets = chat.items
+				.filter((item) => (item?.type === "user" || item?.type === "agent") && item.source !== undefined)
+				.map((item) => ({
+					key: `talk:${item.key}`,
+					value: item.key,
+					label: String(item.text ?? "speech").replace(/\s+/g, " ").trim().slice(0, 120) || "speech",
+					detail: item.type === "agent" ? "Delivered agent speech kept for a future collapse." : "Submitted user speech kept for a future collapse.",
+					input: { source: item.source },
+					...(item.type === "agent" && item.delivery !== "delivered" ? { disabled: true, disabledReason: "Undelivered agent speech is not a stable kept-talk source." } : {}),
+				}));
+			if (targets.length === 0) return { state: "unavailable", reason: "No stable kept-talk source is available in Conversation. Refresh and try again." };
+			return { state: "ready", targets, selected: selectedLine?.item === undefined ? undefined : `talk:${selectedLine.item}` };
+		}
+		const id = `${placement.route.tab}.${placement.route.view}`;
+		const projection = projectionFor(id);
+		if (projection.data === undefined) {
+			if (projection.loading === true) return { state: "loading" };
+			return { state: "unavailable", reason: projection.error?.message === undefined ? "That target view is not settled. Refresh and try again." : `That target view is unavailable: ${projection.error.message}` };
+		}
+		const page = pageOf(id);
+		if (page === undefined) return { state: "unavailable", reason: "That target view is unavailable. Refresh and try again." };
+		const items = page.list.items();
+		const label = (item) => (item.head ?? []).map(([part]) => String(part)).join("").replace(/\s+/g, " ").trim() || String(item.key ?? "target");
+		const selected = page.list.selected()?.key;
+		const keyed = (pattern, input) => items.flatMap((item) => {
+			const matched = pattern.exec(String(item.key ?? ""));
+			if (matched === null) return [];
+			return [{ key: item.key, value: matched[1], label: label(item), input: input(matched[1], item) }];
+		});
+		let targets;
+		if (source === "requests") {
+			targets = keyed(/^request:(.+)$/, (requestId) => pending.actionId === REQUEST_ACTION.approve ? { ids: [requestId] } : { id: requestId });
+		} else if (source === "shell-windows") {
+			targets = keyed(/^window:(.+)$/, (name) => ({ name }));
+		} else if (source === "wakes") {
+			targets = keyed(/^wake:(.+)$/, (wakeId) => ({ id: wakeId }));
+		} else if (source === "model-routes") {
+			targets = items.flatMap((item) => typeof item.target?.modelId !== "string" || item.target.modelId === "" ? [] : [{
+				key: item.key,
+				value: item.target.modelId,
+				label: label(item),
+				input: { modelId: item.target.modelId, ...(Number.isInteger(item.target.contextWindow) && item.target.contextWindow > 0 ? { contextWindow: item.target.contextWindow } : {}) },
+			}]);
+		} else if (source === "atlas-nodes") {
+			targets = keyed(/^node:(.+)$/, (node) => ({ target: node }));
+		} else if (source === "files") {
+			targets = items.flatMap((item) => typeof item.target?.file !== "string" || item.target.file === "" || item.target.folder === true ? [] : [{ key: item.key, value: item.target.file, label: label(item), input: { path: item.target.file } }]);
+		} else if (source === "plan-envelopes") {
+			targets = keyed(/^envelope:(.+)$/, (parent) => ({ parent, rowKey: `envelope:${parent}` }));
+		} else if (source === "settings") {
+			targets = items.flatMap((item) => {
+			const row = item.setting?.row;
+			const write = item.setting?.write;
+			if (typeof row?.key !== "string" || row.key === "" || typeof write?.scope !== "string") return [];
+			const unavailable = write.writable !== true
+				? `The ${write.scope} configuration source is read-only. Choose a writable saved source first.`
+				: write.expectedRevision === undefined ? "Refresh Settings before changing this setting so its saved-source revision is known." : undefined;
+			return [{
+				key: item.key,
+				value: row.key,
+				label: label(item),
+				input: { key: row.key, scope: write.scope, ...(write.expectedRevision === undefined ? {} : { expectedRevision: write.expectedRevision }) },
+				...(unavailable === undefined ? {} : { disabled: true, disabledReason: unavailable }),
+			}];
+		});
+		} else if (source === "workspace-rows") {
+			const allowed = pending.actionId === WORKSPACE_ACTION.unshelve ? /^(shelf):(.+)$/
+				: [WORKSPACE_ACTION.fold, WORKSPACE_ACTION.recall, WORKSPACE_ACTION.toggleFold].includes(pending.actionId) ? /^(report):(.+)$/
+					: /^(report|entry|item|envelope|move|node):(.+)$/;
+			targets = items.flatMap((item) => {
+				const matched = allowed.exec(String(item.key ?? ""));
+				if (matched === null) return [];
+				const rowId = matched[2];
+				return [{ key: item.key, value: rowId, label: label(item), input: { id: rowId, rowKey: item.key } }];
+			});
+		}
+		if (!Array.isArray(targets) || targets.length === 0) return { state: "unavailable", reason: "No current target is available in this settled view. Refresh and try again." };
+		return { state: "ready", targets, selected };
 	};
 	const chooseSettingsSource = () => {
 		const settings = cachedSettings();
@@ -963,8 +1064,8 @@ export async function runScreen(session, options, runTerminal) {
 			},
 		}), { width: Math.max(30, Math.min(76, terminal.columns - 4)), anchor: "center" });
 	};
-	const requestSettingsEdit = () => {
-		const selected = settingsTarget();
+	const requestSettingsEdit = (requested) => {
+		const selected = settingsTarget(requested);
 		if (selected === undefined) return flash("Choose a settled configuration setting before editing.");
 		const { row, settings, target } = selected;
 		if (target.writable !== true) return flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
@@ -1986,6 +2087,86 @@ export async function runScreen(session, options, runTerminal) {
 		flash,
 		redraw: draw,
 	}), { width: Math.max(20, Math.min(76, terminal.columns - 4)), anchor: "center" });
+	const presentLaunchedResult = (result, pending) => {
+		const id = `${pending.placement.route.tab}.${pending.placement.route.view}`;
+		if (pending.actionId.startsWith("settings.")) return presentSettingsResult(result, id);
+		if (pending.actionId.startsWith("runtime.")) return presentRuntimeResult(result, id);
+		if (pending.actionId.startsWith("review.")) return presentReviewResult(result, id);
+		if (pending.actionId.startsWith("talk.")) {
+			flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+			draw();
+			return result.ok;
+		}
+		return presentWorkspaceResult(result, id);
+	};
+	const openExistingActionControl = ({ plan, placement }) => {
+		const input = plan.input ?? {};
+		if (plan.actionId === REVIEW_ACTION.undo) {
+			requestReviewUndo();
+			return true;
+		}
+		if (plan.actionId === SETTINGS_ACTION.edit) {
+			requestSettingsEdit(input);
+			return true;
+		}
+		if (plan.actionId === WORKSPACE_ACTION.add) {
+			openAddBox(BOOK_VIEWS[viewId()] ?? "ledger");
+			return true;
+		}
+		if (plan.actionId === WORKSPACE_ACTION.addMove) {
+			if (typeof input.parent !== "string" || input.parent === "") return false;
+			void openMoveBox(input.parent);
+			return true;
+		}
+		if (plan.actionId === WORKSPACE_ACTION.edit) {
+			if (typeof input.rowKey !== "string" || input.rowKey === "") return false;
+			void openFieldBox(viewId(), input.rowKey);
+			return true;
+		}
+		if (plan.actionId === WORKSPACE_ACTION.settle) {
+			if (typeof input.id !== "string" || typeof input.rowKey !== "string") return false;
+			void settleWorkspaceRow(input.rowKey, input.id);
+			return true;
+		}
+		return false;
+	};
+	// The palette feeds this single launcher. Its target callback reads only current list/chat rows and its execution
+	// callback is application.execute; no Screen component receives a manager or performs a hidden live lookup.
+	actionLauncher = new ActionLauncher({
+		capabilities: application.capabilities,
+		specs: application.actionSpecs,
+		placements: Object.freeze({ get: actionPlacementFor }),
+		execute: application.execute,
+		currentRoute: () => routes.current(),
+		navigate: (route) => setRoute(route),
+		targetsFor: actionTargetsFor,
+		openDialog: ({ plan, submit }) => openModal(({ close }) => new ActionDialog({
+			actionId: plan.actionId,
+			title: plan.title,
+			fields: plan.fields,
+			input: plan.input,
+			keyOf,
+			close,
+			flash,
+			redraw: draw,
+			submit,
+		}), { width: boxWidth(plan.fields, terminal.columns), anchor: "center" }),
+		openTargetPicker: ({ title, targets, choose }) => openModal(({ close }) => new TargetPicker({
+			title,
+			targets,
+			keyOf,
+			close,
+			flash,
+			redraw: draw,
+			choose,
+		}), { width: Math.max(28, Math.min(82, terminal.columns - 4)), anchor: "center" }),
+		openConfirmation: ({ confirmation, confirm }) => openConfirmation(confirmation, confirm, {
+			title: `${application.capabilities.get(confirmation.actionId)?.label ?? "Confirm action"}?`,
+		}),
+		openExistingControl: openExistingActionControl,
+		present: presentLaunchedResult,
+		flash,
+	});
 	const paletteItems = () => [
 		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation, private Work, and isolated Consult.", destination: { tab: "chat", view: "conversation", name: "Chat" } },
 		{ id: "navigate.carto", label: "Go to Carto", category: "navigation", description: "Atlas, Ledger, Plan, Requests, Tree, and the shared brain.", destination: { tab: "carto", view: "atlas", name: "Carto" } },
@@ -2009,19 +2190,27 @@ export async function runScreen(session, options, runTerminal) {
 		close,
 		flash,
 		redraw: draw,
-		activate: (item) => {
+		activate: async (item) => {
 			if (item.id === "shell.refresh") {
 				invalidateBrain();
 				refresh(viewId(), true);
 				flash("read again", NOTICE_LEVEL.info);
 				return true;
 			}
+			if (item.actionId !== undefined) {
+				const started = await actionLauncher.begin(item.actionId, { waitForResume: true });
+				// CommandPalette closes only after this promise resolves. Defer target/dialog resolution one turn so the
+				// shared overlay owner never stacks it on the palette; route settlement resumes a loading target later.
+				if (started) setTimeout(() => {
+					if (!state.closed) void actionLauncher.resume();
+				}, 0);
+				return started;
+			}
 			if (openPaletteDestination(item.destination)) {
 				flash(`opened ${item.destination.name}`, NOTICE_LEVEL.info);
 				return true;
 			}
-			flash(`${item.label} is available through the terminal command surface.`, NOTICE_LEVEL.info);
-			return true;
+			return false;
 		},
 	}), { width: Math.max(20, Math.min(82, terminal.columns - 4)), anchor: "center" });
 	const full = { basis: 0, grow: 1, minSize: 1 };

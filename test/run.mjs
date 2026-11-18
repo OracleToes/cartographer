@@ -2596,6 +2596,7 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 	assert.ok(entries.every(({ destination }) => destination !== undefined), "every registered action remains discoverable from the command palette");
 	assert.ok(entries.every(({ destination }) => TABS.some((tab) => tab.id === destination.tab) && VIEWS[destination.tab]?.some((view) => view.id === destination.view)), "every registered action has a declared palette tab and subview");
 	assert.deepEqual(entries.map(({ action, destination, item }) => ({ id: item.id, destination: item.destination, availability: item.availability })), entries.map(({ action, destination }) => ({ id: `capability:${action}`, destination, availability: unavailable })), "every registered action materializes one palette entry with its destination and availability reason");
+	assert.deepEqual(entries.map(({ action, item }) => item.actionId), registered, "each palette capability keeps its action identity for ActionLauncher rather than being route-only navigation");
 	assert.ok(entries.every(({ item }) => !/remains on the terminal command surface/.test(item.description)), "every registered action has a focused screen seam rather than a terminal-only fallback");
 });
 

@@ -133,7 +133,8 @@ const RAW_ACTION_SPECS = [
 	{ id: "request.answer", launch: ACTION_LAUNCH.dialog, target: target(ACTION_TARGET_KIND.request, "id"), fields: [field("text", "Answer", { required: true, multiline: true, limit: 4_096 })] },
 
 	// Review
-	{ id: "review.undo", launch: ACTION_LAUNCH.direct, target: target(), fields: [] },
+	// Screen reuses the established recovery bridge, which first records active shell changes before it requests undo.
+	{ id: "review.undo", launch: ACTION_LAUNCH.existingControl, target: target(), fields: [] },
 	{ id: "review.record-windows", launch: ACTION_LAUNCH.direct, target: target(), fields: [] },
 
 	// Runtime

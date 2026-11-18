@@ -54,6 +54,8 @@ export function createList() {
 			touch();
 		},
 		selected: () => selection.selected(choosable()),
+		/** Settled render items for a local target picker; callers may read them but never mutate a projection through this list. */
+		items: () => Object.freeze([...items]),
 		select(key) {
 			selection.select(choosable(), key);
 			touch();
