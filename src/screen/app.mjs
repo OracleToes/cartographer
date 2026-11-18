@@ -522,7 +522,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
 		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
-		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+		const windows = (projectionFor?.("shells.list").data?.windows ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (windows.length > 0) {
 			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
 			second.push([` · ${windows.length === 1 ? "1 window" : `${windows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
@@ -571,7 +571,7 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.ledger": queries.paths.ledger,
 			"carto.plan": queries.paths.plan,
 		})[id];
-	const env = { root, brainDir, session, started };
+	const env = { root, brainDir, started };
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
 	const application = options.application ?? createApplication({
@@ -582,6 +582,8 @@ export async function runScreen(session, options, runTerminal) {
 			main: session.main,
 			context: session.context,
 			engine: session.engine,
+			windows: session.windows,
+			preview: session.preview,
 			runner: options.runner,
 			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
 		},
@@ -607,6 +609,12 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.last": ({ signal }) => queries.review.last({ signal }),
 		"diff.session": ({ signal }) => queries.review.session({ started, signal }),
 		"diff.git": ({ signal }) => queries.review.git({ signal }),
+		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
+		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
+		"context.window": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
+		"context.main": ({ signal }) => queries.runtime.sent({ scope: "main", signal }),
+		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
+		"context.preview": ({ signal }) => queries.runtime.preview({ signal }),
 		"context.parts": ({ signal }) => queries.runtime.context({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
@@ -619,6 +627,12 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.last": "Last checkpoint change",
 		"diff.session": "Session changes",
 		"diff.git": "Git changes",
+		"shells.list": "Shell windows",
+		"shells.out": "Shell output",
+		"context.window": "Latest sent provider request",
+		"context.main": "Main sent provider request",
+		"context.raw": "Raw provider payload",
+		"context.preview": "Next request preview",
 		"context.parts": "Current active-context accounting",
 	});
 	let settleProjection = () => {};
@@ -671,14 +685,14 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.tree") return projectionView(id, (data) => treeView({ ...env, tree: data, deferred: true }, isOpen));
 		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, brainDir, context: data, deferred: true }));
 		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ ...env, review: data, deferred: true }, id.slice(5)));
-		if (id === "shells.list") return shellsView(env);
-		if (id === "shells.out") return shellsOutView(env, state.shell);
-		if (id === "context.window" || id === "context.main") {
-			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
+		if (id === "shells.list") return projectionView(id, (data) => shellsView(data));
+		if (id === "shells.out") return projectionView(id, (data) => shellsOutView(data));
+		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
+			const sent = data.sent;
 			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
-		}
-		if (id === "context.raw") return rawPayloadView(session.engine?.window("newest"));
-		if (id === "context.preview") return previewView(pageOf(id).preview);
+		});
+		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView(data.sent));
+		if (id === "context.preview") return projectionView(id, (data) => previewView(data.preview));
 		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView(data, { config }));
 		return { header: [], items: [] };
 	};
@@ -708,22 +722,6 @@ export async function runScreen(session, options, runTerminal) {
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
 		refreshProjection(id, force);
-		if (id === "context.preview" && page.loading !== true) {
-			page.loading = true;
-			Promise.resolve(session.preview?.())
-				.then((preview) => {
-					page.loading = false;
-					page.preview = preview;
-					rebuild(id);
-					draw();
-				})
-				.catch((error) => {
-					page.loading = false;
-					page.preview = { error: error?.message ?? String(error) };
-					rebuild(id);
-					draw();
-				});
-		}
 		const before = page.list.version;
 		rebuild(id);
 		if (page.list.version !== before) draw();
@@ -1611,7 +1609,8 @@ export async function runScreen(session, options, runTerminal) {
 			chat.print(`! ${error?.message ?? error}\n`);
 		}
 	};
-	const windowNames = () => (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone).map((win) => win.name);
+	/** Command completion uses the same cached shell projection as the view; it never probes the live window manager from a key handler. */
+	const windowNames = () => (projectionFor("shells.list").data?.windows ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone).map((win) => win.name);
 	prompt.setAutocompleteProvider(
 		new CombinedAutocompleteProvider(
 			COMMANDS.map(([name, description, words]) => ({
@@ -1718,6 +1717,9 @@ export async function runScreen(session, options, runTerminal) {
 		syncThinking();
 		if (!chatTab()) refresh();
 		else if (state.view.chat === "consult") refresh("chat.consult");
+		// Shell names and activity are also a status/completion source. Keep their deferred snapshot warm without
+		// ever asking the live process manager from rendering or a key handler.
+		if (viewId() !== "shells.list") refresh("shells.list");
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();

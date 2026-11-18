@@ -646,6 +646,68 @@ test("application: active-context accounting is a deferred typed runtime project
 	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
 });
 
+test("application: runtime view projections defer shell, engine, and preview snapshots", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const reads = { sent: 0, shells: 0, output: 0, preview: 0 };
+	const sent = {
+		task: false,
+		requestId: "main:1",
+		payload: { messages: [{ role: "system", content: "You are Cartographer." }], tools: [] },
+		results: new Map(),
+		at: Date.parse(NOW),
+		count: 1,
+		collapsedSince: false,
+	};
+	const window = { name: "main", state: "busy", command: "npm test", running: 1_200, cwd: ".", network: false, sandbox: true, asks: false, tail: ["TAP version 13"] };
+	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
+	const queries = createWorkspaceQueries({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		runtimeViewReader: {
+			sent: (scope) => { reads.sent++; return scope === "main" ? sent : { ...sent, requestId: "newest:1" }; },
+			shells: ({ tail }) => { reads.shells++; assert.equal(tail, POLICY.limits.screen.windowsListed); return { windows: [window] }; },
+			shellOutput: ({ name, tail }) => { reads.output++; assert.equal(name, "main"); assert.equal(tail, POLICY.limits.screen.shellViewLines); return { window, lines: ["TAP version 13"] }; },
+			preview: async () => { reads.preview++; return preview; },
+		},
+	});
+	const pending = queries.runtime.sent({ scope: "main", requestId: "sent-query" });
+	assert.equal(reads.sent, 0, "the engine request snapshot is not calculated from a render/key stack");
+	const current = await pending;
+	assert.equal(current.ok, true);
+	if (!current.ok) throw new Error(current.error.message);
+	assert.equal(current.data.sent, sent);
+	assert.equal(current.meta.requestId, "sent-query");
+	const shells = await queries.runtime.shells();
+	assert.equal(shells.ok, true);
+	if (!shells.ok) throw new Error(shells.error.message);
+	assert.deepEqual(shells.data.windows, [window]);
+	const output = await queries.runtime.shellOutput({ name: "main" });
+	assert.equal(output.ok, true);
+	if (!output.ok) throw new Error(output.error.message);
+	assert.equal(output.data.window, window);
+	assert.deepEqual(output.data.lines, ["TAP version 13"]);
+	const planned = await queries.runtime.preview();
+	assert.equal(planned.ok, true);
+	if (!planned.ok) throw new Error(planned.error.message);
+	assert.equal(planned.data.preview, preview);
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, preview: 1 });
+	const stopped = new AbortController();
+	const cancelledPending = queries.runtime.preview({ signal: stopped.signal });
+	stopped.abort();
+	const cancelled = await cancelledPending;
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled Runtime view projection must not reach its live reader");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(reads.preview, 1);
+	const { contextView, previewView, rawPayloadView, shellsOutView, shellsView } = await import("../src/screen/views.mjs");
+	assert.match(shellsView(shells.data).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
+	assert.match(shellsOutView(output.data).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
+	assert.match(contextView(current.data.sent, { windowSize: 1_000, cols: 80 }).header[0][0][0], /Sent provider request/, "the sent-request renderer consumes its typed engine snapshot");
+	assert.match(rawPayloadView(current.data.sent).header[0][0][0], /Raw provider payload/, "the raw audit renderer reuses that same projection");
+	assert.match(previewView(planned.data.preview).header[0][0][0], /Next request preview/, "the preview renderer receives prepared runtime data");
+});
+
 test("application: assessment projection defers its runtime summary", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const reads = { assessment: 0, atlas: 0, top: 0, since: 0 };

@@ -6,7 +6,7 @@ import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplicatio
 import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
-import { createRuntimeContextReader } from "./runtime.mjs";
+import { createRuntimeContextReader, createRuntimeViewReader } from "./runtime.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
 import { TALK_ACTION, TALK_CAPABILITY_DEFINITIONS, createTalkApplication } from "./talk.mjs";
 import { WORKSPACE_ACTION, WORKSPACE_CAPABILITY_DEFINITIONS, createWorkspaceApplication } from "./workspace.mjs";
@@ -55,7 +55,7 @@ const metadata = (options, now) => ({
  *   requests?: Parameters<typeof createRequestApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
- *   runtime?: { main?: any, context?: any, engine?: any, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined> },
+ *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
 export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
@@ -75,7 +75,12 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		runner: runtimeOptions.runner,
 		contextWindow: runtimeOptions.contextWindow,
 	});
-	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader });
+	const runtimeViewReader = runtimeOptions.viewReader ?? queryOptions.runtimeViewReader ?? createRuntimeViewReader({
+		engine: runtimeOptions.engine,
+		windows: runtimeOptions.windows,
+		preview: runtimeOptions.preview,
+	});
+	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeViewReader });
 	const capabilities = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,

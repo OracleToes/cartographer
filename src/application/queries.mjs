@@ -45,6 +45,10 @@ export const CONSULT_QUERY = Object.freeze({
 export const RUNTIME_QUERY = Object.freeze({
 	assessment: "runtime.assessment",
 	context: "runtime.context",
+	shells: "runtime.shells",
+	shellOutput: "runtime.shell-output",
+	sent: "runtime.sent",
+	preview: "runtime.preview",
 });
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -101,10 +105,11 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
+ *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeViewReader, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -437,7 +442,95 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
-	const runtime = Object.freeze({ assessment: runtimeAssessment, context: runtimeContext });
+	/** A shell snapshot is always safe to show as an empty collection when this session has no shell manager. */
+	const runtimeShells = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			const snapshot = typeof runtimeViewReader?.shells === "function"
+				? await runtimeViewReader.shells({ tail: POLICY.limits.screen.windowsListed, signal: options.signal })
+				: undefined;
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			const windows = Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.windows) ? snapshot.windows : [];
+			return uiSuccess({ windows }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read the shell windows.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	/** The selected shell's kept output is a separate projection, so rendering does not ask a live process manager. */
+	const runtimeShellOutput = async ({ name, ...options } = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			const snapshot = typeof runtimeViewReader?.shellOutput === "function"
+				? await runtimeViewReader.shellOutput({ name, tail: POLICY.limits.screen.shellViewLines, signal: options.signal })
+				: undefined;
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			return uiSuccess({
+				...(snapshot?.window === undefined ? {} : { window: snapshot.window }),
+				lines: Array.isArray(snapshot?.lines) ? snapshot.lines : [],
+			}, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read that shell window.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	/** Frozen provider-request snapshots can calculate collapse state, so they are acquired outside rendering too. */
+	const runtimeSent = async ({ scope = "newest", ...options } = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (scope !== "main" && scope !== "newest") return invalid("Choose the main or newest sent request.", "scope", ready.meta);
+		try {
+			const sent = typeof runtimeViewReader?.sent === "function"
+				? await runtimeViewReader.sent(scope, { signal: options.signal })
+				: undefined;
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			return uiSuccess({ scope, sent }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read the sent provider request.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	/** A request preview may do live planning work; it shares the same deferred/cancellable contract as every view. */
+	const runtimePreview = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			const preview = typeof runtimeViewReader?.preview === "function"
+				? await runtimeViewReader.preview({ signal: options.signal })
+				: undefined;
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			return uiSuccess({ preview }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could prepare the next-request preview.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const runtime = Object.freeze({
+		assessment: runtimeAssessment,
+		context: runtimeContext,
+		shells: runtimeShells,
+		shellOutput: runtimeShellOutput,
+		sent: runtimeSent,
+		preview: runtimePreview,
+	});
 
 	const entry = async (input, options = {}) => {
 		const ready = await prepare(options);

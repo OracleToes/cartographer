@@ -2656,8 +2656,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	});
 	expectReachable("approval request", requestsView({ brainDir, yolo: false }), PLAN_LONG);
 	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
-	const session = { windows: { list: () => [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] } };
-	expectReachable("shell command", shellsView({ session }), LONG);
+	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] }), LONG);
 });
 
 test("screen: the small box caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {

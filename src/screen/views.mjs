@@ -390,8 +390,8 @@ export function diffView({ root, brainDir, started, review: provided, deferred =
 
 // ─── Shells ─────────────────────────────────────────────────────────────────
 
-export function shellsView({ session }) {
-	const all = session.windows?.list(POLICY.limits.screen.windowsListed) ?? [];
+/** Render the deferred Runtime shell-list projection; this renderer never touches a live window manager. */
+export function shellsView({ windows: all = [] } = {}) {
 	if (all.length === 0) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
 	const one = (text) => (text.length > POLICY.limits.screen.viewSummaryChars ? `${text.slice(0, POLICY.limits.screen.viewSummaryChars)}…` : text).replace(/\s+/g, " ");
 	const items = all.map((win) => {
@@ -904,12 +904,9 @@ export function handsView({ root, brainDir, context: provided, error: providedEr
 	return { header, items };
 }
 
-/** The shell windows as a terminal emulator sees them: the newest lines of a window, the newest at the bottom. */
-export function shellsOutView({ session }, name) {
-	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
-	const pick = all.find((win) => win.name === name) ?? all.at(-1);
+/** The selected deferred shell-output projection, as a terminal emulator sees its newest lines. */
+export function shellsOutView({ window: pick, lines = [] } = {}) {
 	if (pick === undefined) return { header: [], items: [note("  No shell window is open. A change task opens one when it runs a command.")] };
-	const lines = (session.windows?.linesFrom(pick.name, 0, { partial: true }) ?? []).slice(-POLICY.limits.screen.shellViewLines);
 	const what =
 		pick.state === POLICY.enums.windowStates.busy
 			? [["busy", "warn"], [`  $ ${pick.command ?? ""}`, "bold"], [pick.asks ? "  · may be waiting for input" : "", "warn"]]

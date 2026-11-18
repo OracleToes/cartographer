@@ -36,3 +36,42 @@ export function createRuntimeContextReader({ main, context, engine, brainDir, ro
 		return { messages, sizes, ...(reportedWindow === undefined ? {} : { contextWindow: reportedWindow }) };
 	};
 }
+
+/**
+ * Deferred session snapshots for Runtime views. The engine's request-window reader currently calculates collapse
+ * state from durable context, and shell managers expose mutable process state, so neither may be called from a
+ * screen render/key stack. Composition supplies both as narrow live dependencies; this adapter owns only their
+ * presentation-safe snapshots.
+ * @param {{
+ *   engine?: { window?: (scope?: "main" | "newest") => any },
+ *   windows?: { list?: (tail?: number) => any[], linesFrom?: (name: string, from: number, options?: { partial?: boolean }) => string[] },
+ *   preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any,
+ * }} options
+ */
+export function createRuntimeViewReader({ engine, windows, preview } = {}) {
+	const list = (tail) => {
+		const listed = typeof windows?.list === "function" ? windows.list(tail) : [];
+		return Array.isArray(listed) ? listed : [];
+	};
+	return Object.freeze({
+		sent(scope = "newest") {
+			return typeof engine?.window === "function" ? engine.window(scope) : undefined;
+		},
+		shells({ tail = 0 } = {}) {
+			return { windows: list(tail) };
+		},
+		shellOutput({ name, tail = 0 } = {}) {
+			const available = list(0).filter((window) => window?.state !== "gone");
+			const window = available.find((candidate) => candidate.name === name) ?? available.at(-1);
+			const lines = window !== undefined && typeof windows?.linesFrom === "function"
+				? windows.linesFrom(window.name, 0, { partial: true }).slice(-tail)
+				: [];
+			return { ...(window === undefined ? {} : { window }), lines };
+		},
+		async preview({ signal } = {}) {
+			if (signal?.aborted === true || typeof preview !== "function") return undefined;
+			const value = await preview({ signal });
+			return signal?.aborted === true ? undefined : value;
+		},
+	});
+}
