@@ -575,8 +575,8 @@ test("screen: Project tree renders settled workspace projections through its app
 	const emptyData = { root: "/project", files: [], marks: {} };
 	const data = {
 		root: emptyData.root,
-		files: [{ path: "src/main.mjs", bytes: 1_536 }],
-		marks: { "src/main.mjs": ["entry"] },
+		files: [{ path: "main.mjs", bytes: 1_536 }],
+		marks: { "main.mjs": ["entry"] },
 	};
 	let rendered = 0;
 	const render = (projection) => {
@@ -595,8 +595,8 @@ test("screen: Project tree renders settled workspace projections through its app
 	assert.match(empty.items[0].head[0][0], /project folder is empty/i, "Project tree owns its successful empty state");
 	const settled = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data }, render });
 	assert.equal(rendered, 2, "a settled Project tree projection uses its adapter for targets and sizes");
-	assert.equal(settled.items.find((item) => item.key === "file:src/main.mjs")?.target?.file, "/project/src/main.mjs");
-	assert.match(settled.items.find((item) => item.key === "file:src/main.mjs")?.head[1][0] ?? "", /1\.5 KB/);
+	assert.equal(settled.items.find((item) => item.key === "file:main.mjs")?.target?.file, "/project/main.mjs");
+	assert.match(settled.items.find((item) => item.key === "file:main.mjs")?.head[1][0] ?? "", /1\.5 KB/);
 	const stale = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data, loading: true }, render });
 	assert.equal(rendered, 3, "cached Project tree data remains renderable while its replacement is in flight");
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Project tree rows");
