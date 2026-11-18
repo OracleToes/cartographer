@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { CheckpointError } from "../src/checkpoints.mjs";
+import { WakeError } from "../src/wakes.mjs";
+import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
@@ -19,6 +21,7 @@ import { createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
+import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
 import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
@@ -660,6 +663,102 @@ test("application: review undo defers checkpoint recovery and returns its plan r
 	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
 });
 
+test("application: runtime controls defer shell and wake mutations behind typed outcomes", async () => {
+	const calls = [];
+	const windows = {
+		send: async (name, line, options) => {
+			calls.push({ action: "send", name, line, options });
+			return { reason: "quiet", name };
+		},
+		close: (name, options) => {
+			calls.push({ action: "close", name, options });
+			return { name, ...(name === "busy" ? { running: "npm test" } : {}) };
+		},
+		closeAll: (options) => {
+			calls.push({ action: "close-all", options });
+			return ["main", "worker"];
+		},
+	};
+	const wakes = {
+		remove: (id) => {
+			calls.push({ action: "remove", id });
+			return id === "all" ? [{ id: "w1" }, { id: "w2" }] : [{ id }];
+		},
+	};
+	const app = createRuntimeApplication({ windows, wakes, shellSendWaitMs: 321, now: () => Date.parse(NOW) });
+	const pending = app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" }, { requestId: "send-1" });
+	assert.deepEqual(calls, [], "runtime mutations leave the caller stack before touching a live manager");
+	const sent = await pending;
+	assert.equal(sent.ok, true);
+	if (!sent.ok) throw new Error(sent.error.message);
+	assert.equal(sent.meta.requestId, "send-1");
+	assert.equal(sent.data.report.reason, "quiet");
+	assert.deepEqual(calls, [{ action: "send", name: "main", line: "yes", options: { waitMs: 321, signal: undefined } }]);
+
+	const closeAsked = await app.execute(RUNTIME_ACTION.closeShell, { name: "busy", reason: "The user stopped it." });
+	assert.equal(closeAsked.ok, false);
+	if (closeAsked.ok) throw new Error("closing a shell must request acknowledgement first");
+	assert.equal(closeAsked.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.deepEqual(calls.map((call) => call.action), ["send"]);
+	const closed = await app.execute(RUNTIME_ACTION.closeShell, { name: "busy", reason: "The user stopped it." }, { confirmation: { ...closeAsked.confirmation, acknowledged: true } });
+	assert.equal(closed.ok, true);
+	if (!closed.ok) throw new Error(closed.error.message);
+	assert.equal(closed.data.closed.running, "npm test");
+	assert.deepEqual(calls.at(-1), { action: "close", name: "busy", options: { why: "The user stopped it." } });
+
+	const allAsked = await app.execute(RUNTIME_ACTION.closeAllShells, { reason: "Switching sandbox." });
+	assert.equal(allAsked.ok, false);
+	if (allAsked.ok) throw new Error("closing all shells must request acknowledgement first");
+	const allClosed = await app.execute(RUNTIME_ACTION.closeAllShells, { reason: "Switching sandbox." }, { confirmation: { ...allAsked.confirmation, acknowledged: true } });
+	assert.equal(allClosed.ok, true);
+	if (!allClosed.ok) throw new Error(allClosed.error.message);
+	assert.deepEqual(allClosed.data.closed, ["main", "worker"]);
+	assert.deepEqual(calls.at(-1), { action: "close-all", options: { why: "Switching sandbox." } });
+
+	const removeAsked = await app.execute(RUNTIME_ACTION.removeWake, { id: "all" });
+	assert.equal(removeAsked.ok, false);
+	if (removeAsked.ok) throw new Error("removing wakes must request acknowledgement first");
+	assert.equal(removeAsked.confirmation?.target, "all");
+	const removed = await app.execute(RUNTIME_ACTION.removeWake, { id: "all" }, { confirmation: { ...removeAsked.confirmation, acknowledged: true } });
+	assert.equal(removed.ok, true);
+	if (!removed.ok) throw new Error(removed.error.message);
+	assert.deepEqual(removed.data.removed.map((wake) => wake.id), ["w1", "w2"]);
+	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
+
+	const invalid = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "   " });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("blank shell input must be refused");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(invalid.error.field, "line");
+	const cancelledController = new AbortController();
+	const cancelledPending = app.execute(RUNTIME_ACTION.removeWake, { id: "w1" }, { signal: cancelledController.signal });
+	cancelledController.abort();
+	const cancelled = await cancelledPending;
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled runtime action must not reach its manager");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
+
+	const noWindows = createRuntimeApplication({});
+	const unavailable = await noWindows.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" });
+	assert.equal(unavailable.ok, false);
+	if (unavailable.ok) throw new Error("a session without windows must expose a typed unavailable action");
+	assert.equal(unavailable.error.code, UI_ERROR_CODE.policyBlocked);
+	const missingWake = createRuntimeApplication({ wakes: { remove: () => { throw new WakeError("No wake is set."); } } });
+	const missingAsked = await missingWake.execute(RUNTIME_ACTION.removeWake, { id: "w1" });
+	assert.equal(missingAsked.ok, false);
+	if (missingAsked.ok) throw new Error("removing a wake still needs confirmation");
+	const missing = await missingWake.execute(RUNTIME_ACTION.removeWake, { id: "w1" }, { confirmation: { ...missingAsked.confirmation, acknowledged: true } });
+	assert.equal(missing.ok, false);
+	if (missing.ok) throw new Error("a missing wake must stay a typed not-found outcome");
+	assert.equal(missing.error.code, UI_ERROR_CODE.notFound);
+	const busyWindow = createRuntimeApplication({ windows: { send: async () => { throw new WindowError("Nothing is running in window main, so there is nothing to send input to."); } } });
+	const refused = await busyWindow.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" });
+	assert.equal(refused.ok, false);
+	if (refused.ok) throw new Error("a shell that cannot accept input must remain a typed refusal");
+	assert.equal(refused.error.code, UI_ERROR_CODE.actionRefused);
+});
+
 test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let reads = 0;
@@ -711,7 +810,7 @@ test("application: active-context accounting is a deferred typed runtime project
 
 test("application: runtime view projections defer shell, wake, engine, and preview snapshots", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, preview: 0 };
+	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0 };
 	const sent = {
 		task: false,
 		requestId: "main:1",
@@ -723,7 +822,10 @@ test("application: runtime view projections defer shell, wake, engine, and previ
 	};
 	const window = { name: "main", state: "busy", command: "npm test", running: 1_200, cwd: ".", network: false, sandbox: true, asks: false, tail: ["TAP version 13"] };
 	const wake = { id: "w1", kind: "time", at: Date.parse(NOW) + 1_000 };
-	const wakeReader = createRuntimeViewReader({ wakes: { list: () => { reads.wakes++; return [wake]; } } });
+	const wakeReader = createRuntimeViewReader({ wakes: {
+		list: () => { reads.wakes++; return [wake]; },
+		lines: () => { reads.wakeLines++; return ["w1 · every 5 minutes"]; },
+	} });
 	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
 	const queries = createWorkspaceQueries({
 		brainDir,
@@ -757,11 +859,12 @@ test("application: runtime view projections defer shell, wake, engine, and previ
 	assert.equal(wakes.ok, true);
 	if (!wakes.ok) throw new Error(wakes.error.message);
 	assert.deepEqual(wakes.data.wakes, [wake]);
+	assert.deepEqual(wakes.data.lines, ["w1 · every 5 minutes"], "wake display lines are also captured before the terminal renders them");
 	const planned = await queries.runtime.preview();
 	assert.equal(planned.ok, true);
 	if (!planned.ok) throw new Error(planned.error.message);
 	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, preview: 1 });
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1 });
 	const stoppedWakes = new AbortController();
 	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
 	stoppedWakes.abort();
@@ -967,6 +1070,10 @@ test("application: composed facade dispatches actions and publishes cache-invali
 			shelveForUser: () => "",
 		} },
 		review: { operations: { undo: () => undefined } },
+		runtime: {
+			windows: { send: async () => ({ reason: "quiet" }), close: () => ({ name: "main" }), closeAll: () => ["main"] },
+			wakes: { remove: () => [{ id: "w1" }] },
+		},
 	});
 	app.events.subscribe((event) => events.push(event));
 	const result = await app.execute(WORKSPACE_ACTION.archive, { id: "a1" }, { requestId: "archive-1" });
@@ -975,15 +1082,23 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	const undone = await app.execute(REVIEW_ACTION.undo, {}, { requestId: "undo-1" });
 	assert.equal(undone.ok, true);
 	assert.equal(undone.meta.requestId, "undo-1");
+	assert.deepEqual(events.at(-1).payload.scopes, ["review", "workspace", "context", "requests"]);
+	const sent = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "continue" }, { requestId: "send-1" });
+	assert.equal(sent.ok, true);
+	assert.equal(sent.meta.requestId, "send-1");
 	assert.deepEqual(events.map((event) => [event.type, event.payload.action]), [
 		["action.completed", WORKSPACE_ACTION.archive],
 		["projection.invalidated", WORKSPACE_ACTION.archive],
 		["action.completed", REVIEW_ACTION.undo],
 		["projection.invalidated", REVIEW_ACTION.undo],
+		["action.completed", RUNTIME_ACTION.sendShell],
+		["projection.invalidated", RUNTIME_ACTION.sendShell],
 	]);
-	assert.deepEqual(events.at(-1).payload.scopes, ["review", "workspace", "context", "requests"]);
+	assert.deepEqual(events.at(-1).payload.scopes, ["runtime"]);
 	assert.equal(app.capabilities.get(WORKSPACE_ACTION.archive)?.label, "Archive");
 	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.label, "Undo last checkpoint change");
+	assert.equal(app.capabilities.get(RUNTIME_ACTION.sendShell)?.label, "Send shell input");
+	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
 	const unknown = await app.execute("workspace.unknown", {});
 	assert.equal(unknown.ok, false);
 	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");

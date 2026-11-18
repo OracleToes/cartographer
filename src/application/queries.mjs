@@ -106,7 +106,7 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
- *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
+ *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
@@ -473,7 +473,8 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 				: undefined;
 			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
 			const wakes = Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.wakes) ? snapshot.wakes : [];
-			return uiSuccess({ wakes }, { meta: ready.meta });
+			const lines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
+			return uiSuccess({ wakes, lines }, { meta: ready.meta });
 		} catch (error) {
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,

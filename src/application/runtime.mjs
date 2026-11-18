@@ -45,7 +45,7 @@ export function createRuntimeContextReader({ main, context, engine, brainDir, ro
  * @param {{
  *   engine?: { window?: (scope?: "main" | "newest") => any },
  *   windows?: { list?: (tail?: number) => any[], linesFrom?: (name: string, from: number, options?: { partial?: boolean }) => string[] },
- *   wakes?: { list?: () => any[] },
+ *   wakes?: { list?: () => any[], lines?: () => string[] },
  *   preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any,
  * }} options
  */
@@ -71,7 +71,8 @@ export function createRuntimeViewReader({ engine, windows, wakes, preview } = {}
 		},
 		wakes() {
 			const listed = typeof wakes?.list === "function" ? wakes.list() : [];
-			return { wakes: Array.isArray(listed) ? listed : [] };
+			const lines = typeof wakes?.lines === "function" ? wakes.lines() : [];
+			return { wakes: Array.isArray(listed) ? listed : [], lines: Array.isArray(lines) ? lines : [] };
 		},
 		async preview({ signal } = {}) {
 			if (signal?.aborted === true || typeof preview !== "function") return undefined;

@@ -7,6 +7,7 @@ import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
 import { createRuntimeContextReader, createRuntimeViewReader } from "./runtime.mjs";
+import { RUNTIME_ACTION, RUNTIME_CAPABILITY_DEFINITIONS, createRuntimeApplication } from "./runtime-actions.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
 import { REVIEW_ACTION, REVIEW_CAPABILITY_DEFINITIONS, createReviewApplication } from "./review.mjs";
 import { TALK_ACTION, TALK_CAPABILITY_DEFINITIONS, createTalkApplication } from "./talk.mjs";
@@ -21,6 +22,10 @@ const ACTION_SCOPES = Object.freeze({
 	[REQUEST_ACTION.deny]: ["requests", "workspace"],
 	[REQUEST_ACTION.answer]: ["requests", "workspace"],
 	[REVIEW_ACTION.undo]: ["review", "workspace", "context", "requests"],
+	[RUNTIME_ACTION.sendShell]: ["runtime"],
+	[RUNTIME_ACTION.closeShell]: ["runtime"],
+	[RUNTIME_ACTION.closeAllShells]: ["runtime"],
+	[RUNTIME_ACTION.removeWake]: ["runtime"],
 	[TALK_ACTION.revise]: ["chat", "context"],
 	[TALK_ACTION.forget]: ["chat", "context"],
 	[WORKSPACE_ACTION.archive]: ["workspace", "context"],
@@ -56,18 +61,21 @@ const metadata = (options, now) => ({
  *   context?: Parameters<typeof createContextApplication>[0],
  *   requests?: Parameters<typeof createRequestApplication>[0],
  *   review?: Parameters<typeof createReviewApplication>[0],
+ *   runtimeActions?: Parameters<typeof createRuntimeApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
  *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
-export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
+export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, runtimeActions: runtimeActionOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
 	const eventStream = events;
 	const jobManager = jobs ?? createJobManager({ events: eventStream, now });
 	const workspace = createWorkspaceApplication({ ...workspaceOptions, brainDir, root, config, now });
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
 	const review = createReviewApplication({ ...reviewOptions, brainDir, root, now });
+	const runtimeActionContext = { windows: runtimeOptions.windows, wakes: runtimeOptions.wakes, ...runtimeActionOptions, now };
+	const runtimeActions = createRuntimeApplication(runtimeActionContext);
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });
 	const runtimeContextReader = runtimeOptions.reader ?? queryOptions.runtimeContextReader ?? createRuntimeContextReader({
 		main: runtimeOptions.main,
@@ -86,18 +94,26 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		preview: runtimeOptions.preview,
 	});
 	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeViewReader });
-	const capabilities = createCapabilityRegistry([
+	const capabilityRegistry = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,
 		...REQUEST_CAPABILITY_DEFINITIONS,
 		...REVIEW_CAPABILITY_DEFINITIONS,
+		...RUNTIME_CAPABILITY_DEFINITIONS,
 		...TALK_CAPABILITY_DEFINITIONS,
 	]);
+	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes });
+	const capabilities = Object.freeze({
+		get: (id) => capabilityRegistry.get(id),
+		availability: (id, context = {}) => capabilityRegistry.availability(id, { ...capabilityContext, ...context }),
+		list: (context = {}) => capabilityRegistry.list({ ...capabilityContext, ...context }),
+	});
 	const owners = new Map([
 		...Object.values(WORKSPACE_ACTION).map((id) => [id, workspace]),
 		...Object.values(CONTEXT_ACTION).map((id) => [id, context]),
 		...Object.values(REQUEST_ACTION).map((id) => [id, requests]),
 		...Object.values(REVIEW_ACTION).map((id) => [id, review]),
+		...Object.values(RUNTIME_ACTION).map((id) => [id, runtimeActions]),
 		...Object.values(TALK_ACTION).map((id) => [id, talk]),
 	]);
 

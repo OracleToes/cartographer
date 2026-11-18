@@ -31,7 +31,7 @@ import { findProject, setUpBrain } from "../src/project.mjs";
 import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, STAGE_WORK_DIR, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
 import { describeCall, describeResult, WAKE_BURST } from "../src/terminal.mjs";
 import { isNote, wakeNote, withoutQuietWakes } from "../src/wake.mjs";
-import { createWakes, NOTE_MAX, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
+import { createWakes, NOTE_MAX, WAKE_MIN, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
 import { createWindows, findScript, KEEP_LINES, WindowError } from "../src/windows.mjs";
 import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
@@ -250,6 +250,30 @@ test("terminal: workspace actions share typed outcomes and deletion needs --yes"
 		assert.equal(loadLedger(brainDir).ledger.items.length, 0, "only the acknowledged delete mutates the durable ledger");
 		assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the unfocus action persisted the cleared atlas lens");
 		assert.equal(server.requests.length, 0, "local workspace commands do not need an agent request");
+	} finally {
+		await server.close();
+	}
+});
+
+test("terminal: wake controls preserve their typed display and removal path", async () => {
+	const root = makeProject("terminal-runtime-wakes", { git: false });
+	configure(root, { initiate: false });
+	const { brainDir } = setUpBrain(root);
+	const wakes = createWakes({ root, brainDir });
+	try {
+		assert.equal(wakes.set({ note: "Check the handoff.", every: WAKE_MIN }).id, "w1");
+	} finally {
+		wakes.shutdown();
+	}
+	const server = await startStandIn();
+	try {
+		const result = await carto(root, server, [], { input: "/wakes\n/wakes remove w1\n/wakes\n/quit\n" });
+		ok(result, "terminal wake controls");
+		has(result.stdout, "w1 ·", "the wake list is rendered from its Runtime projection");
+		has(result.stdout, "wake  - w1", "the typed remove outcome keeps the terminal's established acknowledgement");
+		has(result.stdout, "The agent has set no wake.", "the post-removal projection is read again");
+		assert.deepEqual(JSON.parse(readFileSync(wakesPath(brainDir), "utf8")).wakes, [], "the acknowledged Runtime action persisted the removal");
+		assert.equal(server.requests.length, 0, "local wake controls do not need an agent request");
 	} finally {
 		await server.close();
 	}

@@ -31,6 +31,7 @@ import { CONTEXT_ACTION } from "./application/context.mjs";
 import { WORKSPACE_ACTION } from "./application/workspace.mjs";
 import { REQUEST_ACTION } from "./application/requests.mjs";
 import { REVIEW_ACTION } from "./application/review.mjs";
+import { RUNTIME_ACTION } from "./application/runtime-actions.mjs";
 import { conferenceStatusLine, findConferenceByChild, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
@@ -47,7 +48,7 @@ import { questionText, spanOf } from "./tools/ask.mjs";
 import { repeats } from "./screen/text.mjs";
 import { REPEAT_NOTE } from "./wake.mjs";
 import { createStreamFreeze } from "./stream.mjs";
-import { WAKE_MIN, wakeAbout, WakeError, wakesPath } from "./wakes.mjs";
+import { WAKE_MIN, wakeAbout, wakesPath } from "./wakes.mjs";
 import { USER_NAME } from "./user.mjs";
 import { planRequest, withoutAdditions } from "./request.mjs";
 import { bridgeRequestSources } from "./request-sources.mjs";
@@ -167,6 +168,11 @@ export async function runTerminal(session, options) {
 	};
 	const contextAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
 	const requestAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	const runtimeAction = (action, input, actionOptions = {}) => application.execute(action, input, actionOptions);
+	/** A named terminal command is the user's acknowledgement for its own destructive runtime control. */
+	const acknowledgedRuntimeAction = (action, target, input) => runtimeAction(action, input, {
+		confirmation: { actionId: action, target, acknowledged: true },
+	});
 	/** Run durable row mutations in order: each operation reads and writes the same book. */
 	const workspaceLines = async (action, ids, actionOptions = () => ({})) => {
 		const lines = [];
@@ -1546,19 +1552,24 @@ export async function runTerminal(session, options) {
 				if (wakes === undefined) return true;
 				const [, , id] = text.slice(1).trim().split(/\s+/);
 				if (argument === "remove") {
-					try {
-						for (const gone of wakes.remove(id ?? "")) line(`${bold("●")} wake  - ${gone.id} ${wakeAbout(gone)} · removed by you`);
-					} catch (error) {
-						if (!(error instanceof WakeError)) throw error;
-						line(`  ${error.message}`);
+					const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.removeWake, id ?? "", { id: id ?? "" });
+					if (!outcome.ok) {
+						line(outcome.error.kind === "not-found" || outcome.error.kind === "validation" ? `  ${outcome.error.message}` : `! ${outcome.error.message}`);
+						return true;
 					}
+					for (const gone of outcome.data.removed) line(`${bold("●")} wake  - ${gone.id} ${wakeAbout(gone)} · removed by you`);
 					return true;
 				}
 				if (argument !== undefined) {
 					line("  /wakes lists them; /wakes remove ID takes one away, /wakes remove all every one.");
 					return true;
 				}
-				const lines = wakes.lines();
+				const projection = await queries.runtime.wakes();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const lines = projection.data.lines;
 				if (lines.length === 0) line("  The agent has set no wake.");
 				else for (const text of lines) line(`  ${text}`);
 				const held = heldFor();
@@ -1650,8 +1661,8 @@ export async function runTerminal(session, options) {
 				if (want === "off") {
 					if (runner.off) line("  The sandbox is already off.");
 					else {
+						if (!(await closeForSwitch("off"))) return true;
 						runner.off = true;
-						closeForSwitch("off");
 						line(`${bold("!")} sandbox OFF. The commands of change tasks now run directly on this machine, as you.`);
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
@@ -1662,8 +1673,8 @@ export async function runTerminal(session, options) {
 					}
 				} else if (!runner.off) line(runner.mode === "sandbox" ? "  The sandbox is already on." : `  ${sandboxLine(runner)}`);
 				else {
+					if (!(await closeForSwitch("on"))) return true;
 					runner.off = false;
-					closeForSwitch("on");
 					line(runner.mode === "sandbox" ? `${bold("●")} ${sandboxLine(runner)}` : `  ${sandboxLine(runner)}`);
 				}
 				setPrompt();
@@ -1714,7 +1725,12 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "shells": {
-				const all = windows?.list(POLICY.limits.terminal.shellListTail) ?? [];
+				const projection = await queries.runtime.shells();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const all = projection.data.windows;
 				if (all.length === 0) line("  No shell window is open. A change task opens one when it runs a command.");
 				else {
 					for (const text of windowLines(all, { busy: POLICY.limits.terminal.shellBusyTail, free: POLICY.limits.terminal.shellFreeTail })) line(text.replace(/ `window` close clears this line\.$/, " The agent is told."));
@@ -1724,7 +1740,12 @@ export async function runTerminal(session, options) {
 			}
 			case "kill": {
 				// Only windows that are open. A line about one that is gone is the agent's to read and clear.
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+				const projection = await queries.runtime.shells();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const all = projection.data.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (argument === undefined || argument === "") {
 					line(all.length === 0 ? "  No shell window is open." : `  /kill NAME closes one window, /kill all every one. Open: ${all.map((win) => win.name).join(", ")}.`);
 					return true;
@@ -1734,11 +1755,18 @@ export async function runTerminal(session, options) {
 					line(argument === "all" || all.length === 0 ? "  No shell window is open." : `  There is no window ${JSON.stringify(argument)}. Open: ${all.map((win) => win.name).join(", ")}.`);
 					return true;
 				}
+				let closed = false;
 				for (const win of chosen) {
-					windows.close(win.name, { why: KILLED });
-					line(`${bold("●")} closed window ${win.name}${win.state === POLICY.enums.windowStates.busy ? `, and \`${oneLine(win.command, POLICY.limits.terminal.resultSummary.windowCommand)}\` ended with it` : ""}`);
+					const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.closeShell, win.name, { name: win.name, reason: KILLED });
+					if (!outcome.ok) {
+						line(`! ${outcome.error.message}`);
+						continue;
+					}
+					closed = true;
+					const command = outcome.data.closed.running;
+					line(`${bold("●")} closed window ${win.name}${command === undefined ? "" : `, and \`${oneLine(command, POLICY.limits.terminal.resultSummary.windowCommand)}\` ended with it`}`);
 				}
-				if (!busy) line(dim("  The agent sees this the next time it works. Tell it why, if it matters."));
+				if (closed && !busy) line(dim("  The agent sees this the next time it works. Tell it why, if it matters."));
 				return true;
 			}
 			case "wait": {
@@ -1921,13 +1949,9 @@ export async function runTerminal(session, options) {
 					line("  /send NAME line types a line into a shell window, as you. /shells lists the windows.");
 					return true;
 				}
-				if (windows === undefined) return true;
-				try {
-					await windows.send(argument, tail, { waitMs: POLICY.timing.terminal.shellSendWaitMs });
-					line(dim(`  typed into ${argument}: ${tail}`));
-				} catch (error) {
-					line(`! ${error.message}`);
-				}
+				const outcome = await runtimeAction(RUNTIME_ACTION.sendShell, { name: argument, line: tail });
+				if (!outcome.ok) line(`! ${outcome.error.message}`);
+				else line(dim(`  typed into ${argument}: ${tail}`));
 				return true;
 			}
 			case "quit":
@@ -1940,12 +1964,24 @@ export async function runTerminal(session, options) {
 	};
 
 	/** A window keeps the way it was opened, so a switch of the sandbox closes every one. */
-	function closeForSwitch(to) {
-		const were = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
-		if (were.length === 0) return;
+	async function closeForSwitch(to) {
+		const projection = await queries.runtime.shells();
+		if (!projection.ok) {
+			line(`! ${projection.error.message}`);
+			return false;
+		}
+		const were = projection.data.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
+		if (were.length === 0) return true;
 		recordWindows();
-		windows.closeAll({ why: `${USER_NAME} switched the sandbox ${to}, which closes every window` });
+		const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.closeAllShells, "all", {
+			reason: `${USER_NAME} switched the sandbox ${to}, which closes every window`,
+		});
+		if (!outcome.ok) {
+			line(`! ${outcome.error.message}`);
+			return false;
+		}
 		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
+		return true;
 	}
 
 	/** Which windows are still at work, said after the agent was stopped. */
