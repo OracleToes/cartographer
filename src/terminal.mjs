@@ -37,7 +37,7 @@ import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProb
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableMoves, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { awaitsApproval, planSummary, planWaits, renderPlan, runnableMoves, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { approvalWordTargets, isApprovalWords } from "./requests.mjs";
 import { splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -1047,11 +1047,12 @@ export async function runTerminal(session, options) {
 	};
 
 	/** One line on the plan, when there is one. */
-	const planLine = () => {
-		const { plan, error } = loadPlan(options.brainDir);
-		if (plan === undefined) return line(`! The plan cannot be read: ${error}. Repair the file; until then no declared move can run.`);
+	const planLine = async () => {
+		const projection = await queries.plan();
+		if (!projection.ok) return line(`! ${projection.error.message}. Repair the file; until then no declared move can run.`);
+		const plan = projection.data.plan;
 		if (plan.items.length === 0) return;
-			line(dim(`plan: ${planSummary(plan)} · /plan shows envelopes and moves${awaitsApproval(plan) && !gate.yolo ? ", /approve snapshots current move revisions" : ""}`));
+		line(dim(`plan: ${planSummary(plan)} · /plan shows envelopes and moves${awaitsApproval(plan) && !gate.yolo ? ", /approve snapshots current move revisions" : ""}`));
 	};
 
 	/** Said once for each state of the plan that waits for the user, when the agent has stopped. */
@@ -1442,10 +1443,10 @@ export async function runTerminal(session, options) {
 					for (const id of result.data.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
 					return true;
 				}
-				const { plan, error } = loadPlan(options.brainDir);
-				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
+				const projection = await queries.plan();
+				if (!projection.ok) line(`! ${projection.error.message}`);
 				else {
-					const pending = waitingItems(plan);
+					const pending = waitingItems(projection.data.plan);
 					const result = await requestAction(REQUEST_ACTION.approve, { ids: [] });
 					if (!result.ok) line(`! ${result.error.message}`);
 					else if (pending.length === 0) {
@@ -1491,7 +1492,8 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "yolo": {
-				const { plan } = loadPlan(options.brainDir);
+				const projection = await queries.plan();
+				const plan = projection.ok ? projection.data.plan : undefined;
 				const waiting = plan === undefined ? [] : waitingItems(plan);
 				if (argument === undefined) {
 					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · declared change moves wait for /approve"}`);
@@ -1664,8 +1666,8 @@ export async function runTerminal(session, options) {
 						line(`${bold("!")} sandbox OFF. The commands of change tasks now run directly on this machine, as you.`);
 						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
 						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
-						const { plan } = loadPlan(options.brainDir);
-						const open = plan === undefined ? 0 : runnableMoves(plan).length;
+						const projection = await queries.plan();
+						const open = projection.ok ? runnableMoves(projection.data.plan).length : 0;
 						if (open > 0) line(`  The plan has ${plural(open, "approved move")} ready to run without the sandbox.`);
 						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
 					}
@@ -1991,10 +1993,11 @@ export async function runTerminal(session, options) {
 	}
 
 	/** One line on the atlas and the assessment. */
-	const atlasLine = () => {
+	const atlasLine = async () => {
 		const { atlas, error } = loadAtlas(options.brainDir);
 		if (atlas === undefined) return line(`! The atlas cannot be read: ${error}. Repair the file; until then the agent cannot use its graph.`);
-		const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
+		const planProjection = await queries.plan();
+		const overlays = activeMoveOverlays(planProjection.ok ? planProjection.data.plan : undefined);
 		const attention = attentionSummary(attentionSnapshot(options.root, atlas, { active: overlays }));
 		const assessment = loadAssessment(options.brainDir);
 		line(dim(`atlas: ${atlasSummary(atlas)}${attention === "" ? "" : ` · ${attention}`} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
@@ -2002,8 +2005,8 @@ export async function runTerminal(session, options) {
 
 	// ─── Start ──────────────────────────────────────────────────────────────
 	ledgerLine();
-	planLine();
-	atlasLine();
+	await planLine();
+	await atlasLine();
 	const shellSnapshot = await queries.runtime.shells();
 	if (!shellSnapshot.ok) line(`! ${shellSnapshot.error.message}`);
 	else {
