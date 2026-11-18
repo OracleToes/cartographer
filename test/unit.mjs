@@ -168,8 +168,8 @@ test("configuration: one schema routes and validates all thirty persisted settin
 test("configuration: precedence exposes saved overrides that environment and CLI currently shadow", (t) => {
 	const { root, brainDir } = fresh(t);
 	const install = join(root, "install.json");
-	writeFileSync(install, JSON.stringify({ server: "http://install.test/v1", model: "install-model", colors: "dark", collapseFull: 70 }));
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ server: "http://project.test/v1", colors: "light", collapseFull: 75 }));
+	writeFileSync(install, JSON.stringify({ server: "http://install.test/v1", model: "install-model", colors: "truecolor", collapseFull: 70 }));
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ server: "http://project.test/v1", colors: "none", collapseFull: 75 }));
 	const env = { CARTO_CONFIG: install, CARTO_SERVER: "http://environment.test/v1", CARTO_MODEL: "environment-model", CARTO_USER: "Environment User" };
 	const flags = { url: "http://command-line.test/v1", model: "command-line-model" };
 	const resolved = resolveConfigurationSources({
@@ -186,7 +186,7 @@ test("configuration: precedence exposes saved overrides that environment and CLI
 		server: "http://command-line.test/v1",
 		model: "command-line-model",
 		user: "Environment User",
-		colors: "light",
+		colors: "none",
 		collapseFull: 75,
 	}, "defaults, install, project, environment, and CLI use the documented precedence order");
 	const server = resolved.entries.find((entry) => entry.key === "server");
