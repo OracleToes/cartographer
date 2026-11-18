@@ -40,6 +40,7 @@ import { traceFile, watchTrace } from "./trace.mjs";
 import { createStreamFreeze } from "./stream.mjs";
 import { loadAtlas, observeAtlas, saveAtlas } from "./atlas.mjs";
 import { USER_NAME, USER_HEAD } from "./user.mjs";
+import { requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit", "rm"]);
@@ -105,6 +106,9 @@ async function runOf(runs, api, context) {
  */
 export async function openSession({ root, brainDir, config, runner, gate = { yolo: false }, servedModels, servedContextWindow, trace, configuredContextWindow }) {
 	const context = BACKGROUND_CONTEXT;
+	// `openSession` is also used directly by integrations/tests, not only through cli.mjs. Keep the grammar
+	// requirement at this boundary as well; the CLI's earlier check shares the per-process capability cache.
+	await requireNativeGrammarCapability({ server: config.server, modelId: config.model });
 	// What the settings asked for, whatever the server said at the start. /model re-applies this cap and the same
 	// output reserve per model. `config.contextWindow` is the usable input budget all Cartographer features share.
 	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
@@ -130,8 +134,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			supportsReasoningEffort: false,
 			// This OpenAI-compatible endpoint must accept strict function JSON Schemas; selected calls fail closed otherwise.
 			supportsStrictMode: true,
-			// Custom grammar tools are a distinct capability. The conference probes the selected adapter before capture.
-			...(config.consultGrammar === "openai" ? { supportsOpenAIGrammarTools: true } : {}),
 			supportsUsageInStreaming: true,
 			maxTokensField: "max_tokens",
 		},
@@ -314,7 +316,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	};
 	// Installed once but selected only by independent consultation children. Its registration objects are passed to
 	// Durable agent configuration below; names alone are stored only after Durable validates the selection.
-	const conferenceExtension = createConferenceExtension({ brainDir });
+	const conferenceExtension = createConferenceExtension({ brainDir, server: config.server });
 	// One flat list of tools for the main agent and every task: a fork shares the main conversation's
 	// prompt byte for byte, so a differing tool list would break the prefix the server has already read.
 	// Tool descriptions are built into the tool definitions.
@@ -586,6 +588,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		 */
 		setModel: async (modelId, ctx = context, limits = {}) => {
 			if (!known.includes(modelId)) return false;
+			await requireNativeGrammarCapability({ server: config.server, modelId });
 			const effective = contextWindowLimits(windowCeiling, config.maxTokens, limits?.contextWindow);
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
 			config.contextWindow = effective.usableContextWindow;

@@ -16,8 +16,6 @@ import { createRefDescriber } from "../src/refs.mjs";
 import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate, editRow } from "../src/ops.mjs";
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
-import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
-import { createModels, createProvider } from "@earendil-works/pi-ai/models";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { startStandIn } from "./stand-in.mjs";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
@@ -36,7 +34,8 @@ import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
 import { createConferenceExtension } from "../src/conference-extension.mjs";
-import { CONSULT_ROSTER, ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, enumGrammar, forceSelectorPayload, grammarCapability, loadConference, participantTail, probeGrammarCapability, readConferenceSource, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, renderConference, restrictParticipantPayload, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
+import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, renderConference, restrictParticipantPayload, selectorMessages, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
+import { chooseNativeGrammar, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
 import { createEngine } from "../src/engine.mjs";
@@ -84,6 +83,8 @@ test("C5: the only consult contract is same-model conference, and obsolete threa
 		writeFileSync(join(brainDir, "config.json"), JSON.stringify({ [retired]: retired === "consultModel" ? "" : 1 }));
 		assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), new RegExp(`Removed external-consult setting\\(s\\): .*${retired}`));
 	}
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ consultGrammar: "openai" }));
+	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), /Removed native-grammar compatibility setting\(s\): .*consultGrammar/);
 	writeFileSync(join(brainDir, "config.json"), "{}");
 	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model", CARTO_CONSULT_MODEL: "" } }), /CARTO_CONSULT_MODEL was removed/i);
 });
@@ -2042,6 +2043,41 @@ test("engine: task read turnover drops only redundant task steps, never schedule
 	assert.equal(task.dropped.s1, "An earlier read of the same lines stood here; the newer one is further down.");
 });
 
+test("engine: the optional context handoff is a raw no-tools native grammar decision and fails closed", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	const ignored = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
+	t.after(async () => { await server.close(); await ignored.close(); });
+	const payload = {
+		model: "stand-in",
+		messages: [
+			{ role: "system", content: "ordinary system prompt" },
+			{ role: "user", content: "ON COLLAPSE: preserve this one fact" },
+		],
+		tools: [{ type: "function", function: { name: "book", parameters: {} } }],
+		tool_choice: "auto",
+		stream: true,
+	};
+	const prepare = (url) => {
+		const engine = createEngine({ root, brainDir, config: { server: url, model: "stand-in", contextWindow: 10_000, collapseFull: 80 } });
+		engine.sending(ROOT_CONVERSATION_ID, payload, { provider: "local", id: "stand-in" });
+		engine.replied(ROOT_CONVERSATION_ID, { content: [{ type: "text", text: "A normal participant reply." }] });
+		return engine;
+	};
+	const choice = await prepare(server.url).ask(ROOT_CONVERSATION_ID, { reason: "a test collapse" });
+	assert.equal(choice.handoff, true);
+	const request = server.nativeRequests.at(-1);
+	assert.equal(request.stream, false);
+	assert.equal(request.tools, undefined, "the host decision never copies ordinary provider tools");
+	assert.equal(request.tool_choice, undefined);
+	assert.match(request.grammar, /handoff/);
+	assert.match(request.messages.at(-1).content, /Answer \{\"handoff\": true\}/);
+
+	const refused = await prepare(ignored.url).ask(ROOT_CONVERSATION_ID, { reason: "a test collapse" });
+	assert.equal(refused.handoff, false, "an ignored grammar cannot be accepted by a prompt-only parser");
+	assert.match(refused.error, /required native grammar handoff decision failed/i);
+});
+
 test("engine: a sent provider request is an immutable snapshot with separate provider usage", (t) => {
 	const { root, brainDir } = fresh(t);
 	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
@@ -2081,54 +2117,39 @@ test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped clean
 
 // ─── Same-model consultation conference ─────────────────────────────────────
 
-const grammarFixture = async (t) => {
+test("native grammar is Cartographer's hard host-decision boundary, not an OpenAI custom-tool option", async (t) => {
 	const server = await startStandIn({ tokenDelayMs: 0 });
 	t.after(() => server.close());
-	const id = `grammar-fixture-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-	const model = {
-		id,
-		name: id,
-		api: "openai-completions",
-		provider: "local",
-		baseUrl: server.url,
-		input: ["text"],
-		reasoning: false,
-		contextWindow: 100_000,
-		maxTokens: 1_000,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		compat: { supportsOpenAIGrammarTools: true, supportsStrictMode: true, supportsUsageInStreaming: true, maxTokensField: "max_tokens" },
-	};
-	const provider = createProvider({
-		id: "local",
-		name: "conference grammar fixture",
-		baseUrl: server.url,
-		auth: { apiKey: { name: "fixture", resolve: async () => ({ auth: { apiKey: "fixture" } }) } },
-		models: [model],
-		api: openAICompletionsApi(),
-	});
-	const models = createModels();
-	models.setProvider(provider);
-	return { server, models, model };
-};
+	const capability = await probeNativeGrammarCapability({ server: server.url, modelId: "stand-in", cache: false });
+	assert.equal(capability.ok, true);
+	const probe = server.nativeRequests.at(-1);
+	assert.equal(probe.tools, undefined);
+	assert.equal(probe.tool_choice, undefined);
+	assert.equal(probe.stream, false);
+	assert.match(probe.grammar, /"cartographer"/);
+	assert.match(probe.messages.at(-1).content, /outside-the-allowed-native-grammar-set/);
 
-test("conference C1: the configured adapter probes a required custom grammar tool and pi-ai parses its choice", async (t) => {
-	const { server, models, model } = await grammarFixture(t);
-	assert.deepEqual(await probeGrammarCapability(models, model), { ok: true });
-	const request = server.requests.at(-1);
-	assert.equal(request.tool_choice, "required");
-	assert.equal(request.tools.length, 1);
-	assert.equal(request.tools[0].type, "custom");
-	assert.equal(request.tools[0].custom.name, "consult_grammar_probe");
-	assert.equal(request.tools[0].custom.format.type, "grammar");
-	assert.match(request.tools[0].custom.format.grammar.definition, /"cartographer"/);
-	assert.deepEqual(grammarCapability({ api: "openai-completions", compat: { supportsOpenAIGrammarTools: true } }), { ok: true });
-	assert.equal(grammarCapability({ api: "openai-completions", compat: {} }).ok, false, "declaring only strict JSON schemas cannot enable selector routing");
+	const choice = await chooseNativeGrammar({
+		server: server.url,
+		modelId: "stand-in",
+		messages: [{ role: "user", content: "Choose the next host role." }],
+		grammar: nativeLiteralGrammar(["atlas", "ledger"]),
+		eligible: ["atlas", "ledger"],
+	});
+	assert.equal(choice.value, "atlas");
+	assert.equal(choice.record.request.tools, undefined);
+
+	const ignored = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
+	t.after(() => ignored.close());
+	const refused = await probeNativeGrammarCapability({ server: ignored.url, modelId: "stand-in", cache: false });
+	assert.equal(refused.ok, false, "a server that accepts but ignores grammar never becomes a valid Cartographer route");
+	assert.match(refused.error, /outside the grammar/i);
 });
 
 test("conference C1-C4: an independent same-model child preserves the handoff prefix, reaches a bounded return, and lets the root rest", async (t) => {
 	const { root, brainDir } = fresh(t);
 	writeFileSync(join(root, "source.txt"), "first captured line\nsecond captured line\n");
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false, consultGrammar: "openai" }));
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false }));
 	const server = await startStandIn({ tokenDelayMs: 0 });
 	let session;
 	t.after(async () => {
@@ -2150,41 +2171,38 @@ test("conference C1-C4: an independent same-model child preserves the handoff pr
 	const submitted = await session.main.submit({ type: "input", content: `PARENT-EXCLUSION-SENTINEL || consult: ${JSON.stringify(input)}` }, session.context);
 	const settled = await submitted.wait(session.context);
 	assert.equal(settled.status, "done", "the root ends after its post-consult sleep rather than repeatedly accepting the completed receipt");
-	assert.equal(server.requests.length, 6, "root call, grammar probe, participant, selector, participant, then one root receipt turn");
-	const [rootBefore, probe, opening, selector, selected, rootAfter] = server.requests;
-	const tools = (request) => (request.tools ?? []).map((tool) => tool.type === "custom" ? `custom:${tool.custom?.name}` : `function:${tool.function?.name}`);
+	assert.equal(server.requests.length, 4, "root call, opening participant, selected participant, then one root receipt turn");
+	const [rootBefore, opening, selected, rootAfter] = server.requests;
+	assert.equal(rootBefore.model, "stand-in");
+	const [capability, selector] = server.nativeRequests;
+	const tools = (request) => (request.tools ?? []).map((tool) => `function:${tool.function?.name}`);
 	const messageText = (message) => typeof message.content === "string" ? message.content : (message.content ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
 	const joined = (request) => request.messages.map(messageText).join("\n");
 
-	assert.equal(probe.model, "stand-in");
-	assert.deepEqual(tools(probe), ["custom:consult_grammar_probe"]);
-	assert.equal(probe.tool_choice, "required");
+	assert.equal(capability.model, "stand-in");
+	assert.match(capability.grammar, /"cartographer"/);
 	assert.deepEqual(tools(opening), ["function:consult_source", "function:consult_return"]);
 	assert.equal(opening.tool_choice, undefined);
-	assert.deepEqual(tools(selector), ["custom:select_persona"]);
-	assert.equal(selector.tool_choice, "required");
-	assert.match(selector.tools[0].custom.format.grammar.definition, /"atlas"/);
-	assert.doesNotMatch(selector.tools[0].custom.format.grammar.definition, /"cartographer"/, "the prior speaker is physically absent from the finite grammar");
 	assert.deepEqual(tools(selected), ["function:consult_source", "function:consult_return"]);
 	assert.equal(selected.tool_choice, undefined);
-	for (const request of [opening, selector, selected]) {
-		assert.equal(request.model, "stand-in", "every child request uses the caller's resolved model");
+	assert.equal(selector.tools, undefined, "the raw native selector has no tool surface");
+	assert.equal(selector.tool_choice, undefined);
+	assert.match(selector.grammar, /"atlas"/);
+	assert.doesNotMatch(selector.grammar, /"cartographer"/, "the prior speaker is physically absent from the finite grammar");
+	for (const request of [opening, selected]) {
+		assert.equal(request.model, "stand-in", "every participant request uses the caller's resolved model");
 		assert.doesNotMatch(joined(request), /PARENT-EXCLUSION-SENTINEL/, "the independent child has no parent transcript");
 	}
+	const selectorText = selector.messages.map(messageText).join("\n");
 	assert.match(joined(opening), /OPENING PERSONA SENTINEL/, "Cartographer alone receives the request-local opening persona");
 	assert.match(joined(opening), /COMMON CONTEXT SENTINEL/, "the captured caller context is part of the immutable common packet");
-	assert.doesNotMatch(joined(selector), /OPENING PERSONA SENTINEL/, "the selector tail has no active persona packet");
+	assert.doesNotMatch(selectorText, /OPENING PERSONA SENTINEL/, "the native selector receives no active persona packet");
+	assert.doesNotMatch(selectorText, /COMMON CONTEXT SENTINEL/, "the native selector receives no raw captured project context");
 	assert.doesNotMatch(joined(selected), /OPENING PERSONA SENTINEL/, "the selected participant does not inherit the prior persona tail");
 	assert.match(joined(selected), /You are Atlas \(atlas\)/);
 	assert.match(joined(selected), /private entry-time atlas snapshot.*empty snapshot/is, "even an empty Atlas book remains a real role packet");
-
-	// The shared Durable head is not rebuilt: each later request begins byte-for-byte with the prior request's
-	// stable messages, while only the request-local tail is replaced and new shared history appends in between.
-	assert.deepEqual(selector.messages.slice(0, 2), opening.messages.slice(0, 2), "the selector keeps the initial stable situation and entry packet prefix");
-	assert.deepEqual(selected.messages.slice(0, 4), selector.messages.slice(0, 4), "the selected participant retains the selector's entire stable prefix rather than resetting or forking");
-	assert.match(messageText(selector.messages[2]), /OPENING CONFERENCE CONTRIBUTION/);
-	assert.match(messageText(selector.messages[3]), /attributed to participant cartographer/);
-	assert.match(messageText(selected.messages[5]), /Conference selector chose atlas/);
+	assert.match(joined(selected), /OPENING CONFERENCE CONTRIBUTION/, "the selected participant retains the completed shared contribution");
+	assert.match(joined(selected), /Native GBNF selected atlas/, "the host records the native routing handoff in the durable child");
 	assert.match(messageText(rootAfter.messages.at(-1)), /Consult conference co1 returned answered from atlas/);
 
 	const { conference } = loadConference(brainDir, "co1");
@@ -2196,26 +2214,72 @@ test("conference C1-C4: an independent same-model child preserves the handoff pr
 	assert.equal(conference.final.participant, "atlas", "any active selected participant can return the conference");
 	assert.equal(conference.requestPlans.length, 3);
 	assert.ok(conference.requestPlans.length <= POLICY.limits.conference.requestPlans, "the audit cap is above this complete bounded handoff and did not discard its evidence");
-	assert.ok(POLICY.limits.conference.requestPlans >= Math.max(8, POLICY.limits.conference.turns * 4 + 4), "the request-plan audit cap covers every Durable request permitted by the conference child turn ceiling");
+	assert.ok(POLICY.limits.conference.requestPlans >= Math.max(8, POLICY.limits.conference.turns * 4 + 4) + POLICY.limits.conference.turns, "the request-plan audit cap covers every bounded child request plus each possible raw selector handoff");
 });
 
-test("conference C1/C2: raw provider payloads make selector authority and participant authority disjoint", () => {
+test("conference C1/C2: participant provider payloads have no selector authority, while the native selector has no tools", () => {
 	const participant = restrictParticipantPayload({
 		model: "fixture",
 		tool_choice: "required",
 		tools: [
 			{ type: "function", function: { name: "consult_source", parameters: {} } },
 			{ type: "function", function: { name: "consult_return", parameters: {} } },
-			{ type: "custom", custom: { name: "select_persona", format: { type: "grammar" } } },
 		],
 	});
 	assert.deepEqual(participant.tools.map((tool) => tool.function.name), ["consult_source", "consult_return"]);
-	assert.equal(participant.tool_choice, undefined, "a participant never inherits the selector's required tool choice");
+	assert.equal(participant.tool_choice, undefined, "a participant never inherits host routing control");
 	assert.throws(() => restrictParticipantPayload({ tools: [{ type: "function", function: { name: "consult_source" } }] }), ConferenceError);
-	const selector = forceSelectorPayload({ model: "fixture", messages: [{ role: "user", content: "common history" }], tools: participant.tools }, ["atlas", "ledger"]);
-	assert.equal(selector.tool_choice, "required");
-	assert.deepEqual(selector.tools.map((tool) => tool.custom.name), ["select_persona"]);
-	assert.equal(selector.tools[0].custom.format.grammar.definition, enumGrammar(["atlas", "ledger"]));
+	const record = {
+		id: "co1",
+		question: "Which role should inspect the boundary?",
+		turns: [{ participant: "cartographer", text: "The opening contribution is complete." }],
+		active: { kind: "selector", previousSpeaker: "cartographer" },
+	};
+	const messages = selectorMessages(record, ["atlas", "ledger"]);
+	assert.equal(messages.length, 2);
+	assert.match(messages[1].content, /atlas, ledger/);
+	assert.match(messages[1].content, /opening contribution/);
+	assert.doesNotMatch(messages.map((message) => message.content).join("\n"), /consult_source|consult_return|select_persona/);
+	assert.equal(enumGrammar(["atlas", "ledger"]), 'root ::= "atlas" | "ledger"');
+	assert.throws(() => selectorMessages({ ...record, active: { kind: "selector", previousSpeaker: "invented" } }), /unvalidated state|invalid previous/i, "a corrupt routing record cannot widen a native grammar");
+	assert.throws(() => selectorTail(record, ["cartographer", "atlas"]), /immediately prior participant/, "a caller cannot reinsert the prior speaker into an explicit eligible set");
+});
+
+test("conference recovery resumes a pending native selector and commits its labelled handoff once", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
+	const conference = createConferenceCapture({
+		root,
+		brainDir,
+		question: "Which fresh perspective should inspect the recovery boundary?",
+		myPersona: "Keep the host handoff auditable.",
+		model: { provider: "local", modelId: "stand-in" },
+		caller: { conversationId: "parent", taskId: "outer", callId: "consult" },
+		at: 1,
+	});
+	attachChildConference(brainDir, conference.id, "recovery-child", 2);
+	// This is the durable state a process can leave after recording a no-tool turn
+	// and before it finishes the raw selector HTTP call.
+	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "The opening contribution survived the restart." }] }, 3);
+	assert.equal(loadConference(brainDir, conference.id).conference.active.kind, "selector");
+
+	const extension = createConferenceExtension({ brainDir, server: server.url });
+	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
+	const planned = await generation.beforeRequest({ messages: [{ role: "user", content: "Conference entry packet" }] }, { conversationId: "recovery-child", now: () => 4 });
+	const joined = planned.messages.map((message) => message.content).join("\n");
+	assert.match(joined, /Native GBNF selected atlas/, "recovery recreates the labelled host handoff before the selected participant request");
+	assert.match(joined, /You are Atlas \(atlas\)/, "the recovered request uses the selected participant's private tail");
+	const selector = server.nativeRequests.at(-1);
+	assert.equal(selector.tools, undefined);
+	assert.match(selector.grammar, /"atlas"/);
+	assert.doesNotMatch(selector.grammar, /"cartographer"/);
+	const resumed = loadConference(brainDir, conference.id).conference;
+	assert.equal(resumed.active.participant, "atlas");
+	assert.equal(resumed.active.nativeSelectionPending, undefined, "the restart path consumes the handoff marker before a provider request can replay it");
+	assert.equal(resumed.selectorEvents.length, 1);
+	assert.equal(resumed.requestPlans.filter((plan) => plan.kind === "native-selector").length, 1);
+	assert.equal(generation.onYield({ stopReason: "stop", content: [] }, { conversationId: "recovery-child", now: () => 5 }), undefined, "a recovered handoff is not appended again after Atlas speaks");
 });
 
 test("conference C2/C3: entry snapshots stay immutable, persona tails are private, and routing excludes the previous speaker", (t) => {
@@ -2277,6 +2341,8 @@ test("conference C4: request-plan audit retention stays bounded with monotonic p
 
 test("conference C4: tool activity keeps its speaker, malformed returns and limits preserve an auditable incomplete state, and a valid return carries provenance", async (t) => {
 	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
 	writeFileSync(join(root, "packet.txt"), "captured evidence\n");
 	const captured = createConferenceCapture({
 		root,
@@ -2290,11 +2356,11 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 		at: 1,
 	});
 	attachChildConference(brainDir, captured.id, "conference-child", 2);
-	const extension = createConferenceExtension({ brainDir });
+	const extension = createConferenceExtension({ brainDir, server: server.url });
 	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
 	const source = extension.tools.find((tool) => tool.name === "consult_source");
 	const returned = extension.tools.find((tool) => tool.name === "consult_return");
-	const selector = extension.tools.find((tool) => tool.name === "select_persona");
+	assert.equal(extension.tools.length, 2, "the child exposes only participant tools; native selection is outside Durable's tool registry");
 	const api = { conversationId: "conference-child", now: () => 10 };
 
 	await generation.afterResponse({ stopReason: "toolUse", content: [
@@ -2309,12 +2375,13 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 
 	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "My completed contribution." }] }, api);
 	let running = loadConference(brainDir, captured.id).conference;
-	assert.equal(running.active.kind, "selector");
+	assert.equal(running.active.kind, "participant");
+	assert.equal(running.active.participant, "atlas", "the raw native grammar selector activates the validated next participant");
 	assert.equal(running.turns.length, 1, "only the no-tool response closes the participant turn");
-	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /neutral selector choice/);
-	const picked = await selector.execute({ choice: "atlas" }, api);
-	assert.equal(picked.isError, undefined);
-	assert.equal(loadConference(brainDir, captured.id).conference.active.participant, "atlas");
+	assert.equal(running.selectorEvents[0].method, "llama.cpp-native-gbnf");
+	assert.equal(running.selectorEvents[0].grammarEnforced, true);
+	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF selected atlas/);
+	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined, "the labelled host continuation is consumed exactly once");
 
 	const malformed = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
 	assert.equal(malformed.isError, true);
@@ -2346,6 +2413,15 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 	assert.equal(limitedRecord.final, undefined, "an output limit never fabricates a synthesis");
 	assert.match(renderConference(limitedRecord), /No synthesis was fabricated/);
 
+	const cancelled = createConferenceCapture({ root, brainDir, question: "What if routing is stopped?", myPersona: "Keep cancellation explicit.", model: { provider: "local", modelId: "stand-in" }, caller: {}, at: 30 });
+	attachChildConference(brainDir, cancelled.id, "cancelled-selector-child", 31);
+	const controller = new AbortController();
+	controller.abort();
+	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "A turn whose native routing was stopped." }] }, { conversationId: "cancelled-selector-child", now: () => 32 }, { abortSignal: controller.signal });
+	const cancelledRecord = loadConference(brainDir, cancelled.id).conference;
+	assert.equal(cancelledRecord.status, "cancelled", "aborting an in-flight raw selector preserves cancellation instead of recording a generic failure");
+	assert.match(cancelledRecord.ended.reason, /native selector/i);
+
 	const chat = createChat({ readConference: (id) => id === captured.id ? returnedRecord : undefined });
 	chat.entry(0, { id: "entry-1", conversationId: "parent", model: [
 		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-call", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
@@ -2368,6 +2444,8 @@ test("conference C4: tool activity keeps its speaker, malformed returns and limi
 
 test("conference C4: recovery resumes the captured child and captured model rather than allocating or adopting a later model", async (t) => {
 	const { root, brainDir } = fresh(t);
+	const server = await startStandIn({ tokenDelayMs: 0 });
+	t.after(() => server.close());
 	const captured = createConferenceCapture({
 		root,
 		brainDir,
@@ -2379,18 +2457,14 @@ test("conference C4: recovery resumes the captured child and captured model rath
 	});
 	const selected = [];
 	const submissions = [];
-	const frozenModel = { provider: "frozen-provider", id: "frozen-model", api: "openai-completions", compat: { supportsOpenAIGrammarTools: true } };
+	const frozenModel = { provider: "frozen-provider", id: "frozen-model", api: "openai-completions", baseUrl: server.url };
 	const models = {
 		getModel(provider, modelId) {
 			selected.push([provider, modelId]);
 			return provider === "frozen-provider" && modelId === "frozen-model" ? frozenModel : undefined;
 		},
-		async completeSimple(_model, _request, options) {
-			options.onPayload({ messages: [], tools: [] });
-			return { content: [{ type: "toolCall", name: "consult_grammar_probe", arguments: { choice: "cartographer" } }] };
-		},
 	};
-	const tool = consultTool({ root, brainDir, config: {}, conferenceExtension: { name: "consult-conference", tools: [{}, {}, {}] } });
+	const tool = consultTool({ root, brainDir, config: {}, conferenceExtension: { name: "consult-conference", tools: [{}, {}] } });
 	const api = {
 		conversationId: "caller",
 		taskId: "recover-task",
@@ -2428,7 +2502,7 @@ test("conference C4: recovery resumes the captured child and captured model rath
 
 test("conference C4: stopping the outer tool records cancellation rather than a made-up answer", async (t) => {
 	const { root, brainDir } = fresh(t);
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false, consultGrammar: "openai" }));
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false }));
 	const server = await startStandIn({
 		tokenDelayMs: 0,
 		holdWhen: (request) => (request.tools ?? []).some((tool) => tool.function?.name === "consult_source")

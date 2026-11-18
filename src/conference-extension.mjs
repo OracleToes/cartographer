@@ -1,40 +1,78 @@
 // The isolated Durable profile for one same-model consult conference.
 //
 // This extension is deliberately not the Cartographer extension. A conference child
-// receives only this situation prompt and the three narrowly-scoped registrations
-// below; the selector registration is host-owned and is never offered to a
-// participant's provider payload.
+// receives only this situation prompt and its two narrowly-scoped participant tools.
+// Host routing is a separate raw native-GBNF request, never a participant capability
+// or a provider-tool declaration.
 import { defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import { POLICY } from "./config.mjs";
 import {
 	CONSULT_SITUATION,
 	ConferenceError,
-	PARTICIPANT_IDS,
+	consumeSelectorHandoff,
 	eligibleParticipants,
 	enumGrammar,
 	endConference,
 	findConferenceByChild,
-	grammarCapability,
 	participantTail,
 	readConferenceSource,
 	recordParticipantTurn,
 	recordRequestPlan,
 	recordSelectorChoice,
 	recordToolReceipt,
-	selectorTail,
+	selectorMessages,
 	validateConsultReturn,
 	withConferenceBrain,
 	completeConference,
-	forceSelectorPayload,
 	restrictParticipantPayload,
-	selectorProviderTool as conferenceSelectorProviderTool,
 } from "./conference.mjs";
+import { chooseNativeGrammar } from "./native-grammar.mjs";
 
 const text = (value, details = {}) => ({ output: [{ type: "text", text: value }], details });
 const fail = (value, details = {}) => ({ isError: true, output: [{ type: "text", text: value }], details });
 const callsOf = (message) => (message?.content ?? []).filter((part) => part?.type === "toolCall");
-const textOf = (message) => (message?.content ?? []).filter((part) => part?.type === "text").map((part) => String(part.text ?? "")).join("").trim();
+
+/**
+ * Make the one native decision that follows a completed participant turn. This is
+ * also callable from `beforeRequest` after a process restart: recording the
+ * completed turn before the raw request leaves an explicit, recoverable selector
+ * state rather than inventing a participant or silently falling back to prose.
+ */
+async function selectNativeParticipant({ brainDir, server, conference, at, signal }) {
+	if (conference.active?.kind !== "selector") throw new ConferenceError(`Conference ${conference.id} is not waiting for a native selector.`);
+	const eligible = eligibleParticipants(conference);
+	const messages = selectorMessages(conference, eligible);
+	const grammar = enumGrammar(eligible);
+	recordRequestPlan(brainDir, conference.id, "native-selector", messages, grammar, at);
+	const selected = await chooseNativeGrammar({
+		server,
+		modelId: conference.model?.modelId,
+		messages,
+		grammar,
+		eligible,
+		maxTokens: 16,
+		temperature: 0,
+		timeoutMs: POLICY.timing.nativeGrammar.timeoutMs,
+		...(signal === undefined ? {} : { signal }),
+	});
+	return recordSelectorChoice(brainDir, conference.id, selected.value, { nativeResult: selected.record, at });
+}
+
+const nativeSelectorCancelled = (error, context) => context?.abortSignal?.aborted === true || error?.name === "AbortError" || error?.record?.transport?.aborted === true;
+
+/** The one labelled Durable continuation corresponding to a recorded native choice. */
+function nativeSelectorHandoff(conference) {
+	const selected = conference.active?.participant;
+	if (conference.active?.kind !== "participant" || conference.active.nativeSelectionPending !== true || typeof selected !== "string") {
+		throw new ConferenceError(`Conference ${conference.id} has no pending native selector handoff.`);
+	}
+	const previous = conference.active.previousSpeaker ?? conference.turns?.at(-1)?.participant ?? "the prior participant";
+	return `Conference host event: the immediately preceding assistant contribution is attributed to participant ${previous}. Native GBNF selected ${selected} as the next participant; this event grants no persona instruction or tool authority.`;
+}
+
+const turnLimitReached = (conference) => (conference.turns?.length ?? 0) >= (conference.limits?.turns ?? POLICY.limits.conference.turns);
+const turnLimitReason = (conference) => `The conference reached its ${conference.limits?.turns ?? POLICY.limits.conference.turns}-turn limit without consult_return.`;
 
 function sourceRange(value, range) {
 	const lines = String(value ?? "").split("\n");
@@ -149,124 +187,97 @@ function returnTool({ brainDir }) {
 	});
 }
 
-/**
- * A host-owned routing registration. It is deliberately included only so Durable
- * can validate/settle the custom call it receives. `beforeProviderRequest` removes
- * it from participant payloads and replaces all tools with this one grammar tool for
- * selector payloads. Thus it is not a participant capability.
- */
-function selectorTool({ brainDir }) {
-	return defineTool({
-		name: "select_persona",
-		description: "Host-owned conference routing. This call is valid only for a neutral selector payload and chooses exactly one eligible participant.",
-		parameters: obj({ choice: str({ enum: PARTICIPANT_IDS, description: "One finite roster participant id." }) }),
-		// This static declaration supplies pi-ai's grammar input-property mapping (`choice`) while the raw selector
-		// payload below replaces its grammar with the current eligible subset on every selector request.
-		constrainedSampling: { type: "grammar", variants: { openai_lark: enumGrammar(PARTICIPANT_IDS) } },
-		replay: POLICY.enums.toolReplay.safe,
-		execute: async (args, api) => {
-			const conference = findConferenceByChild(brainDir, api.conversationId);
-			if (conference === undefined || conference.status !== "running") return fail("select_persona is a host-only route inside an active conference.");
-			if (conference.active?.kind !== "selector") return fail("select_persona was not requested by the neutral selector and cannot route an active participant.");
-			const eligible = eligibleParticipants(conference);
-			const choice = String(args.choice ?? "");
-			if (!eligible.includes(choice)) return fail(`Selector choice ${JSON.stringify(choice)} is not in this finite eligible set: ${eligible.join(", ")}.`);
-			try {
-				recordSelectorChoice(brainDir, conference.id, choice, { payloadObserved: true, at: api.now() });
-				return text(`Conference selector chose ${choice}. The host has activated that participant; no analysis was contributed by the selector.`, { conference: conference.id, selector: choice });
-			} catch (error) {
-				return fail(`select_persona refused: ${error.message ?? error}`);
-			}
-		},
-	});
-}
-
-// Re-export the payload builder from its consult-local record module for focused payload tests.
-export const selectorProviderTool = conferenceSelectorProviderTool;
-export { forceSelectorPayload };
-
 /** Build the extension once for the Harness, then select it exclusively for a child. */
-export function createConferenceExtension({ brainDir }) {
+export function createConferenceExtension({ brainDir, server }) {
+	if (typeof server !== "string" || server.trim() === "") throw new ConferenceError("The conference extension needs Cartographer's native-grammar server URL.");
 	const source = sourceTool({ brainDir });
 	const returned = returnTool({ brainDir });
-	const selector = selectorTool({ brainDir });
 	return defineExtension({
 		name: "consult-conference",
 		sections: [section("consult-situation", () => CONSULT_SITUATION, { tag: false })],
-		tools: [source, returned, selector],
+		tools: [source, returned],
 		hooks: [
 			hook(GenerationTask, {
-				beforeRequest: async ({ messages }, api) => {
+				beforeRequest: async ({ messages }, api, context) => {
 					const conference = findConferenceByChild(brainDir, api.conversationId);
 					if (conference === undefined || conference.status !== "running") return undefined;
 					try {
-						if (conference.active?.kind === "participant") {
-							const tail = participantTail(withConferenceBrain(conference, brainDir));
-							recordRequestPlan(brainDir, conference.id, "participant", messages, tail, Date.now());
-							return { messages: [...messages, { role: "user", content: tail }] };
+						// A crash after a participant's no-tool turn can leave the durable record at `selector`.
+						// Resume the same raw finite choice before issuing any more participant work—unless that
+						// completed turn already exhausted the host's product limit.
+						if (conference.active?.kind === "selector" && turnLimitReached(conference)) {
+							endConference(brainDir, conference.id, "interrupted", turnLimitReason(conference), api.now());
+							throw new ConferenceError(turnLimitReason(conference));
 						}
-						if (conference.active?.kind === "selector") {
-							const eligible = eligibleParticipants(conference);
-							const tail = selectorTail(conference, eligible);
-							recordRequestPlan(brainDir, conference.id, "selector", messages, tail, Date.now());
-							return { messages: [...messages, { role: "user", content: tail }] };
+						let active = conference.active?.kind === "selector"
+							? await selectNativeParticipant({ brainDir, server, conference, at: api.now(), signal: context?.abortSignal })
+							: conference;
+						if (active.active?.kind !== "participant") throw new ConferenceError(`Conference ${active.id} has no active participant request.`);
+						let prefix = messages;
+						// A crash can also happen after selection but before `onYield` commits the labelled continuation.
+						// Recreate it exactly once before the selected participant receives a provider request.
+						if (active.active.nativeSelectionPending === true) {
+							const handoff = nativeSelectorHandoff(active);
+							active = consumeSelectorHandoff(brainDir, active.id);
+							prefix = [...messages, { role: "user", content: handoff }];
 						}
-						throw new ConferenceError(`Conference ${conference.id} has no routable active state.`);
+						const tail = participantTail(withConferenceBrain(active, brainDir));
+						recordRequestPlan(brainDir, active.id, "participant", prefix, tail, api.now());
+						return { messages: [...prefix, { role: "user", content: tail }] };
 					} catch (error) {
-						endConference(brainDir, conference.id, "failed", `Could not construct an isolated conference request: ${error.message ?? error}`, Date.now());
+						const cancelled = nativeSelectorCancelled(error, context);
+						endConference(brainDir, conference.id, cancelled ? "cancelled" : "failed", cancelled ? "The caller stopped the conference while its native selector was pending." : `Could not construct an isolated conference request: ${error.message ?? error}`, api.now());
 						throw error;
 					}
 				},
-				beforeProviderRequest: ({ payload, model }, api) => {
+				beforeProviderRequest: ({ payload }, api) => {
 					const conference = findConferenceByChild(brainDir, api.conversationId);
 					if (conference === undefined || conference.status !== "running") return undefined;
 					try {
-						if (conference.active?.kind === "participant") return { payload: restrictParticipantPayload(payload) };
-						if (conference.active?.kind !== "selector") throw new ConferenceError(`Conference ${conference.id} has no routable provider state.`);
-						const capability = grammarCapability(model);
-						if (!capability.ok) throw new ConferenceError(capability.error);
-						const eligible = eligibleParticipants(conference);
-						return { payload: forceSelectorPayload(payload, eligible) };
+						if (conference.active?.kind !== "participant") throw new ConferenceError(`Conference ${conference.id} has no active participant provider state.`);
+						return { payload: restrictParticipantPayload(payload) };
 					} catch (error) {
-						endConference(brainDir, conference.id, "failed", `Could not construct the isolated ${conference.active?.kind ?? "unknown"} provider payload: ${error.message ?? error}`, Date.now());
+						endConference(brainDir, conference.id, "failed", `Could not construct the isolated participant provider payload: ${error.message ?? error}`, Date.now());
 						throw error;
 					}
 				},
-				afterResponse: async (message, api) => {
+				afterResponse: async (message, api, context) => {
 					const conference = findConferenceByChild(brainDir, api.conversationId);
 					if (conference === undefined || conference.status !== "running") return;
-					const calls = callsOf(message);
-					if (conference.active?.kind === "participant") {
-						if (calls.length > 0) return; // tool-plus-text remains this same participant's turn.
-						if (message.stopReason === "length") {
-							endConference(brainDir, conference.id, "interrupted", `The ${conference.active.participant} turn reached the provider output limit before consult_return.`, Date.now());
-							return;
-						}
-						if (message.stopReason === "stop") recordParticipantTurn(brainDir, conference.id, conference.active.participant, message, Date.now());
+					if (conference.active?.kind !== "participant") {
+						endConference(brainDir, conference.id, "failed", "The conference received a provider response without an active participant.", Date.now());
 						return;
 					}
-					if (conference.active?.kind === "selector") {
-						if (message.stopReason === "length") {
-							endConference(brainDir, conference.id, "failed", "The grammar selector reached its output limit without a choice.", Date.now());
+					const calls = callsOf(message);
+					if (calls.length > 0) return; // Tool-plus-text remains this same participant's turn.
+					if (message.stopReason === "length") {
+						endConference(brainDir, conference.id, "interrupted", `The ${conference.active.participant} turn reached the provider output limit before consult_return.`, Date.now());
+						return;
+					}
+					if (message.stopReason !== "stop") return;
+					try {
+						const selectorState = recordParticipantTurn(brainDir, conference.id, conference.active.participant, message, api.now());
+						if (turnLimitReached(selectorState)) {
+							endConference(brainDir, selectorState.id, "interrupted", turnLimitReason(selectorState), api.now());
 							return;
 						}
-						if (calls.length !== 1 || calls[0]?.name !== "select_persona" || textOf(message) !== "") {
-							endConference(brainDir, conference.id, "failed", "The grammar selector did not return exactly one select_persona call without prose.", Date.now());
-						}
+						await selectNativeParticipant({ brainDir, server, conference: selectorState, at: api.now(), signal: context?.abortSignal });
+					} catch (error) {
+						const cancelled = nativeSelectorCancelled(error, context);
+						endConference(brainDir, conference.id, cancelled ? "cancelled" : "failed", cancelled ? "The caller stopped the conference while its native selector was pending." : `The required native grammar selector failed: ${error.message ?? error}`, api.now());
 					}
 				},
-				onYield: (answer, api) => {
+				onYield: (_answer, api) => {
 					const conference = findConferenceByChild(brainDir, api.conversationId);
 					if (conference === undefined || conference.status !== "running") return undefined;
-					// `afterResponse` changed a completed participant into selector state. The durable continuation is
-					// only a compact labelled host event; the detailed selector packet remains the transient request tail.
-					if (conference.active?.kind !== "selector") return undefined;
-					if ((conference.turns?.length ?? 0) >= (conference.limits?.turns ?? POLICY.limits.conference.turns)) {
-						endConference(brainDir, conference.id, "interrupted", `The conference reached its ${conference.limits?.turns ?? POLICY.limits.conference.turns}-turn limit without consult_return.`, Date.now());
+					if (conference.active?.kind !== "participant" || conference.active.nativeSelectionPending !== true) return undefined;
+					if (turnLimitReached(conference)) {
+						endConference(brainDir, conference.id, "interrupted", turnLimitReason(conference), api.now());
 						return undefined;
 					}
-					const previous = conference.active.previousSpeaker ?? conference.turns?.at(-1)?.participant ?? "the prior participant";
-					return { continue: `Conference host event: the immediately preceding assistant contribution is attributed to participant ${previous}. That participant completed its turn. The host now needs one neutral selector choice; this event grants no persona instruction.` };
+					const handoff = nativeSelectorHandoff(conference);
+					consumeSelectorHandoff(brainDir, conference.id);
+					return { continue: handoff };
 				},
 			}),
 		],

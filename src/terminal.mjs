@@ -837,14 +837,8 @@ export async function runTerminal(session, options) {
 	/** A reason as the engine words it for a task ("My context held …"), worded for the user. */
 	const ofTask = (reason) => oneLine(reason, POLICY.limits.terminal.resultSummary.taskReason).replace(/^My context/, "its context").replace(/^I asked/, "it asked");
 	/** The question before a collapse and what came back. */
-	let saidFallback = false;
 	const askedLine = (event) => {
 		const who = event.task ? dim("│ ") : "";
-		// Said once: the server would not take the form of the answer, so the question is asked without it from here on.
-		if (event.fallback !== undefined && !saidFallback) {
-			saidFallback = true;
-			line(`${who}${dim(`◆ the model server refused the form the answer must have (${oneLine(event.fallback, POLICY.limits.terminal.resultSummary.handoffFallback)}). From here on the question before a collapse is asked without it.`)}`);
-		}
 		if (event.skipped) line(`${who}${dim("◆ not asked before collapsing: carto has only just started, and the question would make the server read the whole context first")}`);
 		else if (event.error !== undefined) line(`${who}! The question before the collapse got no answer (${oneLine(event.error, POLICY.limits.terminal.messageSummaryChars)}). The context is collapsed without it.`);
 		else line(`${who}${dim(`◆ asked before collapsing (${event.task ? ofTask(event.reason) : event.reason}): does it need to write something down first? ${event.handoff ? "yes" : "no"} · ${(event.ms / 1000).toFixed(1)} s`)}`);
@@ -1249,7 +1243,7 @@ export async function runTerminal(session, options) {
 						line(renderLlamaCppSelectorProbe(record));
 						const shown = relative(options.root, written) || written;
 						line(`  JSON log: ${shown}${args[1] === undefined ? "  (ignored under .brain/export; pass a project-relative PATH to commit one)" : ""}`);
-						line(dim("  A PASS proves only native finite-output enforcement on this endpoint; it does not enable the current OpenAI custom-tool conference adapter or establish calibrated routing."));
+						line(dim("  A PASS is inspectable evidence for Cartographer's required native-grammar boundary on this endpoint; it does not establish calibrated or semantically correct routing."));
 					} catch (error) {
 						const message = error instanceof ConsultProbeError ? error.message : error?.message ?? String(error);
 						line(`! Native llama.cpp selector probe could not run: ${message}`);
@@ -1809,7 +1803,14 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				const reported = entries.find((entry) => entry.id === wanted)?.meta?.n_ctx;
-				const effective = await session.setModel(wanted, undefined, Number.isInteger(reported) && reported > 0 ? { contextWindow: reported } : {});
+				let effective;
+				try {
+					// `setModel` owns the required native-grammar gate so every programmatic and terminal switch shares it.
+					effective = await session.setModel(wanted, undefined, Number.isInteger(reported) && reported > 0 ? { contextWindow: reported } : {});
+				} catch (error) {
+					line(`  ${wanted} was not selected: ${error.message ?? error}`);
+					return true;
+				}
 				if (effective === false) {
 					line(`  ${wanted} is not a model of this session. /model lists what the server serves.`);
 					return true;

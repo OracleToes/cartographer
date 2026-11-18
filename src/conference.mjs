@@ -7,8 +7,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { obj, str } from "@earendil-works/pi-schema";
 import { POLICY } from "./config.mjs";
+import { nativeLiteralGrammar } from "./native-grammar.mjs";
 import { loadAssessment } from "./assessment.mjs";
 import { loadAtlas } from "./atlas.mjs";
 import { loadContext } from "./context.mjs";
@@ -406,68 +406,66 @@ export function participantTail(record) {
 
 export function eligibleParticipants(record) {
 	const previous = record.active?.previousSpeaker ?? record.turns?.at(-1)?.participant;
+	if (previous !== undefined && !PARTICIPANT_IDS.includes(previous)) {
+		throw new ConferenceError(`Conference ${record?.id ?? "record"} has an invalid previous participant ${JSON.stringify(String(previous))}; native routing cannot build a grammar from unvalidated state.`);
+	}
 	return PARTICIPANT_IDS.filter((id) => id !== previous);
 }
 
-/** The selector tail is neutral: no persona packet and no prose task. */
+/** The selector packet is neutral: no persona packet and no participant tool surface. */
 export function selectorTail(record, eligible = eligibleParticipants(record)) {
-	if (!Array.isArray(eligible) || eligible.length === 0) throw new ConferenceError(`Conference ${record.id} has no eligible participant after ${record.active?.previousSpeaker ?? "the prior turn"}.`);
-	const previous = record.active?.previousSpeaker ?? record.turns?.at(-1)?.participant ?? "none";
+	if (!Array.isArray(eligible) || eligible.length === 0 || eligible.some((id) => !PARTICIPANT_IDS.includes(id))) throw new ConferenceError(`Conference ${record.id} has no valid eligible participant after ${record.active?.previousSpeaker ?? "the prior turn"}.`);
+	const prior = record.active?.previousSpeaker ?? record.turns?.at(-1)?.participant;
+	if (prior === undefined) throw new ConferenceError(`Conference ${record.id} has no completed participant to route after.`);
+	if (!PARTICIPANT_IDS.includes(prior)) throw new ConferenceError(`Conference ${record.id} has an invalid previous participant for native routing.`);
+	if (eligible.includes(prior)) throw new ConferenceError(`Conference ${record.id} native routing would allow the immediately prior participant ${prior}.`);
+	const previous = prior;
 	return [
-		"Neutral selector packet",
+		"Neutral native selector packet",
 		`The immediately preceding conference contribution was spoken by ${previous}. Choose exactly one next participant from this finite eligible set: ${eligible.join(", ")}.`,
-		"Use the select_persona grammar tool and no prose. Do not choose the prior participant. This is routing, not analysis or a vote.",
+		"Output only that id. Native GBNF is the output boundary; do not explain, vote, call a tool, or choose the prior participant. This is routing, not analysis.",
 		"Roster concerns:",
 		...CONSULT_ROSTER.filter((member) => eligible.includes(member.id)).map((member) => `- ${member.id}: ${member.criterion}`),
 	].join("\n");
 }
 
-/** One finite grammar, generated only from host-validated eligible IDs. */
+/** One finite native grammar, generated only from host-validated eligible IDs. */
 export function enumGrammar(ids) {
 	if (!Array.isArray(ids) || ids.length === 0 || ids.some((id) => !PARTICIPANT_IDS.includes(id))) throw new ConferenceError("Cannot build a selector grammar from an invalid eligible roster.");
-	return `root ::= ${ids.map((id) => JSON.stringify(id)).join(" | ")}`;
-}
-
-/** A provider custom tool, not a child-conversation participant tool. */
-export function selectorTool(ids, name = "select_persona") {
-	return {
-		name,
-		description: "Host-owned finite routing decision. Return exactly one eligible participant id and no prose.",
-		parameters: obj({ choice: str({ enum: ids, description: "One eligible participant id." }) }),
-		constrainedSampling: { type: "grammar", variants: { openai_lark: enumGrammar(ids) } },
-	};
-}
-
-/** The exact OpenAI-compatible custom grammar declaration used by the C1 probe and C3 selector. */
-export function selectorProviderTool(ids, name = "select_persona") {
-	return {
-		type: "custom",
-		custom: {
-			name,
-			description: "Host-owned finite routing decision. Return exactly one eligible participant id and no prose.",
-			format: { type: "grammar", grammar: { syntax: "lark", definition: enumGrammar(ids) } },
-		},
-	};
+	try { return nativeLiteralGrammar(ids); }
+	catch (error) { throw new ConferenceError(`Cannot build a selector grammar: ${error.message ?? error}`); }
 }
 
 /**
- * OpenAI-specific forcing is intentionally consult-local. Pi-ai exposes only auto/none as its public neutral
- * ToolChoice; the one-tool custom grammar selector therefore becomes required only in this provider payload hook.
+ * The raw selector sees only host-owned routing material: the bounded question,
+ * completed public contributions, and roster concerns. It never receives a
+ * participant's private packet, project path, live tool declaration, or Durable
+ * history. The native grammar itself supplies the finite answer boundary.
  */
-export function forceSelectorPayload(payload, ids, name = "select_persona") {
-	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new ConferenceError("The selector provider payload is not an OpenAI-compatible object.");
-	const next = { ...payload, tools: [selectorProviderTool(ids, name)], tool_choice: "required" };
-	const tool = next.tools[0];
-	if (tool?.type !== "custom" || tool.custom?.name !== name || tool.custom?.format?.type !== "grammar" || next.tool_choice !== "required") {
-		throw new ConferenceError("Could not build the required custom grammar selector payload.");
-	}
-	return next;
+export function selectorMessages(record, eligible = eligibleParticipants(record)) {
+	if (record === null || typeof record !== "object") throw new ConferenceError("Cannot build a native selector request without a conference record.");
+	const transcript = (record.turns ?? []).map((turn) => `${turn.participant}: ${flat(turn.text)}`).filter((line) => line !== "").join("\n");
+	const clipped = clip(transcript === "" ? "(No completed participant contribution is available.)" : transcript, POLICY.limits.conference.selectorChars);
+	return [
+		{
+			role: "system",
+			content: "You are Cartographer's host-owned conference router. Make one bounded routing choice from the native grammar. Do not analyze, answer the consultation, call tools, or add prose.",
+		},
+		{
+			role: "user",
+			content: [
+				`Consultation question:\n${record.question}`,
+				`Completed participant contributions${clipped.clipped ? " (tail clipped by host)" : ""}:\n${clipped.text}`,
+				selectorTail(record, eligible),
+			].join("\n\n"),
+		},
+	];
 }
 
 /**
- * Durable plans every extension tool before request hooks run. Participants must never receive the host-only
- * selector declaration, so the final OpenAI payload is reduced to their two capabilities here. This is a payload
- * boundary, not a prompt convention; a missing required participant declaration fails the conference closed.
+ * Durable plans every extension tool before request hooks run. Participants receive
+ * exactly their two local capabilities; native selection happens outside that
+ * provider payload, so no host routing declaration can leak into a participant turn.
  */
 export function restrictParticipantPayload(payload) {
 	if (payload === null || typeof payload !== "object" || Array.isArray(payload)) throw new ConferenceError("The participant provider payload is not an OpenAI-compatible object.");
@@ -478,69 +476,7 @@ export function restrictParticipantPayload(payload) {
 		throw new ConferenceError("The isolated participant payload did not contain exactly consult_source and consult_return declarations.");
 	}
 	const { tool_choice: ignoredToolChoice, ...withoutChoice } = payload;
-	const next = { ...withoutChoice, tools };
-	if (next.tools.some((tool) => tool?.function?.name === "select_persona" || tool?.custom?.name === "select_persona")) {
-		throw new ConferenceError("The host-only selector leaked into a participant provider payload.");
-	}
-	return next;
-}
-
-export function grammarCapability(model) {
-	const enabled = model?.api === "openai-completions" && model?.compat?.supportsOpenAIGrammarTools === true;
-	return enabled
-		? { ok: true }
-		: { ok: false, error: "The selected model is not configured with the OpenAI grammar-tool adapter. Set consultGrammar to \"openai\" only for a server that enforces OpenAI custom grammar tools; Cartographer will then probe it before a conference starts." };
-}
-
-const grammarProbeCache = new Map();
-
-/**
- * Prove the configured adapter actually emits a custom grammar tool request and
- * that the server returns the constrained tool call. A prompt-only answer never
- * passes this gate.
- */
-export async function probeGrammarCapability(models, model) {
-	const capability = grammarCapability(model);
-	if (!capability.ok) return capability;
-	// A model name alone is not a capability identity: a later session can point the same local model id at a
-	// different OpenAI-compatible server. Cache only within the exact adapter endpoint/model pair.
-	const key = `${model.provider}/${model.baseUrl ?? ""}/${model.id}`;
-	const known = grammarProbeCache.get(key);
-	if (known !== undefined) return known;
-	const run = (async () => {
-		const tool = selectorTool(["cartographer"], "consult_grammar_probe");
-		let observed;
-		try {
-			const answer = await models.completeSimple(model, {
-				systemPrompt: "This is a provider grammar capability probe. Invoke the one available custom grammar tool with its only allowed value. Do not write prose.",
-				messages: [{ role: "user", content: "Probe the finite grammar now." }],
-				tools: [tool],
-			}, {
-				maxTokens: 8,
-				temperature: 0,
-				toolChoice: "auto",
-				onPayload: (payload) => {
-					// The probe must exercise the same required-custom-tool payload shape as real selector routing,
-					// not merely observe that pi-ai could declare an unused grammar tool.
-					const forced = forceSelectorPayload(payload, ["cartographer"], "consult_grammar_probe");
-					const candidate = forced?.tools?.find?.((entry) => entry?.custom?.name === "consult_grammar_probe");
-					observed = candidate?.type === "custom" && candidate?.custom?.format?.type === "grammar" && forced.tool_choice === "required";
-					return forced;
-				},
-			});
-			if (observed !== true) return { ok: false, error: "The configured adapter did not emit an OpenAI custom grammar tool payload; routing is refused rather than downgraded." };
-			const calls = (answer?.content ?? []).filter((part) => part?.type === "toolCall" && part.name === "consult_grammar_probe");
-			const choice = calls.length === 1 ? calls[0].arguments?.choice : undefined;
-			if (choice !== "cartographer") return { ok: false, error: "The configured server did not return the required grammar-constrained probe choice; routing is refused rather than accepting prose or an alias." };
-			return { ok: true };
-		} catch (error) {
-			return { ok: false, error: `The configured grammar-tool probe failed: ${error?.message ?? error}` };
-		}
-	})();
-	grammarProbeCache.set(key, run);
-	const settled = await run;
-	if (!settled.ok) grammarProbeCache.delete(key);
-	return settled;
+	return { ...withoutChoice, tools };
 }
 
 /** Inspect an immutable source by ID. Private book snapshots deliberately are not exposed here. */
@@ -567,6 +503,7 @@ export function withConferenceBrain(conference, brainDir) {
 
 /** Record one completed no-tool participant turn exactly once. */
 export function recordParticipantTurn(brainDir, id, participant, message, at = Date.now()) {
+	if (!PARTICIPANT_IDS.includes(participant)) throw new ConferenceError(`Conference ${id} cannot record an unrecognized participant ${JSON.stringify(String(participant))}.`);
 	const spoken = textOf(message);
 	const digest = sha256(JSON.stringify(message?.content ?? []));
 	return updateConference(brainDir, id, (record) => {
@@ -583,8 +520,8 @@ export function recordParticipantTurn(brainDir, id, participant, message, at = D
 	});
 }
 
-/** Record a selector result and activate the selected ordinary participant. */
-export function recordSelectorChoice(brainDir, id, participant, { payloadObserved = true, at = Date.now() } = {}) {
+/** Record one validated native selector result and stage its labelled host handoff. */
+export function recordSelectorChoice(brainDir, id, participant, { nativeResult, at = Date.now() } = {}) {
 	return updateConference(brainDir, id, (record) => {
 		record.selectorEvents ??= [];
 		const prior = record.selectorEvents.at(-1);
@@ -592,11 +529,41 @@ export function recordSelectorChoice(brainDir, id, participant, { payloadObserve
 		if (record.active?.kind === "participant" && record.active.participant === participant && prior?.participant === participant) return record;
 		if (record.status !== "running" || record.active?.kind !== "selector") throw new ConferenceError(`Conference ${id} is not waiting for a neutral selector choice.`);
 		const previous = record.active?.previousSpeaker ?? record.turns?.at(-1)?.participant;
-		const eligible = PARTICIPANT_IDS.filter((candidate) => candidate !== previous);
-		if (!eligible.includes(participant)) throw new ConferenceError(`Selector choice ${participant} is not eligible after ${previous ?? "the previous speaker"}.`);
+		if (previous === undefined) throw new ConferenceError(`Conference ${id} has no completed participant to route after.`);
+		const eligible = eligibleParticipants(record);
+		if (!eligible.includes(participant)) throw new ConferenceError(`Selector choice ${participant} is not eligible after ${previous}.`);
 		if (prior?.participant === participant && prior?.after === previous) return record;
-		record.selectorEvents.push({ index: record.selectorEvents.length + 1, at: nowIso(at), after: previous, eligible, participant, grammar: enumGrammar(eligible), payloadObserved: payloadObserved === true });
-		record.active = { kind: "participant", participant, opening: false, previousSpeaker: previous };
+		const response = nativeResult?.response;
+		record.selectorEvents.push({
+			index: record.selectorEvents.length + 1,
+			at: nowIso(at),
+			after: previous,
+			eligible,
+			participant,
+			grammar: enumGrammar(eligible),
+			method: "llama.cpp-native-gbnf",
+			grammarEnforced: true,
+			...(response === undefined ? {} : {
+				native: {
+					status: response.status,
+					...(nativeResult?.finishReason === undefined ? {} : { finishReason: nativeResult.finishReason }),
+					...(nativeResult?.elapsedMs === undefined ? {} : { elapsedMs: nativeResult.elapsedMs }),
+				},
+			}),
+		});
+		// The child needs one labelled continuation after a no-tool participant turn. Clearing this marker in
+		// `consumeSelectorHandoff` makes a later participant tool round unable to replay that host event.
+		record.active = { kind: "participant", participant, opening: false, previousSpeaker: previous, nativeSelectionPending: true };
+		return record;
+	});
+}
+
+/** Consume exactly one durable host continuation after the native selector chose a participant. */
+export function consumeSelectorHandoff(brainDir, id) {
+	return updateConference(brainDir, id, (record) => {
+		if (record.status !== "running" || record.active?.kind !== "participant" || record.active.nativeSelectionPending !== true) return record;
+		const { nativeSelectionPending: ignored, ...active } = record.active;
+		record.active = active;
 		return record;
 	});
 }
@@ -653,7 +620,16 @@ export function completeConference(brainDir, id, participant, outcome, at = Date
 			at: nowIso(at),
 			provenance: {
 				participantPacket: packet,
-				selectorHistory: (record.selectorEvents ?? []).map((event) => ({ index: event.index, after: event.after, eligible: [...event.eligible], participant: event.participant, grammar: event.grammar, payloadObserved: event.payloadObserved === true })),
+				selectorHistory: (record.selectorEvents ?? []).map((event) => ({
+					index: event.index,
+					after: event.after,
+					eligible: [...event.eligible],
+					participant: event.participant,
+					grammar: event.grammar,
+					method: event.method ?? (event.payloadObserved === true ? "legacy-openai-custom-tool" : "unknown"),
+					grammarEnforced: event.grammarEnforced === true || event.payloadObserved === true,
+					...(event.native === undefined ? {} : { native: event.native }),
+				})),
 			},
 		};
 		record.final = { ...artifact, digest: sha256(JSON.stringify(artifact)) };
@@ -734,7 +710,7 @@ export function renderConference(record, { audit = true } = {}) {
 		"Structured notebook only: immutable snapshots, labelled turns, selector events, and tool receipts; no filesystem or command scratch.",
 		`Lifecycle: captured ${record.createdAt ?? "unknown"}${record.startedAt === undefined ? "" : ` · child started ${record.startedAt}`}${duration === undefined ? "" : ` · elapsed ${duration}`}.`,
 		`Budget: ${turns.length}/${limits.turns ?? POLICY.limits.conference.turns} completed participant turns · ${selections.length} selector events · ${plans.length}/${POLICY.limits.conference.requestPlans} retained request-plan audits${record.requestPlanCount === undefined || record.requestPlanCount === plans.length ? "" : ` (${record.requestPlanCount} total)`} · runtime cap ${Math.round((limits.runtimeMs ?? POLICY.limits.conference.runtimeMs) / 1000)}s.`,
-		"Routing: each selector event is a required OpenAI custom grammar choice from a host-computed eligible set; the immediately prior speaker is excluded.",
+		"Routing: each selector event is a host-owned llama.cpp native-GBNF choice from a host-computed eligible set; the immediately prior speaker is excluded.",
 	];
 	if (record.active?.kind === "participant") lines.push(`Current participant: ${record.active.participant}.`);
 	else if (record.active?.kind === "selector") lines.push(`Current state: neutral selector after ${record.active.previousSpeaker ?? "the prior participant"}.`);
@@ -755,9 +731,13 @@ export function renderConference(record, { audit = true } = {}) {
 			: `  ${member.id} · ${sourceLine(source)}${source.empty ? " · empty snapshot" : ""}.`);
 	}
 	if (plans.length > 0) {
-		lines.push("Provider request-plan audit (stable shared prefix before the transient packet):");
+		lines.push("Request-plan audit:");
 		for (const plan of plans) {
-			lines.push(`  ${plan.index}. ${plan.kind} · ${plan.stableMessages} shared messages · stable sha256 ${plan.stableDigest} · transient ${plan.tailChars} chars sha256 ${plan.tailDigest} · prior turns ${plan.historyTurns}, selections ${plan.historySelections}.`);
+			if (plan.kind === "native-selector") {
+				lines.push(`  ${plan.index}. raw native selector · ${plan.stableMessages} bounded decision messages sha256 ${plan.stableDigest} · GBNF ${plan.tailChars} chars sha256 ${plan.tailDigest} · prior turns ${plan.historyTurns}, selections ${plan.historySelections}.`);
+			} else {
+				lines.push(`  ${plan.index}. ${plan.kind} participant request · ${plan.stableMessages} shared messages · stable sha256 ${plan.stableDigest} · transient ${plan.tailChars} chars sha256 ${plan.tailDigest} · prior turns ${plan.historyTurns}, selections ${plan.historySelections}.`);
+			}
 		}
 	}
 	if (turns.length > 0) {
@@ -766,7 +746,12 @@ export function renderConference(record, { audit = true } = {}) {
 	}
 	if (selections.length > 0) {
 		lines.push("Selector events:");
-		for (const event of selections) lines.push(`  ${event.index}. after ${event.after} → ${event.participant}; eligible ${event.eligible.join(", ")} · grammar enforced ${event.payloadObserved ? "yes" : "no"} · ${event.at}.`);
+		for (const event of selections) {
+			const method = event.method ?? (event.payloadObserved === true ? "archived legacy selector" : "unknown selector method");
+			const enforced = event.grammarEnforced === true || event.payloadObserved === true;
+			const native = event.native === undefined ? "" : ` · HTTP ${event.native.status}${event.native.finishReason === undefined ? "" : ` · ${event.native.finishReason}`}${event.native.elapsedMs === undefined ? "" : ` · ${event.native.elapsedMs} ms`}`;
+			lines.push(`  ${event.index}. after ${event.after} → ${event.participant}; eligible ${event.eligible.join(", ")} · ${method} · grammar enforced ${enforced ? "yes" : "no"}${native} · ${event.at}.`);
+		}
 	}
 	if ((record.toolReceipts ?? []).length > 0) {
 		lines.push("Consult-local tool receipts:");

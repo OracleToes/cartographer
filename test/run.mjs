@@ -216,6 +216,19 @@ test("launch: a model name the server does not have is reported with the names i
 	}
 });
 
+test("launch: Cartographer refuses a model route that accepts but ignores native grammar", async () => {
+	const root = makeProject("native-grammar-required", { git: false });
+	const server = await startStandIn({ ignoreNativeGrammar: true });
+	try {
+		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: should never run || sleep"], { cwd: root });
+		assert.equal(result.code, 1, `a grammar-ignoring endpoint must be rejected before session work:\n${result.all}`);
+		has(result.stderr, "requires llama.cpp native GBNF grammar enforcement", "the failure names Cartographer's platform requirement");
+		assert.equal(existsSync(join(root, ".brain", "session.sqlite")), false, "the refusal happens before a project brain/session is created");
+	} finally {
+		await server.close();
+	}
+});
+
 test("launch: a lone llama-server leaves the configured reply reserve below a reported 75k capacity", async () => {
 	const root = makeProject("lone-server", { git: false });
 	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 75_000 } }] });
@@ -244,6 +257,7 @@ test("model: a 75k switch keeps reply room in the provider while every displayed
 		const request = server.requests.find((entry) => entry.model === "Qwen3.8");
 		assert.ok(request, "the next request uses the switched model");
 		assert.equal(request.max_tokens, 32768, "the provider sizes the reply against the 75k server capacity, not the smaller input budget");
+		assert.ok(server.nativeRequests.some((entry) => entry.model === "Qwen3.8" && /outside-the-allowed-native-grammar-set/.test(entry.messages.map(rawText).join("\n"))), "the switch proves native grammar before adopting the new model");
 	} finally {
 		await server.close();
 	}
@@ -826,7 +840,7 @@ test("task: a change focus executes the cached declared move contract through an
 
 test("consult C1-C5: a CLI conference uses the caller model, returns an isolated bounded audit, and has no legacy writer", async () => {
 	const root = makeProject("consult-conference-cli", { git: false });
-	configure(root, { initiate: false, consultGrammar: "openai" });
+	configure(root, { initiate: false });
 	const server = await startStandIn({ tokenDelayMs: 0 });
 	try {
 		const result = await carto(root, server, ["-p", `consult: ${JSON.stringify({ question: "What should we verify?", context: "CLI CAPTURED CONTEXT", myPersona: "Be a skeptical systems reviewer.", files: ["src/math.js"] })}`]);
@@ -837,10 +851,14 @@ test("consult C1-C5: a CLI conference uses the caller model, returns an isolated
 		assert.equal(loaded.model.modelId, "stand-in", "the conference records the model resolved for its caller");
 		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM atlas");
 		assert.ok(loaded.childConversationId, "the independent child identity is durable");
-		assert.ok(loaded.requestPlans.length >= 2, "participant and finite selector provider plans are auditable");
+		assert.ok(loaded.requestPlans.length >= 3, "participant and native finite-selector request plans are auditable");
 		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the conference has no storyteller writer");
-		const custom = server.requests.find((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom"));
-		assert.ok(custom, "the configured adapter receives a provider-enforced required custom grammar request");
+		assert.equal(server.requests.some((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom")), false, "conference routing does not retain the OpenAI custom-tool adapter");
+		const selectorRequests = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("Neutral native selector packet"));
+		assert.equal(selectorRequests.length, 1, "the conference makes one raw native GBNF selector request after the opening contribution");
+		assert.ok(selectorRequests.every((request) => request.tools === undefined && request.tool_choice === undefined && request.stream === false), "native selection has no tool surface");
+		assert.equal(loaded.selectorEvents[0].method, "llama.cpp-native-gbnf");
+		assert.equal(loaded.selectorEvents[0].grammarEnforced, true);
 		const participantRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Active participant packet"));
 		assert.equal(participantRequests.some((request) => request.messages.map(rawText).join("\n").includes("CLI CAPTURED CONTEXT")), true, "the immutable conference seed reaches its independent child");
 	} finally {
@@ -866,7 +884,7 @@ test("consult probe: /consult probe sends standalone native GBNF selector checks
 		assert.deepEqual(log.cases.map((entry) => entry.id), ["forced-literal", "finite-route"]);
 		assert.ok(log.cases.every((entry) => entry.request.tools === undefined && entry.request.tool_choice === undefined), "the selector grammar is deliberately isolated from the tool surface");
 		assert.doesNotMatch(readFileSync(logPath, "utf8"), /MARKER-ONLY-IN-FILE/, "the synthetic diagnostic does not capture project material");
-		const probes = server.requests.filter((request) => typeof request.grammar === "string");
+		const probes = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("outside-the-allowed-selector-set") || request.messages.map(rawText).join("\n").includes("Eligible ids: atlas"));
 		assert.equal(probes.length, 2, "the server receives one forced grammar enforcement request and one finite routing request");
 		assert.ok(probes.every((request) => request.stream === false && request.tools === undefined && request.tool_choice === undefined));
 	} finally {

@@ -41,9 +41,6 @@ export const DEFAULTS = freezeTree({
 	// Upper bound on one reply, thinking included. A file a task writes is part of one reply, so this also bounds
 	// how long a file one `write` call can hold; a reported server capacity holds this much back for the reply.
 	maxTokens: 32768,
-	// The same-model conference selector is enabled only for an adapter that can prove OpenAI custom grammar-tool
-	// enforcement. Cartographer probes this capability before it captures any conference state.
-	consultGrammar: "none",
 	// Tool rounds one run may take before it stops and says so. A focus is a small execution move;
 	// the configured ceiling can never exceed the fixed move ceiling below.
 	mainTurns: 40,
@@ -126,7 +123,7 @@ export const POLICY = freezeTree({
 		taskHistory: { contextEntries: 40, recentEntries: 40, startLookupEntries: 1, apiEntryPage: 100, apiMaxPages: 50 },
 		task: { noteChars: 3000, historyPageEntries: 60, settledDetailChars: 300, fileOps: 4, commandStarts: 2, commandRecords: 8, handoffChars: 1200, evidenceItems: 8, evidenceChars: 32_000 },
 		// Consult-local caps. A conference is advisory and isolated from project/shell/shared-brain authority.
-		conference: { questionChars: 2400, personaChars: 3200, contextChars: 64_000, sourceChars: 32_000, bookChars: 32_000, files: 8, turns: 12, runtimeMs: 300_000, returnChars: 12_000, returnItems: 16, sourceSearchHits: 80, sourceResultChars: 24_000, requestPlans: 64, childLookup: 8, childEntryLookup: 8 },
+		conference: { questionChars: 2400, personaChars: 3200, contextChars: 64_000, sourceChars: 32_000, bookChars: 32_000, selectorChars: 24_000, files: 8, turns: 12, runtimeMs: 300_000, returnChars: 12_000, returnItems: 16, sourceSearchHits: 80, sourceResultChars: 24_000, requestPlans: 64, childLookup: 8, childEntryLookup: 8 },
 		requests: { outcomeChars: 400 },
 		askChoices: { min: 2, max: 9 },
 		bookTool: { refusalChars: 120, keptBookEntries: 12 },
@@ -161,7 +158,7 @@ export const POLICY = freezeTree({
 				shellLast: 70, context: 110, refusal: 110, atlas: 90, search: 80, list: 80, write: 80,
 				taskStream: 110, atlasWritten: 80, atlasRemoved: 60, atlasStale: 60,
 				contextChange: 160, wakeChange: 160, atlasChange: 150, runFailure: 300,
-				taskReason: 80, handoffFallback: 160, readAheadError: 160, reportLine: 150, windowCommand: 80,
+				taskReason: 80, readAheadError: 160, reportLine: 150, windowCommand: 80,
 			},
 		},
 		state: { freeWindowTail: 3, listedNames: 12, commandSummaryChars: 80, outputLineChars: 200 },
@@ -186,8 +183,9 @@ export const POLICY = freezeTree({
 		escapeSequenceMs: 40,
 		reaperPollMs: 400,
 		modelCheckMs: 5000,
-		// A no-project native grammar selector diagnostic may need to wake a large local model, unlike /models.
-		consult: { nativeGrammarProbeMs: 60_000 },
+		// Native GBNF is Cartographer's required control-plane boundary. The first request may need to wake a large
+		// local model, unlike /models, so the same bound covers startup proof and host-owned choices.
+		nativeGrammar: { timeoutMs: 60_000 },
 		gracefulExitMs: 50,
 		terminal: {
 			inputFlushMs: 20, taskFlushMs: 5, retryMinimumMs: 50, inputPollMs: 100,
@@ -211,7 +209,7 @@ export const POLICY = freezeTree({
 		engine: { readAheadSeconds: 600 },
 		sandbox: { toolchainProbeMs: 10_000 },
 	},
-	protocol: { askTemperature: 0, askStream: false, askThinking: false, noToolChoice: "none" },
+	protocol: { askTemperature: 0, askThinking: false },
 	estimation: { charsPerToken: 4, emaMin: 2.5, emaMax: 6, emaAlpha: 0.3 },
 	enums: {
 		actions: ACTION,
@@ -339,6 +337,14 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 	if (retiredAt.length > 0) {
 		throw new ConfigError(`Removed external-consult setting(s): ${retiredAt.join(", ")}. C5 uses the caller's resolved model only; remove these settings instead of expecting a fallback model.`);
 	}
+	const retiredGrammarSettings = ["consultGrammar"];
+	const retiredGrammarAt = [
+		...retiredGrammarSettings.filter((key) => Object.hasOwn(coreSettings, key)).map((key) => `${corePath}:${key}`),
+		...retiredGrammarSettings.filter((key) => Object.hasOwn(projectSettings, key)).map((key) => `${projectPath}:${key}`),
+	];
+	if (retiredGrammarAt.length > 0) {
+		throw new ConfigError(`Removed native-grammar compatibility setting(s): ${retiredGrammarAt.join(", ")}. Native llama.cpp GBNF enforcement is required for Cartographer; remove these settings instead of selecting an adapter.`);
+	}
 	if (env.CARTO_CONSULT_MODEL !== undefined) {
 		throw new ConfigError("CARTO_CONSULT_MODEL was removed by the C5 consult cutover. A conference uses the caller's resolved model only; unset this environment variable instead of setting it empty.");
 	}
@@ -375,7 +381,6 @@ export function loadConfig({ brainDir, flags, env = process.env }) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
 	}
 	if (config.taskTurns > POLICY.limits.plan.moveTurns.max) throw new ConfigError(`config: taskTurns must be ${POLICY.limits.plan.moveTurns.max} or fewer: one focus is one small execution move`);
-	if (!["none", "openai"].includes(config.consultGrammar)) throw new ConfigError('config: consultGrammar must be "none" or "openai". "openai" is only for a server that enforces OpenAI custom grammar tools; Cartographer probes it before it starts a same-model conference.');
 	for (const key of ["chatWindow", "collapseTokens"]) {
 		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.minimumTokenSetting) throw new ConfigError(`config: ${key} must be a whole number of tokens, ${POLICY.validation.minimumTokenSetting} or more`);
 	}

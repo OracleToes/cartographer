@@ -1,6 +1,6 @@
 # Proposal: same-model consultation conference
 
-**Status:** delivered C1–C5 contract. `docs/plan.md` records the completed cutover, and the README describes the shipped behavior and migration boundary.
+**Status:** delivered C1–C5 contract plus native-GBNF control-plane cutover. `docs/plan.md` records the completed product cutover, and the README describes the shipped behavior and migration boundary.
 **Date:** 2026-11-16
 
 > **Implementation note.** This document began as the design contract and remains the
@@ -148,14 +148,16 @@ durable conference entry—for example, `Atlas: ...`—with matching host metada
 distinction is required: appending a persona system message to the transcript would
 leave old personas active during later speakers' turns.
 
-A selector result is likewise appended as a small model-visible conference event, such
-as `Selector chose: atlas`, while its structured record remains host-owned. The
-selector is therefore auditable and intelligible to the next speaker without itself
-becoming a persona or contributing prose analysis.
+After a raw selector result is validated, the host appends one labelled model-visible
+conference event—for example, `Native GBNF selected atlas`—before the selected
+participant's tail. The raw selector request itself is not a Durable conversation
+entry. The recorded host event makes the choice auditable and intelligible to the next
+speaker without turning the selector into a persona or allowing it to contribute prose
+analysis.
 
-The stable Situation Prompt and common conference history remain at the front of the
-provider context. A speaker swap changes only a small suffix, preserving prefix-cache
-value rather than reloading the whole conference for each persona.
+The stable Situation Prompt and common conference history remain at the front of each
+**participant** provider request. A speaker swap changes only a small suffix, preserving
+prefix-cache value rather than reloading the whole conference for each persona.
 
 ### Prefill invariant
 
@@ -167,33 +169,34 @@ conference history `H`:
 P(H) = Situation Prompt + stable tool contract + entry packet/source manifests + H
 ```
 
-An ordinary handoff must use the same live conference and progress only as follows,
-where `C` is the completed participant contribution and `S` is the recorded selector
-choice:
+An ordinary handoff preserves the child only for participant work. Let `C` be a
+completed participant contribution and `S` the labelled host continuation recording a
+validated selection:
 
 ```text
 active participant:      P(H)       + active-persona tail
-neutral selector:        P(H + C)   + constrained-selector tail
-selected participant:    P(H + C+S) + selected-persona tail
+raw native selector:     bounded question + labelled C + eligible roster + GBNF grammar
+selected participant:    P(H + C + S) + selected-persona tail
 ```
 
-Thus the stable Situation Prompt, tool contract, captured common sources, and every
-already-recorded shared entry keep their byte-for-byte content and order at the front
-of each later request. The only replacement is the final transient tail: remove the
-outgoing persona packet, add the selector packet, then replace that selector packet
-with the selected persona packet. `C` and `S` are append-only conference entries, not
-new request heads.
+The raw selector is deliberately outside `P(H)`: it has no Durable conversation,
+tools, active persona packet, or prefix-cache obligation.
 
-Persona removal or selection must never empty, reset, fork, compact, replace the
-Durable head, or rebuild the shared conference as a new prompt. A selector runs against
-the same active provider context, emits one ID, and leaves that common prefill intact.
-A full reread/reconstruction is an invariant failure, not normal routing.
+Participant turns keep the stable Situation Prompt, restricted tool contract, captured
+common sources, and append-only shared conference history at the front of later
+participant requests. Their final transient tail is the active participant packet.
 
-The implementation must capture request plans/payloads in tests across
-participant → selector → participant handoffs and assert the stable-prefix identity,
-append-only shared history, tail-only replacement, one continuing Durable head, and
-absence of reset/compaction. UI/provider accounting should make a broken
-prefix-cache invariant visible rather than quietly treating a full reread as normal.
+The selector deliberately does **not** reuse that provider request. It is a small raw
+llama.cpp request with its own compact host-built state packet: the bounded question,
+completed labelled contributions, current roster criteria, and eligible IDs. It omits
+all tools, active/private persona packets, captured raw source text, and parent-session
+history. This keeps the decision surface small and makes native GBNF the only output
+boundary; it is not a prompt cache optimization.
+
+Tests capture participant request plans and native-selector request plans separately.
+They assert one continuing Durable child for participants, append-only shared history,
+private persona removal, no tool surface on selection, finite output validation, exactly
+one labelled handoff, and explicit failure rather than an unconstrained route.
 
 ### Turn and handoff protocol
 
@@ -203,9 +206,12 @@ prefix-cache invariant visible rather than quietly treating a full reread as nor
    one assistant response. Tool results return to that same active participant; it
    continues its turn and can reason or speak again.
 3. A response with **no tool calls** is that participant's completed spoken turn. The
-   host records it with the participant ID, then removes the active persona prompt.
-4. The host runs the neutral selector over the shared conference state and records a
-   `select_persona` event.
+   host records it with the participant ID, then removes the active persona prompt. If
+   that turn reaches the conference limit, the host records an interruption without
+   making an unused next-speaker choice.
+4. Otherwise, the host makes one separate no-tools native-GBNF selector request over
+   its compact routing packet, validates the exact eligible ID, and records a native
+   selector event.
 5. The selected participant gets its own temporary role/book packet and takes the
    next turn.
 6. The only normal successful end is a valid `consult_return` from any active
@@ -216,6 +222,12 @@ successful return terminates the entire conference rather than continuing that
 participant. A malformed return is a tool error; the same participant remains active
 and can correct it.
 
+If a process stops after recording a completed participant turn but before routing,
+the durable `selector` state is recovered by rerunning the same raw native choice.
+If it stops after selection but before the child receives the labelled continuation,
+the pending marker recreates that continuation exactly once before the selected
+participant's request. A failed selector ends the record; it never substitutes prose.
+
 Hard turn/time/output/provider/storage/cancellation exits remain explicit
 `interrupted`, `failed`, or `cancelled` records. They never fabricate a synthesis.
 
@@ -224,18 +236,16 @@ Hard turn/time/output/provider/storage/cancellation exits remain explicit
 ### Selector contract
 
 The selector is not a participant and does not speak prose into the conference. It is
-a host-owned small inference request made after a completed participant turn. It sees:
+a host-owned raw llama.cpp request made after a completed participant turn. It sees:
 
-- the Situation Prompt and shared conference transcript;
-- a compact, host-built decision tail naming the current roster and their role
-  criteria;
-- the just-completed speaker; and
-- the eligible candidate set.
+- the bounded consultation question;
+- completed **labelled participant contributions**, clipped by a host cap;
+- a compact host-built roster/criterion packet, the just-completed speaker, and the
+  eligible candidate set.
 
-It sees **no active persona prompt** and has no consultation tools. The conference
-transcript is the decision state; the selector does not need a clean/reset context. It
-does need a clean decision surface at the tail: no persona instruction, no ambient
-main-session state, and no unconstrained prose task.
+It sees **no active or private persona prompt**, no captured raw project/source text,
+no parent-session state, and no consultation tools. The raw request is intentionally a
+clean decision surface rather than a replay of the Durable transcript.
 
 For a roster such as `cartographer`, `atlas`, `ledger`, `plan`, `assessment`, and
 `context`, the host builds a grammar from the eligible IDs:
@@ -244,10 +254,11 @@ For a roster such as `cartographer`, `atlas`, `ledger`, `plan`, `assessment`, an
 root ::= "cartographer" | "atlas" | "ledger" | "plan" | "assessment" | "context"
 ```
 
-The selector's completion is constrained by that grammar, uses a very small output
-budget and low/zero temperature, and returns **only one member ID**. It is not a
-voluntary participant tool call. The host validates the result, appends a durable
-selection event, and activates the corresponding persona.
+The selector's raw completion carries llama.cpp's native `grammar` field, uses a very
+small output budget and zero temperature, and returns **only one member ID**. It has
+no tool or `tool_choice` field. The host validates the exact result, appends a durable
+selection event with method/HTTP/finish/timing facts, and activates the corresponding
+persona.
 
 The candidate set is `roster − previousSpeaker`: the same participant cannot be
 selected twice in succession. That rule does not cut off a participant while it has
@@ -262,21 +273,19 @@ eligibility, and explicit failure handling—not a Jev-calibrated probability.
 ### Implementation precondition
 
 A bare completion prefix such as `The next member to speak is:` is insufficient: an
-ordinary unconstrained model can emit prose, an alias, or an invalid name. The
-conference selector requires a provider adapter that actually enforces a finite-choice
-grammar. The implementation must probe and test that capability against the configured
-server.
+ordinary unconstrained model can emit prose, an alias, or an invalid name. Native
+llama.cpp GBNF enforcement is therefore a **Cartographer platform requirement**, not
+an optional consultation adapter. Cartographer proves a deliberately adversarial
+forced-literal grammar when it opens a session and before it adopts another model.
 
-If a server cannot enforce the grammar, it must not silently downgrade to an
-unconstrained persona-routing answer. A separately approved fallback could use a strict
-enum response schema or forced typed call, but that is not this v1 contract.
+If a server/model route cannot enforce the grammar, Cartographer refuses the session or
+model switch. It does not downgrade to an unconstrained answer, a strict JSON schema,
+an OpenAI custom tool, ordinary function calling, or a second provider.
 
-For endpoint investigation, `/consult probe [PATH]` makes two synthetic no-tool calls
-through llama.cpp's native GBNF `grammar` field: a forced literal and a finite roster.
-It writes raw request/response evidence, captures no project/conference material, and
-does not enable or substitute for this OpenAI custom-tool adapter. It is a capability
-experiment for a separately reviewed llama.cpp-specific adapter, not a prompt-only
-fallback or a claim of calibrated routing.
+`/consult probe [PATH]` retains inspectable evidence: it makes two synthetic no-tool
+calls through native `grammar`, a forced literal and a finite roster, and writes raw
+request/response material without project or conference data. It is an audit tool for
+the same required runtime boundary, not a toggle or a fallback claim.
 
 ### General decision direction
 
@@ -286,17 +295,18 @@ The selector demonstrates a small host-owned finite-choice pattern:
 bounded state + explicit finite candidates + enforced enum grammar → one validated ID
 ```
 
-It is a pattern, not a new project-wide decision framework. Keep it consult-local until
-a second concrete routing need justifies extracting a shared helper. Any later use must
-supply its own state packet, candidate registry, grammar support, failure policy, and
-tests.
+This is a Cartographer-wide control-plane pattern, implemented in the shared
+`native-grammar` boundary. It serves every host-owned model decision with a finite or
+fixed answer shape: the mandatory capability proof, conference routing, and the
+optional pre-collapse `{"handoff":true|false}` decision. Each caller supplies its own
+bounded state packet, candidate set/grammar, validation, failure policy, and tests.
 
-This style is appropriate for model-mediated semantic/routing choices, such as which
-conference perspective should speak next. It never replaces deterministic or authority
-decisions: approval, schema validation, path confinement, resource limits, permission
-checks, checkpoint validation, and sandbox policy remain host-enforced rules, never
-model choices. “Use constrained decisions where applicable” is not permission to turn
-security or correctness invariants into inference.
+This style is appropriate for model-mediated semantic/routing choices. It never
+replaces deterministic or authority decisions: approval, schema validation, path
+confinement, resource limits, permission checks, checkpoint validation, and sandbox
+policy remain host-enforced rules, never model choices. “Use constrained decisions
+where applicable” is not permission to turn security or correctness invariants into
+inference.
 
 ## Same model and isolated Durable architecture
 
@@ -304,8 +314,9 @@ security or correctness invariants into inference.
 
 At conference creation, read the launching conversation's resolved model through
 `api.agent(context).model` and store its `{ provider, modelId }` in the conference
-record. Both participant turns and selector decisions use that captured model through
-the normal provider path.
+record. Participant turns use that captured model through the normal provider path;
+raw native selector requests use the same captured model ID against Cartographer's
+configured llama.cpp endpoint.
 
 The captured model comes from the launching agent rather than from `config.model` as a
 second lookup, and there is no `config.consultModel` setting:
@@ -315,9 +326,9 @@ second lookup, and there is no `config.consultModel` setting:
 - later model changes do not rewrite an active conference; and
 - it removed the automatic external-model switch.
 
-Retired `consultModel`, token, temperature, and timeout settings have no role in
-conference mode. Their presence is a direct migration error rather than a silently
-ignored value or an external-consult compatibility adapter.
+Retired `consultModel`, token, temperature, timeout, and `consultGrammar` settings
+have no role in conference mode. Their presence is a direct migration error rather than
+a silently ignored value or an external-consult/native-grammar compatibility adapter.
 
 ### Independent conversation, not a fork
 
@@ -344,22 +355,20 @@ child rather than creating another conference.
 ### Request-local persona plumbing
 
 The consultation extension needs a request-planning hook and a durable conference
-state record. The hook builds one provider payload from the same shared child
-transcript, then conditionally appends one of two tail packets:
+state record. Participant provider requests append one active participant packet: role
+prompt plus that participant's frozen book snapshot.
 
-- an active participant packet: role prompt plus that participant's frozen book
-  snapshot; or
-- a selector packet: eligible IDs and the constrained-selection instruction, with
-  no participant prompt.
-
-The selector request is host-owned and writes a `select_persona` event, not an
-assistant sentence attributed to a persona. The participant's actual assistant answer
-is preserved in the Durable transcript with participant metadata so the UI and audit
-log can label it accurately.
+After a no-tool participant response, the host separately builds the raw native
+selector packet and posts it directly to the configured llama.cpp endpoint. The
+selector event is host-owned—not an assistant sentence or model tool call—and
+records the validated selection plus native response facts. The participant's actual
+assistant answer remains in the Durable transcript with participant metadata so the UI
+and audit log can label it accurately.
 
 This is preferable to repeatedly configuring persistent `instructions` or appending
-system messages: both would retain the old persona in later context. It also preserves
-the stable head needed for provider prefix caching.
+system messages: both would retain the old persona in later context. Participant
+requests retain their ordinary stable prefix; the selector intentionally uses its own
+compact no-tools decision payload.
 
 ## Restricted tool surface
 
@@ -395,7 +404,8 @@ Before starting the conference, the host captures:
 Each snapshot receives an ID, kind, source label, range/version metadata where
 relevant, size, and SHA-256 digest. The host stores private immutable copies under the
 conference record. A later project or brain change does not alter what a participant
-or selector sees in that conference.
+sees in that conference; the native selector sees only completed labelled contributions,
+not the raw snapshot bodies.
 
 This is a compact conference-owned capture contract, not adoption of Case C1's
 capsule, ledger, receipt, artifact, or phase schema. Existing C1 records inform the
@@ -485,8 +495,8 @@ The Work view renders conference audits on demand from their `co<N>` records. It
 live storyteller or Case renderer; historical consultation rows are labelled as static
 archive notices. Conference rows show:
 
-- `co<N>`, captured model, lifecycle state, elapsed/budget facts, and grammar-adapter
-  availability;
+- `co<N>`, captured model, lifecycle state, elapsed/budget facts, and native-grammar
+  selection evidence;
 - current speaker, completed turns, selector history, and no-consecutive-speaker
   enforcement;
 - roster and each participant's role/book snapshot status, including an explicit
@@ -539,9 +549,9 @@ Case runtime.
   file/book mutation cannot change the entry packet.
 - An independent Durable child uses the launching conversation's captured model,
   request-local personas, and only `consult_source`/`consult_return` authority.
-- The provider adapter probes a required finite grammar choice; selector records are
-  durable, exclude the prior speaker, retain a common append-only prefix, and fail
-  explicitly when the capability is unavailable.
+- A shared native-GBNF boundary proves the selected endpoint/model at session open and
+  model switch. Selector records are durable, exclude the prior speaker, retain native
+  HTTP/timing facts, and fail explicitly rather than using an unconstrained fallback.
 - Participant return, malformed return, recovery, cancellation, limits, and bounded
   request-plan audit retention are tested without fabricating a result.
 - Cutover tests prove fresh requests expose only conference consultation, archived

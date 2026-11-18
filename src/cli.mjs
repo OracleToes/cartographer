@@ -7,6 +7,7 @@ import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, se
 import { forkCatalogNamespace } from "./catalog.mjs";
 import { LegacyCutoverError, migrateLegacyProducts } from "./legacy-cutover.mjs";
 import { traceFile } from "./trace.mjs";
+import { requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const HELP = `carto: Cartographer, run from a project folder.
 
@@ -14,7 +15,7 @@ const HELP = `carto: Cartographer, run from a project folder.
   carto -p "message"    send one message, print the answer, leave
   carto --where         show which folders it would use, and do nothing
 
-  --url URL             model server for this run (an OpenAI-compatible /v1 address)
+  --url URL             llama.cpp-compatible /v1 server for this run (native GBNF required)
   --model NAME          model name for this run
   --here                treat the current folder as the project, whatever is above it
   --fork-brain          mark this copied brain as an independent namespace and rebind its internal refs
@@ -134,6 +135,13 @@ export async function main(argv) {
 		// What the settings asked for; /model re-applies this cap and reserves its reply room for the new model.
 		const configuredContextWindow = config.contextWindow;
 		const served = await checkServer(config);
+		try {
+			// Native GBNF is a Cartographer platform requirement, not a best-effort consult feature. Prove the
+			// exact configured route before creating a brain or opening any model work.
+			await requireNativeGrammarCapability({ server: config.server, modelId: config.model });
+		} catch (error) {
+			throw new ConfigError(`The selected model route cannot run Cartographer: ${error.message ?? error}`);
+		}
 		const contextLimits = contextWindowLimits(configuredContextWindow, config.maxTokens, served?.context);
 		let contextNote = "";
 		if (contextLimits.usableContextWindow !== configuredContextWindow) {

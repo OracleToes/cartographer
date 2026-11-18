@@ -18,8 +18,9 @@
 //                        turn it does DIRECTIVE. Without it the answer is no.
 //   AFTER COLLAPSE: DIRECTIVE  planted: what it does when a collapse came in the middle of its turn
 //
-// A request that is not streamed is one of Cartographer's own (src/engine.mjs): the question before a collapse,
-// or the read-ahead after one. Those are kept in `asides`, not in `requests`.
+// A non-streaming native-grammar request is a host control decision (capability proof, conference routing, or a
+// collapse question) and is kept in `nativeRequests`, not `requests`. Other non-streaming Cartographer work such
+// as read-ahead is kept in `asides`.
 //
 // As a task (the newest message begins with TASK_HEADER) it obeys the brief,
 // one line per turn:
@@ -194,8 +195,8 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 		const text = textOf(message);
 		const later = messages.slice(i + 1);
 		const raw = rawOf(message);
-		// The isolated conference fixture first gives Cartographer one ordinary contribution, then lets the real
-		// custom-grammar selector choose another participant, which returns the structured advisory result.
+		// The isolated conference fixture first gives Cartographer one ordinary contribution; Cartographer's
+		// host-owned raw native-GBNF selector then chooses another participant, which returns the advisory result.
 		if (message.role === "user" && text.startsWith("Active participant packet")) {
 			const participant = /You are [^(]+\(([^)]+)\)/.exec(text)?.[1];
 			const alreadySpoke = messages.some((entry) => entry.role === "user" && textOf(entry).startsWith("Conference host event:"));
@@ -358,6 +359,7 @@ export async function startStandIn(options = {}) {
 	const focusSteps = Array.isArray(options.focusSteps) ? options.focusSteps : undefined;
 	const returnProof = typeof options.returnProof === "string" && options.returnProof.trim() !== "" ? options.returnProof.trim() : undefined;
 	const requests = [];
+	const nativeRequests = [];
 	const asides = [];
 	const held = [];
 	let counter = 0;
@@ -374,12 +376,20 @@ export async function startStandIn(options = {}) {
 		const chunks = [];
 		for await (const chunk of request) chunks.push(chunk);
 		const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-		// The native llama.cpp selector diagnostic is intentionally a plain non-streaming completion: no tools, just
-		// a GBNF grammar in the raw request. It is not one of the context-engine asides below.
-		const nativeGrammarChoice = typeof body.grammar === "string" ? /"([^"\\]+)"/.exec(body.grammar)?.[1] : undefined;
-		if (body.stream !== true && nativeGrammarChoice !== undefined) {
-			requests.push(body);
-			const content = options.ignoreNativeGrammar === true ? "outside-the-allowed-selector-set" : nativeGrammarChoice;
+		// Every Cartographer host-owned control decision is a plain non-streaming native GBNF request: no tools,
+		// no provider custom-tool adapter, and no fallback parser. Keep these separate from streamed agent requests
+		// so normal request-count assertions do not mistake the mandatory capability proof for agent work.
+		const nativeGrammarChoices = typeof body.grammar === "string"
+			? [...body.grammar.matchAll(/"((?:\\.|[^"\\])*)"/g)].map((match) => JSON.parse(`"${match[1]}"`))
+			: [];
+		if (body.stream !== true && nativeGrammarChoices.length > 0) {
+			nativeRequests.push(body);
+			const texts = (body.messages ?? []).filter((entry) => entry.role === "user" || entry.role === "tool").map(textOf);
+			const wantsHandoff = texts.some((entry) => /ON COLLAPSE/.test(entry));
+			const handoffChoice = nativeGrammarChoices.includes('{"handoff": true}') && nativeGrammarChoices.includes('{"handoff": false}')
+				? JSON.stringify({ handoff: wantsHandoff })
+				: nativeGrammarChoices[0];
+			const content = options.ignoreNativeGrammar === true ? "outside-the-allowed-selector-set" : handoffChoice;
 			const prompt = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 			response.writeHead(200, { "content-type": "application/json" });
 			response.end(JSON.stringify({ id: `chatcmpl-native-grammar-${++counter}`, object: "chat.completion", model: body.model, choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: prompt, completion_tokens: 1, total_tokens: prompt + 1 } }));
@@ -412,12 +422,6 @@ export async function startStandIn(options = {}) {
 		}
 		requests.push(body);
 		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof });
-		// The conference selector uses OpenAI's custom grammar-tool wire shape, not a function schema. The fixture
-		// enforces that small contract: it emits only the first enum literal from the supplied grammar as custom input.
-		const customTool = Array.isArray(body.tools) && body.tools.length === 1 && body.tools[0]?.type === "custom" ? body.tools[0].custom : undefined;
-		const grammarChoice = typeof customTool?.format?.grammar?.definition === "string"
-			? /"([^"\\]+)"/.exec(customTool.format.grammar.definition)?.[1]
-			: undefined;
 		const promptTokens = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 
 		response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
@@ -445,14 +449,7 @@ export async function startStandIn(options = {}) {
 			send({ reasoning_content: piece });
 			generated += 1;
 		}
-		if (customTool !== undefined && grammarChoice !== undefined) {
-			send({ tool_calls: [{ index: 0, id: `call_${counter}_custom`, type: "custom", custom: { name: customTool.name, input: "" } }] });
-			for (const piece of grammarChoice.match(/.{1,12}/gs) ?? []) {
-				await pause();
-				send({ tool_calls: [{ index: 0, custom: { input: piece } }] });
-				generated += 1;
-			}
-		} else if (decision.calls !== undefined) {
+		if (decision.calls !== undefined) {
 			for (const piece of decision.say?.match(/\S+\s*/g) ?? []) {
 				await pause();
 				send({ content: piece });
@@ -476,7 +473,7 @@ export async function startStandIn(options = {}) {
 				generated += 1;
 			}
 		}
-		send({}, decision.cut ? "length" : customTool !== undefined || decision.calls !== undefined ? "tool_calls" : "stop");
+		send({}, decision.cut ? "length" : decision.calls !== undefined ? "tool_calls" : "stop");
 		const usage = { prompt_tokens: promptTokens, completion_tokens: generated, total_tokens: promptTokens + generated };
 		response.write(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: 0, model: body.model, choices: [], usage })}\n\n`);
 		response.end("data: [DONE]\n\n");
@@ -485,6 +482,7 @@ export async function startStandIn(options = {}) {
 	return {
 		url: `http://127.0.0.1:${server.address().port}/v1`,
 		requests,
+		nativeRequests,
 		asides,
 		heldCount: () => held.length,
 		release: () => {

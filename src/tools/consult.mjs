@@ -11,12 +11,11 @@ import {
 	createConferenceCapture,
 	endConference,
 	findConferenceByCaller,
-	grammarCapability,
 	loadConference,
-	probeGrammarCapability,
 	renderConferenceResult,
 } from "../conference.mjs";
 import { describe } from "../prompt.mjs";
+import { requireNativeGrammarCapability } from "../native-grammar.mjs";
 
 const fileSpec = union([
 	str({ minLength: 1, maxLength: 1024, description: "A confined project-relative file path to capture immutably." }),
@@ -37,13 +36,15 @@ const finalStates = new Set(["returned", "failed", "interrupted", "cancelled", "
 
 function conferenceAgent(model, extension) {
 	const tools = Array.isArray(extension?.tools) ? extension.tools : [];
-	if (extension?.name !== "consult-conference" || tools.length !== 3) {
+	if (extension?.name !== "consult-conference" || tools.length !== 2) {
 		throw new ConferenceError("The isolated consult-conference extension is unavailable or incomplete.");
 	}
-	const maxTurns = Math.max(8, POLICY.limits.conference.turns * 4 + 4);
-	// One request-plan record is written per child generation. Keep the child ceiling below the retained audit cap so
-	// normal bounded conferences never lose the C3 handoff proof; trimming remains a defensive corruption/retry bound.
-	if (maxTurns > POLICY.limits.conference.requestPlans) throw new ConferenceError("Conference request-plan retention is below the child generation ceiling.");
+	const desiredMaxTurns = Math.max(8, POLICY.limits.conference.turns * 4 + 4);
+	// Every child generation records a participant plan. At most one raw selector plan follows each completed
+	// participant turn, and the host ends those turns at `conference.turns`; reserve that many audit slots so the
+	// normal bounded child cannot evict its own participant/selector handoff evidence.
+	const maxTurns = Math.min(desiredMaxTurns, POLICY.limits.conference.requestPlans - POLICY.limits.conference.turns);
+	if (maxTurns < 8) throw new ConferenceError("Conference request-plan retention is below the minimum child and native-selector audit budget.");
 	return {
 		model,
 		extensions: [extension],
@@ -142,21 +143,17 @@ export function consultTool({ root, brainDir, conferenceExtension }) {
 					}
 					return fail(`consult cannot start because ${why.charAt(0).toLowerCase()}${why.slice(1)}`);
 				}
-				const declared = grammarCapability(configured);
-				if (!declared.ok) {
+				try {
+					// Startup and /model already prove the required native path, but a retained caller may carry a
+					// different resolved model. Recheck this exact endpoint/model pair before capturing anything.
+					await requireNativeGrammarCapability({ server: configured.baseUrl, modelId: configured.id ?? model.modelId });
+				} catch (error) {
+					const why = `The captured conference model cannot satisfy Cartographer's required native grammar boundary: ${error.message ?? error}`;
 					if (conference !== undefined) {
-						const ended = endConference(brainDir, conference.id, "failed", declared.error, api.now());
+						const ended = endConference(brainDir, conference.id, "failed", why, api.now());
 						return fail(renderConferenceResult(ended), { consult: true, conference: ended.id, status: ended.status });
 					}
-					return fail(`consult refused before capture: ${declared.error}`);
-				}
-				const probed = await probeGrammarCapability(api.models, configured);
-				if (!probed.ok) {
-					if (conference !== undefined) {
-						const ended = endConference(brainDir, conference.id, "failed", probed.error, api.now());
-						return fail(renderConferenceResult(ended), { consult: true, conference: ended.id, status: ended.status });
-					}
-					return fail(`consult refused before capture: ${probed.error}`);
+					return fail(`consult refused before capture: ${why}`);
 				}
 
 				if (conference === undefined) {
