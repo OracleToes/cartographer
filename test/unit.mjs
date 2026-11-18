@@ -18,6 +18,7 @@ import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
+import { ACTION_SPECS, ACTION_TARGET_KIND, assertActionSpecParity, createActionSpecRegistry } from "../src/application/action-specs.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createSettingsReader } from "../src/application/settings.mjs";
@@ -79,6 +80,10 @@ import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat as createChatModel } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
+import { ACTION_PLACEMENTS, assertActionPlacementParity, createActionPlacementRegistry } from "../src/screen/action-placement.mjs";
+import { ActionDialog } from "../src/screen/action-dialog.mjs";
+import { ActionLauncher, ActionRequestGate, actionInputFromDrafts, actionLaunchPlan, normalizeActionTargets, resolveActionTarget } from "../src/screen/action-launcher.mjs";
+import { TargetPicker } from "../src/screen/target-picker.mjs";
 import { createFocusManager } from "../src/screen/focus.mjs";
 import { createKeyHints } from "../src/screen/key-hints.mjs";
 import { createList } from "../src/screen/list.mjs";
@@ -1187,6 +1192,136 @@ test("screen: command palette filters registered actions, keeps disabled reasons
 	await Promise.resolve();
 	await Promise.resolve();
 	assert.equal(closes, 1, "only a successful asynchronous palette activation dismisses its overlay");
+});
+
+test("action launcher: specs and placements give every registered capability one pure Screen launch contract", () => {
+	const capabilities = { list: () => ACTION_SPECS.map((spec) => ({ id: spec.id })) };
+	const specs = createActionSpecRegistry(ACTION_SPECS);
+	const placements = createActionPlacementRegistry(ACTION_PLACEMENTS);
+	assert.deepEqual(assertActionSpecParity(capabilities, specs).actionIds, ACTION_SPECS.map((spec) => spec.id));
+	assert.deepEqual(assertActionPlacementParity(capabilities, placements).actionIds, ACTION_SPECS.map((spec) => spec.id));
+	assert.equal(specs.get("runtime.shell.send")?.target.kind, ACTION_TARGET_KIND.shellWindow);
+	assert.equal(placements.get("runtime.shell.send")?.route.view, "list");
+	assert.equal(placements.get("settings.reset")?.targetSource, "settings");
+	assert.throws(() => createActionSpecRegistry([{ id: "bad", launch: "direct", target: { kind: "none" }, fields: [{ id: "why", label: "Why", kind: "text", limit: 1, required: false, multiline: false }] }]), /cannot declare dialog fields/);
+	assert.throws(() => createActionPlacementRegistry([{ id: "bad", route: { tab: "chat" }, targetSource: "none" }]), /tab and view/);
+	assert.throws(() => assertActionPlacementParity({ list: () => [{ id: "known" }] }, placements), /missing placements/);
+});
+
+test("action launcher: settled targets, schema dialogs, confirmations, and request ids stay behind one duplicate gate", async () => {
+	const requestSpec = createActionSpecRegistry([{ id: "request.answer", launch: "dialog", target: { kind: "request", input: "id" }, fields: [{ id: "text", label: "Answer", kind: "text", required: true, multiline: true, limit: 40 }] }]);
+	const requestPlacement = createActionPlacementRegistry([{ id: "request.answer", route: { tab: "carto", view: "requests" }, targetSource: "requests", formTitle: "Answer request" }]);
+	const requestCapabilities = { get: (id) => id === "request.answer" ? { id, label: "Answer request", availability: { enabled: true } } : undefined };
+	const target = { key: "request:q1", value: "q1", label: "q1", input: { id: "q1" }, detail: "Which wording?" };
+	assert.deepEqual(normalizeActionTargets([target])[0].input, { id: "q1" }, "a settled row may supply complete backend input rather than a scalar only");
+	assert.equal(resolveActionTarget({ kind: ACTION_TARGET_KIND.request, selected: "gone", targets: [target] }).state, "pick", "a disappeared selection never resolves from live state");
+	assert.equal(resolveActionTarget({ kind: ACTION_TARGET_KIND.request, selected: "q1", targets: [] }).state, "unavailable");
+	const requestPlan = actionLaunchPlan({ capability: requestCapabilities.get("request.answer"), spec: requestSpec.get("request.answer"), placement: requestPlacement.get("request.answer"), selected: "q1", targets: [target] });
+	assert.deepEqual(requestPlan.input, { id: "q1" });
+	assert.equal(requestPlan.title, "Answer request");
+	assert.deepEqual(actionInputFromDrafts(requestPlan.fields, new Map([["text", "ready"]])), { ok: true, input: { text: "ready" } });
+	assert.equal(actionInputFromDrafts(requestPlan.fields, new Map([["text", ""]])).ok, false);
+
+	const route = { tab: "chat", view: "conversation" };
+	const opened = {};
+	const results = [];
+	const deferred = [];
+	const calls = [];
+	const launcher = new ActionLauncher({
+		capabilities: requestCapabilities,
+		specs: requestSpec,
+		placements: requestPlacement,
+		currentRoute: () => route,
+		navigate: (next) => { Object.assign(route, next); return true; },
+		targetsFor: () => ({ state: "ready", targets: [target], selected: undefined }),
+		execute: async (action, input, options) => {
+			calls.push({ action, input, options });
+			return { ok: true, data: { line: "answered" }, meta: { requestId: options.requestId }, notices: [] };
+		},
+		openTargetPicker: (given) => {
+			opened.picker = given;
+			return { opened: true, close: () => { opened.pickerClosed = true; } };
+		},
+		openDialog: (given) => {
+			opened.dialog = given;
+			return { opened: true, close: () => { opened.dialogClosed = true; } };
+		},
+		present: (result) => results.push(result),
+		defer: (work) => deferred.push(work),
+		requestId: () => "request-1",
+	});
+	assert.equal(await launcher.begin("request.answer"), true);
+	assert.deepEqual(route, { tab: "carto", view: "requests" }, "the launcher routes before it looks at a target");
+	assert.equal(await launcher.resume(), true);
+	assert.equal(opened.picker.targets[0].key, "request:q1");
+	assert.equal(await opened.picker.choose(target), true);
+	assert.equal(opened.pickerClosed, true, "the target picker closes before a form can replace it");
+	deferred.shift()();
+	await Promise.resolve();
+	assert.deepEqual(opened.dialog.plan.input, { id: "q1" });
+	assert.equal(await opened.dialog.submit({ text: "Use the durable wording." }), true);
+	assert.deepEqual(calls.map((call) => [call.action, call.input, call.options.requestId]), [["request.answer", { id: "q1", text: "Use the durable wording." }, "request-1"]]);
+	assert.equal(results.length, 1);
+	assert.equal(launcher.state().state, "idle");
+
+	let release;
+	const gate = new ActionRequestGate({ execute: () => new Promise((resolve) => { release = resolve; }), requestId: () => "dedupe-1" });
+	const first = gate.run("workspace.archive", { id: "a1" });
+	const duplicate = await gate.run("workspace.archive", { id: "a1" });
+	assert.equal(duplicate.duplicate, true, "the same async action cannot enter application.execute twice");
+	release({ ok: true, data: {}, meta: { requestId: "dedupe-1" }, notices: [] });
+	await first;
+
+	const closes = [];
+	const flashes = [];
+	let submitted;
+	const dialog = new ActionDialog({
+		actionId: "example",
+		title: "Example",
+		fields: [{ id: "count", label: "Count", kind: "integer", required: true, multiline: false, limit: 4 }],
+		keyOf: (key) => key,
+		close: () => closes.push(true),
+		flash: (message) => flashes.push(message),
+		submit: (input) => { submitted = input; return true; },
+	});
+	dialog.handleInput("enter");
+	assert.match(flashes.at(-1), /Count is required/);
+	dialog.text = "12";
+	dialog.handleInput("enter");
+	assert.deepEqual(submitted, { count: 12 }, "ActionDialog turns its schema draft into typed action input");
+	assert.equal(closes.length, 1);
+});
+
+test("screen: target picker keeps unavailable settled rows visible and gates an asynchronous choice", async () => {
+	const flashes = [];
+	let closes = 0;
+	let choices = 0;
+	let settle;
+	const picker = new TargetPicker({
+		title: "Choose request",
+		targets: [
+			{ key: "gone", value: "gone", label: "Gone", disabled: true, disabledReason: "That request disappeared; refresh first." },
+			{ key: "q1", value: "q1", label: "q1" },
+		],
+		keyOf: (key) => key,
+		close: () => { closes++; },
+		flash: (message) => flashes.push(message),
+		choose: () => {
+			choices++;
+			return new Promise((resolve) => { settle = resolve; });
+		},
+	});
+	assert.match(picker.render(58).join("\n"), /That request disappeared/);
+	picker.handleInput("enter");
+	assert.match(flashes.at(-1), /disappeared/);
+	picker.handleInput("down");
+	picker.handleInput("enter");
+	picker.handleInput("enter");
+	assert.equal(choices, 1, "a chosen target waits for its first action attempt to settle");
+	settle(true);
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(closes, 1);
 });
 
 test("screen: shared forms keep local required, field-validation, help, disabled, and focus behavior without bypassing action saves", () => {
@@ -2806,6 +2941,9 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	const registeredCapabilities = app.capabilities.list().map((capability) => capability.id);
 	assert.equal(registeredCapabilities.length, registeredActions.length, "every action has one capability presentation");
 	assert.deepEqual([...registeredCapabilities].sort(), [...registeredActions].sort(), "the composed capability registry covers every action owner");
+	assert.deepEqual([...app.actionSpecs.list().map((spec) => spec.id)].sort(), [...registeredActions].sort(), "every composed capability has one pure action schema and target contract");
+	assert.doesNotThrow(() => assertActionSpecParity(app.capabilities, app.actionSpecs));
+	assert.doesNotThrow(() => assertActionPlacementParity(app.capabilities));
 	for (const action of registeredActions) {
 		const controller = new AbortController();
 		controller.abort();
