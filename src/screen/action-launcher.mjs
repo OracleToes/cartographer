@@ -215,8 +215,8 @@ export class ActionLauncher {
 		this.pending = undefined;
 		return pending;
 	}
-	/** Start an action but do not open a second overlay yet; callers invoke resume after a palette has closed. */
-	async begin(actionId) {
+	/** Start an action but optionally hold resolution until a caller has closed its own overlay (usually the palette). */
+	async begin(actionId, { waitForResume = false } = {}) {
 		if (this.pending !== undefined) {
 			this.flash("Finish or cancel the action already open first.");
 			return false;
@@ -233,8 +233,11 @@ export class ActionLauncher {
 			this.flash(blocked);
 			return false;
 		}
-		this.pending = { actionId, capability, spec, placement, phase: "routing", close: undefined, requestId: undefined };
-		if (!sameRoute(this.currentRoute(), placement.route)) {
+		const routeChanged = !sameRoute(this.currentRoute(), placement.route);
+		// A selection that was already visible may be used directly. After navigation, require a fresh explicit pick
+		// rather than applying an action to whatever row that destination happened to retain from an earlier visit.
+		this.pending = { actionId, capability, spec, placement, phase: "routing", close: undefined, requestId: undefined, requireTargetChoice: routeChanged, waitForResume: waitForResume === true };
+		if (routeChanged) {
 			let moved;
 			try { moved = this.navigate(placement.route); }
 			catch (error) {
@@ -260,12 +263,16 @@ export class ActionLauncher {
 	/** Let Screen composition signal that a deferred route projection has settled. */
 	onRouteSettled(route = this.currentRoute()) {
 		if (this.pending === undefined || !sameRoute(this.pending.placement.route, route)) return false;
-		void this.resume();
+		void this.resume({ fromRoute: true });
 		return true;
 	}
-	async resume() {
+	async resume({ fromRoute = false } = {}) {
 		const pending = this.pending;
 		if (pending === undefined) return false;
+		if (pending.waitForResume === true) {
+			if (fromRoute) return true;
+			pending.waitForResume = false;
+		}
 		if (!sameRoute(this.currentRoute(), pending.placement.route)) return true;
 		if (["dialog", "picker", "confirmation", "executing", "existing-control"].includes(pending.phase)) return true;
 		let source;
@@ -285,7 +292,7 @@ export class ActionLauncher {
 			this.flash(source.reason);
 			return false;
 		}
-		return this.resolve(pending, source.selected, source.targets);
+		return this.resolve(pending, pending.requireTargetChoice === true ? undefined : source.selected, source.targets);
 	}
 	async choose(target) {
 		const pending = this.pending;
