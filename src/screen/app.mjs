@@ -132,7 +132,7 @@ const SPIN_MS = POLICY.timing.spinnerMs;
 // A palette may safely expose every registered capability before every feature has a dedicated control. Selecting an
 // item goes to the narrowest existing screen seam; only that screen's contextual action supplies target/input and
 // crosses the application action boundary. Unmigrated runtime controls stay discoverable with their terminal path.
-const paletteDestinationFor = (id) => {
+export const paletteDestinationFor = (id) => {
 	if (id.startsWith("talk.")) return { tab: "chat", view: "conversation", name: "Chat · Conversation", hint: "Choose kept talk, then use its contextual action." };
 	if (id.startsWith("workspace.")) return { tab: "carto", view: "atlas", name: "Carto", hint: "Choose the relevant record, then use its contextual action." };
 	if (id.startsWith("request.")) return { tab: "carto", view: "requests", name: "Carto · Requests", hint: "Choose a request, then approve, deny, answer, or forget it." };
