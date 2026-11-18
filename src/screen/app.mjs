@@ -643,6 +643,8 @@ export async function runScreen(session, options, runTerminal) {
 			models: session.models,
 			preview: session.preview,
 			runner: options.runner,
+			gate: options.gate,
+			initiation: options.initiation,
 			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
 		},
 	});

@@ -58,7 +58,12 @@ export const RUNTIME_QUERY = Object.freeze({
 	preview: "runtime.preview",
 });
 
+export const SETTINGS_QUERY = Object.freeze({
+	status: "settings.status",
+});
+
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
+const positiveInteger = (value) => Number.isInteger(value) && value > 0 ? value : undefined;
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 /** Opaque message identity for the lifecycle-only Consult route; its source text never enters ordinary Work state. */
 export const consultMessageFingerprint = (text) => createHash("sha256").update(String(text ?? "")).digest("hex");
@@ -114,6 +119,87 @@ const missing = (message, meta) => uiFailure(uiError({
 	retryable: false,
 }), { meta });
 
+/** Keep the Settings projection deliberately narrow even when an integration supplies its own reader. */
+const settingsSnapshot = (snapshot) => {
+	if (!isRecord(snapshot)) return undefined;
+	const source = (value) => isRecord(value) ? value : {};
+	const pickNumber = (value, key) => positiveInteger(value?.[key]);
+	const pickText = (value, key) => nonEmpty(value?.[key]);
+	const pickBoolean = (value, key) => typeof value?.[key] === "boolean" ? value[key] : undefined;
+	const configured = source(snapshot.configuration);
+	const configuration = {
+		provider: {
+			...(pickText(configured.provider, "server") === undefined ? {} : { server: pickText(configured.provider, "server") }),
+			...(pickText(configured.provider, "configuredModel") === undefined ? {} : { configuredModel: pickText(configured.provider, "configuredModel") }),
+			...(pickNumber(configured.provider, "contextWindow") === undefined ? {} : { contextWindow: pickNumber(configured.provider, "contextWindow") }),
+			...(pickNumber(configured.provider, "maxTokens") === undefined ? {} : { maxTokens: pickNumber(configured.provider, "maxTokens") }),
+		},
+		agent: Object.fromEntries(["mainTurns", "taskTurns", "shellWait", "windowTail", "wakeMin"].flatMap((key) => {
+			const value = pickNumber(configured.agent, key);
+			return value === undefined ? [] : [[key, value]];
+		})),
+		context: {
+			...Object.fromEntries(["chatWindow", "collapseTokens"].flatMap((key) => {
+				const value = pickNumber(configured.context, key);
+				return value === undefined ? [] : [[key, value]];
+			})),
+			...(typeof configured.context?.collapseMinutes === "number" && configured.context.collapseMinutes >= 0 ? { collapseMinutes: configured.context.collapseMinutes } : {}),
+		},
+		appearance: Object.fromEntries(["colors", "theme"].flatMap((key) => {
+			const value = pickText(configured.appearance, key);
+			return value === undefined ? [] : [[key, value]];
+		})),
+	};
+	const policies = source(snapshot.policy);
+	const sandbox = source(policies.sandbox);
+	const policy = {
+		approval: {
+			...(pickBoolean(policies.approval, "yolo") === undefined ? {} : { yolo: pickBoolean(policies.approval, "yolo") }),
+			...(pickBoolean(policies.approval, "defaultYolo") === undefined ? {} : { defaultYolo: pickBoolean(policies.approval, "defaultYolo") }),
+		},
+		initiation: {
+			...(pickBoolean(policies.initiation, "on") === undefined ? {} : { on: pickBoolean(policies.initiation, "on") }),
+			...(pickBoolean(policies.initiation, "defaultOn") === undefined ? {} : { defaultOn: pickBoolean(policies.initiation, "defaultOn") }),
+		},
+		sandbox: {
+			...(pickText(sandbox, "mode") === undefined ? {} : { mode: pickText(sandbox, "mode") }),
+			...(pickBoolean(sandbox, "defaultOn") === undefined ? {} : { defaultOn: pickBoolean(sandbox, "defaultOn") }),
+			...(pickText(sandbox, "version") === undefined ? {} : { version: pickText(sandbox, "version") }),
+			...(pickText(sandbox, "unavailableReason") === undefined ? {} : { unavailableReason: pickText(sandbox, "unavailableReason") }),
+		},
+	};
+	const providerSource = source(snapshot.provider);
+	const rawRoutes = source(providerSource.routes);
+	const routes = snapshot.provider?.routes === undefined ? undefined : {
+		...(pickText(rawRoutes, "currentId") === undefined ? {} : { currentId: pickText(rawRoutes, "currentId") }),
+		models: (Array.isArray(rawRoutes.models) ? rawRoutes.models : []).flatMap((entry) => {
+			const id = nonEmpty(entry?.id);
+			if (id === undefined) return [];
+			const contextWindow = positiveInteger(entry.contextWindow);
+			return [{ id, ...(contextWindow === undefined ? {} : { contextWindow }) }];
+		}),
+		...(typeof rawRoutes.ready === "boolean" ? { ready: rawRoutes.ready } : {}),
+		...(nonEmpty(rawRoutes.diagnostic?.message) === undefined ? {} : { diagnostic: { ...(nonEmpty(rawRoutes.diagnostic?.kind) === undefined ? {} : { kind: nonEmpty(rawRoutes.diagnostic.kind) }), message: nonEmpty(rawRoutes.diagnostic.message) } }),
+		...(nonEmpty(rawRoutes.issue?.message) === undefined ? {} : { issue: { message: nonEmpty(rawRoutes.issue.message) } }),
+		...(positiveInteger(rawRoutes.limits?.usableContextWindow) === undefined ? {} : {
+			limits: {
+				usableContextWindow: positiveInteger(rawRoutes.limits.usableContextWindow),
+				...(positiveInteger(rawRoutes.limits.configuredContextWindow) === undefined ? {} : { configuredContextWindow: positiveInteger(rawRoutes.limits.configuredContextWindow) }),
+				...(positiveInteger(rawRoutes.limits.serverContextWindow) === undefined ? {} : { serverContextWindow: positiveInteger(rawRoutes.limits.serverContextWindow) }),
+			},
+		}),
+	};
+	const routeIssue = nonEmpty(providerSource.routeIssue);
+	return {
+		configuration,
+		policy,
+		provider: {
+			...(routes === undefined ? {} : { routes }),
+			...(routeIssue === undefined ? {} : { routeIssue }),
+		},
+	};
+};
+
 /** Source positions are presentation metadata, read only after this facade has yielded out of the UI stack. */
 const jsonLines = (file, field, values) => {
 	try {
@@ -143,12 +229,13 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
  *   runtimeStatusReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages?: readonly any[], contextSize?: number, windows?: any[], wakes?: any[], modelId?: string, nextWakeDue?: number } | undefined>,
  *   runtimeActivityReader?: (options?: { signal?: AbortSignal }) => Promise<{ question?: { since?: number }, taskActive?: boolean } | undefined>,
- *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], ready?: boolean, limits?: object, issue?: { message?: string } } | undefined>,
+ *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], ready?: boolean, limits?: object, diagnostic?: { kind?: string, message?: string }, issue?: { message?: string } } | undefined>,
+ *   settingsReader?: (options?: { signal?: AbortSignal }) => Promise<{ configuration?: object, policy?: object, provider?: object } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, runtimeViewReader, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, settingsReader, runtimeViewReader, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -472,7 +559,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			const atlas = atlasResult?.atlas;
 			const top = runtimeReaders.loadTop(brainDir);
 			const changes = atlas === undefined || top === undefined ? undefined : runtimeReaders.sinceTop(brainDir, atlas, assessment.text);
-			return uiSuccess({ assessment, atlas, top, changes, atlasError: atlasResult?.error }, { meta: ready.meta });
+			return uiSuccess({ assessment, atlas, top, changes, atlasError: atlasResult?.error, file: paths.assessment }, { meta: ready.meta });
 		} catch (error) {
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
@@ -569,11 +656,14 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			});
 			const currentId = nonEmpty(snapshot.currentId);
 			const issue = nonEmpty(snapshot.issue?.message);
+			const diagnosticMessage = nonEmpty(snapshot.diagnostic?.message);
+			const diagnosticKind = nonEmpty(snapshot.diagnostic?.kind);
 			return uiSuccess({
 				...(currentId === undefined ? {} : { currentId }),
 				models,
 				...(typeof snapshot.ready === "boolean" ? { ready: snapshot.ready } : {}),
 				...(snapshot.limits !== undefined && typeof snapshot.limits === "object" && snapshot.limits !== null ? { limits: snapshot.limits } : {}),
+				...(diagnosticMessage === undefined ? {} : { diagnostic: { ...(diagnosticKind === undefined ? {} : { kind: diagnosticKind }), message: diagnosticMessage } }),
 				...(issue === undefined ? {} : { issue: { message: issue } }),
 			}, { meta: ready.meta });
 		} catch (error) {
@@ -581,6 +671,26 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,
 				message: "Cartographer could not read model routes.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	/** Settings & Safety is a deferred session/configuration snapshot, not a screen-side read of mutable policy objects. */
+	const settingsStatus = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (typeof settingsReader !== "function") return unavailable("Settings & Safety status", "the running session does not expose a settings snapshot", ready.meta);
+		try {
+			const snapshot = await settingsReader({ signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			const projected = settingsSnapshot(snapshot);
+			if (projected === undefined) return unavailable("Settings & Safety status", "the running session did not provide a settings snapshot", ready.meta);
+			return uiSuccess(projected, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read Settings & Safety status.",
 				retryable: true,
 			}), { meta: ready.meta });
 		}
@@ -739,5 +849,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, assessment, tree, ledger, plan, requests, status, context, report, review, consult, runtime, entry });
+	return Object.freeze({ paths, atlas, assessment, tree, ledger, plan, requests, status, context, report, review, consult, settings: Object.freeze({ status: settingsStatus }), runtime, entry });
 }

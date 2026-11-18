@@ -130,6 +130,8 @@ export async function runTerminal(session, options) {
 			models: modelManager,
 			preview: session.preview,
 			runner: options.runner,
+			gate: options.gate,
+			initiation: options.initiation,
 			contextWindow: () => options.contextWindow,
 		},
 	});

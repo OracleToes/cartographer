@@ -106,7 +106,7 @@ const listedModel = (entry) => {
  * Build the model route projection used by the terminal's model command and connection status. The deferred result
  * carries only known route names, active identity, advertised context limits, and a safe listing issue—not provider
  * payloads or a model request.
- * @param {{ models?: { current?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, inspect?: () => Promise<{ listing?: { entries?: any[] }, limits?: object } | undefined>, known?: () => string[], ready?: () => boolean } }} options
+ * @param {{ models?: { current?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, inspect?: () => Promise<{ listing?: { entries?: any[] }, limits?: object } | undefined>, known?: () => string[], ready?: () => boolean, diagnostic?: () => { kind?: string, message?: string } | undefined } }} options
  */
 export function createRuntimeModelsReader({ models } = {}) {
 	return async ({ signal } = {}) => {
@@ -116,6 +116,10 @@ export function createRuntimeModelsReader({ models } = {}) {
 		// Route discovery only says that a server listed a name. Readiness is a separate session fact set after the
 		// native-GBNF proof succeeds; expose the settled boolean without asking the model manager to do more work.
 		const ready = typeof models.ready === "function" ? models.ready() === true : undefined;
+		const suppliedDiagnostic = typeof models.diagnostic === "function" ? models.diagnostic() : undefined;
+		const diagnostic = suppliedDiagnostic !== null && typeof suppliedDiagnostic === "object" && typeof suppliedDiagnostic.message === "string" && suppliedDiagnostic.message.trim() !== ""
+			? { ...(typeof suppliedDiagnostic.kind === "string" && suppliedDiagnostic.kind.trim() !== "" ? { kind: suppliedDiagnostic.kind.trim() } : {}), message: suppliedDiagnostic.message.trim() }
+			: undefined;
 		let inspected;
 		let issue;
 		try {
@@ -142,6 +146,7 @@ export function createRuntimeModelsReader({ models } = {}) {
 			models: modelsListed,
 			...(ready === undefined ? {} : { ready }),
 			...(inspected?.limits === undefined ? {} : { limits: inspected.limits }),
+			...(diagnostic === undefined ? {} : { diagnostic }),
 			...(issue === undefined ? {} : { issue }),
 		};
 	};
