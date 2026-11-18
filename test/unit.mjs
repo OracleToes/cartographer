@@ -2381,7 +2381,7 @@ test("conference C2/C3: entry snapshots stay immutable, persona tails are privat
 	assert.match(atlasTail, /empty snapshot/);
 	assert.doesNotMatch(atlasTail, /Care about a reversible migration boundary/, "the next participant never inherits Cartographer's request-local persona");
 	const neutral = selectorTail({ ...running, turns: [{ participant: "cartographer" }], active: { kind: "selector", previousSpeaker: "cartographer" } });
-	assert.match(neutral, /atlas, ledger, plan, assessment, context/);
+	assert.match(neutral, /continue:atlas, continue:ledger, continue:plan, continue:assessment, continue:context/);
 	assert.doesNotMatch(neutral, /Care about a reversible migration boundary/);
 	assert.doesNotMatch(neutral, /Atlas entry snapshot/);
 	assert.equal(loadConference(brainDir, conference.id).conference.turns[0].participant, "cartographer");
