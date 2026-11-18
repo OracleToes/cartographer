@@ -29,6 +29,7 @@ import { fileURLToPath } from "node:url";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
+import { REQUEST_ACTION } from "../application/requests.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
@@ -41,6 +42,7 @@ import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createFocusManager } from "./focus.mjs";
+import { createKeyHints } from "./key-hints.mjs";
 import { createList } from "./list.mjs";
 import { createRouteManager } from "./routes.mjs";
 import { renderAsyncBoundary } from "./async-boundary.mjs";
@@ -534,33 +536,69 @@ export async function runScreen(session, options, runTerminal) {
 		options,
 	});
 
-	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
-	const LEGEND = {
-		"chat.conversation": "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
-		"chat.work": "j k move · Enter open · y copy",
-		"chat.consult": "j k move · Enter open · + all · y copy",
-		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
-		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
-		"carto.plan": "t done/review · n new · v archive · d delete · e edit",
-		"carto.requests": "a approve · n deny · d forget · e edit",
-		"carto.tree": "Enter fold · y copy · e edit",
-		"carto.hands": "f fold · v archive · d delete · x unshelve · e edit",
-		"diff.last": "Enter open · y copy · e edit",
-		"diff.session": "Enter open · y copy · e edit",
-		"diff.git": "Enter open · y copy · e edit",
-		"shells.list": "Enter output · y copy",
-		"shells.out": "Enter back",
-		"context.window": "Enter open · y copy",
-		"context.main": "Enter open · y copy",
-		"context.raw": "Enter open · y copy",
-		"context.preview": "Enter open · y copy",
-		"context.parts": "Enter open · + all · y copy",
-	};
-	const legend = () => {
-		if (state.mode === "type") return "Esc: commands · Ctrl-K: palette · Ctrl-O: $EDITOR · ? all keys";
-		const id = viewId();
-		return `${LEGEND[id] ?? "j k move · Enter open"} · Ctrl-K palette · ? all keys`;
-	};
+	/** The footer has route-local meanings, but capability-backed actions remain tied to the one registered availability source. */
+	const keyHints = createKeyHints({
+		typing: "Esc: commands · Ctrl-K: palette · Ctrl-O: $EDITOR · ? all keys",
+		fallback: ["j k move", "Enter open"],
+		global: ["Ctrl-K palette", "? all keys"],
+		routes: {
+			"chat.conversation": [
+				"j k move",
+				"Enter open",
+				{ text: "e reword kept talk", capability: TALK_ACTION.revise },
+				{ text: "d remove kept talk", capability: TALK_ACTION.forget },
+				"y copy",
+			],
+			"chat.work": ["j k move", "Enter open", "y copy"],
+			"chat.consult": ["j k move", "Enter open", "+ all", "y copy"],
+			"carto.atlas": [
+				{ text: "t confirm", capability: WORKSPACE_ACTION.settle },
+				{ text: "n new", capability: WORKSPACE_ACTION.add },
+				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
+				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
+				"e edit",
+			],
+			"carto.ledger": [
+				{ text: "t settle", capability: WORKSPACE_ACTION.settle },
+				{ text: "n new", capability: WORKSPACE_ACTION.add },
+				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
+				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
+				"e edit",
+			],
+			"carto.plan": [
+				{ text: "t done/review", capability: WORKSPACE_ACTION.settle },
+				{ text: "n new", capabilities: [WORKSPACE_ACTION.add, WORKSPACE_ACTION.addMove] },
+				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
+				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
+				"e edit",
+			],
+			"carto.requests": [
+				{ text: "a approve", capability: REQUEST_ACTION.approve },
+				{ text: "n deny", capability: REQUEST_ACTION.deny },
+				{ text: "d forget", capability: WORKSPACE_ACTION.delete },
+				"e edit",
+			],
+			"carto.tree": ["Enter fold", "y copy", "e edit"],
+			"carto.hands": [
+				{ text: "f fold", capability: WORKSPACE_ACTION.toggleFold },
+				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
+				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
+				{ text: "x unshelve", capability: WORKSPACE_ACTION.unshelve },
+				"e edit",
+			],
+			"diff.last": ["Enter open", "y copy", "e edit"],
+			"diff.session": ["Enter open", "y copy", "e edit"],
+			"diff.git": ["Enter open", "y copy", "e edit"],
+			"shells.list": ["Enter output", "y copy"],
+			"shells.out": ["Enter back"],
+			"context.window": ["Enter open", "y copy"],
+			"context.main": ["Enter open", "y copy"],
+			"context.raw": ["Enter open", "y copy"],
+			"context.preview": ["Enter open", "y copy"],
+			"context.parts": ["Enter open", "+ all", "y copy"],
+		},
+	});
+	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: paletteCapabilities });
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = () => routes.id();
 	/** The file a view comes from, for `e` when no item names one. */

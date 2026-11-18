@@ -71,6 +71,7 @@ import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
 import { createFocusManager } from "../src/screen/focus.mjs";
+import { createKeyHints } from "../src/screen/key-hints.mjs";
 import { createList } from "../src/screen/list.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
 import { createRouteManager } from "../src/screen/routes.mjs";
@@ -510,6 +511,35 @@ test("screen: status bar paints settled activity, status, notice, and footer sna
 	const question = renderStatusBar({ state, core, chat: { doing: () => undefined }, activity: { question: {} }, options: { contextWindow: 1_000 }, now: () => at });
 	assert.match(question[0].map(([value]) => value).join(""), /waiting for your answer/, "a pending question takes precedence over generic task activity");
 	assert.throws(() => renderStatusBar({ state }), /terminal activity/);
+});
+
+test("screen: shared key hints keep shell navigation while hiding unavailable capability actions", () => {
+	const keyHints = createKeyHints({
+		typing: "Esc: commands · Ctrl-K: palette",
+		fallback: ["j k move", "Enter open"],
+		global: ["Ctrl-K palette", "? all keys"],
+		routes: {
+			"carto.atlas": [
+				"j k move",
+				{ text: "d delete", capability: "workspace.delete" },
+				{ text: "v archive", capabilities: ["workspace.archive", "workspace.unarchive"] },
+				{ text: "x unshelve", when: (context) => context?.shelved === true },
+			],
+		},
+	});
+	assert.equal(keyHints.text({ mode: "type", route: "carto.atlas" }), "Esc: commands · Ctrl-K: palette");
+	assert.equal(keyHints.text({ route: "carto.atlas" }), "j k move · d delete · v archive · Ctrl-K palette · ? all keys", "component-only rendering keeps configured hints when no capability snapshot was supplied");
+	assert.equal(keyHints.text({
+		route: "carto.atlas",
+		capabilities: [
+			{ id: "workspace.delete", availability: { enabled: false } },
+			{ id: "workspace.archive", availability: { enabled: true } },
+		],
+		context: { shelved: true },
+	}), "j k move · v archive · x unshelve · Ctrl-K palette · ? all keys", "a footer keeps shell hints but removes a registered action that is unavailable");
+	assert.equal(keyHints.text({ route: "other" }), "j k move · Enter open · Ctrl-K palette · ? all keys");
+	assert.throws(() => createKeyHints({ typing: "type", routes: { bad: [{ text: "d delete", capability: "" }] } }), /capability/);
+	assert.throws(() => keyHints.text({ capabilities: {} }), /presentation/);
 });
 
 test("screen: command palette filters registered actions, keeps disabled reasons visible, and gates asynchronous activation", async () => {
