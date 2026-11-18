@@ -13,6 +13,7 @@ import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
+import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
 import { pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
@@ -385,6 +386,57 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(status.ok, true, "status retains readable ledger information while naming a separate plan issue");
 	if (!status.ok) throw new Error(status.error.message);
 	assert.deepEqual(status.data.issues, [{ source: "plan", message: "carto-plan.json is not valid JSON" }]);
+});
+
+test("application: request decisions have typed validation and durable-operation outcomes", async (t) => {
+	const { brainDir } = fresh(t);
+	const calls = [];
+	const app = createRequestApplication({
+		brainDir,
+		now: () => Date.parse(NOW),
+		operations: {
+			approveRequests: (_dir, ids, at) => {
+				calls.push({ action: "approve", ids, at });
+				return { items: ids, unknown: [] };
+			},
+			denyRequest: (_dir, id, reason, at) => {
+				calls.push({ action: "deny", id, reason, at });
+				return id === "m1" ? { kind: "approval", text: "Run the check." } : undefined;
+			},
+			answerQuestion: (_dir, id, text, at) => {
+				calls.push({ action: "answer", id, text, at });
+				return id === "q1" ? { kind: "question", text: "Which wording?" } : undefined;
+			},
+		},
+	});
+	const invalid = await app.execute(REQUEST_ACTION.answer, { id: "q1", text: "  " });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("an empty question answer must be refused");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(invalid.error.field, "text");
+	const approved = await app.execute(REQUEST_ACTION.approve, { ids: ["m1"] }, { requestId: "approve-1" });
+	assert.equal(approved.ok, true);
+	if (!approved.ok) throw new Error(approved.error.message);
+	assert.deepEqual(approved.data.approved, ["m1"]);
+	assert.equal(approved.meta.requestId, "approve-1");
+	const denied = await app.execute(REQUEST_ACTION.deny, { id: "m1", reason: "Not this release." });
+	assert.equal(denied.ok, true);
+	if (!denied.ok) throw new Error(denied.error.message);
+	assert.match(denied.data.line, /Not this release/);
+	const answered = await app.execute(REQUEST_ACTION.answer, { id: "q1", text: "Use the concise wording." });
+	assert.equal(answered.ok, true);
+	const absent = await app.execute(REQUEST_ACTION.deny, { id: "m404" });
+	assert.equal(absent.ok, false);
+	if (absent.ok) throw new Error("a non-waiting request must be explicit");
+	assert.equal(absent.error.code, UI_ERROR_CODE.notFound);
+	assert.deepEqual(calls, [
+		{ action: "approve", ids: ["m1"], at: NOW },
+		{ action: "deny", id: "m1", reason: "Not this release.", at: Date.parse(NOW) },
+		{ action: "answer", id: "q1", text: "Use the concise wording.", at: Date.parse(NOW) },
+		{ action: "deny", id: "m404", reason: "", at: Date.parse(NOW) },
+	]);
+	const approveCapability = app.capabilities.list().find((entry) => entry.id === REQUEST_ACTION.approve);
+	assert.equal(approveCapability?.intent, "mutate");
 });
 
 test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {

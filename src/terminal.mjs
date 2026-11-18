@@ -26,13 +26,14 @@ import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowS
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "./application/context.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
+import { REQUEST_ACTION, createRequestApplication } from "./application/requests.mjs";
 import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { authorize, awaitsApproval, loadPlan, planPath, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
-import { listRequests, approveRequests, denyRequest, answerQuestion, approvalWords } from "./requests.mjs";
+import { awaitsApproval, loadPlan, planPath, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { listRequests, approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, sinceTop, splitTop } from "./top.mjs";
@@ -210,6 +211,7 @@ export async function runTerminal(session, options) {
 	const config = options.config ?? {};
 	const contextApplication = createContextApplication({ brainDir: options.brainDir });
 	const workspace = createWorkspaceApplication({ brainDir: options.brainDir, root: options.root, config });
+	const requestsApplication = createRequestApplication({ brainDir: options.brainDir });
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -261,6 +263,7 @@ export async function runTerminal(session, options) {
 		return result.ok ? result.data.line : `! ${result.error.message}`;
 	};
 	const contextAction = (action, input, actionOptions = {}) => contextApplication.execute(action, input, actionOptions);
+	const requestAction = (action, input, actionOptions = {}) => requestsApplication.execute(action, input, actionOptions);
 	/** Run durable row mutations in order: each operation reads and writes the same book. */
 	const workspaceLines = async (action, ids, actionOptions = () => ({})) => {
 		const lines = [];
@@ -1499,29 +1502,36 @@ export async function runTerminal(session, options) {
 				// `/approve p7` expands only to p7's waiting child moves now. `/approve` snapshots every
 				// waiting move at this moment; adding another move later never inherits this decision.
 				if (args.length > 0) {
-					const done = approveRequests(options.brainDir, args);
-					const names = done.items;
+					const result = await requestAction(REQUEST_ACTION.approve, { ids: args });
+					if (!result.ok) {
+						line(`! ${result.error.message}`);
+						return true;
+					}
+					const names = result.data.approved;
 					if (names.length === 0) line(`  None of ${args.join(", ")} names a move revision that waits. /requests lists them.`);
 					else {
 						line(`${bold("●")} moves  approved ${names.join(", ")}`);
 						await send(`I approved the current revisions of ${names.join(", ")}. Only those declared moves may now run; later moves still need their own approval.`);
 					}
-					for (const id of done.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
+					for (const id of result.data.unknown) line(dim(`  ${id} is not a move or envelope snapshot that waits. /requests lists them.`));
 					return true;
 				}
 				const { plan, error } = loadPlan(options.brainDir);
 				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
 				else {
 					const pending = waitingItems(plan);
-					if (pending.length === 0) {
+					const result = await requestAction(REQUEST_ACTION.approve, { ids: [] });
+					if (!result.ok) line(`! ${result.error.message}`);
+					else if (pending.length === 0) {
 						line("  The plan has no declared change move waiting for approval. /plan shows envelopes and moves. The agent is told.");
 						await send(NOTHING_TO_APPROVE);
+					} else if (result.data.approved.length === 0) {
+						line("  No declared change move was still waiting for approval. /plan shows envelopes and moves.");
 					} else {
-						const covered = authorize(plan, new Date().toISOString());
-						savePlan(options.brainDir, plan);
-						line(`${bold("●")} moves  approved by you: ${plural(covered, "change move")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
+						const names = result.data.approved;
+						line(`${bold("●")} moves  approved by you: ${plural(names.length, "change move")} may run${options.runner?.mode === "direct" ? " · the sandbox is OFF: their commands run directly on this machine" : ""}`);
 						for (const move of pending) line(dim(`  ${move.id} ${move.action ?? move.text}${move.capabilities?.network === true ? "  · its commands reach the network" : ""}`));
-						await send(`I approve the current declared move revisions: ${pending.map((move) => move.id).join(", ")}. Carry out only one move per focus and review each report before accepting it.`);
+						await send(`I approve the current declared move revisions: ${names.join(", ")}. Carry out only one move per focus and review each report before accepting it.`);
 					}
 				}
 				return true;
@@ -1531,9 +1541,10 @@ export async function runTerminal(session, options) {
 					line("  /deny ID [why] turns down one request. /requests lists the ids.");
 					return true;
 				}
-				const turned = denyRequest(options.brainDir, argument, tail);
-				if (turned === undefined) line(`  ${argument} is not a request that waits. /requests lists them.`);
+				const result = await requestAction(REQUEST_ACTION.deny, { id: argument, reason: tail });
+				if (!result.ok) line(result.error.kind === "not-found" ? `  ${argument} is not a request that waits. /requests lists them.` : `! ${result.error.message}`);
 				else {
+					const turned = result.data.request;
 					line(`${bold("●")} requests  ${argument} turned down${tail === "" ? "" : `: ${tail}`}`);
 					await send(`I turned down ${argument}: ${turned.text}. Do not carry it out${tail === "" ? "" : `; my reason was: ${tail}`}. Go on with whatever does not depend on it.`);
 				}
@@ -1544,9 +1555,10 @@ export async function runTerminal(session, options) {
 					line("  /answer ID words answers a question of taste. /requests lists the ids.");
 					return true;
 				}
-				const answered = answerQuestion(options.brainDir, argument, tail);
-				if (answered === undefined) line(`  ${argument} is not an open question. /requests lists them.`);
+				const result = await requestAction(REQUEST_ACTION.answer, { id: argument, text: tail });
+				if (!result.ok) line(result.error.kind === "not-found" ? `  ${argument} is not an open question. /requests lists them.` : `! ${result.error.message}`);
 				else {
+					const answered = result.data.request;
 					line(`${bold("●")} requests  ${argument} answered: ${tail}`);
 					await send(`My answer to ${argument} (${answered.text}) is: ${tail}. Use it and go on with whatever does not depend on it.`);
 				}
