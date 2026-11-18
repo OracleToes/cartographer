@@ -1,5 +1,5 @@
-// Top-level `shelf`: the agent's working-memory bench for keeping files, ranges, reports,
-// immutable snapshots, or pinned records in view together across reads and across collapses.
+// Top-level `shelf`: the agent's working-memory bench for keeping several files, ranges, reports, stories,
+// or pinned records in view together across reads and across collapses.
 //
 // `shelf add` persists a backing snapshot under `.brain/shelf/` and returns a one-line receipt; the snapshot body
 // itself renders once (in `<state>` until the next collapse, and in `<context>` after collapse) so unshelving or
@@ -33,6 +33,7 @@ import {
 } from "../catalog.mjs";
 import { durableRecordFor } from "../index.mjs";
 import { describe } from "../prompt.mjs";
+import { readStory, STORY_ID } from "../story.mjs";
 import { takeWarnings } from "../warnings.mjs";
 import { noFileRecord } from "./read.mjs";
 
@@ -51,7 +52,7 @@ const SHELF_GUIDE = {
 const REFERENCE_SCHEMA = obj({
 	id: str({ minLength: 1, maxLength: 256, description: "Stable ID of the entity. Pass top-level `id` instead unless pinning `version`." }),
 	namespace: opt(str({ minLength: 16, description: "Brain-store namespace. Inferred from this brain when omitted." })),
-	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind (file, report, schema, message, toolCall, toolResult). Inferred from the ID when omitted." })),
+	kind: opt(str({ minLength: 1, maxLength: 64, pattern: "^[a-z][A-Za-z0-9_-]{0,63}$", description: "Reference kind (file, report, story, schema, message, toolCall, toolResult). Inferred from the ID when omitted." })),
 	version: opt(str({ description: "Exact immutable content version to pin; omit to resolve the live one." })),
 });
 
@@ -89,7 +90,7 @@ const currentShelf = (brainDir, conversationId, main) => {
 };
 
 /**
- * Infer a shelf target kind from an ID alone: catalog file, report, Durable record,
+ * Infer a shelf target kind from an ID alone: catalog file, report, storyteller thread, Durable record,
  * or confined project-relative path passed in `id`.
  */
 export async function inferShelfRef(ref, root, brainDir, api, callContext) {
@@ -100,6 +101,7 @@ export async function inferShelfRef(ref, root, brainDir, api, callContext) {
 	if (loadReport(brainDir, ref.id) !== undefined && composedRows(loadContext(brainDir)).some((row) => row.id === ref.id)) {
 		return { ...filled, kind: "report" };
 	}
+	if (STORY_ID.test(String(ref.id)) && readStory(brainDir, ref.id) !== undefined) return { ...filled, kind: "story" };
 	for (const kind of ["schema", "message", "toolResult", "toolCall"]) {
 		try {
 			const found = await durableRecordFor(kind, ref.id, brainDir, api, callContext);
@@ -137,9 +139,6 @@ export async function runShelf({ root, brainDir, config }, action, args, api, ca
 		const wantedPlacementId = typeof args.id === "string" && args.ref?.kind === undefined && args.ref?.version === undefined ? args.id.trim() : undefined;
 		const existingPlacement = wantedPlacementId !== undefined ? mine.find((entry) => entry.id === wantedPlacementId) : undefined;
 		if (existingPlacement !== undefined) {
-			if (existingPlacement?.legacyArchive?.kind === "storyteller") {
-				return fail("This is an immutable C5 archive snapshot, not a live consultation thread. It can be removed from the shelf, but it cannot be refreshed or resumed.");
-			}
 			if (existingPlacement.ref !== undefined) {
 				const kind = existingPlacement.ref.type ?? existingPlacement.ref.kind;
 				ref = {
@@ -160,7 +159,7 @@ export async function runShelf({ root, brainDir, config }, action, args, api, ca
 			if (ref.kind === undefined) {
 				const inferred = await inferShelfRef(ref, root, brainDir, api, callContext);
 				if (inferred === undefined) {
-					return fail(`Nothing with the ID "${ref.id}" is a file, a report, a schema or a durable record; nothing was added. Pass a project-relative \`path\`, or give \`ref.kind\` to say what it is.`);
+					return fail(`Nothing with the ID "${ref.id}" is a file, a report, a story, a schema or a durable record; nothing was added. Pass a project-relative \`path\`, or give \`ref.kind\` to say what it is.`);
 				}
 				ref = inferred;
 			}
@@ -186,7 +185,10 @@ export async function runShelf({ root, brainDir, config }, action, args, api, ca
 				if (body === undefined) return fail(`Report ${ref.id} is deleted or unavailable.`);
 				path = `report:${ref.id}`;
 			} else if (ref.kind === "story") {
-				return fail("Storyteller shelf references were retired by the C5 cutover. Migrated placements are immutable snapshots; consult .brain/legacy/exports for historical transcripts.");
+				if (!STORY_ID.test(String(ref.id)) || readStory(brainDir, ref.id) === undefined) {
+					return fail(`Story ${ref.id} is unavailable; nothing was shelved.`);
+				}
+				path = `story:${ref.id}`;
 			} else if (ref.kind === "schema") {
 				if (typeof ref.version !== "string") return fail("A schema shelf placement needs an exact version-pinned schema reference.");
 				const retained = readReferenceVersion(brainDir, ref);
@@ -208,7 +210,7 @@ export async function runShelf({ root, brainDir, config }, action, args, api, ca
 				}
 				pinnedDurable = { record: durable, ref: { namespace: ref.namespace, kind: ref.kind, id: ref.id, version: ref.version ?? durable.version } };
 			} else {
-				return fail(`Unsupported shelf reference kind ${JSON.stringify(ref.kind)}. Supported kinds: file, report, schema, message, toolCall, toolResult.`);
+				return fail(`Unsupported shelf reference kind ${JSON.stringify(ref.kind)}. Supported kinds: file, report, story, schema, message, toolCall, toolResult.`);
 			}
 		}
 		if (ref?.kind !== "schema" && !DURABLE_REF_KINDS.has(ref?.kind ?? "") && (typeof path !== "string" || path.trim() === "")) {
@@ -279,7 +281,7 @@ export function shelfTool({ root, brainDir, config }) {
 	const validationSchema = obj({
 		action: str({ enum: SHELF_ACTIONS, description: "Shelf operation: add (pin, update range, or refresh), remove, or list." }),
 		path: opt(str({ minLength: 1, pattern: "\\S", description: "Project-relative file path on add or remove." })),
-		id: opt(str({ minLength: 1, maxLength: 256, description: 'Placement or target ID: sh1, file f1 (or path), report t1, Durable record, or "all" on remove.' })),
+		id: opt(str({ minLength: 1, maxLength: 256, description: 'Placement or target ID: sh1, file f1 (or path), report t1, story st1, Durable record, or "all" on remove.' })),
 		range: opt(str({ description: `Optional line selection on add, such as "1-200" (at most ${POLICY.limits.look.readMaxLines} lines). Re-adding a shelved file updates its range and refreshes its snapshot.` })),
 		ref: opt(REFERENCE_SCHEMA),
 		handOn: opt(bool({ description: "When adding from a focused task, pass the placement to the orchestrating shelf on return." })),

@@ -2,10 +2,11 @@
 // before it, and the read-ahead after it. What a collapse keeps is in src/context.mjs.
 //
 // Before a context is collapsed the agent is asked one question, and it can answer
-// only {"handoff": true} or {"handoff": false}: a no-tools llama.cpp native GBNF
-// grammar is the only reply boundary, with thinking off. True buys one turn to
-// write down what would be lost; false collapses at once. The question is not
-// stored. It is sent after the very request the server read last.
+// only {"handoff": true} or {"handoff": false}: the request names that shape as the
+// only reply the server may produce, and switches thinking off for it. True buys
+// one turn to write down what would be lost; false collapses at once. The question
+// is not stored. It is sent after the very request the server read last, so the
+// server reads only the question.
 //
 // After a collapse made while the agent rests, the new and much shorter context is
 // sent once with room for a single token of answer. The server reads it then, and
@@ -17,17 +18,18 @@
 import { POLICY } from "./config.mjs";
 import { createHash } from "node:crypto";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { describeCall, describeResult } from "./application/activity.mjs";
+import { describeCall, describeResult } from "./terminal.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { callWords, droppable, estimate, FLOOR, isFront, loadContext, messageTokens, stepsOf, supersededBy, taskBlock, taskState, textOf, updateContext, writeFront } from "./context.mjs";
 import { calibrate } from "./calibrate.mjs";
 import { ASK_MAIN, ASK_TASK, HANDOFF_IN_TURN, TASK_HANDOFF } from "./prompt.mjs";
 import { withTimes } from "./request.mjs";
 import { loadTop, pin, withTop } from "./top.mjs";
-import { nativeLiteralGrammar, requestNativeGrammar, validateNativeGrammarResult } from "./native-grammar.mjs";
 
-const HANDOFF_VALUES = Object.freeze([JSON.stringify({ handoff: true }), JSON.stringify({ handoff: false })]);
-const HANDOFF_GRAMMAR = nativeLiteralGrammar(HANDOFF_VALUES);
+const SCHEMA = {
+	type: "json_schema",
+	json_schema: { name: "handoff", strict: true, schema: { type: "object", properties: { handoff: { type: "boolean" } }, required: ["handoff"], additionalProperties: false } },
+};
 /** Seconds the question may take. More than this means the server is reading the whole context again. */
 const ASK_SECONDS = POLICY.timing.context.handoffQuestionSeconds;
 const NOTE_TAG = new RegExp(`(?:${POLICY.markup.note.open}|${POLICY.markup.note.close})\\n?`, "g");
@@ -89,6 +91,8 @@ export function createEngine({ root, brainDir, config }) {
 	};
 	// The conversation that sent the newest request.
 	let newest;
+	// Whether the server has refused the answer's schema in this run of carto: the question is then asked without it.
+	let noSchema = false;
 	/** A collapse of the main context that is wanted: { reason, asked?, byAgent?, forced?, round? }. */
 	let due;
 	const full = () => Math.floor((config.contextWindow * config.collapseFull) / 100);
@@ -126,30 +130,40 @@ export function createEngine({ root, brainDir, config }) {
 		if (state.payload === undefined) return { handoff: false, skipped: true, ms: 0 };
 		const returned = new Map(state.results);
 		for (const result of results) returned.set(result.toolCallId, textOf(result));
-		const messages = [...state.payload.messages, ...(state.reply === undefined ? [] : replyForServer(state.reply, returned)), { role: "user", content: task ? ASK_TASK(reason) : ASK_MAIN(reason) }];
-		const modelId = typeof state.payload.model === "string" && state.payload.model !== "" ? state.payload.model : config.model;
-		let answer;
-		try {
-			// This is a host-owned binary control decision. It intentionally has no tools, response_format fallback,
-			// or prompt-only parser: llama.cpp native GBNF is the required output boundary.
-			answer = await requestNativeGrammar({
-				server: config.server,
-				modelId,
-				messages,
-				grammar: HANDOFF_GRAMMAR,
-				maxTokens: POLICY.limits.engine.askMaxTokens,
-				temperature: POLICY.protocol.askTemperature,
-				thinking: POLICY.protocol.askThinking,
-				timeoutMs: Math.max(1, Math.round(Number(config.askSeconds ?? ASK_SECONDS) * 1000)),
-			});
-		} catch (error) {
-			return { handoff: false, error: `the required native grammar handoff request could not be made: ${error.message ?? error}`, ms: 0 };
+		const { stream_options: _dropped, ...base } = state.payload;
+		const body = {
+			...base,
+			messages: [...state.payload.messages, ...(state.reply === undefined ? [] : replyForServer(state.reply, returned)), { role: "user", content: task ? ASK_TASK(reason) : ASK_MAIN(reason) }],
+			stream: POLICY.protocol.askStream,
+			max_tokens: POLICY.limits.engine.askMaxTokens,
+			temperature: POLICY.protocol.askTemperature,
+			// Thinking off for this one request: the answer is one word.
+			chat_template_kwargs: { enable_thinking: POLICY.protocol.askThinking },
+			// The tools stay in the request, because the server has read them as part of the prompt. But no call can
+			// be the answer, and with some chat templates llama.cpp cannot build the grammar for "this JSON or a call
+			// of any of these tools" at all: it answers 400 "failed to parse grammar" (seen with the Qwen3.8 template
+			// on build 11913; with tool_choice none the same request is accepted and the prompt is not read again).
+			...(Array.isArray(base.tools) && base.tools.length > 0 ? { tool_choice: POLICY.protocol.noToolChoice } : {}),
+		};
+		// A server that will not take the schema is asked the same question without it, from then on.
+		let answer = noSchema ? undefined : await post({ ...body, response_format: SCHEMA }, { seconds: config.askSeconds ?? ASK_SECONDS });
+		let fallback;
+		if (answer?.error !== undefined && /answered 4\d\d/.test(answer.error)) {
+			noSchema = true;
+			fallback = answer.error;
 		}
-		const checked = validateNativeGrammarResult(answer, { eligible: HANDOFF_VALUES });
-		if (!checked.ok) return { handoff: false, error: `the required native grammar handoff decision failed: ${checked.reason}`, ms: answer.elapsedMs };
-		const handoff = JSON.parse(checked.value).handoff;
-		if (typeof handoff !== "boolean") return { handoff: false, error: `the native grammar handoff value was malformed: ${JSON.stringify(checked.value.slice(0, POLICY.limits.engine.handoffErrorChars))}`, ms: answer.elapsedMs };
-		return { handoff, ms: answer.elapsedMs };
+		if (answer === undefined || fallback !== undefined) answer = await post(body, { seconds: config.askSeconds ?? ASK_SECONDS });
+		const also = fallback === undefined ? {} : { fallback };
+		if (answer.error !== undefined) return { handoff: false, error: answer.error, ms: answer.ms, ...also };
+		const said = answer.json?.choices?.[0]?.message?.content ?? "";
+		let handoff;
+		try {
+			handoff = JSON.parse(said)?.handoff;
+		} catch {
+			handoff = /"handoff"\s*:\s*true/.test(said) ? true : /"handoff"\s*:\s*false/.test(said) ? false : undefined;
+		}
+		if (typeof handoff !== "boolean") return { handoff: false, error: `the answer was not the JSON asked for: ${JSON.stringify(String(said).slice(0, POLICY.limits.engine.handoffErrorChars))}`, ms: answer.ms, ...also };
+		return { handoff, ms: answer.ms, ...also };
 	}
 
 	/**

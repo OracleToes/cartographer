@@ -22,24 +22,16 @@ const watchdog = setTimeout(() => {
 	process.exit(1);
 }, BUDGET_MS);
 
-const runSuite = (suite) => new Promise((resolve) => {
-	const child = spawn(process.execPath, [join(root, suite)], { stdio: "inherit", cwd: root });
-	children.add(child);
-	let settled = false;
-	const finish = (code) => {
-		if (settled) return;
-		settled = true;
-		children.delete(child);
-		resolve(code);
-	};
-	child.once("error", () => finish(1));
-	child.once("close", (exit) => finish(exit ?? 1));
-});
-
-// The suites use isolated temp projects and standalone servers. Start both together so the immutable aggregate
-// watchdog measures their real wall clock rather than paying one suite's process lifetime before the other starts.
-const codes = await Promise.all(suites.map(runSuite));
-const failed = codes.filter((code) => code !== 0).length;
+let failed = 0;
+for (const suite of suites) {
+	const code = await new Promise((resolve) => {
+		const child = spawn(process.execPath, [join(root, suite)], { stdio: "inherit", cwd: root });
+		children.add(child);
+		child.on("error", () => resolve(1));
+		child.on("close", (exit) => resolve(exit ?? 1));
+	});
+	if (code !== 0) failed++;
+}
 
 clearTimeout(watchdog);
 const elapsed = ((Date.now() - started) / 1000).toFixed(1);

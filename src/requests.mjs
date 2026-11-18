@@ -32,51 +32,31 @@ export function listRequests(brainDir, { yolo = false } = {}) {
 // A visible yes can approve only the current declared move revision. It never gives a
 // broad envelope or a future move permission.
 const APPROVAL = /^(?:i\s+)?(?:y(?:es|eah|ep)|yeah|ok(?:ay)?|sure|approved?|go(?:\s+ahead)?|go\s+for\s+it|do\s+it|proceed|lgtm|ship(?:\s+it)?|looks\s+good|sounds\s+good)(?:(?:[ ,]+[pm]\d+)|(?:,?\s+(?:the\s+)?(?:plan|it|them|all|everything)))*[.!]*$/i;
-const SCOPE = /(?:the\s+)?(?:plan|it|them|all|everything)\b/i;
 const networkMove = (move) => move.capabilities?.network === true;
-
-/** Whether text is an unqualified affirmative that can carry a request decision. This is pure input recognition. */
-export const isApprovalWords = (text) => APPROVAL.test(String(text ?? "").trim());
-
-/**
- * Resolve an affirmative against a projected plan without reading or writing durable state. A presentation adapter
- * gives these current move IDs to the typed request action, which remains the only mutation boundary. A named p<N>
- * resolves to its currently waiting children; a bare affirmative approves one non-network move only.
- * @param {{ moves?: any[] } | undefined} plan
- * @param {string} text
- * @returns {string[] | undefined} current waiting move ids
- */
-export function approvalWordTargets(plan, text) {
-	const line = String(text ?? "").trim();
-	if (plan === undefined || !isApprovalWords(line)) return undefined;
-	const pending = waiting(plan);
-	if (pending.length === 0) return undefined;
-	const asked = line.match(/[pm]\d+/gi)?.map((id) => id.toLowerCase());
-	if (asked !== undefined) {
-		const targets = asked.flatMap((id) => (PLAN_ID.test(id)
-			? pending.filter((move) => move.parent === id)
-			: pending.filter((move) => move.id === id)).map((move) => move.id));
-		return targets.length === 0 ? undefined : targets;
-	}
-	if (SCOPE.test(line)) {
-		const targets = pending.filter((move) => !networkMove(move)).map((move) => move.id);
-		return targets.length === 0 ? undefined : targets;
-	}
-	const open = pending.filter((move) => !networkMove(move));
-	return open.length === 1 ? [open[0].id] : undefined;
-}
 
 /**
  * Approve waiting moves from what the user typed, without the slash command.
- * This legacy domain helper stays authoritative for non-UI callers; terminal adapters resolve targets from their
- * typed plan projection and dispatch `request.approve` instead.
+ * A named p<N> snapshots its currently waiting children. A bare affirmative only
+ * approves one non-network move; it never sweeps in a network move or future work.
  * @returns {string[] | undefined} approved move ids
  */
 export function approvalWords(brainDir, text, now = new Date().toISOString()) {
-	if (!isApprovalWords(text)) return undefined;
+	const line = String(text ?? "").trim();
+	if (!APPROVAL.test(line)) return undefined;
 	const { plan } = loadPlan(brainDir);
-	const ids = approvalWordTargets(plan, text);
-	if (ids === undefined) return undefined;
+	if (plan === undefined) return undefined;
+	const pending = waiting(plan);
+	if (pending.length === 0) return undefined;
+	const asked = line.match(/[pm]\d+/gi)?.map((id) => id.toLowerCase());
+	const SCOPE = /(?:the\s+)?(?:plan|it|them|all|everything)\b/i;
+	let ids;
+	if (asked !== undefined) ids = asked;
+	else if (SCOPE.test(line)) ids = pending.filter((move) => !networkMove(move)).map((move) => move.id);
+	else {
+		const open = pending.filter((move) => !networkMove(move));
+		ids = open.length === 1 ? [open[0].id] : [];
+	}
+	if (ids.length === 0) return undefined;
 	const result = approve(plan, now, ids);
 	if (result.approved.length === 0) return undefined;
 	savePlan(brainDir, plan);

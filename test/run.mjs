@@ -10,10 +10,10 @@ import { accessSync, chmodSync, constants, existsSync, mkdirSync, mkdtempSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { droppable, dressTask, KEPT_AS, loadContext, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
+import { droppable, dressTask, KEPT_AS, parseLines, ShelfError, shelfLabel, stepsOf, supersededBy, withoutTags } from "../src/context.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { FOCUS_START, TASK_HEADER } from "../src/prompt.mjs";
+import { TASK_HEADER } from "../src/prompt.mjs";
 import { changeRecord, changesBetween, checkpoint, isIgnored, lastChange, undo } from "../src/checkpoints.mjs";
 import { ASSESSMENT_MAX, saveAssessment } from "../src/assessment.mjs";
 import { applyAtlasOp, AtlasError, DETAIL_MAX, GIST_MAX, loadAtlas, nodeChanges, nodeHashes, NODES_MAX, renderOutline, saveAtlas, staleNodes } from "../src/atlas.mjs";
@@ -28,21 +28,14 @@ import { drawTree, treeSection } from "../src/tree.mjs";
 import { ChangeError, confineWrite, editOne, writeOne } from "../src/tools/change.mjs";
 import { confine, listProject, LookError, projectFiles, readOne, searchProject } from "../src/tools/look.mjs";
 import { findProject, setUpBrain } from "../src/project.mjs";
-import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, STAGE_WORK_DIR, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
+import { findSandbox, HEAD_LINES, HEAD_MAX, LINE_MAX, Output, TAIL_LINES, TAIL_MAX } from "../src/sandbox.mjs";
 import { describeCall, describeResult, WAKE_BURST } from "../src/terminal.mjs";
 import { isNote, wakeNote, withoutQuietWakes } from "../src/wake.mjs";
-import { createWakes, NOTE_MAX, WAKE_MIN, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
+import { createWakes, NOTE_MAX, WakeError, wakesPath, WAKES_MAX } from "../src/wakes.mjs";
 import { createWindows, findScript, KEEP_LINES, WindowError } from "../src/windows.mjs";
 import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
-import { POLICY } from "../src/config.mjs";
-import { createWorkspaceQueries } from "../src/application/queries.mjs";
-import { createChatPresentation } from "../src/application/chat.mjs";
-import { createRuntimePresentation } from "../src/application/runtime-presentation.mjs";
-import { createChat as createChatModel, homeOf } from "../src/screen/chat.mjs";
-import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
-import { loadConference } from "../src/conference.mjs";
 
 /** The first line of every block the harness writes; the anchor the strip patterns match. */
 const ESC = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -54,13 +47,6 @@ const only = process.argv[2];
 
 const tests = [];
 const test = (name, run) => tests.push({ name, run });
-// Chat's presentation contract is injected by the screen composition. The integration model cases use the same
-// adapter so their assertions remain about rendered behavior rather than direct domain imports.
-const createChat = (options = {}) => {
-	const { presentation, describeRef, ...rest } = options;
-	return createChatModel({ ...rest, presentation: presentation ?? createChatPresentation({ describeRef }) });
-};
-const runtimePresentation = createRuntimePresentation();
 /** Write the project's config by hand (tests use it to switch features off). */
 const configure = (root, config) => {
 	mkdirSync(join(root, ".brain"), { recursive: true });
@@ -160,9 +146,8 @@ let python;
 async function cartoOnTerminal(cwd, server, args, steps) {
 	python ??= (await run("python3", ["-c", "import pty"])).code === 0;
 	if (!python) return undefined;
-	const serverUrl = typeof server === "string" ? server : server.url;
 	// The line-by-line terminal, unless the test is about the full screen.
-	const command = [process.execPath, CARTO, "--url", serverUrl, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
+	const command = [process.execPath, CARTO, "--url", server.url, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
 	const result = await run("python3", ["-c", PTY, JSON.stringify(steps), ...command], { cwd, timeoutMs: 70_000 });
 	// Colour codes and carriage returns are the terminal's business, not the test's.
 	return { ...result, screen: result.stdout.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "") };
@@ -216,167 +201,46 @@ test("launch: the command works through a symlink, as install.sh sets it up", as
 	has(result.stdout, `core     ${CORE}`, "the core folder is the real one, not the symlink's");
 });
 
-test("launch: a model name the server does not have is reported when model work is first requested", async () => {
+test("launch: a model name the server does not have is reported with the names it has", async () => {
 	const root = makeProject("wrong-model");
 	const server = await startStandIn({ models: ["ByteShape", "other"] });
 	try {
-		const result = await run(CARTO, ["--url", server.url, "--model", "Byteshape", "-p", "say: hi || sleep"], { cwd: root });
+		const result = await run(CARTO, ["--url", server.url, "--model", "Byteshape"], { cwd: root });
 		assert.equal(result.code, 1, `expected exit 1:\n${result.all}`);
-		has(result.stdout, 'has no model named "Byteshape". It has: ByteShape, other.', "message");
-		assert.equal(server.requests.length, 0, "an invalid listed route never receives an ordinary agent request");
+		has(result.stderr, 'has no model named "Byteshape". It has: ByteShape, other.', "message");
 	} finally {
 		await server.close();
 	}
 });
 
-test("launch: Cartographer opens without a server and keeps local commands available", async () => {
-	const root = makeProject("offline-open", { git: false });
-	const result = await run(CARTO, ["--url", "http://127.0.0.1:1/v1", "--model", "offline"], { cwd: root, input: "/model\n/status\n/quit\n" });
-	ok(result, "an offline Cartographer session");
-	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the unavailable server is an on-screen recoverable error");
-	has(result.stdout, "model offline · idle", "local status remains usable without a model connection");
-	assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session opens before a server is reachable");
-});
-
-test("terminal: workspace actions share typed outcomes and deletion needs --yes", async () => {
-	const root = makeProject("terminal-workspace-actions", { git: false });
-	configure(root, { initiate: false });
-	const { brainDir } = setUpBrain(root);
-	assert.match(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep this only while the command is tested." }), root), /n1 added/);
-	const server = await startStandIn();
-	try {
-		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
-		ok(result, "terminal workspace actions");
-		has(result.stdout, "n1 archived", "archive reaches the shared workspace action");
-		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
-		has(result.stdout, "/delete is permanent. To remove n1, run: /delete n1 --yes", "delete asks for an explicit acknowledgement");
-		has(result.stdout, "n1 is gone for good", "acknowledged delete reaches the shared workspace action");
-		has(result.stdout, "README.md (lines 1-1) is on the shelf as sh1", "shelve reaches the shared workspace action");
-		has(result.stdout, "Taken off the shelf: README.md (lines 1-1) [sh1]", "unshelve reaches the shared workspace action");
-		has(result.stdout, "Focus is README.md: trace startup.", "focus reaches the shared workspace action");
-		has(result.stdout, "The explicit atlas focus is cleared", "unfocus reaches the shared workspace action");
-		has(result.stdout, "The copy at the top of the context is already current.", "pin reaches the typed context action");
-		has(result.stdout, "fresh context; earlier messages are no longer in view", "new clears the kept projection through the typed context action");
-		assert.equal(loadLedger(brainDir).ledger.items.length, 0, "only the acknowledged delete mutates the durable ledger");
-		assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the unfocus action persisted the cleared atlas lens");
-		assert.equal(server.requests.length, 0, "local workspace commands do not need an agent request");
-	} finally {
-		await server.close();
-	}
-});
-
-test("terminal: wake controls preserve their typed display and removal path", async () => {
-	const root = makeProject("terminal-runtime-wakes", { git: false });
-	configure(root, { initiate: false });
-	const { brainDir } = setUpBrain(root);
-	const wakes = createWakes({ root, brainDir });
-	try {
-		assert.equal(wakes.set({ note: "Check the handoff.", every: WAKE_MIN }).id, "w1");
-	} finally {
-		wakes.shutdown();
-	}
-	const server = await startStandIn();
-	try {
-		const result = await carto(root, server, [], { input: "/wakes\n/wakes remove w1\n/wakes\n/quit\n" });
-		ok(result, "terminal wake controls");
-		has(result.stdout, "w1 ·", "the wake list is rendered from its Runtime projection");
-		has(result.stdout, "wake  - w1", "the typed remove outcome keeps the terminal's established acknowledgement");
-		has(result.stdout, "The agent has set no wake.", "the post-removal projection is read again");
-		assert.deepEqual(JSON.parse(readFileSync(wakesPath(brainDir), "utf8")).wakes, [], "the acknowledged Runtime action persisted the removal");
-		assert.equal(server.requests.length, 0, "local wake controls do not need an agent request");
-	} finally {
-		await server.close();
-	}
-});
-
-test("launch: an offline interactive terminal renders before it reports the server error", async () => {
-	const root = makeProject("offline-interactive", { git: false });
-	configure(root, { initiate: false });
-	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", [], [["Set one up in", ""], ["Type a message.", ""], ["Could not connect to the model server", "/quit"]]);
-	if (result === undefined) return "python3 is needed for the pseudo-terminal launch check";
-	ok(result, "an offline interactive Cartographer session");
-	has(result.screen, "Type a message.", "the terminal is usable before the health check completes");
-	has(result.screen, "Could not connect to the model server at http://127.0.0.1:1/v1", "the failed health check is shown in the open terminal");
-	assert.ok(result.screen.indexOf("Type a message.") < result.screen.indexOf("Could not connect to the model server"), "the terminal renders before its unavailable-server error");
-});
-
-test("launch: the full-screen terminal keeps an offline server error visible", async () => {
-	const root = makeProject("offline-screen", { git: false });
-	configure(root, { initiate: false });
-	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [["Set one up in", ""], ["Could not connect to the model server", "\x03", false], [0.1, "\x03", false]]);
-	if (result === undefined) return "python3 is needed for the full-screen terminal check";
-	ok(result, "an offline full-screen Cartographer session");
-	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the full-screen status strip says the server is unavailable");
-});
-
-test("launch: a grammar-ignoring route is refused before its first agent request", async () => {
-	const root = makeProject("native-grammar-required", { git: false });
-	const server = await startStandIn({ ignoreNativeGrammar: true });
-	try {
-		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: should never run || sleep"], { cwd: root });
-		assert.equal(result.code, 1, `a grammar-ignoring endpoint must be rejected before agent work:\n${result.all}`);
-		has(result.stdout, "requires llama.cpp native GBNF grammar enforcement", "the failure names Cartographer's platform requirement");
-		assert.equal(server.requests.length, 0, "the normal agent request never reaches a grammar-ignoring route");
-		assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session can open before the deferred route check");
-	} finally {
-		await server.close();
-	}
-});
-
-test("launch: a lone llama-server exposes its reported 75k capacity as the context limit", async () => {
+test("launch: a lone llama-server leaves the configured reply reserve below a reported 75k capacity", async () => {
 	const root = makeProject("lone-server", { git: false });
 	const server = await startStandIn({ models: [{ id: "../some-file.gguf", object: "model", owned_by: "llamacpp", meta: { n_ctx: 75_000 } }] });
 	try {
 		const result = await run(CARTO, ["--url", server.url, "--model", "anything", "-p", "say: hi || sleep"], { cwd: root });
 		ok(result, "a name the lone server does not list");
-		has(result.stdout, "of 75k tokens", "the full reported context is shown after the first model turn");
-		hasNot(result.stdout, "reserved for replies", "no fixed reply reserve is displayed");
-		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains configured independently of the context plan");
+		has(result.stdout, "usable context 42232 tokens (server capacity 75000; 32768 reserved for replies; settings cap 100000)", "the 75k capacity is distinct from Cartographer's usable context");
+		has(result.stdout, "of 42k tokens", "the usable context is shown everywhere else");
+		assert.equal(server.requests[0].max_tokens, 32768, "the provider retains total server capacity when sizing the reply");
 	} finally {
 		await server.close();
 	}
 });
 
-test("launch: llama-swap's context_length is refreshed after the proof warms a model", async () => {
-	const root = makeProject("lazy-llama-swap-context", { git: false });
-	const server = await startStandIn({
-		// llama-swap can omit capability data until the first routed model request has started it. The native
-		// grammar proof is that request, so Cartographer must read /models once more before sizing the session.
-		models: ({ nativeRequests }) => [{
-			id: "stand-in",
-			object: "model",
-			...(nativeRequests.length === 0 ? {} : { context_length: 64_000, context_window: 64_000 }),
-		}],
-	});
-	try {
-		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: hi || sleep"], { cwd: root });
-		ok(result, "a lazily described llama-swap model");
-		has(result.stdout, "of 64k tokens", "the full advertised input context is shown after the deferred proof refresh");
-		hasNot(result.stdout, "of 32k tokens", "the model capacity is never halved for a static reply reserve");
-		assert.equal(server.requests[0].max_tokens, 32768, "the reply ceiling remains independent of the full context plan");
-	} finally {
-		await server.close();
-	}
-});
-
-test("model: a 75k switch uses the full reported context after lazy capability discovery", async () => {
+test("model: a 75k switch keeps reply room in the provider while every displayed context budget becomes usable", async () => {
 	const root = makeProject("model-context-window", { git: false });
 	configure(root, { initiate: false });
-	const server = await startStandIn({
-		models: ({ nativeRequests }) => [
-			{ id: "stand-in", object: "model", context_length: 200_000, context_window: 200_000 },
-			// This model's capacity appears only after the switch's required proof starts it.
-			{ id: "Qwen3.8", object: "model", ...(nativeRequests.some((request) => request.model === "Qwen3.8") ? { context_length: 75_000, context_window: 75_000 } : {}) },
-		],
-	});
+	const server = await startStandIn({ models: [
+		{ id: "stand-in", object: "model", meta: { n_ctx: 200_000 } },
+		{ id: "Qwen3.8", object: "model", meta: { n_ctx: 75_000 } },
+	] });
 	try {
 		const result = await carto(root, server, [], { input: "/model Qwen3.8\nsay: after the switch || sleep\n/quit\n" });
 		ok(result, "switching to the reported model");
-		has(result.stdout, "model  stand-in → Qwen3.8 · context 75k tokens (server capacity 75k; settings cap 100k)", "the switch exposes the full discovered server capacity");
+		has(result.stdout, "model  stand-in → Qwen3.8 · usable context 42k tokens (server capacity 75k; 33k reserved for replies; settings cap 100k)", "the switch distinguishes server capacity from Cartographer's usable context");
 		const request = server.requests.find((entry) => entry.model === "Qwen3.8");
 		assert.ok(request, "the next request uses the switched model");
-		assert.equal(request.max_tokens, 32768, "the reply ceiling stays independent of the full context limit");
-		assert.ok(server.nativeRequests.some((entry) => entry.model === "Qwen3.8" && /outside-the-allowed-native-grammar-set/.test(entry.messages.map(rawText).join("\n"))), "the switch proves native grammar before adopting the new model");
+		assert.equal(request.max_tokens, 32768, "the provider sizes the reply against the 75k server capacity, not the smaller input budget");
 	} finally {
 		await server.close();
 	}
@@ -727,28 +591,6 @@ test("shell: what a window can reach: the project, and not the home folder, the 
 	}
 });
 
-test("shell: a staged command writes only its disposable work tree before candidate promotion", async () => {
-	const skip = NO_SANDBOX();
-	if (skip) return skip;
-	const root = makeProject("staged-command");
-	await git(root, "init", "-q");
-	const { brainDir } = setUpBrain(root);
-	const stage = createStage({ root });
-	const windows = windowsOf(root, brainDir);
-	try {
-		const result = await windows.run("stage", `printf 'export const add = () => 99;\\n' > src/math.js; test ! -e ${STAGE_WORK_DIR}/.brain; test ! -e ${STAGE_WORK_DIR}/.git; echo staged`, { network: false, waitMs: 20_000, stage });
-		assert.deepEqual([result.reason, result.exit, result.text, result.cwd, result.stage], ["done", 0, "staged", "(staged work)", stage.id], "the stage shell runs from its private work copy");
-		assert.equal(existsSync(join(stage.home, ".cartographer-stage-rc")), true, "the stage startup file stays in the private host-side stage home that bwrap binds as HOME");
-		assert.equal(existsSync(join(stage.home, ".cartographer-stage-stage.cmd")), true, "each staged command is written in that private home before the shell sources its in-sandbox bind");
-		assert.match(readFileSync(join(root, "src", "math.js"), "utf8"), /return a \+ b/, "the live project is unchanged before promotion");
-		windows.close("stage");
-		assert.deepEqual(collectStageCandidate(stage).changes.map(({ path, status }) => ({ path, status })), [{ path: "src/math.js", status: "changed" }], "only the bounded stage candidate records the formatter-like change");
-	} finally {
-		windows.shutdown();
-		disposeStage(stage);
-	}
-});
-
 test("windows: long output keeps its start and its end; what was running at the last exit is reported as gone", async () => {
 	const skip = NO_WINDOWS();
 	if (skip) return skip;
@@ -916,7 +758,7 @@ test("plan: network belongs to a change envelope, but each move must declare its
 
 // ─── Looking: only inside the project ───────────────────────────────────────
 
-test("task: a change focus executes the cached declared move contract through an isolated provider continuation", async () => {
+test("task: a change focus executes the cached declared move contract and returns stated proof for review", async () => {
 	const root = makeProject("move-contract", { git: false });
 	configure(root, { initiate: false });
 	const { brainDir } = setUpBrain(root);
@@ -941,152 +783,9 @@ test("task: a change focus executes the cached declared move contract through an
 		assert.equal(move.reported.claimed, true);
 		assert.equal(move.reported.proof, "Stand-in observed the task results above.", "proof is stored separately from the report claim");
 		assert.deepEqual(move.reported.changes, [], "checkpoint evidence is kept even for a read-only execution step");
-		const contractRequest = server.requests.find((request) => request.messages.some((message) => rawText(message).includes("Move contract:\nread: src/main.js")));
+		const contractRequest = server.requests.map((request) => request.messages.map(rawText).join("\n")).find((text) => text.includes("Move contract:\nread: src/main.js"));
 		assert.ok(contractRequest, "the child received the stored move action, not a broad new brief");
-		const capsuleAt = contractRequest.messages.findIndex((message) => message.role === "tool" && rawText(message).startsWith(TASK_HEADER));
-		assert.ok(capsuleAt > 0, "the focused provider request carries the prepared capsule");
-		assert.equal(contractRequest.messages[capsuleAt - 1]?.role, "user", "the focused provider request has the user-role query its chat template requires");
-		assert.equal(rawText(contractRequest.messages[capsuleAt - 1]), FOCUS_START, "the continuation is request-only rather than replayed parent chat");
-		const focusOnly = contractRequest.messages.filter((message) => message.role !== "system").map(rawText).join("\n");
-		assert.doesNotMatch(focusOnly, /ignore this free-form text/, "the parent request is not replayed into the focus");
-		assert.match(focusOnly, /Required proof: The read output names the entry point\./);
-		assert.match(focusOnly, /Closure: this focus is done only when its declared result is observed within its declared authority/);
-		assert.ok(server.requests.some((request) => request.messages.some((message) => message.role === "assistant" && message.tool_calls?.some((call) => call.function?.name === "read"))), "the focus continues past its capsule with a normal focus-local read call");
-	} finally {
-		await server.close();
-	}
-});
-
-test("consult C1-C5: a CLI conference uses the caller model, returns an isolated bounded audit, and has no legacy writer", async () => {
-	const root = makeProject("consult-conference-cli", { git: false });
-	configure(root, { initiate: false });
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	try {
-		const result = await carto(root, server, ["-p", `consult: ${JSON.stringify({ question: "What should we verify?", context: "CLI CAPTURED CONTEXT", myPersona: "Be a skeptical systems reviewer.", files: ["src/math.js"] })}`]);
-		assert.equal(result.code, 0, `conference CLI call exits cleanly:\n${result.all}`);
-		has(result.stdout, "Consult conference co1 returned", "the parent receives only the compact terminal conference receipt");
-		const loaded = loadConference(join(root, ".brain"), "co1").conference;
-		assert.equal(loaded.status, "returned");
-		assert.equal(loaded.model.modelId, "stand-in", "the conference records the model resolved for its caller");
-		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM cartographer");
-		assert.equal(loaded.final.participant, "cartographer", "the host authorizes Cartographer alone to write the terminal advisory");
-		assert.ok(loaded.childConversationId, "the independent child identity is durable");
-		assert.ok(loaded.requestPlans.length >= 5, "two debate turns, two native finite decisions, and the terminal report request are auditable");
-		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the conference has no storyteller writer");
-		assert.equal(server.requests.some((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom")), false, "conference routing does not retain the OpenAI custom-tool adapter");
-		const selectorRequests = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("Neutral native selector packet"));
-		assert.equal(selectorRequests.length, 2, "the conference makes a native continuation decision after each completed debate contribution");
-		assert.ok(selectorRequests.every((request) => request.tools === undefined && request.tool_choice === undefined && request.stream === false), "native selection has no tool surface");
-		assert.match(selectorRequests[0].grammar, /"continue:atlas"/);
-		assert.doesNotMatch(selectorRequests[0].grammar, /"report:cartographer"/, "one opening contribution cannot authorize a conclusion");
-		assert.match(selectorRequests[1].grammar, /"report:cartographer"/, "the ready debate makes a final-report decision a native finite choice");
-		assert.deepEqual(loaded.selectorEvents.map((event) => event.decision), ["continue", "report"]);
-		assert.ok(loaded.selectorEvents.every((event) => event.method === "llama.cpp-native-gbnf" && event.grammarEnforced === true));
-		const participantRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Active participant packet"));
-		assert.equal(participantRequests.some((request) => request.messages.map(rawText).join("\n").includes("CLI CAPTURED CONTEXT")), true, "the immutable conference seed reaches its independent child");
-		const reportRequest = participantRequests.find((request) => request.messages.map(rawText).join("\n").includes("host's native GBNF decision found the bounded debate ready for a final advisory"));
-		assert.deepEqual((reportRequest?.tools ?? []).map((tool) => tool.function?.name), ["consult_source", "consult_return"], "only the host-authorized report request exposes consult_return");
-	} finally {
-		await server.close();
-	}
-});
-
-test("consult probe: /consult probe sends standalone native GBNF selector checks and writes a shareable log", async () => {
-	const root = makeProject("consult-native-grammar-probe", { git: false });
-	configure(root, { initiate: false });
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	try {
-		const result = await carto(root, server, [], { input: "/consult probe llama-cpp-selector-probe.json\n/quit\n" });
-		ok(result, "native grammar selector diagnostic");
-		has(result.stdout, "Native llama.cpp selector probe", "the terminal identifies the standalone diagnostic");
-		has(result.stdout, "Result: PASS", "the terminal reports both grammar checks passed");
-		const logPath = join(root, "llama-cpp-selector-probe.json");
-		assert.equal(existsSync(logPath), true, "an explicit project-relative path makes the evidence easy to commit");
-		const log = JSON.parse(readFileSync(logPath, "utf8"));
-		assert.equal(log.kind, "cartographer.llama-cpp-native-selector-probe");
-		assert.equal(log.model, "stand-in", "the command probes the model currently selected by the session");
-		assert.equal(log.passed, true);
-		assert.deepEqual(log.cases.map((entry) => entry.id), ["forced-literal", "finite-route"]);
-		assert.ok(log.cases.every((entry) => entry.request.tools === undefined && entry.request.tool_choice === undefined), "the selector grammar is deliberately isolated from the tool surface");
-		assert.doesNotMatch(readFileSync(logPath, "utf8"), /MARKER-ONLY-IN-FILE/, "the synthetic diagnostic does not capture project material");
-		const probes = server.nativeRequests.filter((request) => request.messages.map(rawText).join("\n").includes("outside-the-allowed-selector-set") || request.messages.map(rawText).join("\n").includes("Eligible ids: atlas"));
-		assert.equal(probes.length, 2, "the server receives one forced grammar enforcement request and one finite routing request");
-		assert.ok(probes.every((request) => request.stream === false && request.tools === undefined && request.tool_choice === undefined));
-	} finally {
-		await server.close();
-	}
-});
-
-test("C5 CLI cutover blocks running Cases, archives stopped data, and exposes no Case tool", async () => {
-	const root = makeProject("c5-cli-cutover", { git: false });
-	const brainDir = join(root, ".brain");
-	configure(root, { initiate: false });
-	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
-	mkdirSync(join(brainDir, "cases"), { recursive: true });
-	const story = "<!-- storyteller v1 -->\nlegacy transcript\n";
-	writeFileSync(join(brainDir, "storyteller", "st1.md"), story);
-	writeFileSync(join(brainDir, "cases", "c1.json"), JSON.stringify({ id: "c1", status: "running" }));
-	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ shelf: [{ id: "sh1", ref: { type: "story", id: "st1" } }], tasks: { legacy: { caseId: "c1", phase: "construct" } } }));
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	try {
-		const blocked = await carto(root, server, ["-p", "say: should not start || sleep"]);
-		assert.equal(blocked.code, 1, `a running legacy Case blocks startup:\n${blocked.all}`);
-		has(blocked.stderr, "active or resumable legacy Case material: c1", "the blocker identifies the Case once");
-		assert.equal(existsSync(join(brainDir, "cases", "c1.json")), true, "the blocked source is untouched");
-
-		writeFileSync(join(brainDir, "cases", "c1.json"), JSON.stringify({ id: "c1", status: "stopped" }));
-		const migrated = await carto(root, server, ["-p", "say: archive complete || sleep"]);
-		ok(migrated, "stopped legacy data starts through the C5 cutover");
-		has(migrated.stdout, "C5 legacy archive", "startup reports the static archive");
-		assert.equal(existsSync(join(brainDir, "storyteller")), false);
-		assert.equal(existsSync(join(brainDir, "cases")), false);
-		assert.equal(readFileSync(join(brainDir, "legacy", "raw", "storyteller", "st1.md"), "utf8"), story);
-		assert.match(readFileSync(join(brainDir, "legacy", "exports", "cases", "c1.md"), "utf8"), /Recorded legacy status: stopped/);
-		const requestToolNames = server.requests.flatMap((request) => request.tools ?? []).map((tool) => tool.function?.name ?? tool.name).filter(Boolean);
-		assert.equal(requestToolNames.includes("case"), false, "fresh C5 provider payloads contain no Case tool");
-	} finally {
-		await server.close();
-	}
-});
-
-test("task: browser evidence outside m2's JavaScript boundary becomes a durable closure gap without undeclared edits", async () => {
-	const root = makeProject("browser-closure-gap", { git: false });
-	configure(root, { initiate: false });
-	writeFileSync(join(root, "index.html"), "<!doctype html><script type=\"module\" src=\"js/main.js\"></script>\n");
-	mkdirSync(join(root, "js"), { recursive: true });
-	const { brainDir } = setUpBrain(root);
-	savePlan(brainDir, {
-		version: 2,
-		next: 2,
-		nextMove: 2,
-		items: [{ id: "p1", mode: "change", text: "Show the browser simulation.", doneWhen: "The browser visibly runs the simulation.", status: "open", revision: 1 }],
-		moves: [{
-			id: "m2", parent: "p1", action: "Create the simulation module.", text: "Create the simulation module.",
-			doneWhen: "The browser loads and runs js/main.js.", targets: ["js/main.js"], proof: "Browser observation shows the running simulation.",
-			capabilities: { files: true, commands: false, network: false }, budget: { replies: 3, fileOps: 1, commandStarts: 0 }, turns: 3,
-			revision: 1, parentRevision: 1, status: "open", approvedRevision: 1, approvedAt: "2026-11-15T00:00:00.000Z",
-		}],
-	});
-	const server = await startStandIn({
-		focusSteps: ["book: {\"target\":\"file\",\"action\":\"create\",\"path\":\"js/main.js\",\"content\":\"console.log('simulation');\"}"],
-		returnProof: "node --check js/main.js exits zero.",
-		closureGap: "Browser proof depends on index.html loading js/main.js, but index.html is outside m2's declared targets.",
-	});
-	try {
-		const result = await carto(root, server, ["-p", "task(m2): inspect the JavaScript-only browser claim || then think"]);
-		ok(result, "browser closure gap");
-		const plan = readPlan(root);
-		const move = plan.moves.find((entry) => entry.id === "m2");
-		assert.equal(move.status, "blocked", "the focus cannot claim browser completion from a JavaScript-only check");
-		assert.equal(move.reported.claimed, false);
-		assert.equal(move.reported.proof, "node --check js/main.js exits zero.", "JavaScript syntax evidence remains distinct from browser evidence");
-		assert.match(move.reported.closureGap, /index\.html loading js\/main\.js/);
-		assert.match(move.blocked, /^Closure gap:/);
-		assert.equal(readFileSync(join(root, "js", "main.js"), "utf8"), "console.log('simulation');", "the declared JavaScript surface may change without closing the browser claim");
-		assert.equal(readFileSync(join(root, "index.html"), "utf8"), "<!doctype html><script type=\"module\" src=\"js/main.js\"></script>\n", "the undeclared browser-integration path is not edited");
-		const focusRequest = server.requests.find((request) => request.messages.some((message) => rawText(message).includes("Move contract:\nCreate the simulation module.")));
-		assert.ok(focusRequest, "the focused request was made");
-		assert.match(focusRequest.messages.map(rawText).join("\n"), /Closure: this focus is done only when its declared result is observed within its declared authority/);
+		assert.match(contractRequest, /Required proof: The read output names the entry point\./);
 	} finally {
 		await server.close();
 	}
@@ -1164,8 +863,6 @@ test("tree: levels, folders with counts, the anchor, the marks of nodes, and a d
 	has(whole, "From the project root, 3 levels deep: 5 files in all.\nsrc/\n  deep/\n    er/  (1 file)\n  main.js\n  math.js\nREADME.md\nlong.txt", "the whole project");
 	hasNot(whole, ".brain", "the brain is not part of the project");
 	has(treeSection(root, { anchor: "src/", depth: 1 }).text, 'From src/ (the anchor I set), 1 level deep: 3 of the project\'s 5 files are under it. `atlas` with a tree operation and anchor "." returns to the project root.\nsrc/\n  deep/  (1 file)\n  main.js\n  math.js', "anchored");
-	const projected = treeSection(join(root, "not-read-again"), { anchor: "src", depth: 1 }, { files: ["README.md", "src/deep/er/leaf.txt", "src/main.js", "src/math.js", "long.txt"] });
-	has(projected.text, "From src/ (the anchor I set), 1 level deep", "a prepared file projection does not synchronously validate the anchor again");
 	const lost = treeSection(root, { anchor: "gone" });
 	has(lost.text, "The anchor was gone, which is no longer a folder with files in it.", "a folder that is gone is said");
 	has(lost.text, "From the project root", "and the tree falls back to the root");
@@ -1815,6 +1512,7 @@ test("atlas attention: a completed read and shelf batch publishes one durable ma
 });
 
 test("screen: a collapse of the main context leaves only the marker, and the agent's blocks fold open", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
 	const out = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -1896,6 +1594,7 @@ test("screen: keys are named for the commands mode, and several lines that arriv
 });
 
 test("screen: Work folds the agent's private trace into one line, opens it to a line per call, and shows what is being written", async () => {
+	const { createChat, homeOf } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
 	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -1940,8 +1639,7 @@ test("screen: Work folds the agent's private trace into one line, opens it to a 
 	// What is being written now is shown as it grows: notes, a message, the arguments of a call.
 	chat.user("Write it");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: "The file needs a seed." }, call("c9", "task", { brief: "Add a seed\nto the roller" })] });
-	has(text(), "The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
-	assert.equal(chat.lines(80).find((line) => line.kind === "live" && line.bg === "bgNote")?.bg, "bgNote", "live private material uses the same quiet block as a completed note");
+	has(text(), "┊ The file needs a seed.\n✎ task  Add a seed to the roller\n  │ Add a seed\n  │ to the roller", "the call being written is open, with what it holds so far");
 	assert.equal(chat.doing().what, "writing task Add a seed to the roller");
 	// `book file edit` streams `oldText` and then `newText`; both show as they are written, and `newText` wins at equal length.
 	chat.live(1, { timestamp: 9, content: [call("c9", "book", { target: "file", action: "edit", id: "f1", oldText: "print(1)" })] });
@@ -1970,6 +1668,7 @@ test("screen: Work folds the agent's private trace into one line, opens it to a 
 });
 
 test("screen: Talk separates delivered speech from private Work", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
 	let clock = 1000;
 	const chat = createChat({ now: () => clock });
 	const text = (projection, cols = 120) => chat.lines(cols, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
@@ -2027,6 +1726,7 @@ test("screen: Talk separates delivered speech from private Work", async () => {
 });
 
 test("screen: Talk binds an admitted Durable source by lifecycle, not matching words", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
 	const chat = createChat();
 	chat.user("same visible words");
 	chat.entry(0, {
@@ -2048,160 +1748,207 @@ test("screen: Talk binds an admitted Durable source by lifecycle, not matching w
 });
 
 test("screen: long live reasoning names its compact tail, opens in Work, and resets when it finishes", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
 	const chat = createChat();
 	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	const previewRows = POLICY.limits.screen.notePreviewLines;
-	const thoughtLines = previewRows + 8;
-	const thought = Array.from({ length: thoughtLines }, (_entry, index) => `thought ${index + 1}`).join("\n");
+	const thought = Array.from({ length: 10 }, (_entry, index) => `thought ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: thought }] });
 	const compact = text();
 	has(compact, "▸ thinking · 8 earlier lines · Enter opens all", "a long stream names what is left out and how to open it");
-	has(compact, `thought ${thoughtLines}`, "the newest reasoning stays visible");
+	has(compact, "thought 10", "the newest reasoning stays visible");
 	hasNot(compact, "thought 1\n", "the old reasoning does not make the preview grow");
 	const live = chat.lines(40).find((line) => line.kind === "live" && line.liveDepth === 0);
 	assert.ok(live, "the compact stream is selectable in Chat");
 	chat.setAll(true);
-	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds`, "open all opens the live stream too");
+	has(text(), "▾ thinking · 10 lines · Enter folds", "open all opens the live stream too");
 	chat.setAll(false);
 	has(text(), "▸ thinking · 8 earlier lines · Enter opens all", "fold all returns it to the compact tail");
 	assert.equal(chat.toggleLive(live.liveDepth, true), true, "the selected live stream opens");
-	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds\nthought 1`, "opening shows the beginning as well as the tail");
+	has(text(), "▾ thinking · 10 lines · Enter folds\n┊ thought 1", "opening shows the beginning as well as the tail");
 	assert.equal(chat.textOf("live:0"), thought, "copying the live stream takes its whole reasoning");
-	const nextThoughtLine = thoughtLines + 1;
-	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] });
-	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds`, "an opened stream stays open as it grows");
-	has(text(), `thought ${nextThoughtLine}`, "the growing stream includes its new reasoning");
+	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought 11` }] });
+	has(text(), "▾ thinking · 11 lines · Enter folds", "an opened stream stays open as it grows");
+	has(text(), "thought 11", "the growing stream includes its new reasoning");
 	chat.setThinking(false);
 	has(text(), "thinking… (Ctrl-T shows it)", "Ctrl-T hides the live reasoning");
-	hasNot(text(), `thought ${nextThoughtLine}`, "the hidden stream does not leave its open text behind");
+	hasNot(text(), "thought 11", "the hidden stream does not leave its open text behind");
 	chat.setThinking(true);
-	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds\nthought 1`, "showing thinking again keeps the deliberate open state");
-	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] }] });
+	has(text(), "▾ thinking · 11 lines · Enter folds\n┊ thought 1", "showing thinking again keeps the deliberate open state");
+	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought 11` }] }] });
 	hasNot(text(), "Enter folds", "the completed reply has no live expansion control");
-	has(text(), "thought 1", "the completed reasoning stands as its saved message");
-	assert.equal(chat.lines(40).find((line) => line.kind === "reasoning")?.bg, "bgNote", "completed private reasoning keeps its own quiet block instead of blending into tool work");
+	has(text(), "┊ thought 1", "the completed reasoning stands as its saved message");
 	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
-	const nextLines = previewRows + 3;
-	const next = Array.from({ length: nextLines }, (_entry, index) => `next ${index + 1}`).join("\n");
+	const next = Array.from({ length: 5 }, (_entry, index) => `next ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 10, content: [{ type: "thinking", thinking: next }] });
 	has(text(), "▸ thinking · 3 earlier lines · Enter opens all", "the next reply starts folded again");
 	chat.live(0, undefined);
-	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
+	hasNot(text(), "next 5", "removing a live reply removes its expansion state and preview");
 });
 
-test("screen: only Consult loads a conference audit; parent rows remain private pointers", async () => {
-	const record = {
-		id: "co7",
-		status: "returned",
-		model: { provider: "openai-completions", modelId: "stand-in" },
-		question: "What must the parent verify?",
-		createdAt: "2026-11-17T00:00:00.000Z",
-		roster: { version: 1 },
-		bookSources: {},
-		myPersona: { digest: "a".repeat(64) },
-		turns: [], selectorEvents: [], requestPlans: [], sources: [], toolReceipts: [], activities: [],
-		final: { participant: "cartographer", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
-	};
-	const chat = createChat({ now: () => 1_000 });
+test("screen: a consult call folds to one line, and opens to the whole story — the context, the question, and the answer under its thread", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	let clock = 1000;
+	const thread = "st-20261116-053946-a1b2";
+	const roundOne = [
+		"<!-- storyteller v1 -->",
+		"The storyteller — one long problem, kept whole",
+		"",
+		"Model: MythosNano",
+		"Started: 2026-11-16T05:39:46.000Z",
+		"",
+		"## Round 1 — 2026-11-16T05:39:46.000Z",
+		"Elapsed: 1 m 12 s · 9,001 output tokens · finish: stop",
+		"",
+		"Context:",
+		"```text",
+		"The roller rolls one die.",
+		"The user suspects it is unfair.",
+		"```",
+		"",
+		"Question:",
+		"```text",
+		"Is the roller sound?",
+		"```",
+		"",
+		"Answer:",
+		"```text",
+		"It is not. Roll twice, not once, or the die never lands on six.",
+		"```",
+		"",
+	].join("\n");
+	const stories = { [thread]: roundOne };
+	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
+	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
-	const text = (projection) => chat.lines(100, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	chat.entry(0, reply([call("c1", "consult", { question: "What must the parent verify?", myPersona: "Audit the source boundary." })], 1));
-	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from cartographer.", { details: { consult: true, conference: "co7" } }));
-	assert.equal(chat.lines(100, "work").some((line) => line.spans.some(([part]) => part.includes(record.question))), false, "the private notebook is not loaded into Conversation or Work");
-	hasNot(text("work"), "What must the parent verify?", "the parent consult call is absent from Work");
-	// A child replay without terminal-supplied persona metadata cannot infer one from a private audit while the user
-	// is still in another Chat subview. Attribution arrives only with a settled Consult projection.
-	const child = createChat();
-	child.entry(1, reply([{ type: "text", text: "Private child replay words." }], 2), "", { conference: "co7" });
-	child.live(1, { timestamp: 3, content: [{ type: "thinking", thinking: "Private child live reasoning." }] }, { conference: "co7" });
-	hasNot(child.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "Private child", "child state cannot become an ordinary Work row while attribution is unavailable");
-	const group = chat.items.find((item) => item.type === "group");
-	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot load or export the audit");
-	chat.setConsultProjection({ data: { conferences: [{ id: record.id, conference: record }] } });
-	const beforePaint = chat.version;
-	const consult = text("consult");
-	assert.equal(chat.version, beforePaint, "Consult paints the settled cache without a domain read or local state transition");
-	has(consult, "Consultation co7 · returned", "the dedicated view names the conference record");
-	has(consult, "Verify the current source before acting.", "the durable advisory renders only in Consult");
 
-	const historical = createChat();
-	historical.entry(0, reply([call("c2", "consult", { question: "Old question", thread: "st1" })], 1));
-	historical.entry(0, result("c2", "consult", "Legacy row", { details: { consult: true, thread: "st1" } }));
-	const historicalWork = historical.lines(100, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	hasNot(historicalWork, "Legacy row", "an old parent receipt is never rendered as ordinary Work");
-	const historicalConsult = historical.lines(100, "consult").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	has(historicalConsult, "Legacy row", "the isolated Consult view can name the compact historic parent receipt without parsing an archive");
+	chat.user("Is the roller sound?");
+	chat.entry(0, reply([call("c1", "consult", { question: "Is the roller sound?", context: "The roller rolls one die.\nThe user suspects it is unfair." })], 1));
+	clock += 72_000;
+	chat.entry(0, result("c1", "consult", `The storyteller took 1 m 12 s (9,001 output tokens). The story stands under thread ${thread}; shelved as placement sh1 (12,340 rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so. A story is not a record: check the work against a test or a proof, and apply it yourself. I can ask on with \`thread: "${thread}"\` — the storyteller sees the original question and its answer — for as long as the work needs.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
+	chat.entry(0, reply([call("c2", "chat", { text: "It rolls once; ask the storyteller, and it says twice." })], 2));
+
+	// Folded: one line for the run, and the line says whose work it was; nothing of the answer stands until it is opened.
+	has(text(), "▸ 1 call · Is the roller sound? · 1m 12s", "once something is said, the run is one line, and the line says what the storyteller was asked");
+	hasNot(text(), "the storyteller  Is the roller sound?", "the call's own line is folded away with the run");
+	hasNot(text(), "Roll twice", "the answer is not shown until the call is opened");
+	hasNot(text(), "It is not.", "and the receipt never carried it either");
+
+	// The run opened: the call is one line — who was asked, what, how long it took, how much it wrote, where the story stands.
+	chat.toggle(chat.lines(80).find((line) => line.kind === "group").item);
+	has(text(), "the storyteller  Is the roller sound?  → 1 m 12 s · 9,001 tokens", "opened, the call line says who was asked, what, how long it took and how much it wrote");
+	hasNot(text(), "Roll twice", "the answer stands behind the call");
+
+	// Opened: the whole story stands in the row, read from the brain under its thread, never from the session.
+	const consultRow = chat.lines(80).find((line) => line.kind === "call");
+	chat.toggleRow(consultRow.item, consultRow.row);
+	const opened = text();
+	has(opened, `the story stands under thread ${thread} · 1 round`, "the opened row names the thread, never a path");
+	has(opened, "round 1 · 2026-11-16 05:39 UTC", "the round is labelled");
+	has(opened, "what I sent — the context", "the ask says what was sent");
+	has(opened, "The roller rolls one die.", "the context of the call");
+	has(opened, "The user suspects it is unfair.", "all of it");
+	has(opened, "what I asked — the question", "and what was asked");
+	has(opened, "Is the roller sound?", "the question in full");
+	has(opened, "what the storyteller answered", "and what came back");
+	has(opened, "It is not. Roll twice, not once, or the die never lands on six.", "the answer, from the story it stands in");
+	hasNot(opened, "Shelved as placement", "the receipt is not repeated inside the opened row");
+
+	// y copies the whole story: the context, the question and the answer, not just the one line.
+	const copied = chat.textOf(consultRow.item, consultRow.row);
+	has(copied, `The story stands under thread ${thread}`, "the copied text carries the thread");
+	has(copied, "The roller rolls one die.", "the copied text carries the context");
+	has(copied, "Is the roller sound?", "the question");
+	has(copied, "Roll twice, not once", "and the answer");
+
+	// A follow-up is its own call; the story grew under the same thread, and its row reads the whole of it.
+	stories[thread] = roundOne.replace(/\s+$/, "\n\n") + [
+		"## Round 2 — 2026-11-16T06:10:02.000Z",
+		"Elapsed: 0 m 41 s · 640 output tokens · finish: stop",
+		"",
+		"Question:",
+		"```text",
+		"Why twice?",
+		"```",
+		"",
+		"Answer:",
+		"```text",
+		"Once lands on six only half the time.",
+		"```",
+		"",
+	].join("\n");
+	chat.entry(0, reply([call("c3", "consult", { question: "Why twice?", thread })], 3));
+	clock += 41_000;
+	chat.entry(0, result("c3", "consult", `Round 2. The storyteller took 0 m 41 s (640 output tokens). The story (2 rounds) stands under thread ${thread}; shelved as placement sh1 (12,410 rendered tokens); over what the shelf renders, the story stands in the brain and the state block says so. A story is not a record: check it against a test or a proof. Ask on with \`thread: "${thread}"\` while a refutable doubt remains — the storyteller sees the whole exchange — or let it rest.`, { details: { consult: true, thread, rounds: 2, placement: "sh1", tokens: 640, finish: "stop", seconds: 41 } }));
+	const consultLines = chat.lines(80).filter((line) => line.kind === "call" && line.spans.some(([part]) => String(part).includes("Why twice?")));
+	const secondRow = consultLines.at(-1);
+	chat.toggleRow(secondRow.item, secondRow.row);
+	const opened2 = text();
+	has(opened2, `the story stands under thread ${thread} · 2 rounds`, "the follow-up row reads the story, both rounds");
+	has(opened2, "round 1 · 2026-11-16 05:39 UTC", "the first round stands in it");
+	has(opened2, "round 2 · 2026-11-16 06:10 UTC", "and so does the second");
+	has(opened2, "Why twice?", "the follow-up question");
+	has(opened2, "Once lands on six only half the time.", "the follow-up answer");
+
+	// A missing story is said as such, not as an empty answer: a fresh chat cannot read a thread the brain no longer holds.
+	delete stories[thread];
+	const gone = createChat({ now: () => clock, readStory: (id) => stories[id] });
+	gone.entry(0, reply([call("c9", "consult", { question: "Is the roller sound?", context: "" })], 1));
+	gone.entry(0, result("c9", "consult", `The storyteller took 1 m 12 s. The story stands under thread ${thread}.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
+	gone.toggle(gone.lines(80).find((line) => line.kind === "group").item);
+	const goneRow = gone.lines(80).find((line) => line.kind === "call");
+	gone.toggleRow(goneRow.item, goneRow.row);
+	has(gone.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "is gone from the brain", "a story that is gone is said as gone");
+
+	// A failed consult shows why it failed, once, where the answer would stand.
+	const failed = createChat({ now: () => clock, readStory: (id) => stories[id] });
+	failed.entry(0, reply([call("c8", "consult", { question: "Is the roller sound?", context: "" })], 1));
+	failed.entry(0, result("c8", "consult", "The storyteller refused the call: HTTP 500. boom", { isError: true }));
+	failed.toggle(failed.lines(80).find((line) => line.kind === "group").item);
+	const failedRow = failed.lines(80).find((line) => line.kind === "call");
+	failed.toggleRow(failedRow.item, failedRow.row);
+	const failedText = failed.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	has(failedText, "why it failed", "a failed consult says why");
+	has(failedText, "HTTP 500", "with what the endpoint said");
+	hasNot(failedText, "what the storyteller answered", "and no empty answer section under it");
+
+	// A consult that fails carries no answer section and no story; the harness line stands alone.
+	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
 });
 
-test("screen: Consult is a separate persona-attributed conference timeline with durable and live activity", async () => {
-	const record = {
-		id: "co18",
-		status: "returned",
-		question: "Which migration boundary remains advisory?",
-		model: { provider: "local", modelId: "fixture" },
-		roster: { version: 1 },
-		activities: [{
-			index: 1,
-			participant: "cartographer",
-			at: "2026-11-16T12:00:00.000Z",
-			reasoning: "First separate the parent context from the private audit.",
-			prose: "I will inspect only the frozen packet.",
-			calls: [{ id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } }],
-		}],
-		turns: [
-			{ index: 1, participant: "cartographer", at: "2026-11-16T12:00:00.000Z", text: "I will inspect only the frozen packet." },
-			{ index: 2, participant: "atlas", at: "2026-11-16T12:00:01.500Z", text: "The second perspective completed the bounded debate." },
-		],
-		selectorEvents: [
-			{ index: 1, at: "2026-11-16T12:00:01.000Z", after: "cartographer", participant: "atlas", decision: "continue", eligible: ["atlas", "ledger", "plan", "assessment", "context"], grammarEnforced: true, debate: { turns: 1, debateTurns: 2, participants: ["cartographer"], debateParticipants: 2, ready: false } },
-			{ index: 2, at: "2026-11-16T12:00:02.000Z", after: "atlas", participant: "cartographer", decision: "report", eligible: ["cartographer", "ledger", "plan", "assessment", "context"], grammarEnforced: true, debate: { turns: 2, debateTurns: 2, participants: ["cartographer", "atlas"], debateParticipants: 2, ready: true } },
-		],
-		toolReceipts: [{ id: "source-1", callId: "source-1", participant: "cartographer", action: "read", source: "s1", result: "== s1\n1 immutable evidence", at: "2026-11-16T12:00:00.500Z" }],
-		final: { participant: "cartographer", outcome: "answered", at: "2026-11-16T12:00:03.000Z", synthesis: "Keep the conference audit isolated from parent context.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] },
-	};
-	const chat = createChat();
-	chat.setConsultProjection({ data: { conferences: [{ id: record.id, conference: record }] } });
-	const text = (projection) => chat.lines(110, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+test("screen: while the storyteller writes, Work shows the tail of its draft, and wipes it when the answer lands", async () => {
+	const { createChat } = await import("../src/screen/chat.mjs");
+	let clock = 1000;
+	const thread = "st-20261116-053946-a1b2";
+	const stories = { [thread]: "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: Mythos-nano\nStarted: 2026-11-16T05:39:46.000Z\n\n## Round 1 — 2026-11-16T05:39:46.000Z\nElapsed: 0 m 12 s · finish: stop\n\nQuestion:\n```text\nq?\n```\n\nAnswer:\n```text\nIt is not. Roll twice.\n```\n" };
+	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
+	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
+	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
+	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
 
-	// A parent call creates only a private Consult pointer. Ordinary Work does not fetch or echo the co<N> audit.
-	chat.entry(0, { model: [{ role: "assistant", content: [call("outer-consult", "consult", { question: record.question, myPersona: "Keep the boundary explicit." })] }] });
-	chat.liveTools(0, [{ callId: "outer-consult", status: "running", details: { consult: true, conference: record.id } }]);
-	hasNot(text("work"), record.question, "the parent consult call is not mixed into ordinary Work");
-
-	const beforePaint = chat.version;
-	const consult = text("consult");
-	assert.equal(chat.version, beforePaint, "Consult uses the settled conference projection without mutating local state while it paints");
-	for (const name of ["Cartographer", "Atlas", "Ledger", "Plan", "Assessment", "Context"]) has(consult, `${name} ·`, `the roster visibly labels ${name}`);
-	has(consult, "Cartographer · reasoning", "a participant's reasoning is its own named block");
-	has(consult, "Cartographer · chat / prose", "participant prose is distinct from reasoning");
-	has(consult, "Cartographer · tool call · consult_source · read s1", "local tool calls name their participant and action");
-	has(consult, "Cartographer · tool result · consult_source · read s1 · completed", "local tool results stay with the same participant");
-	has(consult, "Conference host · native debate routing", "host continuation routing is visibly distinguished from participant prose");
-	has(consult, "Conference host · native final-report decision", "the host's conclusion decision is visibly distinct from debate routing");
-	has(consult, "Cartographer · final advisory · answered", "the host-authorized final advisory names Cartographer");
-	has(consult, "Keep the conference audit isolated from parent context.", "the durable final synthesis stays readable in Consult");
-
-	// Child streaming comes through the same separate projection and never creates a generic focus/Work row.
-	chat.live(1, { timestamp: 9, content: [{ type: "thinking", thinking: "Check what the ledger snapshot actually supports." }, { type: "text", text: "I am checking the retained claim." }, call("source-live", "consult_source", { action: "search", id: "s1", pattern: "claim" })] }, { conference: record.id, participant: "ledger" });
-	chat.liveTools(1, [{ callId: "source-live", status: "running", output: "s1:4: claim is bounded" }], { conference: record.id, participant: "ledger" });
-	const live = text("consult");
-	has(live, "Ledger · reasoning · writing", "live consultation reasoning keeps its persona label");
-	has(live, "Ledger · chat / prose · writing", "live consultation prose keeps its persona label");
-	has(live, "Ledger · tool call · consult_source · search s1", "a live local call names the active persona");
-	has(live, "Ledger · tool result · consult_source · search s1 · \"claim\" · running", "a live local result is visibly separate from its call");
-	hasNot(text("work"), "Check what the ledger snapshot", "live child reasoning does not leak into parent Work");
-
-	const conferenceLine = chat.lines(110, "consult").find((line) => line.kind === "consult");
-	assert.ok(conferenceLine, "the conference header is selectable for folding/copying");
-	assert.match(chat.textOf(conferenceLine.item), /# Consultation co18/, "copying the header exports the private consult timeline, not parent history");
+	chat.user("q?");
+	chat.entry(0, reply([call("c1", "consult", { question: "q?", context: "" })], 1));
+	// The draft streams in through the harness's live slot, a bounded tail — nothing from the session.
+	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six" }]);
+	has(text(), "… the storyteller", "while it runs, the call line shows the waiting mark");
+	has(text(), "No. The uniform() call modulo six", "and the draft as far as it has come");
+	clock += 3000;
+	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six biases toward 1 and 2. Draw with rejection." }]);
+	has(text(), "biases toward 1 and 2. Draw with", "the tail grows as it writes");
+	has(text(), "rejection.", "wrapped onto the next row like everything else");
+	assert.equal(chat.doing().what, "the storyteller is writing", "the strip says whose words those are");
+	// The answer lands: the tool result stands, the tail is gone.
+	clock += 2000;
+	chat.entry(0, result("c1", "consult", `The storyteller took 0 m 05 s (40 output tokens). The story stands under thread ${thread}; shelved as placement sh1.`, { details: { consult: true, thread, rounds: 1, tokens: 40, finish: "stop", seconds: 5 } }));
+	chat.liveTools(0, []);
+	hasNot(text(), "modulo six", "once the answer lands, the draft leaves the tab — the story holds it");
+	has(text(), "→ 0 m 05 s · 40 tokens", "and the call line keeps how long it took and how much it wrote");
 });
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
 	const { colorMode, makeTheme, markdownTheme, parseColorReply, schemeFromEnv, schemeOf, to256, HUES } = await import("../src/screen/theme.mjs");
-	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	const { colorToOklch, rgbColor } = await import("@earendil-works/pi-tui");
 	const light = ([r, g, b]) => (r * 299 + g * 587 + b * 114) / 1000;
 	const far = (a, b) => Math.abs(light(a) - light(b));
@@ -2219,7 +1966,7 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(hues.every((hue) => hue.c > 0.07), `and each is a colour, not a grey: ${what}`);
 		assert.ok(Math.abs(hues[0].h - HUES.user) < 12 && Math.abs(hues[1].h - HUES.tool) < 12, `the hues are the ones named: ${what}`);
 		// Where it is: every block is near the background, in its own direction, and all of them tell apart.
-		const blocks = ["bgUser", "bgTool", "bgNote", "bgPanel", "bgInput", "bgBar", "bgSel"];
+		const blocks = ["bgUser", "bgTool", "bgPanel", "bgInput", "bgBar", "bgSel"];
 		for (const name of blocks) assert.ok(far(rgb[name], rgb.bg) < 70, `${name} stays near the background: ${what}`);
 		assert.equal(new Set(blocks.map((name) => rgb[name].join())).size, blocks.length, `each block has a background of its own: ${what}`);
 		assert.ok(far(rgb.bgSel, rgb.bg) > far(rgb.bgUser, rgb.bg) && far(rgb.bgUser, rgb.bg) > far(rgb.bgTool, rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
@@ -2230,15 +1977,12 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(blue(rgb.bgUser) > blue(rgb.bg) && blue(rgb.bgUser) > blue(rgb.bgBar), `a block has the tint of its hue (yours is blue): ${what}`);
 	}
 	const exact = makeTheme({ mode: "truecolor" }).styles;
-	assert.equal(exact.bgTool, exact[TOKEN.activity.shellSurface], "the former feature surface remains an alias for its semantic activity token");
-	assert.equal(exact.bgSel, exact[TOKEN.interaction.selected], "selection has one semantic source despite compatibility styling");
-	assert.equal(exact.muted, exact[TOKEN.text.secondary], "text hierarchy is also reachable by semantic token");
-	assert.match(exact[TOKEN.activity.shellSurface], /^48;2;\d+;\d+;\d+$/, "a semantic background is in exact colour");
+	assert.match(exact.bgTool, /^48;2;\d+;\d+;\d+$/, "a background, in exact colour");
 	assert.match(exact.muted, /^38;2;\d+;\d+;\d+$/, "a text colour");
 	assert.match(exact.chip, /^48;2;[\d;]+;38;2;[\d;]+;1$/, "the mode's name is filled and bold: the one saturated shape");
 	const near = makeTheme({ mode: "256" }).styles;
-	assert.match(near[TOKEN.activity.shellSurface], /^48;5;\d+$/, "with 256 colours, the nearest of them");
-	assert.notEqual(near[TOKEN.interaction.selected], near[TOKEN.activity.shellSurface], "which still tells what is selected from a block");
+	assert.match(near.bgTool, /^48;5;\d+$/, "with 256 colours, the nearest of them");
+	assert.notEqual(near.bgSel, near.bgTool, "which still tells what is selected from a block");
 	assert.equal(makeTheme({ mode: "none" }).styles, undefined, "without colours there is no palette: the terminal's sixteen are used");
 	assert.deepEqual([to256(0, 0, 0), to256(255, 255, 255), to256(128, 128, 128), to256(255, 0, 0)], [16, 231, 244, 196]);
 	assert.deepEqual(parseColorReply("11;rgb:1e1e/1e1e/2e2e"), { target: "background", rgb: [30, 30, 46] }, "what the terminal answers about its background");
@@ -2253,17 +1997,14 @@ test("screen: the palette is made for the terminal's background: levels of text,
 
 test("screen: lines are painted on their block's background, and text says by its style what it is", async () => {
 	const { applyTheme, paint, paintStyled, sgr, STYLES } = await import("../src/screen/text.mjs");
-	const { TOKEN } = await import("../src/screen/tokens.mjs");
+	const { createChat } = await import("../src/screen/chat.mjs");
 	try {
 		applyTheme({ bgTool: "48;5;235", bgSel: "48;5;239", muted: "38;5;246", ok: "38;5;115" });
 		assert.equal(paint([["✓ ", "ok"], ["read", ""]], 8, "bgTool"), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");
 		assert.equal(paintStyled("a\x1b[1mb\x1b[22m", 2, 4, "bgSel"), "\x1b[48;5;239ma\x1b[1mb\x1b[22m  \x1b[0m", "and under a line that came styled");
 		assert.equal(sgr("bgNothing"), "", "a style the palette does not have is no style");
-		assert.equal(sgr(TOKEN.activity.shellSurface), "\x1b[48;5;235m", "a shell component can ask for its semantic surface directly");
-		assert.equal(sgr(TOKEN.interaction.selected), "\x1b[48;5;239m", "focus and selection have semantic styles too");
 		applyTheme(undefined);
 		assert.deepEqual([STYLES.bgTool, STYLES.muted, STYLES.bgSel, STYLES.ok], [undefined, "2", "7", "32"], "without a palette: no backgrounds, dim for muted, inverse for what is selected, the terminal's own green");
-		assert.deepEqual([STYLES[TOKEN.activity.shellSurface], STYLES[TOKEN.text.secondary], STYLES[TOKEN.interaction.selected], STYLES[TOKEN.feedback.success]], [undefined, "2", "7", "32"], "semantic tokens retain the same no-colour fallbacks");
 		assert.equal(paint([["x", "muted"]], 3, "bgTool"), "\x1b[2mx\x1b[0m  ");
 	} finally {
 		applyTheme(undefined);
@@ -2285,7 +2026,7 @@ test("screen: lines are painted on their block's background, and text says by it
 		"- | ",
 		"bgUser | › {user bold}Look at it{bold}",
 		"- | ",
-		"bgNote | A thought.{note italic}",
+		"- | ┊ {faint}A thought.{note italic}",
 		"- | ",
 		"bgTool | ▸ {tool}1 call · t1 · 0s{muted}{err}",
 		"- | ◂ {carto}report t1  5 characters{muted}",
@@ -2313,73 +2054,6 @@ test("screen: lines are painted on their block's background, and text says by it
 	const call = opened.find((line) => line.kind === "call");
 	chat.toggleRow(call.item, call.row);
 	assert.ok(chat.lines(60).some((line) => line.kind === "detail"), "and a call that is opened inside it shows what it returned");
-});
-
-test("screen: static chrome keeps hierarchy, affordances, and whole labels across terminal widths", async () => {
-	const { TabBar, ViewBar, contentRow, marginOf } = await import("../src/screen/parts.mjs");
-	const { clean } = await import("../src/screen/text.mjs");
-	const tabs = [
-		{ id: "chat", name: "Chat" },
-		{ id: "carto", name: "Carto" },
-		{ id: "diff", name: "Diff" },
-		{ id: "shells", name: "Shells" },
-		{ id: "context", name: "Model" },
-	];
-	const views = [
-		{ id: "window", name: "Latest sent" },
-		{ id: "main", name: "Main sent" },
-		{ id: "raw", name: "Raw payload" },
-		{ id: "preview", name: "Next preview" },
-		{ id: "parts", name: "Current accounting" },
-	];
-	const picked = [];
-	const ui = {
-		tabs,
-		state: { tab: "context" },
-		views: () => views,
-		view: () => "raw",
-		fileHint: () => "src/screen/app.mjs",
-		setTab: (id) => picked.push(`tab:${id}`),
-		setView: (id) => picked.push(`view:${id}`),
-	};
-	const text = (line) => clean(line).replace(/ +$/, "");
-	assert.deepEqual([20, 35, 36, 71, 72, 119, 120, 159, 160].map(marginOf), [0, 0, 1, 1, 2, 2, 4, 4, 6], "the reading margin grows only when the terminal has room for it");
-
-	const wideTabs = new TabBar(ui);
-	const wide = text(wideTabs.render(80)[0]);
-	has(wide, "Cartographer", "a roomy tab bar establishes the product before its areas");
-	has(wide, "1 Chat", "the full tab labels scan with their number keys");
-	has(wide, "5 Model", "the last tab remains visible too");
-	wideTabs.handleMouse({ type: "click", button: "left", x: wideTabs.spans[1].from, y: 0 });
-	assert.equal(picked.pop(), "tab:carto", "the re-spaced tab still receives its own click");
-	const narrow = text(new TabBar(ui).render(35)[0]);
-	assert.equal(narrow, " 1  2  3  4  5", "when names cannot fit, the compact tabs remain complete instead of clipping one another");
-
-	const compactViews = new ViewBar(ui);
-	const compact = text(compactViews.render(80)[0]);
-	has(compact, "Latest", "the common-width subview bar keeps the first sibling visible");
-	has(compact, "Accounting", "and it keeps the last sibling visible");
-	has(compact, "[ ]", "the keyboard affordance stays beside the subviews");
-	hasNot(compact, "Latest sent", "compact labels are deliberate, not clipped full labels");
-	compactViews.handleMouse({ type: "click", button: "left", x: compactViews.spans[3].from, y: 0 });
-	assert.equal(picked.pop(), "view:preview", "every compact subview keeps its click target");
-	const cartoViews = [
-		{ id: "atlas", name: "Atlas" },
-		{ id: "ledger", name: "Ledger" },
-		{ id: "plan", name: "Plan" },
-		{ id: "requests", name: "Requests" },
-		{ id: "tree", name: "Tree" },
-		{ id: "hands", name: "Current shared brain" },
-	];
-	const cartoCompact = text(new ViewBar({ ...ui, views: () => cartoViews, view: () => "atlas" }).render(80)[0]);
-	has(cartoCompact, "Atlas", "the six Carto subviews keep their first item visible at the common width");
-	has(cartoCompact, "Brain", "and compact the long Current shared brain name without hiding that view");
-	const roomy = text(new ViewBar(ui).render(120)[0]);
-	has(roomy, "Latest sent", "a wide terminal restores the descriptive subview names");
-	has(roomy, "Current accounting", "without changing the underlying information architecture");
-
-	has(text(contentRow({ spans: [["your message", ""]], bg: "bgUser", pad: 1 }, 40)), "▎your message", "your multi-line block has a stable blue rail");
-	has(text(contentRow({ spans: [["tool work", ""]], bg: "bgTool", pad: 1 }, 40)), "│tool work", "tool work has its own quieter rail");
 });
 
 test("screen: a list of items that fold: the selection, opening one and all, folders, what is in view, and what e and y act on", async () => {
@@ -2439,7 +2113,7 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 });
 
 test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
-	const { contextView, rawPayloadView } = await import("../src/screen/runtime.mjs");
+	const { contextBar, contextView } = await import("../src/screen/views.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
 		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
@@ -2453,15 +2127,11 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	const reply = { role: "assistant", content: [{ type: "thinking", thinking: "Say it." }, { type: "toolCall", id: "c2", name: "chat", arguments: { text: "It is in src/config.js." } }] };
 	const payloadJson = JSON.stringify(payload);
 	const sent = { task: false, requestId: "main:7", payload, payloadJson, payloadHash: "a1b2c3d4e5f60708", model: { provider: "local", api: "openai-completions", id: "qwen" }, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, usage: { input: 6000, cacheRead: 100, output: 500 }, used: 6100, collapsedSince: false };
-	const view = contextView({ sent, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent });
+	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
-	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the semantic sent request stays in provider order, then the explicit not-sent response boundary");
-	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
-	assert.equal(view.items.some((item) => item.key === "payload"), false, "the serialized audit copy is not rendered as a first context part");
-	const raw = rawPayloadView({ sent, presentation: runtimePresentation.sent });
-	assert.equal(raw.items[0].body, payloadJson, "the raw frozen provider body remains available without reconstructing it");
-	assert.match(raw.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /not another model-context part/, "the raw view makes clear that its duplicate JSON is not a second prompt");
-	has(rawPayloadView({ sent: { ...sent, payloadJson: undefined }, presentation: runtimePresentation.sent }).items[0].head[0][0], "This sent request has no retained raw provider JSON", "the audit view does not manufacture a serialized body from the semantic snapshot");
+	assert.deepEqual(titles, ["Provider payload JSON", "System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the frozen payload stays in provider order, then the explicit not-sent response boundary");
+	assert.deepEqual(view.items.slice(1, 3).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
+	assert.equal(view.items[0].body, payloadJson, "the raw frozen provider body is available without reconstructing it");
 	assert.equal(view.items.every((item) => item.editKind === undefined), true, "sent payload and since-send response rows have no edit route");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
@@ -2488,31 +2158,27 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	assert.ok(resultCells >= 9 && resultCells <= 11, `a part takes as much of the bar as of the window: ${resultCells} of 40 cells for about 5k of 20k tokens`);
 	has(top.join("\n"), "■ Tool results ", "what each colour is");
 	has(top.join("\n"), "□ Free ", "and how much is free");
-	assert.deepEqual(runtimePresentation.sent.contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
+	assert.deepEqual(contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
 
-	const task = contextView({ sent: { ...sent, task: true, reply: undefined, results: new Map() }, windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] }, presentation: runtimePresentation.sent });
+	const task = contextView({ ...sent, task: true, reply: undefined, results: new Map() }, { windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] } });
 	has(task.header[0][0][0], "Sent provider request", "while a task runs, the frozen request stays labelled as sent");
 	has(task.header[0].map(([part]) => part).join(""), "focus", "and names the focus rather than calling it main");
 	const writing = task.items.at(-1);
 	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("Response, as it is being written"), writing.body], [true, "Half a tho"], "and unfinished response material is explicitly not sent");
-	has(contextView({ sent: { ...sent, collapsedSince: true }, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
-	has(contextView({ sent: undefined, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
-	has(rawPayloadView({ sent: undefined, presentation: runtimePresentation.sent }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "and the audit view does not invent raw JSON before a request exists");
+	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
+	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
 });
 
 test("screen: the Next preview is explicit that its request plan was not sent", async () => {
-	const { accountingView, previewView } = await import("../src/screen/runtime.mjs");
+	const { accountingView, previewView } = await import("../src/screen/views.mjs");
 	const view = previewView({
-		preview: {
-			at: Date.parse("2026-11-16T14:05:00.000Z"),
-			plan: {
-				parts: [
-					{ id: "part:1:message:0", kind: "active-message", source: "durable:main:u1:0", sourceRef: { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
-					{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
-				],
-			},
+		at: Date.parse("2026-11-16T14:05:00.000Z"),
+		plan: {
+			parts: [
+				{ id: "part:1:message:0", kind: "active-message", source: "durable:main:u1:0", sourceRef: { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
+				{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
+			],
 		},
-		presentation: runtimePresentation.preview,
 	});
 	const header = view.header.map((line) => line.map(([part]) => part).join(" ")).join("\n");
 	assert.match(header, /Next request preview · not sent/, "the prospective boundary is in the title");
@@ -2526,30 +2192,21 @@ test("screen: the Next preview is explicit that its request plan was not sent", 
 });
 
 test("screen: Current shared brain lives in Carto, not Model", async () => {
-	const [{ TABS, VIEWS }, { handsView }, { createWorkspacePresentation }] = await Promise.all([
+	const [{ TABS, VIEWS }, { handsView }] = await Promise.all([
 		import("../src/screen/app.mjs"),
-		import("../src/screen/workspace.mjs"),
-		import("../src/application/workspace-presentation.mjs"),
+		import("../src/screen/views.mjs"),
 	]);
-	const workspacePresentation = createWorkspacePresentation();
-	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model"], "the top-level tabs group speech and private activity under Chat before the project and provider views");
-	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }, { id: "consult", name: "Consult" }], "Chat gives isolated consultation activity its own adjacent subtab, rather than hiding it in parent Work");
+	assert.deepEqual(TABS.map((tab) => tab.name), ["Talk", "Work", "Carto", "Diff", "Shells", "Model"], "the top-level tabs name speech, private work, live brain, and provider inspection separately");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
-	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
-	const brainDir = join(scratch, "empty-current-brain");
-	mkdirSync(brainDir, { recursive: true });
-	const projected = await createWorkspaceQueries({ root: scratch, brainDir }).context();
-	assert.equal(projected.ok, true);
-	if (!projected.ok) throw new Error(projected.error.message);
-	const current = handsView({ context: projected.data, presentation: workspacePresentation.hands });
+	const current = handsView({ root: scratch, brainDir: join(scratch, "empty-current-brain") });
 	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");
 	has(header, "Current shared brain", "the live scope is named in the view itself");
 	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");
 });
 
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
-	const { contextView } = await import("../src/screen/runtime.mjs");
+	const { contextView } = await import("../src/screen/views.mjs");
 	// Exactly what dressRequest produces after a read batch: the blocks are glued to the result, and the current batch stands at the very end.
 	const payload = {
 		messages: [
@@ -2558,7 +2215,7 @@ test("screen: a windows block followed by an ephemeral read batch tail is still 
 		],
 	};
 	const sent = { task: false, payload, reply: undefined, results: new Map(), at: Date.now(), count: 1, used: undefined, collapsedSince: false };
-	const view = contextView({ sent, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent });
+	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
 	const keys = view.items.map((item) => String(item.key ?? ""));
 	const byKey = (key) => view.items.find((item) => item.key === key);
 	assert.ok(keys.some((key) => key.endsWith(".windows")), "the windows block stands as its own part even with the read tail after it");
@@ -2569,13 +2226,13 @@ test("screen: a windows block followed by an ephemeral read batch tail is still 
 	hasNot(byKey("m0.0.result").body, "<read-tail>", "the original result does not duplicate the tail");
 	// A request with no state block at all: a loud, visible marker, not silence.
 	const bare = { ...sent, payload: { messages: [{ role: "system", content: "You are Cartographer." }, { role: "tool", tool_call_id: "c1", content: "== a.js" }] } };
-	const bareView = contextView({ sent: bare, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent });
+	const bareView = contextView(bare, { windowSize: 20_000, cols: 40 });
 	assert.ok(bareView.items.some((item) => item.key === "state:missing"), "the absence of the state block is said out loud");
 	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this sent request", "and the marker tells the user what this payload did not carry");
 });
 
 test("screen: a sent collapse block stays frozen when the current brain changes", async () => {
-	const { contextView } = await import("../src/screen/runtime.mjs");
+	const { contextView } = await import("../src/screen/views.mjs");
 	const { writeFront, noteChat, updateContext } = await import("../src/context.mjs");
 	const root = mkdtempSync(join(tmpdir(), "carto-snapshot-"));
 	const brainDir = join(root, ".brain");
@@ -2589,7 +2246,7 @@ test("screen: a sent collapse block stays frozen when the current brain changes"
 		// These are later current-brain changes. A historical sent request must not gain either one.
 		noteChat(brainDir, "user", at(15, 0), "words added after send");
 		updateContext(brainDir, (store) => { store.front.text = "replaced current front"; });
-		const view = contextView({ sent, windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", presentation: runtimePresentation.sent });
+		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept" });
 		const kept = view.items.find((item) => item.head?.[2]?.[0]?.includes("What the last collapse kept"));
 		assert.ok(kept, "the sent collapse block remains one frozen payload part");
 		assert.match(kept.body, /words at collapse/, "it shows the bytes that were sent");
@@ -2659,24 +2316,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const [{ shellsView }, { diffView }, { atlasView, ledgerView, planView, requestsView }, { createReviewPresentation }, { createRuntimePresentation }, { createWorkspacePresentation }] = await Promise.all([
-		import("../src/screen/runtime.mjs"),
-		import("../src/screen/review.mjs"),
-		import("../src/screen/workspace.mjs"),
-		import("../src/application/review-presentation.mjs"),
-		import("../src/application/runtime-presentation.mjs"),
-		import("../src/application/workspace-presentation.mjs"),
-	]);
-	const reviewPresentation = createReviewPresentation();
-	const runtimePresentation = createRuntimePresentation();
-	const workspacePresentation = createWorkspacePresentation();
-	const queries = createWorkspaceQueries({ root, brainDir });
-	const projection = async (promise) => {
-		const result = await promise;
-		assert.equal(result.ok, true);
-		if (!result.ok) throw new Error(result.error.message);
-		return result.data;
-	};
+	const { ledgerView, planView, atlasView, requestsView, shellsView } = await import("../src/screen/views.mjs");
 	const flatStr = (value) => String(value ?? "").replace(/\s+/g, " ").trim();
 	const exposed = (item) => flatStr([item.body, typeof item.copy === "function" ? item.copy() : item.copy].filter((part) => part !== undefined).join("\n"));
 	const expectReachable = (name, view, needle) => {
@@ -2693,23 +2333,18 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	};
 	const LONG = "word ".repeat(70).trim(); // about 350 characters, longer than any head row at a usual width
 	const PLAN_LONG = "word ".repeat(55).trim(); // below the plan's 300-character contract limit, still longer than a head row
-	const review = { root, last: { item: "m1", text: LONG, finished: true, changes: [{ path: "src/main.js", status: "changed", added: 1, removed: 0 }], patch: "diff --git a/src/main.js b/src/main.js\n--- a/src/main.js\n+++ b/src/main.js\n@@ -1 +1 @@\n-old\n+new\n" } };
-	expectReachable("last checkpoint change", diffView({ review, presentation: reviewPresentation }, "last"), LONG);
 	saveLedger(brainDir, { version: 1, next: 3, items: [
 		{ id: "q1", kind: "question", text: LONG, status: "open", added: 1 },
 		{ id: "g1", kind: "goal", text: "Ship the thing", doneWhen: LONG, status: "open", added: 1 },
 	] });
-	const ledger = await projection(queries.ledger());
-	expectReachable("ledger question", ledgerView({ file: ledger.file, ledger: ledger.ledger, lines: ledger.lines, presentation: workspacePresentation.ledger }), LONG);
-	expectReachable("ledger goal done-when", ledgerView({ file: ledger.file, ledger: ledger.ledger, lines: ledger.lines, presentation: workspacePresentation.ledger }), LONG);
+	expectReachable("ledger question", ledgerView({ brainDir }), LONG);
+	expectReachable("ledger goal done-when", ledgerView({ brainDir }), LONG);
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
 	savePlan(brainDir, { version: 2, next: 2, nextMove: 1, items: [{ id: "p1", mode: "look", text: PLAN_LONG, status: "open", revision: 1 }], moves: [] });
-	const plan = await projection(queries.plan());
-	expectReachable("plan envelope", planView({ file: plan.file, yolo: false, plan: plan.plan, lines: plan.lines, presentation: workspacePresentation.plan }), PLAN_LONG);
+	expectReachable("plan envelope", planView({ brainDir, yolo: false }), PLAN_LONG);
 	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
-	const atlas = await projection(queries.atlas());
-	expectReachable("atlas gist", atlasView({ file: atlas.file, atlas: atlas.atlas, attention: atlas.attention, lines: atlas.lines, presentation: workspacePresentation.atlas }), LONG.slice(0, 200));
-	expectReachable("atlas detail", atlasView({ file: atlas.file, atlas: atlas.atlas, attention: atlas.attention, lines: atlas.lines, presentation: workspacePresentation.atlas }), LONG);
+	expectReachable("atlas gist", atlasView({ root, brainDir }), LONG.slice(0, 200));
+	expectReachable("atlas detail", atlasView({ root, brainDir }), LONG);
 	savePlan(brainDir, {
 		version: 2,
 		next: 2,
@@ -2717,13 +2352,13 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 		items: [{ id: "p1", mode: "change", text: "Apply the narrow update.", doneWhen: "The update is checked.", status: "open", revision: 1 }],
 		moves: [{ id: "m1", parent: "p1", action: PLAN_LONG, text: PLAN_LONG, doneWhen: "The narrow update is checked.", capabilities: { files: true, commands: true, network: false }, budget: { replies: 6, fileOps: 4, commandStarts: 2 }, turns: 6, revision: 1, parentRevision: 1, status: "open", targets: ["src/main.js"], proof: "The focused check passes." }],
 	});
-	const requests = await projection(queries.requests());
-	expectReachable("approval request", requestsView({ requests: requests.items, presentation: workspacePresentation.requests }), PLAN_LONG);
+	expectReachable("approval request", requestsView({ brainDir, yolo: false }), PLAN_LONG);
 	savePlan(brainDir, { version: 2, next: 1, nextMove: 1, items: [], moves: [] });
-	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }], presentation: runtimePresentation.shells }), LONG);
+	const session = { windows: { list: () => [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }] } };
+	expectReachable("shell command", shellsView({ session }), LONG);
 });
 
-test("screen: the small box caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {
+test("screen: the small box caps what goes in, counts it live, and saves through the operations", async () => {
 	const { Box } = await import("../src/screen/parts.mjs");
 	const caps = [];
 	const flashes = [];
@@ -2777,31 +2412,6 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 	// Enter on a one-line field saves it.
 	box2.handleInput("enter");
 	assert.equal(closed, 2, "Enter saves a one-line field");
-	// A typed action result is asynchronous: the draft stays visible and cannot be submitted twice while it settles.
-	let resolveSave;
-	let redraws = 0;
-	const pending = new Box({
-		title: "pending",
-		fields: [{ id: "text", label: "Text", limit: 6, value: "draft" }],
-		keyOf: (data) => data,
-		flash: (text) => flashes.push(text),
-		close: () => closed++,
-		redraw: () => redraws++,
-		save: () => new Promise((resolve) => { resolveSave = resolve; }),
-	});
-	pending.handleInput("enter");
-	assert.equal(closed, 2, "an unresolved action does not close the box");
-	assert.match(pending.render(50).map((line) => line.replace(/\x1b\[[0-9;]*m/g, "")).join("\n"), /Saving…/, "the pending state stays visible");
-	pending.handleInput("enter");
-	assert.equal(redraws, 1, "a second submit does not start another action while the first is pending");
-	resolveSave(false);
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(closed, 2, "a typed failure leaves the drafts open for correction");
-	pending.handleInput("enter");
-	resolveSave(true);
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(closed, 3, "a successful asynchronous action closes the box after it settles");
-	assert.ok(redraws >= 4, "the box redraws when asynchronous saving starts and finishes");
 });
 
 

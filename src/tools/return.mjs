@@ -5,7 +5,6 @@ import { POLICY } from "../config.mjs";
 import { defineTool } from "@earendil-works/pi-durable";
 import { bool, obj, opt, str } from "@earendil-works/pi-schema";
 import { loadContext, persistShelfSnapshot, sameShelfItem, shelfItem, shelfLabel, ShelfError, taskState, updateContext } from "../context.mjs";
-import { describe } from "../prompt.mjs";
 
 const fail = (text) => ({ isError: true, output: [{ type: "text", text }] });
 
@@ -38,11 +37,13 @@ function prepareHandoff(root, brainDir, config, conversationId, wanted) {
 export function returnTool({ root, brainDir, config }) {
 	return defineTool({
 		name: "return",
-		description: describe("return"),
+		description: [
+			"End this focused context and continue the orchestrating conversation. Keep durable findings in the shared ledger or atlas before returning; the report carries the outcome and anything not already kept.",
+			"Items named in `shelf` are added to my shelf if needed, then handed to the shared context when this focus returns.",
+		].join(" "),
 		parameters: obj({
 			report: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "Everything the orchestrating context needs: what I found or changed, with file paths and line numbers, and what I could not find or do." }),
-			done: bool({ description: "true only when the brief's declared result is carried out and witnessed. false when something is left; say what in the report. For a declared move, true only reports a completion claim; the orchestrator reviews the evidence and accepts it separately." }),
-			closure_gap: opt(str({ maxLength: POLICY.limits.plan.proofChars, description: "When the declared result or proof cannot be reached within this focus's targets, capabilities, or available evidence: the smallest exact dependency. It requires done: false." })),
+			done: bool({ description: "true when the brief is carried out. false when something is left; say what in the report. For a declared move, true only reports a completion claim; the orchestrator reviews the evidence and accepts it separately." }),
 			summary: opt(str({ description: "One or two lines the main agent keeps of this task after its context is collapsed. Leave out, and the start of the report is used." })),
 			proof: opt(str({ description: "For a declared change move, the observed evidence required by its contract: the named check and result, or other concrete proof. A done claim without it is blocked for review." })),
 			shelf: opt(str({ description: "Paths or typed references to add to my shelf if not present, then hand to the shared context on return; separate multiple entries with commas." })),
@@ -53,8 +54,6 @@ export function returnTool({ root, brainDir, config }) {
 		execute: async (args, api) => {
 			const report = String(args.report ?? "").trim();
 			if (report === "") return fail("`report` is empty, so the task has not ended. I call `return` again with the report: what I found or changed, and what is left.");
-			const closureGap = String(args.closure_gap ?? "").replace(/\s+/g, " ").trim();
-			if (closureGap !== "" && args.done === true) return fail("`closure_gap` says this focus cannot close its declared result, so `done` must be false. I return again with done: false and the exact gap.");
 			const wanted = String(args.shelf ?? "").split(",").map((path) => path.trim().replace(/^\.\//, "")).filter((path) => path !== "");
 			let handoff;
 			try {
@@ -72,10 +71,9 @@ export function returnTool({ root, brainDir, config }) {
 					else state.shelf.push({ ...item, handOn: true });
 				}
 				const proof = String(args.proof ?? "").trim();
-				state.returned = { report, done: args.done === true, at: api.now(), ...(closureGap !== "" ? { closureGap } : {}), ...(String(args.summary ?? "").trim() !== "" ? { summary: String(args.summary).trim() } : {}), ...(proof !== "" ? { proof } : {}) };
+				state.returned = { report, done: args.done === true, at: api.now(), ...(String(args.summary ?? "").trim() !== "" ? { summary: String(args.summary).trim() } : {}), ...(proof !== "" ? { proof } : {}) };
 			});
-			const blocked = closureGap === "" ? "" : " The closure gap is recorded for the orchestrating context.";
-			return { output: [{ type: "text", text: `Returned. This focus has ended; requested items are queued for handoff to the shared shelf.${blocked}` }], details: { returned: true, done: args.done === true, ...(closureGap !== "" ? { closureGap } : {}), handedOn: handoff.map(shelfLabel) }, control: { ...POLICY.control.terminate } };
+			return { output: [{ type: "text", text: "Returned. This focus has ended; requested items are queued for handoff to the shared shelf." }], details: { returned: true, done: args.done === true, handedOn: handoff.map(shelfLabel) }, control: { ...POLICY.control.terminate } };
 		},
 	});
 }

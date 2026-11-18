@@ -1,7 +1,7 @@
 // The tree: the project's files as they are, drawn for the agent.
 //
-// Nobody writes it. Presentation receives a project-file projection from disk. The
-// main agent has no tools that look at files; the tree is how
+// Nobody writes it. It is read from the disk each time it is shown, so it cannot
+// be out of date. The main agent has no tools that look at files; the tree is how
 // it sees where things are. It shows a few levels below an anchor folder: the
 // agent moves the anchor into a folder to look around there, and back to the
 // project root, and sets how many levels are drawn (`book` with target=atlas, action=tree).
@@ -30,11 +30,8 @@ export function cleanAnchor(anchor) {
 }
 
 /** Whether `anchor` is a folder of the project that holds at least one listed file. */
-export function isFolder(root, files, anchor, { listed = false } = {}) {
+export function isFolder(root, files, anchor) {
 	if (anchor === ".") return true;
-	// A deferred projection already established the full file list. A folder with files below it is all this view
-	// accepts as an anchor, so that list is enough and a terminal/screen presentation path need not touch disk again.
-	if (listed) return files.some((path) => path.startsWith(`${anchor}/`));
 	try {
 		if (!statSync(join(root, anchor)).isDirectory()) return false;
 	} catch {
@@ -117,7 +114,7 @@ export function treeSection(root, view = {}, options = {}) {
 	const files = options.files ?? projectFiles(root);
 	let anchor = cleanAnchor(view.anchor);
 	let lost = "";
-	if (!isFolder(root, files, anchor, { listed: options.files !== undefined })) {
+	if (!isFolder(root, files, anchor)) {
 		lost = ` The anchor was ${anchor}, which is no longer a folder with files in it.`;
 		anchor = ".";
 	}
