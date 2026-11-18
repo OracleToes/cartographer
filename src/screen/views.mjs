@@ -834,7 +834,7 @@ export function handsView({ root, context: provided, error } = {}) {
 	}
 	const standing = provided.standing ?? [];
 	const archived = provided.archived ?? [];
-	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d deletes it (press d again)"));
+	items.push(heading("  The reports of finished work · f folds one out of view, v archives it out of the record, d opens a deletion confirmation"));
 	if (standing.length === 0 && archived.length === 0) items.push(note("  No work has been finished yet. When a task ends, its report is kept here, and its record line stands in the context."));
 	for (const source of standing) {
 		const record = source.record ?? source;

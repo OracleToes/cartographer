@@ -35,11 +35,13 @@ import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
+import { ConfirmDialog } from "./confirm-dialog.mjs";
 import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
 import { renderAsyncBoundary } from "./async-boundary.mjs";
+import { createOverlayManager } from "./overlays.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
@@ -171,7 +173,7 @@ export const KEYS_HELP = [
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
 	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d opens a confirmation before it deletes for good, and in Requests before it forgets without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -311,7 +313,6 @@ export async function runScreen(session, options, runTerminal) {
 		tab: "chat",
 		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "window" },
 		shell: undefined, // the shell window whose output the Output view shows
-		deleteArm: undefined, // a report or Talk source marked for its second d
 		mode: "type",
 		selected: undefined, // a stop of the Conversation, Work, or Consult projection
 		pending: "", // the first key of a command of two (z, then R)
@@ -757,6 +758,20 @@ export async function runScreen(session, options, runTerminal) {
 			.then((result) => presentWorkspaceResult(result, id))
 			.catch((error) => flash(`could not complete that workspace action: ${error?.message ?? error}`));
 	};
+	/** A destructive workspace action first receives the application's scoped confirmation request, then the shared modal acknowledges that exact action and target. */
+	const requestWorkspaceDelete = (id) => {
+		const route = viewId();
+		void workspace.execute(WORKSPACE_ACTION.delete, { id })
+			.then((asked) => {
+				if (asked.confirmation === undefined) return presentWorkspaceResult(asked, route);
+				openConfirmation(asked.confirmation, () => workspace.execute(WORKSPACE_ACTION.delete, { id }, {
+					confirmation: { ...asked.confirmation, acknowledged: true },
+				}).then((result) => presentWorkspaceResult(result, route)), {
+					title: route === "carto.requests" ? "Forget request?" : "Delete permanently?",
+				});
+			})
+			.catch((error) => flash(`could not prepare that deletion: ${error?.message ?? error}`));
+	};
 	/** A reported move needs its evidence review in the composer; every other row can settle immediately. */
 	const settleWorkspaceRow = async (rowKey, id) => {
 		if (!rowKey.startsWith("move:")) return runWorkspaceAction(WORKSPACE_ACTION.settle, { id });
@@ -933,28 +948,22 @@ export async function runScreen(session, options, runTerminal) {
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
 		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
 		if (item?.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
-		const arm = `talk:${item.key}`;
-		if (state.deleteArm?.id !== arm || Date.now() - state.deleteArm.at >= POLICY.timing.screen.deleteConfirmMs) {
-			void talk.execute(TALK_ACTION.forget, { source: item.source })
-				.then((result) => {
-					if (result.confirmation === undefined) return flash(result.ok ? result.data.line : result.error.message);
-					state.deleteArm = { id: arm, at: Date.now(), confirmation: result.confirmation };
-					flash("Press d again: remove this source from future kept talk; sent requests and the active conversation stay unchanged");
-				})
-				.catch((error) => flash(`could not prepare that kept-source removal: ${error?.message ?? error}`));
-			return;
-		}
-		const confirmation = state.deleteArm.confirmation;
-		state.deleteArm = undefined;
-		if (confirmation === undefined) return flash("the removal confirmation expired; press d again");
-		void talk.execute(TALK_ACTION.forget, { source: item.source }, { confirmation: { ...confirmation, acknowledged: true } })
-			.then((result) => {
-				if (!result.ok) return flash(result.error.message);
-				inPlace(() => chat.forget(item.key));
-				flash(result.data.line);
-				draw();
+		void talk.execute(TALK_ACTION.forget, { source: item.source })
+			.then((asked) => {
+				if (asked.confirmation === undefined) return flash(asked.ok ? asked.data.line : asked.error.message);
+				openConfirmation(asked.confirmation, async () => {
+					const result = await talk.execute(TALK_ACTION.forget, { source: item.source }, { confirmation: { ...asked.confirmation, acknowledged: true } });
+					if (!result.ok) {
+						flash(result.error.message);
+						return false;
+					}
+					inPlace(() => chat.forget(item.key));
+					flash(result.data.line);
+					draw();
+					return true;
+				}, { title: "Remove kept talk?" });
 			})
-			.catch((error) => flash(`could not remove that kept source: ${error?.message ?? error}`));
+			.catch((error) => flash(`could not prepare that kept-source removal: ${error?.message ?? error}`));
 	};
 	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
 	/** n in a book view: the external editor stays a transitional handoff; its template and saved row use the typed action boundary. */
@@ -1104,12 +1113,12 @@ export async function runScreen(session, options, runTerminal) {
 		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
 		if (found.error !== undefined) return flash(found.error);
 		const { id, fields } = found;
-		const handle = tui.showOverlay(new Box({
+		openModal(({ close }) => new Box({
 			title: id,
 			fields,
 			keyOf,
 			flash,
-			close: () => handle.hide(),
+			close,
 			save: (drafts) => {
 				/** @type {Record<string, string>} */
 				const changes = {};
@@ -1185,12 +1194,12 @@ export async function runScreen(session, options, runTerminal) {
 		if (template === undefined) return flash("this view has no add");
 		const id = viewId();
 		const fields = template();
-		const handle = tui.showOverlay(new Box({
+		openModal(({ close }) => new Box({
 			title: `new ${book}`,
 			fields,
 			keyOf,
 			flash,
-			close: () => handle.hide(),
+			close,
 			save: (drafts) => workspace.execute(WORKSPACE_ACTION.add, { book, text: JSON.stringify(addOpOf(book, drafts)) })
 				.then((result) => presentWorkspaceResult(result, id)),
 			redraw: draw,
@@ -1218,12 +1227,12 @@ export async function runScreen(session, options, runTerminal) {
 				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
 			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
 		];
-		const handle = tui.showOverlay(new Box({
+		openModal(({ close }) => new Box({
 			title: `new move under ${parent.id}`,
 			fields,
 			keyOf,
 			flash,
-			close: () => handle.hide(),
+			close,
 			save: (drafts) => {
 				const said = (key) => drafts.get(key) ?? "";
 				const number = (key) => {
@@ -1357,8 +1366,7 @@ export async function runScreen(session, options, runTerminal) {
 	// ─── The commands mode ───────────────────────────────────────────────────
 	const showKeys = () => {
 		if (tui.hasOverlay()) return;
-		const sheet = new Sheet({ title: "Keys", text: KEYS_HELP, rows: () => terminal.rows, keyOf, close: () => handle.hide() });
-		const handle = tui.showOverlay(sheet, { width: Math.max(20, Math.min(108, terminal.columns - 4)), anchor: "center" });
+		openModal(({ close }) => new Sheet({ title: "Keys", text: KEYS_HELP, rows: () => terminal.rows, keyOf, close }), { width: Math.max(20, Math.min(108, terminal.columns - 4)), anchor: "center" });
 	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
@@ -1388,19 +1396,9 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void runWorkspaceAction(item.archived === true ? WORKSPACE_ACTION.unarchive : WORKSPACE_ACTION.archive, { id: bookId });
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
 			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
-			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
-			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
-			if (key === "d" && deletable) {
-				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
-					state.deleteArm = undefined;
-					return void runWorkspaceAction(WORKSPACE_ACTION.delete, { id: bookId }, {
-						confirmation: { actionId: WORKSPACE_ACTION.delete, target: bookId, acknowledged: true },
-					});
-				}
-				state.deleteArm = { id: rowKey, at: Date.now() };
-				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : `Press d again: ${bookId} goes for good`);
-				return;
-			}
+			// Deleting is for good, so it always opens the same scoped confirmation. A request is not deleted but
+			// forgotten: the agent is told nothing of it, and so forgets it had asked.
+			if (key === "d" && deletable) return void requestWorkspaceDelete(bookId);
 			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
 			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
 			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
@@ -1646,6 +1644,34 @@ export async function runScreen(session, options, runTerminal) {
 			fileSearch ?? null,
 		),
 	);
+	// Forms, help, and destructive acknowledgements share one focus-capturing modal owner. pi-tui restores the
+	// normal editor/command focus after a hidden overlay; the explicit fallback also covers a modal that settles
+	// after a terminal resize or action error.
+	const overlays = createOverlayManager({
+		show: (component, overlayOptions) => tui.showOverlay(component, overlayOptions),
+		restoreFocus: () => {
+			if (!state.closed) tui.setFocus(state.mode === "type" ? prompt : commands);
+		},
+		redraw: draw,
+	});
+	const openModal = (create, overlayOptions) => {
+		if (tui.hasOverlay() && !overlays.hasOpen()) {
+			flash("finish or cancel the open dialog first");
+			return undefined;
+		}
+		const opened = overlays.open(create, overlayOptions);
+		if (opened === undefined) flash("finish or cancel the open dialog first");
+		return opened;
+	};
+	const openConfirmation = (confirmation, confirm, { title } = {}) => openModal(({ close }) => new ConfirmDialog({
+		title,
+		confirmation,
+		keyOf,
+		close,
+		confirm,
+		flash,
+		redraw: draw,
+	}), { width: Math.max(20, Math.min(76, terminal.columns - 4)), anchor: "center" });
 	const full = { basis: 0, grow: 1, minSize: 1 };
 	const airy = ({ height }) => height >= AIRY_ROWS;
 	tui.setLayoutRoot(

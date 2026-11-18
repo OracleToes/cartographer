@@ -67,7 +67,9 @@ import { RECORD } from "../src/voice.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
+import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat } from "../src/screen/chat.mjs";
+import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
@@ -430,6 +432,86 @@ test("screen: the shared async boundary keeps loading, stale, error, issue, and 
 	]);
 	assert.equal(cachedFailure.items[0].key, "cached");
 	assert.throws(() => renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: {}, render: undefined }), /needs a data renderer/);
+});
+
+test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {
+	let hidden = 0;
+	let restored = 0;
+	let redrawn = 0;
+	let closeFirst;
+	const manager = createOverlayManager({
+		show: (component, options) => {
+			assert.equal(typeof component.render, "function");
+			assert.deepEqual(options, { anchor: "center" });
+			return { hide: () => { hidden++; } };
+		},
+		restoreFocus: () => { restored++; },
+		redraw: () => { redrawn++; },
+	});
+	const first = manager.open(({ close }) => {
+		closeFirst = close;
+		return { render: () => [] };
+	}, { anchor: "center" });
+	assert.ok(first?.isOpen(), "the first application modal becomes the active focus-capturing overlay");
+	assert.equal(manager.open(() => ({ render: () => [] })), undefined, "a delayed action cannot stack another modal above a draft");
+	assert.equal(closeFirst(), true);
+	assert.equal(closeFirst(), false, "a modal closes exactly once");
+	assert.equal(manager.hasOpen(), false);
+	assert.deepEqual([hidden, restored, redrawn], [1, 1, 1], "dismissal removes the overlay and returns keyboard focus to the shell");
+	assert.throws(() => createOverlayManager(), /needs a show function/);
+
+	const flashes = [];
+	let closes = 0;
+	let confirms = 0;
+	const acknowledgement = new ConfirmDialog({
+		title: "Delete permanently?",
+		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "acknowledge" },
+		keyOf: (key) => key,
+		close: () => { closes++; },
+		confirm: () => { confirms++; return true; },
+		flash: (text) => flashes.push(text),
+	});
+	assert.match(acknowledgement.render(48).join("\n"), /Delete permanently\?/);
+	acknowledgement.handleInput("n");
+	assert.equal(closes, 1, "n cancels an acknowledgement dialog");
+	acknowledgement.handleInput("enter");
+	assert.equal(confirms, 1, "Enter confirms an acknowledgement dialog");
+	assert.equal(closes, 2, "a successful action closes the dialog");
+
+	let typedConfirms = 0;
+	const typed = new ConfirmDialog({
+		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "typed" },
+		keyOf: (key) => key,
+		close: () => { closes++; },
+		confirm: () => { typedConfirms++; return true; },
+		flash: (text) => flashes.push(text),
+	});
+	typed.handleInput("n");
+	typed.handleInput("enter");
+	assert.equal(typedConfirms, 0, "a typed confirmation cannot execute until its exact target is entered");
+	typed.handleInput("backspace");
+	typed.handleInput("n");
+	typed.handleInput("4");
+	typed.handleInput("enter");
+	assert.equal(typedConfirms, 1, "typing the exact scoped target permits confirmation");
+
+	let resolve;
+	const pending = new ConfirmDialog({
+		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "acknowledge" },
+		keyOf: (key) => key,
+		close: () => { closes++; },
+		confirm: () => new Promise((done) => { resolve = done; }),
+		flash: (text) => flashes.push(text),
+	});
+	pending.handleInput("enter");
+	assert.equal(pending.pending, true, "an asynchronous confirmation disables duplicate input while it settles");
+	pending.handleInput("escape");
+	assert.match(flashes.at(-1), /still finishing/);
+	resolve(true);
+	await new Promise((done) => setImmediate(done));
+	await new Promise((done) => setImmediate(done));
+	assert.equal(pending.pending, false);
+	assert.ok(closes >= 4, "a successful asynchronous acknowledgement also dismisses its modal");
 });
 
 test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
