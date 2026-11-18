@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 2 proposal — implementation is not authorized yet.
+**Status:** Phase 4 shell and component foundation complete — Phase 5 view migration is next.
 
 **Date:** 2026-11-16
 
@@ -408,7 +408,7 @@ Settings surfaces make policy status and permitted controls visible, but every a
 
 ## 8. Migration strategy
 
-### Phase 3 — backend/application refactor
+### Phase 3 — backend/application refactor — complete
 
 1. Add result, error, capability, event, and job contracts.
 2. Build read-only application query facades.
@@ -417,11 +417,13 @@ Settings surfaces make policy status and permitted controls visible, but every a
 5. Route the plain terminal through the same actions/capabilities as the screen.
 6. Retain narrow transitional adapters until behavior and safety parity are proven.
 
-### Phase 4 — shell and component foundation
+### Phase 4 — shell and component foundation — complete
 
 1. Centralize semantic tokens and color-mode fallbacks.
 2. Build the persistent shell, route manager, status bar, palette, footer, notices, and modal system.
 3. Establish shared focus, selection, async-boundary, form, and confirmation behavior.
+
+**Completion record (2026-11-16).** The Screen now composes semantic tokens/theme, persistent tabs and routes, cached status/footer/notices, the command palette and overlay system; shared models own focus, selection, async boundaries, forms, and confirmations. Rendering consumes settled projections, and status/footer rendering starts no application read. Feature-specific view migration remains Phase 5 work.
 
 ### Phase 5 — view migration
 
@@ -460,6 +462,6 @@ Each coherent implementation slice is committed and pushed on the current branch
 | Responsiveness | Large tree/diff and delayed filesystem/process fixtures; no blocking render/key path |
 | Regression | Durable-agent, native grammar, offline, sandbox, approval, context-accounting, and watchdog guarantees |
 
-## Approval gate
+## Implementation gate — satisfied
 
-This document completes Phase 2 planning only. No implementation work may begin until the architecture and design-system plan receive explicit approval. On approval, Phase 3 starts with the application contracts and backend-facing facades, not a wholesale UI rewrite.
+The architecture and design-system plan proceeded through the approved incremental path: Phase 3 established the application-facing seams, and Phase 4 completed the shared Screen shell/component foundation. Phase 5 begins with feature-view migration, not a wholesale rewrite.
