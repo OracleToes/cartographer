@@ -439,6 +439,8 @@ test("application: workspace queries defer readers and return typed empty, unava
 		rows: [{ id: "t1", species: "composed", mode: "look", at: 0, brief: "Inspect", outcome: "Done." }],
 		shelf: [{ id: "sh1", path: "README.md", snapshot: "Shelf snapshot." }],
 		dropped: [],
+		last: { reason: "You asked for it", before: 9000, after: 800, kept: { tasks: 1, shelf: 1, talk: 2 } },
+		front: { kept: { tasks: 1, shelf: 1, talk: 2 }, left: [{ item: { id: "sh2", path: "old.md" }, why: "it changed" }] },
 	};
 	const queries = createWorkspaceQueries({
 		brainDir,
@@ -508,6 +510,8 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(contextReads, 1);
 	assert.equal(shared.data.shelf[0].text, "Shelf snapshot.");
 	assert.equal(shared.data.standing[0].text, "The report body.");
+	assert.deepEqual(shared.data.store.last, contextStore.last, "the same deferred context projection keeps the collapse marker metadata");
+	assert.deepEqual(shared.data.store.front, contextStore.front);
 	assert.equal(shared.meta.requestId, "context-query");
 	const report = await queries.report("t1", { requestId: "report-query" });
 	assert.equal(report.ok, true);

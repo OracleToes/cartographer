@@ -22,7 +22,7 @@ import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { atlasSummary, attentionSummary, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary } from "./checkpoints.mjs";
-import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
+import { bindTalkSource, contextPath, FLOOR, isFront, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
 import { describeCall, describeResult } from "./application/activity.mjs";
 export { describeCall, describeResult } from "./application/activity.mjs";
@@ -607,23 +607,32 @@ export async function runTerminal(session, options) {
 		if (windows !== undefined) ui.block("the shell windows as they stand", windows);
 		if (tail !== undefined) ui.block("the current read batch — its contents stand at the end of the request", tail);
 	};
+	const isCollapsedFront = (depth, message, body = undefined) => {
+		if (depth !== 0 || message.role !== "user") return false;
+		let visible = body;
+		if (visible === undefined) {
+			const { text: afterTail } = splitReadTail(textOf(message));
+			const { text: afterState } = splitState(afterTail);
+			visible = splitTop(afterState).text;
+		}
+		return isFront({ role: "user", content: [{ type: "text", text: visible }] });
+	};
 	/**
 	 * One dressed message, the way the agent sees it: folded for what the request adds, the message's own words in
 	 * between, the blocks the message carries after it. The screen only; the plain terminal has its own behavior.
 	 */
-	const renderDressed = (depth, message, source, consult) => {
+	const renderDressed = (depth, message, source, consult, collapseStore = {}) => {
 		promoteChatSources(message, source);
 		const original = textOf(message);
 		const { text: afterTail, tail } = splitReadTail(original);
 		const { text: afterState, state, windows } = splitState(afterTail);
 		const { text: afterTop, top } = splitTop(afterState);
 		const body = afterTop;
-		const front = depth === 0 && message.role === "user" && isFront({ role: "user", content: [{ type: "text", text: body }] });
+		const front = isCollapsedFront(depth, message, body);
 		if (front) {
 			// The front block of a collapse: everything before it is gone from the agent's view, so the tab shows
 			// only the marker (the collapse leaves the intro alone), and then what stands in its place.
-			const store = loadContext(options.brainDir);
-				ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(store.last ?? {}), kept: store.last?.kept ?? store.front?.kept, left: store.front?.left })}`, consult);
+			ui.entry(depth, { model: [message] }, `◆ ${collapsePrinted({ reason: "a collapse", ...(collapseStore.last ?? {}), kept: collapseStore.last?.kept ?? collapseStore.front?.kept, left: collapseStore.front?.left })}`, consult);
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
 		} else {
 			if (top !== undefined) ui.block("the copy at the top of the context — my assessment and my graph", top);
@@ -728,9 +737,12 @@ export async function runTerminal(session, options) {
 			ui.print(`! the stored conversation could not be shown as the agent sees it (${error?.message ?? error}); it is stored safely\n`);
 			dressed = raw;
 		}
+		// This lifecycle replay resolves durable collapse metadata before it hands the matching row to the synchronous screen renderer.
+		const contextProjection = dressed.some((message) => isCollapsedFront(depth, message)) ? await queries.context() : undefined;
+		const collapseStore = contextProjection?.ok ? contextProjection.data.store : {};
 		for (const [index, message] of dressed.entries()) {
 			if (message.role === "toolResult" && briefIds.has(message.toolCallId)) continue;
-			renderDressed(depth, message, dressedSources?.get(index), consult);
+			renderDressed(depth, message, dressedSources?.get(index), consult, collapseStore);
 		}
 	};
 
