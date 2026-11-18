@@ -35,6 +35,7 @@ import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
+import { CommandPalette } from "./command-palette.mjs";
 import { ConfirmDialog } from "./confirm-dialog.mjs";
 import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
@@ -103,6 +104,21 @@ const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 /** The marks of the spinner that turns while the agent works, and how long each stands. */
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPIN_MS = POLICY.timing.spinnerMs;
+
+// A palette may safely expose every registered capability before every feature has a dedicated control. Selecting an
+// item goes to the narrowest existing screen seam; only that screen's contextual action supplies target/input and
+// crosses the application action boundary. Unmigrated runtime controls stay discoverable with their terminal path.
+const paletteDestinationFor = (id) => {
+	if (id.startsWith("talk.")) return { tab: "chat", view: "conversation", name: "Chat · Conversation", hint: "Choose kept talk, then use its contextual action." };
+	if (id.startsWith("workspace.")) return { tab: "carto", view: "atlas", name: "Carto", hint: "Choose the relevant record, then use its contextual action." };
+	if (id.startsWith("request.")) return { tab: "carto", view: "requests", name: "Carto · Requests", hint: "Choose a request, then approve, deny, answer, or forget it." };
+	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Use the Review command surface for the selected recovery action." };
+	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
+	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
+	if (id.startsWith("runtime.model.")) return { tab: "context", view: "preview", name: "Model · Next preview", hint: "Inspect the route before changing it." };
+	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
+	return undefined;
+};
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
@@ -191,6 +207,7 @@ export const KEYS_HELP = [
 	"  Ctrl-C           clear what you have typed; with the line empty, again (soon after) leaves, the way /quit does",
 	"  Ctrl-X           stop the agent; Ctrl-V pauses it: holds the agent in its stream mid-reply; until you unpause, it starts nothing of its own (a line or command you write ends the held stream)",
 	"  Ctrl-L           draw the screen again",
+	"  Ctrl-K           search navigation and registered actions in the command palette",
 	"  Ctrl-O           the $EDITOR door, in every tab and mode, including while typing",
 	"  F1               this sheet",
 	"",
@@ -580,9 +597,9 @@ export async function runScreen(session, options, runTerminal) {
 		"context.parts": "Enter open · + all · y copy",
 	};
 	const legend = () => {
-		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
+		if (state.mode === "type") return "Esc: commands · Ctrl-K: palette · Ctrl-O: $EDITOR · ? all keys";
 		const id = viewId();
-		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
+		return `${LEGEND[id] ?? "j k move · Enter open"} · Ctrl-K palette · ? all keys`;
 	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = (tab = state.tab) => (VIEWS[tab] !== undefined ? `${tab}.${state.view[tab]}` : tab);
@@ -616,6 +633,9 @@ export async function runScreen(session, options, runTerminal) {
 		},
 	});
 	const queries = application.queries;
+	// Availability is a composition-time snapshot: opening the palette never consults a manager from a key handler
+	// or render pass. The registered capability remains its single metadata source, including disabled reasons.
+	const paletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
 	const talk = Object.freeze({ execute: application.execute });
 	/** Consult records are loaded only through the application facade and stay in Chat · Consult's private cache. */
@@ -1688,6 +1708,56 @@ export async function runScreen(session, options, runTerminal) {
 		flash,
 		redraw: draw,
 	}), { width: Math.max(20, Math.min(76, terminal.columns - 4)), anchor: "center" });
+	const paletteItems = () => [
+		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation, private Work, and isolated Consult.", destination: { tab: "chat", view: "conversation", name: "Chat" } },
+		{ id: "navigate.carto", label: "Go to Carto", category: "navigation", description: "Atlas, Ledger, Plan, Requests, Tree, and the shared brain.", destination: { tab: "carto", view: "atlas", name: "Carto" } },
+		{ id: "navigate.review", label: "Go to Diff and review", category: "navigation", description: "Last-step, session, and git change inspection.", destination: { tab: "diff", view: "last", name: "Diff · Last step" } },
+		{ id: "navigate.shells", label: "Go to Shells", category: "navigation", description: "Open shell windows and their captured output.", destination: { tab: "shells", view: "list", name: "Shells · List" } },
+		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Sent requests, preview, and current context accounting.", destination: { tab: "context", view: "parts", name: "Model · Current accounting" } },
+		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
+		...paletteCapabilities.map((capability) => {
+			const destination = paletteDestinationFor(capability.id);
+			return {
+				id: `capability:${capability.id}`,
+				label: capability.label,
+				category: capability.category,
+				availability: capability.availability,
+				description: destination === undefined
+					? `${capability.id} is registered but remains on the terminal command surface until its focused screen control migrates.`
+					: `${destination.name}. ${destination.hint}`,
+				keywords: capability.id,
+				destination,
+			};
+		}),
+	];
+	const openPaletteDestination = (destination) => {
+		if (destination === undefined) return false;
+		if (state.tab !== destination.tab) setTab(destination.tab);
+		if (destination.view !== undefined && state.view[state.tab] !== destination.view) setView(destination.view);
+		return true;
+	};
+	const showPalette = () => openModal(({ close }) => new CommandPalette({
+		title: "Command palette",
+		items: paletteItems,
+		keyOf,
+		close,
+		flash,
+		redraw: draw,
+		activate: (item) => {
+			if (item.id === "shell.refresh") {
+				invalidateBrain();
+				refresh(viewId(), true);
+				flash("read again", NOTICE_LEVEL.info);
+				return true;
+			}
+			if (openPaletteDestination(item.destination)) {
+				flash(`opened ${item.destination.name}`, NOTICE_LEVEL.info);
+				return true;
+			}
+			flash(`${item.label} is available through the terminal command surface.`, NOTICE_LEVEL.info);
+			return true;
+		},
+	}), { width: Math.max(20, Math.min(82, terminal.columns - 4)), anchor: "center" });
 	const full = { basis: 0, grow: 1, minSize: 1 };
 	const airy = ({ height }) => height >= AIRY_ROWS;
 	tui.setLayoutRoot(
@@ -1743,6 +1813,7 @@ export async function runScreen(session, options, runTerminal) {
 		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
+		else if (key === "ctrl+k") showPalette();
 		else if (key === "ctrl+o") editInEditor();
 		else if (key === "f1") showKeys();
 		else if (key === "shift+tab") stepTab(-1);

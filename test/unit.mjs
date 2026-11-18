@@ -69,6 +69,7 @@ import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat } from "../src/screen/chat.mjs";
+import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
@@ -454,6 +455,53 @@ test("screen: notices retain a bounded history while only their current live sta
 	assert.equal(notices.latest({ live: true })?.id, warning.id);
 	assert.equal(notices.clear(), true);
 	assert.equal(notices.clear(), false);
+});
+
+test("screen: command palette filters registered actions, keeps disabled reasons visible, and gates asynchronous activation", async () => {
+	const source = [
+		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation and Work." },
+		{ id: "workspace.delete", label: "Delete", category: "workspace", availability: { enabled: false, reason: "Choose a durable row first." } },
+		{ id: "review.undo", label: "Undo last checkpoint change", category: "review", keywords: "recover checkpoint" },
+	];
+	assert.deepEqual(normalizePaletteItems([{ id: "same", label: "First" }, { id: "same", label: "Second" }]).map((item) => item.id), ["same", "same:2"], "a palette keeps every registry item distinguishable");
+	assert.deepEqual(filterPaletteItems(source, "checkpoint").map((item) => item.id), ["review.undo"], "keywords make a registered capability discoverable without duplicating its label");
+	assert.equal(filterPaletteItems(source, "delete")[0]?.disabled, true);
+	assert.throws(() => normalizePaletteItems([undefined]), /must be an object/);
+
+	const flashes = [];
+	let closes = 0;
+	let activations = 0;
+	let settle;
+	const palette = new CommandPalette({
+		items: source,
+		keyOf: (key) => key,
+		close: () => { closes++; },
+		flash: (message) => flashes.push(message),
+		activate: (item) => {
+			activations++;
+			assert.equal(item.id, "review.undo");
+			return new Promise((resolve) => { settle = resolve; });
+		},
+	});
+	palette.handleInput("d");
+	palette.handleInput("e");
+	palette.handleInput("l");
+	palette.handleInput("e");
+	assert.equal(palette.selected()?.id, "workspace.delete", "printable keys stay in the palette search field");
+	palette.handleInput("enter");
+	assert.equal(activations, 0, "a disabled capability cannot be dispatched from the palette");
+	assert.match(flashes.at(-1), /Choose a durable row first/);
+
+	palette.setQuery("checkpoint");
+	assert.match(palette.render(56).join("\n"), /Undo last checkpoint change/);
+	palette.handleInput("enter");
+	palette.handleInput("enter");
+	assert.equal(activations, 1, "a pending activation is not started twice");
+	assert.match(flashes.at(-1), /opening/);
+	settle(true);
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(closes, 1, "only a successful asynchronous palette activation dismisses its overlay");
 });
 
 test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {
