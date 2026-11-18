@@ -16,6 +16,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { projectFiles } from "../tools/look.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
+import { yieldToUi } from "./defer.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
 
 export const WORKSPACE_QUERY = Object.freeze({
@@ -83,9 +84,6 @@ const jsonLines = (file, field, values) => {
 	}
 };
 
-/** Leave the caller's current key/render stack before one of the legacy readers touches disk. */
-const afterCurrentTurn = () => new Promise((resolve) => queueMicrotask(resolve));
-
 const DEFAULT_READERS = Object.freeze({ loadAtlas, loadLedger, loadPlan, loadContext });
 const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommitted });
 const DEFAULT_CONSULT_READERS = Object.freeze({ listConferences });
@@ -115,7 +113,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 	const prepare = async (options) => {
 		const meta = metadata(options, now);
 		if (options?.signal?.aborted === true) return { meta, result: uiCancelled({ meta }) };
-		await afterCurrentTurn();
+		await yieldToUi();
 		if (options?.signal?.aborted === true) return { meta, result: uiCancelled({ meta }) };
 		return { meta };
 	};

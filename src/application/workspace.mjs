@@ -8,6 +8,7 @@ import { ShelfError, foldReports, parseLines, recallReport, shelveForUser } from
 import { ADD_BOOKS, addMove, addTemplate, applyAdd, archiveRow, dropRow, editRow, focusAtlas, foldRow, settleRow, unarchiveRow, unfocusAtlas, unshelveRow } from "../ops.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
+import { yieldToUi } from "./defer.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
 
 export const WORKSPACE_ACTION = Object.freeze({
@@ -233,6 +234,8 @@ export function createWorkspaceApplication({ brainDir, root, config = {}, operat
 	const execute = async (action, input = {}, options = {}) => {
 		const meta = metadata(options, now);
 		if (options.signal?.aborted === true) return uiCancelled({ meta });
+		await yieldToUi();
+		if (options.signal?.aborted === true) return uiCancelled({ meta });
 		const capability = WORKSPACE_CAPABILITIES.get(action);
 		if (capability === undefined) return uiFailure(uiError({
 			code: UI_ERROR_CODE.unknownAction,
@@ -302,6 +305,8 @@ export function createWorkspaceApplication({ brainDir, root, config = {}, operat
 
 	const template = async (book, options = {}) => {
 		const meta = metadata(options, now);
+		if (options.signal?.aborted === true) return uiCancelled({ meta });
+		await yieldToUi();
 		if (options.signal?.aborted === true) return uiCancelled({ meta });
 		if (!ADD_BOOKS.includes(book)) return invalidInput(`Choose one of ${ADD_BOOKS.join(", ")} before adding a row.`, meta, "book");
 		return uiSuccess({ book, text: operations.addTemplate(book) }, { meta });

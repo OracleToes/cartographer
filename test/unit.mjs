@@ -670,6 +670,57 @@ test("application: consult projection defers its isolated audit list", async (t)
 	assert.doesNotMatch(chatText("work"), /Does the cache stay private/, "a cached conference remains exclusive to Consult");
 });
 
+test("application: durable action adapters leave the render and key stack before legacy mutations", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const workspace = createWorkspaceApplication({
+		brainDir,
+		root,
+		operations: { archiveRow: () => { calls.push("workspace"); return "a1 archived"; } },
+	});
+	const workspacePending = workspace.execute(WORKSPACE_ACTION.archive, { id: "a1" });
+	assert.deepEqual(calls, [], "workspace mutations do not start while a key handler still owns the stack");
+	assert.equal((await workspacePending).ok, true);
+	const context = createContextApplication({
+		brainDir,
+		operations: { clearFront: () => { calls.push("context"); }, pin: () => ({ changed: false }) },
+	});
+	const contextPending = context.execute(CONTEXT_ACTION.clearKept);
+	assert.deepEqual(calls, ["workspace"], "context mutations yield before touching durable state");
+	assert.equal((await contextPending).ok, true);
+	const requests = createRequestApplication({
+		brainDir,
+		operations: {
+			approveRequests: () => { calls.push("requests"); return { items: ["m1"], unknown: [] }; },
+			denyRequest: () => undefined,
+			answerQuestion: () => undefined,
+		},
+	});
+	const requestPending = requests.execute(REQUEST_ACTION.approve, { ids: ["m1"] });
+	assert.deepEqual(calls, ["workspace", "context"], "request decisions also leave the current UI stack");
+	assert.equal((await requestPending).ok, true);
+	const talk = createTalkApplication({
+		brainDir,
+		operations: {
+			talkSourceKey: (source) => source?.callId === "call-1" ? "chat-call:main:call-1" : undefined,
+			reviseTalkSource: () => { calls.push("talk"); return true; },
+			removeTalkSource: () => false,
+		},
+	});
+	const talkPending = talk.execute(TALK_ACTION.revise, { source: { kind: "chat-call", conversationId: "main", callId: "call-1" }, text: "Keep the corrected source." });
+	assert.deepEqual(calls, ["workspace", "context", "requests"], "kept-talk mutations cannot block a render either");
+	assert.equal((await talkPending).ok, true);
+	assert.deepEqual(calls, ["workspace", "context", "requests", "talk"]);
+	const controller = new AbortController();
+	const cancelled = workspace.execute(WORKSPACE_ACTION.archive, { id: "a2" }, { signal: controller.signal });
+	controller.abort();
+	const outcome = await cancelled;
+	assert.equal(outcome.ok, false);
+	if (outcome.ok) throw new Error("a cancellation between dispatch and legacy work must be explicit");
+	assert.equal(outcome.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual(calls, ["workspace", "context", "requests", "talk"], "a cancelled action never reaches its legacy mutation");
+});
+
 test("application: composed facade dispatches actions and publishes cache-invalidating facts", async (t) => {
 	const { brainDir, root } = fresh(t);
 	const events = [];

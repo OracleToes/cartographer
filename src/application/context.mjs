@@ -7,6 +7,7 @@ import { clearFront } from "../context.mjs";
 import { pin } from "../top.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
+import { yieldToUi } from "./defer.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
 
 export const CONTEXT_ACTION = Object.freeze({
@@ -55,6 +56,8 @@ export function createContextApplication({ brainDir, operations = DEFAULT_OPERAT
 
 	const execute = async (action, input = {}, options = {}) => {
 		const meta = metadata(options, now);
+		if (options.signal?.aborted === true) return uiCancelled({ meta });
+		await yieldToUi();
 		if (options.signal?.aborted === true) return uiCancelled({ meta });
 		const capability = CONTEXT_CAPABILITIES.get(action);
 		if (capability === undefined) return uiFailure(uiError({
