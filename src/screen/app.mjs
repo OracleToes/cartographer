@@ -145,6 +145,22 @@ export const paletteDestinationFor = (id) => {
 	return undefined;
 };
 
+/** Turn an application capability into the entry the command palette presents. */
+export const paletteItemForCapability = (capability) => {
+	const destination = paletteDestinationFor(capability.id);
+	return {
+		id: `capability:${capability.id}`,
+		label: capability.label,
+		category: capability.category,
+		availability: capability.availability,
+		description: destination === undefined
+			? `${capability.id} is registered but remains on the terminal command surface until its focused screen control migrates.`
+			: `${destination.name}. ${destination.hint}`,
+		keywords: capability.id,
+		destination,
+	};
+};
+
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 export const COMMANDS = [
 	["requests", "what waits for you: change moves, questions of taste, "],
@@ -1841,20 +1857,7 @@ export async function runScreen(session, options, runTerminal) {
 		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Model-route readiness, sent requests, preview, and current context accounting.", destination: { tab: "context", view: "routes", name: "Model · Routes" } },
 		{ id: "navigate.settings", label: "Go to Settings and Safety", category: "navigation", description: "Configuration, session policy, provider diagnostics, and assessment.", destination: { tab: "settings", view: "overview", name: "Settings · Safety" } },
 		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
-		...paletteCapabilities.map((capability) => {
-			const destination = paletteDestinationFor(capability.id);
-			return {
-				id: `capability:${capability.id}`,
-				label: capability.label,
-				category: capability.category,
-				availability: capability.availability,
-				description: destination === undefined
-					? `${capability.id} is registered but remains on the terminal command surface until its focused screen control migrates.`
-					: `${destination.name}. ${destination.hint}`,
-				keywords: capability.id,
-				destination,
-			};
-		}),
+		...paletteCapabilities.map(paletteItemForCapability),
 	];
 	const openPaletteDestination = (destination) => {
 		if (destination === undefined) return false;
