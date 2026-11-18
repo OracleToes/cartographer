@@ -43,6 +43,7 @@ import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
+import { TOKEN } from "./tokens.mjs";
 import { accountingProjectionView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -248,9 +249,9 @@ export async function runScreen(session, options, runTerminal) {
 		wheelScrollLines: POLICY.limits.screen.wheelScrollLines,
 		// What is selected with the mouse is copied when the button is let go, every way there is.
 		copySelection: async (text) => ((await toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) })).length > 0 ? true : "no way to the clipboard was found"),
-		scrollToEndIndicator: () => `${sgr("bgSel")} ↓ the newest · G or End \x1b[0m`,
-		searchMatchStyle: (text) => `${sgr("under")}${text}\x1b[24m`,
-		searchCurrentMatchStyle: (text) => `${sgr("chip")}${text}\x1b[0m`,
+		scrollToEndIndicator: () => `${sgr(TOKEN.interaction.selected)} ↓ the newest · G or End \x1b[0m`,
+		searchMatchStyle: (text) => `${sgr(TOKEN.emphasis.underline)}${text}\x1b[24m`,
+		searchCurrentMatchStyle: (text) => `${sgr(TOKEN.interaction.chip)}${text}\x1b[0m`,
 	});
 
 	// ─── Colours (src/screen/theme.mjs) ──────────────────────────────────────

@@ -11,17 +11,18 @@
 import { CURSOR_MARKER, Editor, renderFakeCursor, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { POLICY } from "../config.mjs";
 import { cut, paint, paintStyled, sgr, width as cells, wrap } from "./text.mjs";
+import { LAYOUT, TOKEN } from "./tokens.mjs";
 
 /**
  * Empty cells at the left and right edge of the screen. Wide terminals get a calmer reading column; narrow ones
  * give those cells back to the content instead of making every row feel needlessly cramped.
  */
 export const marginOf = (width) => {
-	if (width < 36) return 0;
-	if (width < 72) return 1;
-	if (width < 120) return 2;
-	if (width < 160) return 4;
-	return 6;
+	if (width < 36) return LAYOUT.gutter.narrow;
+	if (width < 72) return LAYOUT.gutter.compact;
+	if (width < 120) return LAYOUT.gutter.regular;
+	if (width < 160) return LAYOUT.gutter.wide;
+	return LAYOUT.gutter.expanded;
 };
 /** From how many rows on the screen has an empty row under the tabs, above the strip and under what is typed. */
 export const AIRY_ROWS = POLICY.limits.screen.airyRows;
@@ -29,9 +30,13 @@ export const AIRY_ROWS = POLICY.limits.screen.airyRows;
 
 const widthOf = (text) => visibleWidth(text);
 const BLOCK_RAILS = {
-	bgUser: ["▎", "user"],
-	bgTool: ["│", "tool"],
-	bgNote: ["┊", "note"],
+	[TOKEN.activity.userSurface]: ["▎", TOKEN.activity.user],
+	[TOKEN.activity.shellSurface]: ["│", TOKEN.activity.shell],
+	[TOKEN.activity.noteSurface]: ["┊", TOKEN.activity.note],
+	// Compatibility for feature projections that still name their former surfaces.
+	bgUser: ["▎", TOKEN.activity.user],
+	bgTool: ["│", TOKEN.activity.shell],
+	bgNote: ["┊", TOKEN.activity.note],
 };
 const EMPTY_RAIL = [" ", ""];
 const TAB_BRAND = " Cartographer ";
@@ -139,12 +144,12 @@ export const barRow = (spans, width, bg) => `${edge(width, bg)}${paint(spans, wi
 export function contentRow(line, width, chosen = false) {
 	const inner = width - 2 * marginOf(width);
 	if (line === undefined) return " ".repeat(width);
-	if (line.styled !== undefined) return `${edge(width)}${paintStyled(line.styled, line.cells, inner, chosen ? "bgSel" : "")}${edge(width)}`;
+	if (line.styled !== undefined) return `${edge(width)}${paintStyled(line.styled, line.cells, inner, chosen ? TOKEN.interaction.selected : "")}${edge(width)}`;
 	// A block gets one quiet, consistent rail. It groups a multi-line message without making every line compete for
 	// attention: your words have a blue edge, tool work a teal one, and private notes a violet one.
 	const rail = line.pad ? (BLOCK_RAILS[line.bg] ?? EMPTY_RAIL) : undefined;
 	const spans = rail === undefined ? line.spans : [rail, ...line.spans];
-	const background = chosen ? "bgSel" : (line.bg ?? "");
+	const background = chosen ? TOKEN.interaction.selected : (line.bg ?? "");
 	return `${edge(width)}${paint(spans, inner, background)}${edge(width)}`;
 }
 /** A line that pi-tui will take: never wider than it was asked for, whatever went into it. */
@@ -194,10 +199,10 @@ export class TabBar {
 				const label = labels[index];
 				const cells = widthOf(label);
 				this.spans.push({ id: tab.id, from: marginOf(width) + x, to: marginOf(width) + x + cells });
-				spans.push([label, tab.id === ui.state.tab ? "bgTab" : "muted"]);
+				spans.push([label, tab.id === ui.state.tab ? TOKEN.interaction.active : TOKEN.text.secondary]);
 				x += cells;
 			}
-			return [barRow(spans, width, "bgBar")];
+			return [barRow(spans, width, TOKEN.surface.raised)];
 		});
 	}
 	handleMouse(event) {
@@ -220,7 +225,7 @@ export class ViewBar {
 			const { ui } = this;
 			const views = ui.views();
 			const inner = width - 2 * marginOf(width);
-			if (views.length === 0) return [barRow([], width, "bgPanel")];
+			if (views.length === 0) return [barRow([], width, TOKEN.surface.content)];
 			const active = views.find((view) => view.id === ui.view()) ?? views[0];
 			const layout = viewNavigation(views, inner);
 			const file = ui.fileHint();
@@ -254,7 +259,7 @@ export class ViewBar {
 				spans.push([label, "user bold under"]);
 				spans.push([COMPACT_VIEW_NAV.switchHint, "faint"]);
 			}
-			return [barRow(spans, width, "bgPanel")];
+			return [barRow(spans, width, TOKEN.surface.content)];
 		});
 	}
 	handleMouse(event) {
@@ -370,8 +375,8 @@ export class Strip {
 		return guarded(width, () => {
 			// The strip reads from now to later: immediate activity, quieter shared state, then the key reminder next
 			// to the input. Giving those rows descending chrome makes the information order visible without extra rules.
-			const grounds = ["bgBar", "bgPanel", "bgInput"];
-			return this.ui.status(width).map((spans, index) => barRow(spans, width, grounds[index] ?? "bgPanel"));
+			const grounds = [TOKEN.surface.raised, TOKEN.surface.content, TOKEN.surface.input];
+			return this.ui.status(width).map((spans, index) => barRow(spans, width, grounds[index] ?? TOKEN.surface.content));
 		});
 	}
 }

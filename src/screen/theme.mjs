@@ -21,6 +21,7 @@
 // used. With 256 colours the nearest of them is taken, which keeps the steps of lightness and loses the tints;
 // with fewer, there are no backgrounds and the terminal's sixteen colours are used (the fallback in text.mjs).
 import { colorToRgb, mixColors, oklchColor, rgbColor } from "@earendil-works/pi-tui";
+import { TOKEN, withCompatibilityAliases } from "./tokens.mjs";
 
 const DEFAULTS = {
 	dark: { bg: [22, 23, 28], fg: [208, 211, 218] },
@@ -148,15 +149,71 @@ export function makeTheme({ mode = "none", background, foreground, scheme } = {}
 	const rgb = { bg: bgRgb, fg: fgRgb, ...fgs, ...bgs, chip: out(hue.warn) };
 	if (mode !== "truecolor" && mode !== "256") return { mode: "none", scheme: kind, known, rgb, styles: undefined };
 	const code = (layer, [r, g, b]) => (mode === "truecolor" ? `${layer};2;${r};${g};${b}` : `${layer};5;${to256(r, g, b)}`);
+	// Feature renderers still use the former names. Give the theme one semantic source of truth first, then add
+	// those names as compatibility aliases while each renderer migrates to TOKEN in a later slice.
+	const semanticRgb = {
+		[TOKEN.surface.canvas]: rgb.bg,
+		[TOKEN.surface.content]: rgb.bgPanel,
+		[TOKEN.surface.raised]: rgb.bgBar,
+		[TOKEN.surface.input]: rgb.bgInput,
+		[TOKEN.surface.overlay]: rgb.bgPanel,
+		[TOKEN.text.primary]: rgb.fg,
+		[TOKEN.text.secondary]: rgb.muted,
+		[TOKEN.text.muted]: rgb.faint,
+		[TOKEN.text.inverse]: rgb.fg,
+		[TOKEN.text.link]: rgb.link,
+		[TOKEN.text.heading]: rgb.heading,
+		[TOKEN.text.code]: rgb.code,
+		[TOKEN.border.subtle]: rgb.faint,
+		[TOKEN.border.strong]: rgb.muted,
+		[TOKEN.border.focus]: rgb.user,
+		[TOKEN.interaction.focus]: rgb.bgSel,
+		[TOKEN.interaction.selected]: rgb.bgSel,
+		[TOKEN.interaction.active]: rgb.bgTab,
+		[TOKEN.interaction.disabled]: rgb.faint,
+		[TOKEN.interaction.loading]: rgb.warn,
+		[TOKEN.interaction.stale]: rgb.muted,
+		[TOKEN.feedback.success]: rgb.ok,
+		[TOKEN.feedback.warning]: rgb.warn,
+		[TOKEN.feedback.danger]: rgb.err,
+		[TOKEN.feedback.info]: rgb.tool,
+		[TOKEN.activity.user]: rgb.user,
+		[TOKEN.activity.agent]: rgb.carto,
+		[TOKEN.activity.shell]: rgb.tool,
+		[TOKEN.activity.note]: rgb.note,
+		[TOKEN.activity.userSurface]: rgb.bgUser,
+		[TOKEN.activity.shellSurface]: rgb.bgTool,
+		[TOKEN.activity.noteSurface]: rgb.bgNote,
+		[TOKEN.domain.diff.added]: rgb.green,
+		[TOKEN.domain.diff.removed]: rgb.red,
+		[TOKEN.domain.diff.changed]: rgb.yellow,
+		[TOKEN.domain.context.system]: rgb.catSystem,
+		[TOKEN.domain.context.tools]: rgb.catTools,
+		[TOKEN.domain.context.top]: rgb.catTop,
+		[TOKEN.domain.context.kept]: rgb.catKept,
+		[TOKEN.domain.context.user]: rgb.catYou,
+		[TOKEN.domain.context.cartographer]: rgb.catCarto,
+		[TOKEN.domain.context.agent]: rgb.catAgent,
+		[TOKEN.domain.context.result]: rgb.catResult,
+		[TOKEN.domain.context.state]: rgb.catState,
+		[TOKEN.domain.context.windows]: rgb.catWindows,
+	};
 	const styles = {};
-	for (const [name, value] of Object.entries(fgs)) styles[name] = code(38, value);
-	for (const [name, value] of Object.entries(bgs)) styles[name] = code(48, value);
-	styles.link = `${styles.link};4`;
-	styles.heading = `${styles.heading};1`;
-	styles.bgTab = `${styles.bgTab};1`;
+	for (const [token, value] of Object.entries(semanticRgb)) {
+		const layer = token.includes("surface") || token.startsWith("interaction.") ? 48 : 38;
+		styles[token] = code(layer, value);
+	}
+	styles[TOKEN.text.link] = `${styles[TOKEN.text.link]};4`;
+	styles[TOKEN.text.heading] = `${styles[TOKEN.text.heading]};1`;
+	styles[TOKEN.interaction.active] = `${styles[TOKEN.interaction.active]};1`;
+	styles[TOKEN.emphasis.dim] = "2";
+	styles[TOKEN.emphasis.strong] = "1";
+	styles[TOKEN.emphasis.italic] = "3";
+	styles[TOKEN.emphasis.underline] = "4";
+	styles[TOKEN.emphasis.inverse] = "7";
 	// The mode's name: the one filled, saturated shape, with the background's colour as its text.
-	styles.chip = `${code(48, out(hue.warn))};${code(38, bgRgb)};1`;
-	return { mode, scheme: kind, known, rgb, styles };
+	styles[TOKEN.interaction.chip] = `${code(48, out(hue.warn))};${code(38, bgRgb)};1`;
+	return { mode, scheme: kind, known, rgb, styles: withCompatibilityAliases(styles) };
 }
 
 /** The theme functions pi-tui's Markdown wants, made of the palette's codes. Each switches off only what it switched on. */

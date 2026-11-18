@@ -2202,6 +2202,7 @@ test("screen: Consult is a separate persona-attributed conference timeline with 
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
 	const { colorMode, makeTheme, markdownTheme, parseColorReply, schemeFromEnv, schemeOf, to256, HUES } = await import("../src/screen/theme.mjs");
+	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	const { colorToOklch, rgbColor } = await import("@earendil-works/pi-tui");
 	const light = ([r, g, b]) => (r * 299 + g * 587 + b * 114) / 1000;
 	const far = (a, b) => Math.abs(light(a) - light(b));
@@ -2230,12 +2231,15 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(blue(rgb.bgUser) > blue(rgb.bg) && blue(rgb.bgUser) > blue(rgb.bgBar), `a block has the tint of its hue (yours is blue): ${what}`);
 	}
 	const exact = makeTheme({ mode: "truecolor" }).styles;
-	assert.match(exact.bgTool, /^48;2;\d+;\d+;\d+$/, "a background, in exact colour");
+	assert.equal(exact.bgTool, exact[TOKEN.activity.shellSurface], "the former feature surface remains an alias for its semantic activity token");
+	assert.equal(exact.bgSel, exact[TOKEN.interaction.selected], "selection has one semantic source despite compatibility styling");
+	assert.equal(exact.muted, exact[TOKEN.text.secondary], "text hierarchy is also reachable by semantic token");
+	assert.match(exact[TOKEN.activity.shellSurface], /^48;2;\d+;\d+;\d+$/, "a semantic background is in exact colour");
 	assert.match(exact.muted, /^38;2;\d+;\d+;\d+$/, "a text colour");
 	assert.match(exact.chip, /^48;2;[\d;]+;38;2;[\d;]+;1$/, "the mode's name is filled and bold: the one saturated shape");
 	const near = makeTheme({ mode: "256" }).styles;
-	assert.match(near.bgTool, /^48;5;\d+$/, "with 256 colours, the nearest of them");
-	assert.notEqual(near.bgSel, near.bgTool, "which still tells what is selected from a block");
+	assert.match(near[TOKEN.activity.shellSurface], /^48;5;\d+$/, "with 256 colours, the nearest of them");
+	assert.notEqual(near[TOKEN.interaction.selected], near[TOKEN.activity.shellSurface], "which still tells what is selected from a block");
 	assert.equal(makeTheme({ mode: "none" }).styles, undefined, "without colours there is no palette: the terminal's sixteen are used");
 	assert.deepEqual([to256(0, 0, 0), to256(255, 255, 255), to256(128, 128, 128), to256(255, 0, 0)], [16, 231, 244, 196]);
 	assert.deepEqual(parseColorReply("11;rgb:1e1e/1e1e/2e2e"), { target: "background", rgb: [30, 30, 46] }, "what the terminal answers about its background");
@@ -2250,14 +2254,18 @@ test("screen: the palette is made for the terminal's background: levels of text,
 
 test("screen: lines are painted on their block's background, and text says by its style what it is", async () => {
 	const { applyTheme, paint, paintStyled, sgr, STYLES } = await import("../src/screen/text.mjs");
+	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	const { createChat } = await import("../src/screen/chat.mjs");
 	try {
 		applyTheme({ bgTool: "48;5;235", bgSel: "48;5;239", muted: "38;5;246", ok: "38;5;115" });
 		assert.equal(paint([["✓ ", "ok"], ["read", ""]], 8, "bgTool"), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");
 		assert.equal(paintStyled("a\x1b[1mb\x1b[22m", 2, 4, "bgSel"), "\x1b[48;5;239ma\x1b[1mb\x1b[22m  \x1b[0m", "and under a line that came styled");
 		assert.equal(sgr("bgNothing"), "", "a style the palette does not have is no style");
+		assert.equal(sgr(TOKEN.activity.shellSurface), "\x1b[48;5;235m", "a shell component can ask for its semantic surface directly");
+		assert.equal(sgr(TOKEN.interaction.selected), "\x1b[48;5;239m", "focus and selection have semantic styles too");
 		applyTheme(undefined);
 		assert.deepEqual([STYLES.bgTool, STYLES.muted, STYLES.bgSel, STYLES.ok], [undefined, "2", "7", "32"], "without a palette: no backgrounds, dim for muted, inverse for what is selected, the terminal's own green");
+		assert.deepEqual([STYLES[TOKEN.activity.shellSurface], STYLES[TOKEN.text.secondary], STYLES[TOKEN.interaction.selected], STYLES[TOKEN.feedback.success]], [undefined, "2", "7", "32"], "semantic tokens retain the same no-colour fallbacks");
 		assert.equal(paint([["x", "muted"]], 3, "bgTool"), "\x1b[2mx\x1b[0m  ");
 	} finally {
 		applyTheme(undefined);
