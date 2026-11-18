@@ -245,8 +245,10 @@ test("terminal: workspace actions share typed outcomes and deletion needs --yes"
 	assert.match(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep this only while the command is tested." }), root), /n1 added/);
 	const server = await startStandIn();
 	try {
-		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
+		const result = await carto(root, server, [], { input: "/help\n/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
 		ok(result, "terminal workspace actions");
+		has(result.stdout, "/wait [SECONDS]  with piped input, wait for shell commands and scheduled wakes", "terminal help names the piped-input wait control");
+		has(result.stdout, "/quit, /exit  leave", "terminal help names the exit alias");
 		has(result.stdout, "n1 archived", "archive reaches the shared workspace action");
 		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
 		has(result.stdout, "/delete is permanent. To remove n1, run: /delete n1 --yes", "delete asks for an explicit acknowledgement");
