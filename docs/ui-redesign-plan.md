@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration in progress — Chat, Workspace, Review, and Runtime are complete; Settings & Safety is next.
+**Status:** Phase 5 view migration complete — Chat, Workspace, Review, Runtime, and Settings & Safety render through settled application projections.
 
 **Date:** 2026-11-16
 
@@ -304,7 +304,7 @@ Global semantics are fixed. A page may disable an action, but it cannot redefine
 
 | Scope | Key | Meaning |
 | --- | --- | --- |
-| Shell | `1`–`5` | Jump to Chat, Workspace, Review, Runtime, Settings |
+| Shell | `1`–`6` | Jump to Chat, Carto, Diff, Shells, Model, Settings |
 | Shell | `[` / `]` | Previous/next primary section |
 | Focus | `Tab` / `Shift+Tab` | Next/previous focusable region or control |
 | Collections | `j` / `k`, `↑` / `↓` | Move active item |
@@ -448,6 +448,8 @@ Migrate capability groups in this order:
 
 **Runtime transport and status completion record (2026-11-16).** Model Routes now consumes the deferred `runtime.models` snapshot through the Runtime presentation adapter. It distinguishes a listed route from native-GBNF readiness, retains cached route names and a typed listing issue, and sends Enter-driven connect/select controls through `runtime.model.ensure` or `runtime.model.select`; neither action needs a destructive confirmation. The persistent strip now consumes its own scheduled `runtime.status` snapshot plus cached route state, rather than live context/window/wake/model-manager callbacks. It renders first-load, cached-refresh, and typed error diagnostics without initiating a read; successful empty runtime state remains a quiet, valid strip. Runtime projections are cancelled/superseded by the shared scheduler, and route discovery is retried only on entry, explicit refresh, or a route lifecycle event rather than every screen frame.
 
+**Settings & Safety completion record (2026-11-16).** Settings is a sixth Screen tab with Safety and Assessment subviews, key and palette navigation, and deferred projection scheduling. Safety renders the composition-owned configuration/policy snapshot through its presentation adapter; it keeps route-listing issues distinct from native llama.cpp GBNF proof and makes blocked or disconnected state visible without authorizing work. Assessment uses the existing deferred runtime comparison and retains valid empty, stale-top-copy, loading, cancellation, and error states through the shared async boundary. Neither view imports a configuration, process, sandbox, or native-grammar manager, and their descriptive state does not alter the terminal's backend-owned authorization behavior.
+
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 
 ### Phase 6 — polish and verification
@@ -477,4 +479,4 @@ Each coherent implementation slice is committed and pushed on the current branch
 
 ## Implementation gate — satisfied
 
-The architecture and design-system plan proceeded through the approved incremental path: Phase 3 established the application-facing seams, and Phase 4 completed the shared Screen shell/component foundation. Phase 5 begins with feature-view migration, not a wholesale rewrite.
+The architecture and design-system plan proceeded through the approved incremental path: Phase 3 established the application-facing seams, Phase 4 completed the shared Screen shell/component foundation, and Phase 5 completed feature-view migration without a wholesale rewrite.
