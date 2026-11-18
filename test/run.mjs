@@ -240,8 +240,8 @@ test("terminal: workspace row commands share typed outcomes and deletion needs -
 		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
 		has(result.stdout, "/delete is permanent. To remove n1, run: /delete n1 --yes", "delete asks for an explicit acknowledgement");
 		has(result.stdout, "n1 is gone for good", "acknowledged delete reaches the shared workspace action");
-		has(result.stdout, "README.md is on the shelf as sh1", "shelve reaches the shared workspace action");
-		has(result.stdout, "Taken off the shelf: README.md [sh1]", "unshelve reaches the shared workspace action");
+		has(result.stdout, "README.md (lines 1-1) is on the shelf as sh1", "shelve reaches the shared workspace action");
+		has(result.stdout, "Taken off the shelf: README.md (lines 1-1) [sh1]", "unshelve reaches the shared workspace action");
 		assert.equal(loadLedger(brainDir).ledger.items.length, 0, "only the acknowledged delete mutates the durable ledger");
 		assert.equal(server.requests.length, 0, "local workspace commands do not need an agent request");
 	} finally {
