@@ -141,6 +141,10 @@ const RAW_ACTION_SPECS = [
 	{ id: "runtime.shell.send", launch: ACTION_LAUNCH.dialog, target: target(ACTION_TARGET_KIND.shellWindow, "name"), fields: [field("line", "Input", { required: true, limit: 4_096 })] },
 	{ id: "runtime.shell.close", launch: ACTION_LAUNCH.dialog, target: target(ACTION_TARGET_KIND.shellWindow, "name"), fields: [field("reason", "Reason", { multiline: true, limit: 1_024, help: "Optional record of why this shell is being closed." })] },
 	{ id: "runtime.shell.close-all", launch: ACTION_LAUNCH.dialog, target: target(), fields: [field("reason", "Reason", { multiline: true, limit: 1_024, help: "Optional record of why every shell is being closed." })] },
+	// Wake trigger fields change with the selected kind, so Screen owns the schema-derived WakeDialog while the
+	// application action remains the sole validator and scheduler mutator.
+	{ id: "runtime.wake.create", launch: ACTION_LAUNCH.existingControl, target: target(), fields: [] },
+	{ id: "runtime.wake.replace", launch: ACTION_LAUNCH.existingControl, target: target(ACTION_TARGET_KIND.wake, "id"), fields: [] },
 	{ id: "runtime.wake.remove", launch: ACTION_LAUNCH.direct, target: target(ACTION_TARGET_KIND.wake, "id"), fields: [] },
 	{ id: "runtime.task.message", launch: ACTION_LAUNCH.dialog, target: target(), fields: [field("text", "Message", { required: true, multiline: true, limit: 4_096 })] },
 	{ id: "runtime.model.ensure", launch: ACTION_LAUNCH.direct, target: target(), fields: [] },

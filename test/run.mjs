@@ -2586,7 +2586,7 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 	assert.deepEqual(commands.get("consult")?.words, ["probe"], "the composer completes the native-grammar diagnostic subcommand");
 	assert.equal(commands.get("exit")?.description, "leave; the same as /quit", "the full-screen composer retains the terminal exit alias");
 	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
-	assert.equal(registered.length, 32, "the application registry has the phase-six actions plus the authorized Settings edit/reset surface");
+	assert.equal(registered.length, 34, "the application registry includes Settings plus complete wake create/replace/remove actions");
 	const unavailable = { enabled: false, reason: "Unavailable in this fixture." };
 	const entries = registered.map((action) => ({
 		action,

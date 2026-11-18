@@ -37,6 +37,7 @@ import { createReviewPresentation } from "../application/review-presentation.mjs
 import { createRuntimePresentation } from "../application/runtime-presentation.mjs";
 import { createSettingsPresentation } from "../application/settings-presentation.mjs";
 import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
+import { CONTEXT_ACTION } from "../application/context.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
 import { REVIEW_ACTION } from "../application/review.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
@@ -52,6 +53,7 @@ import { ActionDialog } from "./action-dialog.mjs";
 import { ActionLauncher } from "./action-launcher.mjs";
 import { ConfirmDialog } from "./confirm-dialog.mjs";
 import { TargetPicker } from "./target-picker.mjs";
+import { WakeDialog } from "./wake-dialog.mjs";
 import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
@@ -132,7 +134,6 @@ export const VIEWS = {
 const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts", "settings.configuration", "settings.safety", "settings.assessment"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
-const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 /** How long each spinner mark stands; the status strip owns its visible marks. */
 const SPIN_MS = POLICY.timing.spinnerMs;
 
@@ -604,7 +605,7 @@ export async function runScreen(session, options, runTerminal) {
 				{ text: "d remove kept talk", capability: TALK_ACTION.forget },
 				"y copy",
 			],
-			"chat.work": ["j k move", "Enter open", "y copy"],
+			"chat.work": ["j k move", "Enter open", { text: "m message task", capability: RUNTIME_ACTION.routeTaskMessage }, "y copy"],
 			"chat.consult": ["j k move", "Enter open", "+ all", "y copy"],
 			"carto.atlas": [
 				{ text: "t confirm", capability: WORKSPACE_ACTION.settle },
@@ -630,8 +631,8 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.requests": [
 				{ text: "a approve", capability: REQUEST_ACTION.approve },
 				{ text: "n deny", capability: REQUEST_ACTION.deny },
+				{ text: "e answer", capability: REQUEST_ACTION.answer },
 				{ text: "d forget", capability: WORKSPACE_ACTION.delete },
-				"e edit",
 			],
 			"carto.tree": ["Enter fold", "y copy", "e edit"],
 			"carto.hands": [
@@ -644,9 +645,21 @@ export async function runScreen(session, options, runTerminal) {
 			"diff.last": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
 			"diff.session": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
 			"diff.git": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
-			"shells.list": ["Enter output", "y copy"],
+			"shells.list": [
+				"Enter output",
+				{ text: "s send", capability: RUNTIME_ACTION.sendShell },
+				{ text: "d close", capability: RUNTIME_ACTION.closeShell },
+				{ text: "D close all", capability: RUNTIME_ACTION.closeAllShells },
+				"y copy",
+			],
 			"shells.out": ["Enter back"],
-			"shells.wakes": [{ text: "d remove", capability: RUNTIME_ACTION.removeWake }, "Enter open", "y copy"],
+			"shells.wakes": [
+				{ text: "n create", capability: RUNTIME_ACTION.createWake },
+				{ text: "e replace", capability: RUNTIME_ACTION.replaceWake },
+				{ text: "d remove", capability: RUNTIME_ACTION.removeWake },
+				"Enter open",
+				"y copy",
+			],
 			"context.routes": [{ text: "Enter connect/select", capabilities: [RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel] }, "y copy"],
 			"context.window": ["Enter open", "y copy"],
 			"context.main": ["Enter open", "y copy"],
@@ -1000,7 +1013,15 @@ export async function runScreen(session, options, runTerminal) {
 		} else if (source === "shell-windows") {
 			targets = keyed(/^window:(.+)$/, (name) => ({ name }));
 		} else if (source === "wakes") {
-			targets = keyed(/^wake:(.+)$/, (wakeId) => ({ id: wakeId }));
+			targets = items.flatMap((item) => {
+				const matched = /^wake:(.+)$/.exec(String(item.key ?? ""));
+				if (matched === null) return [];
+				const settled = item.target;
+				const input = settled !== null && typeof settled === "object"
+					? { ...settled, id: matched[1] }
+					: { id: matched[1] };
+				return [{ key: item.key, value: matched[1], label: label(item), input }];
+			});
 		} else if (source === "model-routes") {
 			targets = items.flatMap((item) => typeof item.target?.modelId !== "string" || item.target.modelId === "" ? [] : [{
 				key: item.key,
@@ -1136,18 +1157,6 @@ export async function runScreen(session, options, runTerminal) {
 		void application.execute(action, input)
 			.then((result) => presentRuntimeResult(result, route))
 			.catch((error) => flash(`could not prepare that model route: ${error?.message ?? error}`));
-	};
-	const requestWakeRemoval = (wake) => {
-		if (wake === undefined || typeof wake.id !== "string" || wake.id === "") return flash("choose a wake before removing it");
-		const route = viewId();
-		void application.execute(RUNTIME_ACTION.removeWake, { id: wake.id })
-			.then((asked) => {
-				if (asked.confirmation === undefined) return presentRuntimeResult(asked, route);
-				openConfirmation(asked.confirmation, () => application.execute(RUNTIME_ACTION.removeWake, { id: wake.id }, {
-					confirmation: { ...asked.confirmation, acknowledged: true },
-				}).then((result) => presentRuntimeResult(result, route)), { title: wake.id === "all" ? "Remove every wake?" : "Remove wake?" });
-			})
-			.catch((error) => flash(`could not prepare that wake removal: ${error?.message ?? error}`));
 	};
 	/** Run a row action through the typed application boundary, then redraw its projection after it settles. */
 	const runWorkspaceAction = (action, input, options_ = {}) => {
@@ -1792,6 +1801,12 @@ export async function runScreen(session, options, runTerminal) {
 		if (tui.hasOverlay()) return;
 		openModal(({ close }) => new Sheet({ title: "Keys", text: KEYS_HELP, rows: () => terminal.rows, keyOf, close }), { width: Math.max(20, Math.min(108, terminal.columns - 4)), anchor: "center" });
 	};
+	/** Route-local shortcuts use the same launcher as the palette; no key handler touches a Runtime manager. */
+	const launchAction = (actionId) => {
+		if (actionLauncher === undefined) return false;
+		void actionLauncher.launch(actionId).catch((error) => flash(`could not open that action: ${error?.message ?? error}`));
+		return true;
+	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
 		const inChat = chatTab();
@@ -1818,6 +1833,17 @@ export async function runScreen(session, options, runTerminal) {
 				if (key === "s") return void chooseSettingsSource();
 			}
 			if (key === "u" && viewId().startsWith("diff.")) return void requestReviewUndo();
+			if (viewId() === "context.parts" && key === "p") return void launchAction(CONTEXT_ACTION.pinTop);
+			if (viewId() === "shells.list") {
+				if (key === "s") return void launchAction(RUNTIME_ACTION.sendShell);
+				if (key === "d") return void launchAction(RUNTIME_ACTION.closeShell);
+				if (key === "D") return void launchAction(RUNTIME_ACTION.closeAllShells);
+			}
+			if (viewId() === "shells.wakes") {
+				if (key === "n") return void launchAction(RUNTIME_ACTION.createWake);
+				if (key === "e") return void launchAction(RUNTIME_ACTION.replaceWake);
+				if (key === "d") return void launchAction(RUNTIME_ACTION.removeWake);
+			}
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
@@ -1827,22 +1853,16 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
 			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
 			if (viewId() === "context.routes" && (key === "enter" || key === " " || key === "o")) return void requestModelRoute(item?.target);
-			if (key === "d" && viewId() === "shells.wakes" && rowKey?.startsWith("wake:")) return void requestWakeRemoval({ id: rowKey.slice(5) });
 			// Deleting is for good, so it always opens the same scoped confirmation. A request is not deleted but
 			// forgotten: the agent is told nothing of it, and so forgets it had asked.
 			if (key === "d" && deletable) return void requestWorkspaceDelete(bookId);
 			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
-			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
+			// Requests use the settled row's typed launcher contract. The next agent turn sees the durable decision through
+			// its state projection; a Screen key never constructs a slash command or reaches request storage directly.
 			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
-				if (key === "a") {
-					if (QUESTION_ID.test(bookId)) return flash("a question is answered with words: /answer " + bookId + " words");
-					setMode("type");
-					return void submit(`/approve ${bookId}`);
-				}
-				if (key === "n") {
-					setMode("type");
-					return void submit(`/deny ${bookId}`);
-				}
+				if (key === "a") return void launchAction(REQUEST_ACTION.approve);
+				if (key === "n") return void launchAction(REQUEST_ACTION.deny);
+				if (key === "e") return void launchAction(REQUEST_ACTION.answer);
 			}
 			// In Plan, n on an envelope declares one child move; elsewhere it opens the book's new-entry box.
 			if (key === "n" && viewId() === "carto.plan" && rowKey?.startsWith("envelope:")) return void openMoveBox(bookId);
@@ -1882,6 +1902,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "ctrl+e") return void scroll.scrollBy(1);
 		if (key === "ctrl+y") return void scroll.scrollBy(-1);
 		if (inChat) {
+			if (state.view.chat === "work" && key === "m") return void launchAction(RUNTIME_ACTION.routeTaskMessage);
 			if (key === "d") return void removeChat();
 			if (key === "j" || key === "down") return void moveSelection(1);
 			if (key === "k" || key === "up") return void moveSelection(-1);
@@ -2134,7 +2155,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		return presentWorkspaceResult(result, id);
 	};
-	const openExistingActionControl = ({ plan, placement, dispatch }) => {
+	const openExistingActionControl = ({ plan, placement, dispatch, cancel }) => {
 		const input = plan.input ?? {};
 		if (plan.actionId === REVIEW_ACTION.undo) {
 			return (async () => {
@@ -2150,6 +2171,26 @@ export async function runScreen(session, options, runTerminal) {
 				}
 				return dispatch();
 			})();
+		}
+		if ([RUNTIME_ACTION.createWake, RUNTIME_ACTION.replaceWake].includes(plan.actionId)) {
+			// Suggestions are copied only from an already-settled Shells projection. A form may name another window,
+			// but it never probes the live manager while it is being opened or painted.
+			const shellSnapshot = projectionFor("shells.list").data;
+			const windowSuggestions = Array.isArray(shellSnapshot?.windows)
+				? shellSnapshot.windows.filter((window) => typeof window?.name === "string" && window.name !== "" && window.state !== POLICY.enums.windowStates.gone).map((window) => window.name)
+				: [];
+			const openedWakeDialog = openModal(({ close }) => new WakeDialog({
+				title: plan.actionId === RUNTIME_ACTION.replaceWake ? `Replace wake ${input.id ?? ""}`.trim() : "Create wake",
+				input,
+				windowSuggestions,
+				keyOf,
+				close,
+				flash,
+				redraw: draw,
+				submit: (wakeInput) => dispatch(wakeInput, { fromDialog: true }),
+				cancel,
+			}), { width: Math.max(46, Math.min(82, terminal.columns - 4)), anchor: "center" });
+			return openedWakeDialog === undefined ? false : { ...openedWakeDialog, pending: true };
 		}
 		if (plan.actionId === SETTINGS_ACTION.edit) return requestSettingsEdit(input);
 		if (plan.actionId === WORKSPACE_ACTION.add) return openAddBox(BOOK_VIEWS[viewId()] ?? "ledger");
