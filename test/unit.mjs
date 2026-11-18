@@ -72,6 +72,7 @@ import { createChat } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
+import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
@@ -502,6 +503,42 @@ test("screen: command palette filters registered actions, keeps disabled reasons
 	await Promise.resolve();
 	await Promise.resolve();
 	assert.equal(closes, 1, "only a successful asynchronous palette activation dismisses its overlay");
+});
+
+test("screen: shared forms keep local required, field-validation, help, disabled, and focus behavior without bypassing action saves", () => {
+	const flashes = [];
+	const saves = [];
+	let closed = 0;
+	const form = new Form({
+		title: "New record",
+		fields: [
+			{ id: "title", label: "Title", limit: 24, required: true, help: "A short durable label." },
+			{ id: "system", label: "System", limit: 24, value: "managed", disabled: true },
+			{ id: "mode", label: "Mode", limit: 8, value: "no", validate: (value) => value === "yes" ? undefined : "Mode must be yes." },
+		],
+		keyOf: (key) => key,
+		flash: (message) => flashes.push(message),
+		close: () => { closed++; },
+		save: (drafts) => { saves.push(new Map(drafts)); return true; },
+	});
+	assert.equal(form.field.id, "title");
+	assert.match(form.render(60).join("\n"), /A short durable label/);
+	form.handleInput("enter");
+	assert.equal(saves.length, 0, "a required local field is shown for correction before an action starts");
+	assert.match(flashes.at(-1), /Title is required/);
+	assert.match(form.render(60).join("\n"), /Title \*/);
+	form.text = "Refresh the durable view";
+	form.handleInput("tab");
+	assert.equal(form.field.id, "mode", "Tab skips a disabled field rather than focusing an unusable control");
+	form.handleInput("enter");
+	assert.equal(saves.length, 0, "field validation keeps its draft open instead of calling the durable action");
+	assert.match(form.render(60).join("\n"), /Mode must be yes/);
+	form.text = "yes";
+	form.handleInput("enter");
+	assert.equal(saves.length, 1);
+	assert.equal(saves[0].get("title"), "Refresh the durable view");
+	assert.equal(closed, 1, "the form retains the established close-on-success contract");
+	assert.throws(() => new Form({ fields: [] }), /needs one or more fields/);
 });
 
 test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {

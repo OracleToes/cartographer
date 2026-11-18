@@ -539,21 +539,27 @@ export class Sheet {
  * of the row and the drafts ride along until `Esc`. The screen is one more client of the same operations the
  * agent uses: `save(drafts)` flashes what was saved or the refusal, and says whether it was saved. A save may
  * settle asynchronously; the box keeps its drafts and makes its pending state plain until the result arrives.
+ *
+ * `required`, `disabled`, `help`, and a synchronous field `validate(value, drafts)` are optional shared field
+ * metadata. They improve local correction only; the application action remains the authority for every durable rule.
  */
 export class Box {
 	static VISIBLE = 6;
 	/**
-	 * @param {{ title: string, fields: { id: string, label: string, limit: number, multiline?: boolean, value?: string }[],
-	 *   keyOf: (data: string) => string | undefined, save: (drafts: Map<string, string>) => boolean | Promise<boolean>, close: () => void, flash: (text: string) => void, redraw?: () => void }} given
+	 * @param {{ title: string, fields: { id: string, label: string, limit: number, multiline?: boolean, value?: string, required?: boolean, disabled?: boolean, help?: string, validate?: (value: string, drafts: Map<string, string>) => string | { message?: string } | boolean | undefined }[],
+	 *   keyOf: (data: string) => string | undefined, save: (drafts: Map<string, string>) => boolean | Promise<boolean>, close: () => void, flash: (text: string) => void, redraw?: () => void, validate?: (drafts: Map<string, string>) => string | { field?: string, message?: string } | boolean | undefined }} given
 	 *   `save` flashes the outcome itself and says whether the drafts were kept; a false means the box stays open.
 	 */
 	constructor(given) {
+		if (given === null || typeof given !== "object" || !Array.isArray(given.fields) || given.fields.length === 0) throw new TypeError("A form needs one or more fields.");
 		this.given = given;
 		this.capturesViewportInput = true;
-		this.index = 0;
+		this.index = given.fields.findIndex((field) => field.disabled !== true);
+		if (this.index < 0) this.index = 0;
 		this.drafts = given.fields.map((field) => field.value ?? "");
 		this.cursors = given.fields.map((_, at) => given.fields[at].value?.length ?? 0);
 		this.scrolls = given.fields.map(() => 0);
+		this.errors = new Map();
 		this.inner = 60;
 		this.saving = false;
 	}
@@ -565,6 +571,63 @@ export class Box {
 	}
 	set text(value) {
 		this.drafts[this.index] = value;
+		this.errors.delete(this.field.id);
+	}
+	get error() {
+		return this.errors.get(this.field.id);
+	}
+	editable() {
+		return this.given.fields.flatMap((field, index) => field.disabled === true ? [] : [index]);
+	}
+	moveField(by) {
+		const editable = this.editable();
+		if (editable.length < 2) return false;
+		const at = editable.indexOf(this.index);
+		this.index = editable[(at < 0 ? 0 : at + by + editable.length) % editable.length];
+		this.follow();
+		return true;
+	}
+	draftMap() {
+		return new Map(this.given.fields.map((field, at) => [field.id, this.drafts[at]]));
+	}
+	/** Validate local field affordances without duplicating the application's durable validation. */
+	validateDrafts() {
+		const drafts = this.draftMap();
+		const errors = new Map();
+		const errorFor = (field, outcome, fallback) => {
+			if (outcome === undefined || outcome === true) return;
+			if (outcome !== null && typeof outcome === "object" && typeof outcome.then === "function") throw new TypeError("Form validation must settle synchronously.");
+			const message = typeof outcome === "string" ? outcome.trim() : typeof outcome?.message === "string" ? outcome.message.trim() : outcome === false ? fallback : "";
+			if (message !== "") errors.set(field.id, message);
+		};
+		for (const [at, field] of this.given.fields.entries()) {
+			if (field.disabled === true) continue;
+			const value = this.drafts[at];
+			if (field.required === true && String(value).trim() === "") errorFor(field, false, `${field.label} is required.`);
+			else if (typeof field.validate === "function") {
+				try { errorFor(field, field.validate(value, drafts), `${field.label} is invalid.`); }
+				catch (error) { errorFor(field, `Could not validate ${field.label}: ${error?.message ?? error}`, ""); }
+			}
+		}
+		if (errors.size === 0 && typeof this.given.validate === "function") {
+			try {
+				const outcome = this.given.validate(drafts);
+				const field = typeof outcome?.field === "string" ? this.given.fields.find((entry) => entry.id === outcome.field) ?? this.field : this.field;
+				errorFor(field, outcome, "This form is not ready to save.");
+			} catch (error) {
+				errorFor(this.field, `Could not validate this form: ${error?.message ?? error}`, "");
+			}
+		}
+		this.errors = errors;
+		if (errors.size === 0) return drafts;
+		const first = this.given.fields.findIndex((field) => errors.has(field.id));
+		if (first >= 0) {
+			this.index = first;
+			this.follow();
+		}
+		this.given.flash(errors.get(this.field.id) ?? "Correct the marked field before saving.");
+		this.given.redraw?.();
+		return undefined;
 	}
 	get cursor() {
 		return this.cursors[this.index];
@@ -630,7 +693,8 @@ export class Box {
 	}
 	save() {
 		if (this.saving) return void this.given.flash("this save is still finishing");
-		const drafts = new Map(this.given.fields.map((field, at) => [field.id, this.drafts[at]]));
+		const drafts = this.validateDrafts();
+		if (drafts === undefined) return;
 		let saved;
 		try {
 			saved = this.given.save(drafts);
@@ -662,14 +726,12 @@ export class Box {
 		const bracketed = /^\x1b\[200~([\s\S]*?)\x1b\[201~$/.exec(String(data));
 		if (bracketed) return void this.insert(bracketed[1]);
 		if (key === "escape") return void this.given.close();
-		const fields = this.given.fields;
-		if (fields.length > 1 && (key === "tab" || key === "shift+tab")) {
-			const by = key === "tab" ? 1 : fields.length - 1;
-			this.index = (this.index + by) % fields.length;
-			this.follow();
+		if (key === "tab" || key === "shift+tab") {
+			if (!this.moveField(key === "tab" ? 1 : -1)) this.given.flash("there is no other editable field");
 			return;
 		}
 		const field = this.field;
+		if (field.disabled === true) return void this.given.flash(`${field.label} is unavailable`);
 		if (key === "enter") {
 			if (field.multiline) return void this.insert("\n");
 			return void this.save();
@@ -697,19 +759,24 @@ export class Box {
 	}
 	/** The row the editor's own cursor stands on: one inverse cell over the sign under it, or over a blank one at the end. */
 	rowSpans(slice, cursor) {
-		const bar = ["▎", "user"];
-		if (cursor < 0) return [bar, [` ${slice}`, ""]];
+		const bar = ["▎", TOKEN.activity.user];
+		if (cursor < 0) return [bar, [` ${slice}`, TOKEN.text.primary]];
 		const before = slice.slice(0, cursor);
 		const end = cursor < slice.length ? afterAt(slice, cursor) : cursor;
 		const cursorChar = cursor < slice.length ? slice.slice(cursor, end) : " ";
 		const after = cursor < slice.length ? slice.slice(end) : "";
-		return [bar, [` ${before}`, ""], [cursorChar, "inverse"], [after, ""]];
+		return [bar, [` ${before}`, TOKEN.text.primary], [cursorChar, TOKEN.emphasis.inverse], [after, TOKEN.text.primary]];
 	}
 	footer() {
 		if (this.saving) return "Saving… · the draft stays here until Cartographer replies";
 		const field = this.field;
+		if (field.disabled === true) return "This field is unavailable · Esc cancel";
 		const parts = [field.multiline ? "Enter newline · Ctrl-Enter save" : "Enter save"];
-		if (this.given.fields.length > 1) parts.push(`Tab ${this.given.fields[(this.index + 1) % this.given.fields.length].label}`);
+		const editable = this.editable();
+		if (editable.length > 1) {
+			const at = editable.indexOf(this.index);
+			parts.push(`Tab ${this.given.fields[editable[(at + 1) % editable.length]].label}`);
+		}
 		parts.push("Esc cancel");
 		return parts.join("  ·  ");
 	}
@@ -721,12 +788,16 @@ export class Box {
 			const counter = `${used} / ${field.limit}`;
 			const atCap = used >= field.limit;
 			const fields = this.given.fields;
-			const left = [[` ${field.label}`, "user bold"], [` · ${field.id}${fields.length > 1 ? ` · ${this.index + 1} of ${fields.length}` : ""}`, "faint"]];
+			const error = this.error;
+			const state = field.disabled === true ? " · unavailable" : field.required === true ? " · required" : "";
+			const label = `${field.label}${field.required === true ? " *" : ""}`;
+			const labelStyle = field.disabled === true ? TOKEN.interaction.disabled : `${TOKEN.activity.user} ${TOKEN.emphasis.strong}`;
+			const left = [[` ${label}`, labelStyle], [` · ${field.id}${state}${fields.length > 1 ? ` · ${this.index + 1} of ${fields.length}` : ""}`, TOKEN.text.muted]];
 			const leftWidth = left.reduce((sum, [text]) => sum + widthOf(text), 0);
 			const counterWidth = widthOf(counter);
 			const room = Math.max(1, this.inner - leftWidth - counterWidth);
-			const row = (spans) => paint([["   ", ""], ...spans], width, "bgPanel");
-			const lines = [paint([], width, "bgPanel"), row([...left, [" ".repeat(room), ""], [counter, atCap ? "warn" : "faint"]]), paint([], width, "bgPanel")];
+			const row = (spans) => paint([["   ", ""], ...spans], width, TOKEN.surface.overlay);
+			const lines = [paint([], width, TOKEN.surface.overlay), row([...left, [" ".repeat(room), ""], [counter, atCap ? TOKEN.feedback.warning : TOKEN.text.muted]]), paint([], width, TOKEN.surface.overlay)];
 			if (!field.multiline) {
 				// A one-line field: the text rides with the cursor, so it is never cut away from it.
 				const inner = this.inner - 2;
@@ -740,7 +811,7 @@ export class Box {
 					cells += w;
 					end = start + index + segment.length;
 				}
-				lines.push(row(this.rowSpans(this.text.slice(start, end), this.cursor - start)));
+				lines.push(row(this.rowSpans(this.text.slice(start, end), field.disabled === true ? -1 : this.cursor - start)));
 			} else {
 				const rows = rowsOf(this.text, this.inner - 2);
 				const at = this.cursorRow(rows);
@@ -748,17 +819,25 @@ export class Box {
 				this.scrolls[this.index] = scroll;
 				for (let i = scroll; i < scroll + Box.VISIBLE; i++) {
 					const range = rows[i];
-					if (range === undefined) lines.push(row([["▎", "user"], ["", ""]]));
+					if (range === undefined) lines.push(row([["▎", TOKEN.activity.user], ["", TOKEN.text.primary]]));
 					else lines.push(row(this.rowSpans(this.text.slice(range.start, range.end), i === at ? this.cursor - range.start : -1)));
 				}
 			}
-			lines.push(paint([], width, "bgPanel"));
-			lines.push(row([[this.footer(), "faint"]]));
-			lines.push(paint([], width, "bgPanel"));
+			if (error !== undefined) lines.push(row([[` ! ${error}`, TOKEN.feedback.danger]]));
+			else if (typeof field.help === "string" && field.help.trim() !== "") lines.push(row([[` ${field.help.trim()}`, TOKEN.text.muted]]));
+			lines.push(paint([], width, TOKEN.surface.overlay));
+			lines.push(row([[this.footer(), this.saving ? TOKEN.interaction.loading : TOKEN.text.muted]]));
+			lines.push(paint([], width, TOKEN.surface.overlay));
 			return lines;
 		});
 	}
 }
+
+/**
+ * The shared form name for new component call sites. `Box` remains as a compatibility alias while existing feature
+ * forms migrate one at a time; both share focus capture, local validation, disabled fields, and pending-save rules.
+ */
+export class Form extends Box {}
 
 /** What is left on the terminal when carto leaves: the conversation as it stood, without the screen around it. */
 export class Farewell {

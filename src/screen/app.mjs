@@ -45,7 +45,7 @@ import { renderAsyncBoundary } from "./async-boundary.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "./notices.mjs";
 import { createOverlayManager } from "./overlays.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
-import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
+import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { TOKEN } from "./tokens.mjs";
@@ -1081,9 +1081,9 @@ export async function runScreen(session, options, runTerminal) {
 			}
 		}
 	};
-	// ─── The fields the small box edits ───────────────────────────────────────
+	// ─── The shared form fields ───────────────────────────────────────────────
 	// The book views open one of these on e; E keeps the editor on the entry's own JSON. The limits are the books'
-	// own, so the box never holds more than the book would; the counter shows how much of the field is used.
+	// own, so the form never holds more than the book would; the counter shows how much of the field is used.
 	const ROW_KEY = /^(?:entry|item|envelope|move|node):/;
 	const boxWidth = (fields, cols) => {
 		const longest = Math.max(...fields.map((field) => Math.min(field.limit, 80)));
@@ -1149,7 +1149,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
 		if (found.error !== undefined) return flash(found.error);
 		const { id, fields } = found;
-		openModal(({ close }) => new Box({
+		openModal(({ close }) => new Form({
 			title: id,
 			fields,
 			keyOf,
@@ -1230,7 +1230,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (template === undefined) return flash("this view has no add");
 		const id = viewId();
 		const fields = template();
-		openModal(({ close }) => new Box({
+		openModal(({ close }) => new Form({
 			title: `new ${book}`,
 			fields,
 			keyOf,
@@ -1263,7 +1263,7 @@ export async function runScreen(session, options, runTerminal) {
 				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
 			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
 		];
-		openModal(({ close }) => new Box({
+		openModal(({ close }) => new Form({
 			title: `new move under ${parent.id}`,
 			fields,
 			keyOf,
