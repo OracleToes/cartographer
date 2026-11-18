@@ -430,6 +430,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	const { root, brainDir } = fresh(t);
 	let ledgerReads = 0;
 	let planReads = 0;
+	let assessmentReads = 0;
 	let contextReads = 0;
 	mkdirSync(join(brainDir, "reports"), { recursive: true });
 	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
@@ -445,6 +446,10 @@ test("application: workspace queries defer readers and return typed empty, unava
 		now: () => Date.parse(NOW),
 		readers: {
 			loadAtlas: () => ({ atlas: { nodes: [] } }),
+			loadAssessment: () => {
+				assessmentReads++;
+				return { text: "A deferred assessment.", written: Date.parse(NOW) };
+			},
 			loadLedger: () => {
 				ledgerReads++;
 				return { ledger: { items: [] } };
@@ -475,6 +480,21 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.deepEqual(projectedPlan.data.plan, { items: [], moves: [] });
 	assert.equal(projectedPlan.meta.requestId, "plan-query");
 	assert.equal(planReads, 1);
+	const pendingAssessment = queries.assessment({ requestId: "assessment-query" });
+	assert.equal(assessmentReads, 0, "the lightweight assessment reader also stays outside the current UI stack");
+	const projectedAssessment = await pendingAssessment;
+	assert.equal(projectedAssessment.ok, true);
+	if (!projectedAssessment.ok) throw new Error(projectedAssessment.error.message);
+	assert.equal(projectedAssessment.data.assessment.text, "A deferred assessment.");
+	assert.equal(projectedAssessment.meta.requestId, "assessment-query");
+	assert.equal(assessmentReads, 1);
+	const stoppedAssessment = new AbortController();
+	stoppedAssessment.abort();
+	const cancelledAssessment = await queries.assessment({ signal: stoppedAssessment.signal });
+	assert.equal(cancelledAssessment.ok, false);
+	if (cancelledAssessment.ok) throw new Error("an aborted assessment projection must not inspect durable state");
+	assert.equal(cancelledAssessment.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(assessmentReads, 1, "cancellation leaves the deferred assessment reader untouched");
 	const listed = await queries.tree({ requestId: "tree-query" });
 	assert.equal(listed.ok, true);
 	if (!listed.ok) throw new Error(listed.error.message);

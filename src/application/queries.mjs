@@ -21,6 +21,7 @@ import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./resul
 
 export const WORKSPACE_QUERY = Object.freeze({
 	atlas: "workspace.atlas",
+	assessment: "workspace.assessment",
 	ledger: "workspace.ledger",
 	plan: "workspace.plan",
 	requests: "workspace.requests",
@@ -93,7 +94,7 @@ const jsonLines = (file, field, values) => {
 	}
 };
 
-const DEFAULT_READERS = Object.freeze({ loadAtlas, loadLedger, loadPlan, loadContext });
+const DEFAULT_READERS = Object.freeze({ loadAtlas, loadAssessment, loadLedger, loadPlan, loadContext });
 const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommitted });
 const DEFAULT_CONSULT_READERS = Object.freeze({ listConferences });
 const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtlas, sinceTop });
@@ -171,6 +172,8 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
+	/** A lightweight assessment snapshot is separate from Runtime's top/atlas comparison for terminal startup. */
+	const assessment = (options = {}) => read("assessment", "assessment", (dir) => ({ assessment: readers.loadAssessment(dir) }), options);
 	const tree = async (options = {}) => {
 		const ready = await prepare(options);
 		if (ready.result !== undefined) return ready.result;
@@ -622,5 +625,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, report, review, consult, runtime, entry });
+	return Object.freeze({ paths, atlas, assessment, tree, ledger, plan, requests, status, context, report, review, consult, runtime, entry });
 }

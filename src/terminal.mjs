@@ -20,8 +20,7 @@ import { modelContextWindow, POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
-import { loadAssessment } from "./assessment.mjs";
-import { activeMoveOverlays, atlasSummary, attentionSnapshot, attentionSummary, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
+import { atlasSummary, attentionSummary, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
@@ -1996,12 +1995,15 @@ export async function runTerminal(session, options) {
 
 	/** One line on the atlas and the assessment. */
 	const atlasLine = async () => {
-		const { atlas, error } = loadAtlas(options.brainDir);
-		if (atlas === undefined) return line(`! The atlas cannot be read: ${error}. Repair the file; until then the agent cannot use its graph.`);
-		const planProjection = await queries.plan();
-		const overlays = activeMoveOverlays(planProjection.ok ? planProjection.data.plan : undefined);
-		const attention = attentionSummary(attentionSnapshot(options.root, atlas, { active: overlays }));
-		const assessment = loadAssessment(options.brainDir);
+		const atlasProjection = await queries.atlas();
+		if (!atlasProjection.ok) {
+			const detail = atlasProjection.error.detail ?? atlasProjection.error.message;
+			return line(`! The atlas cannot be read: ${detail}. Repair the file; until then the agent cannot use its graph.`);
+		}
+		const assessmentProjection = await queries.assessment();
+		const { atlas, attention: snapshot } = atlasProjection.data;
+		const assessment = assessmentProjection.ok ? assessmentProjection.data.assessment : { text: "" };
+		const attention = attentionSummary(snapshot);
 		line(dim(`atlas: ${atlasSummary(atlas)}${attention === "" ? "" : ` · ${attention}`} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
 	};
 
