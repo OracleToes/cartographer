@@ -1,36 +1,13 @@
 // Fast, self-contained unit checks. No model server, no terminal, no sandbox:
 // temp brain directories and direct calls to the operations. Runs in seconds.
 // Run with: npm test
-import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
-import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
-import { CheckpointError } from "../src/checkpoints.mjs";
-import { WakeError } from "../src/wakes.mjs";
-import { WindowError } from "../src/windows.mjs";
-import { createApplicationEvents } from "../src/application/events.mjs";
-import { createJobManager } from "../src/application/jobs.mjs";
-import { createApplication } from "../src/application/app.mjs";
-import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
-import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
-import { createDeferredReferenceLabels } from "../src/application/references.mjs";
-import { createChatPresentation } from "../src/application/chat.mjs";
-import { createReviewPresentation } from "../src/application/review-presentation.mjs";
-import { createRuntimePresentation } from "../src/application/runtime-presentation.mjs";
-import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
-import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
-import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
-import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
-import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
-import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
-import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
-import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
-import { createWorkspacePresentation } from "../src/application/workspace-presentation.mjs";
+import { contextWindowLimits, POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
@@ -39,11 +16,10 @@ import { archiveRow, dropRow, settleRow, unarchiveRow, applyAdd, addTemplate, ed
 import { ignoredLine, shellTool } from "../src/tools/shell.mjs";
 import { validateToolArguments } from "@earendil-works/pi-ai/utils/validation";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
-import { startStandIn } from "./stand-in.mjs";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
 import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, bindTalkSource, dressMain, KEPT_AS, recordSoftForgetPending, removeTalkSource, reviseTalkSource } from "../src/context.mjs";
-import { approveRequests, approvalWordTargets, approvalWords, isApprovalWords, listRequests } from "../src/requests.mjs";
+import { approveRequests, approvalWords } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { readTool } from "../src/tools/read.mjs";
@@ -52,51 +28,19 @@ import { taskTool } from "../src/tools/task.mjs";
 import { returnTool } from "../src/tools/return.mjs";
 import { stateBlock } from "../src/state.mjs";
 import { noteKey } from "../src/wake.mjs";
-import { describeCall, describeResult } from "../src/application/activity.mjs";
+import { describeCall, describeResult } from "../src/terminal.mjs";
 import { changeTools, changedSurface, writeOne } from "../src/tools/change.mjs";
 import { consultTool } from "../src/tools/consult.mjs";
-import { createConferenceExtension } from "../src/conference-extension.mjs";
-import { ConferenceError, attachChildConference, completeConference, conferenceStatusLine, createConferenceCapture, debateStatus, enumGrammar, loadConference, participantTail, readConferenceSource, recordParticipantActivity, recordParticipantTurn, recordRequestPlan, recordSelectorChoice, recordToolReceipt, renderConference, restrictParticipantPayload, selectorGrammar, selectorMessages, selectorOptions, selectorTail, validateConsultReturn, withConferenceBrain } from "../src/conference.mjs";
-import { chooseNativeGrammar, NativeGrammarError, nativeLiteralGrammar, probeNativeGrammarCapability } from "../src/native-grammar.mjs";
 import { dressRequest, planRequest, withoutAdditions } from "../src/request.mjs";
 import { activeContextProjection, bridgeRequestSources } from "../src/request-sources.mjs";
 import { createEngine } from "../src/engine.mjs";
-import { ModelRouteError, ModelServerUnavailableError, openSession, runFromBrief } from "../src/harness.mjs";
+import { runFromBrief } from "../src/harness.mjs";
 import { TOOLS, TASK_HEADER, TASK_HANDOFF, LOOK_NOTE, CHANGE_NOTE, HANDOFF_IN_TURN, HANDOFF_NOTE, systemPrompt } from "../src/prompt.mjs";
 import { assessmentPath } from "../src/assessment.mjs";
 import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
-import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
-import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
-import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
-import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
-import { createChat as createChatModel } from "../src/screen/chat.mjs";
-import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
-import { createFocusManager } from "../src/screen/focus.mjs";
-import { createKeyHints } from "../src/screen/key-hints.mjs";
-import { createList } from "../src/screen/list.mjs";
-import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
-import { createRouteManager } from "../src/screen/routes.mjs";
-import { createOverlayManager } from "../src/screen/overlays.mjs";
-import { Form } from "../src/screen/parts.mjs";
-import { createProjectionScheduler } from "../src/screen/projections.mjs";
-import { createSelection } from "../src/screen/selection.mjs";
-import { diffView } from "../src/screen/review.mjs";
-import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
-import { renderStatusBar } from "../src/screen/status.mjs";
-import { TOKEN } from "../src/screen/tokens.mjs";
-import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
-import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
-import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
-
-// Chat is a pure screen model; its domain-shaped labels enter through the same application adapter that the screen
-// composition supplies.
-const createChat = (options = {}) => {
-	const { presentation, describeRef, ...rest } = options;
-	return createChatModel({ ...rest, presentation: presentation ?? createChatPresentation({ describeRef }) });
-};
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -106,7 +50,7 @@ const fresh = (t) => {
 	return { root, brainDir };
 };
 const NOW = "2026-11-15T00:00:00.000Z";
-const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
+
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
@@ -114,2485 +58,37 @@ test("prompt: the sleep checklist names the person whose message may be waiting"
 	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
 });
 
-test("C5: the only consult contract is same-model conference, and obsolete thread/config inputs are refused", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const prompt = systemPrompt({ root });
-	assert.equal(Object.hasOwn(TOOLS, "case"), false, "the retired Case tool is absent from the prompt registry");
-	assert.doesNotMatch(prompt, /evidence case|\bcase tool\b/i, "the active system prompt does not advertise a Case product");
-	assert.match(TOOLS.consult, /current resolved model/i);
-	assert.match(TOOLS.consult, /There is no `thread` follow-up/i);
-	const consult = consultTool({ root, brainDir });
-	const rejected = await consult.execute({ question: "Can an old transcript continue?", myPersona: "Audit the migration boundary.", thread: "st1" }, {}, undefined);
-	assert.equal(rejected.isError, true);
-	assert.match(rejected.output[0].text, /thread.*removed by the C5 cutover/i);
-	for (const retired of ["consultModel", "consultMaxTokens", "consultTemperature", "consultTimeoutSeconds"]) {
-		writeFileSync(join(brainDir, "config.json"), JSON.stringify({ [retired]: retired === "consultModel" ? "" : 1 }));
-		assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), new RegExp(`Removed external-consult setting\\(s\\): .*${retired}`));
-	}
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ consultGrammar: "openai" }));
-	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), /Removed native-grammar compatibility setting\(s\): .*consultGrammar/);
-	writeFileSync(join(brainDir, "config.json"), "{}");
-	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model", CARTO_CONSULT_MODEL: "" } }), /CARTO_CONSULT_MODEL was removed/i);
-});
-
-test("native llama.cpp selector probe uses no tools, records raw evidence, and fails closed when grammar is ignored", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const allowedFetch = async (_url, init) => {
-		const request = JSON.parse(init.body);
-		calls.push(request);
-		const output = /"([^"\\]+)"/.exec(request.grammar)?.[1];
-		return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: output }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
-	};
-	const record = await runLlamaCppSelectorProbe({ server: "http://selector.test/v1", modelId: "qwen-test", fetchImpl: allowedFetch, now: () => Date.parse(NOW) });
-	assert.equal(record.passed, true);
-	assert.equal(calls.length, 2, "the forced literal and finite-route checks are separate no-tool requests");
-	for (const request of calls) {
-		assert.equal(request.tools, undefined, "native grammar routing does not mix grammar with tools");
-		assert.equal(request.tool_choice, undefined);
-		assert.match(request.grammar, /^root ::= /);
-		assert.equal(request.chat_template_kwargs.enable_thinking, false);
-	}
-	assert.deepEqual(record.cases.map((entry) => entry.output), ["cartographer", "atlas"]);
-	const explicit = selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.json", at: Date.parse(NOW) });
-	writeSelectorProbeLog(explicit, record);
-	assert.deepEqual(JSON.parse(readFileSync(explicit, "utf8")), record, "the shareable log preserves raw synthetic requests and responses exactly");
-	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "../outside.json" }), /stay inside the project/i);
-	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "/tmp/outside.json" }), /relative to the project/i);
-	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.txt" }), /end in .json/i);
-	assert.throws(() => selectorProbeLogPath({ root, brainDir, path: "evidence/selector-probe.json" }), /already exists/i);
-
-	const ignored = await runLlamaCppSelectorProbe({
-		server: "http://selector.test/v1",
-		modelId: "qwen-test",
-		fetchImpl: async () => new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "outside-the-allowed-selector-set" }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } }),
-		now: () => Date.parse(NOW),
-	});
-	assert.equal(ignored.passed, false, "prompt obedience alone cannot make an ignored grammar look like a valid selector");
-	assert.equal(ignored.cases[0].passed, false);
-	assert.equal(ignored.cases[1].skipped, true, "the multi-choice request is not sent after enforcement has already failed");
-	assert.match(ignored.cases[0].reason, /outside the grammar/i);
-	assert.deepEqual(llamaCppSelectorProbePayload({ modelId: "qwen-test", ids: ["atlas"], instruction: "Choose atlas." }).grammar, 'root ::= "atlas"');
-});
-
-test("C5: stopped legacy data is byte-archived, shelf snapshots become inert, and exports recover", (t) => {
-	const { brainDir } = fresh(t);
-	const storyteller = join(brainDir, "storyteller");
-	const cases = join(brainDir, "cases");
-	mkdirSync(storyteller, { recursive: true });
-	mkdirSync(cases, { recursive: true });
-	const transcript = "<!-- storyteller v1 -->\nlegacy bytes stay exact\n";
-	const stoppedCase = `${JSON.stringify({ id: "c1", status: "stopped", note: "explicitly stopped before C5" }, null, "\t")}\n`;
-	writeFileSync(join(storyteller, "st1.md"), transcript);
-	writeFileSync(join(cases, "c1.json"), stoppedCase);
-	const originalContext = `${JSON.stringify({
-		version: 1,
-		shelf: [{ id: "sh1", ref: { type: "story", id: "st1" }, path: "story:st1" }],
-		front: { shelf: [{ id: "sh1", target: { kind: "story", id: "st1" }, path: "story:st1" }] },
-		tasks: { oldCase: { caseId: "c1", phase: "construct", shelf: [] }, ordinary: { mode: "look", shelf: [] } },
-	}, null, "\t")}\n`;
-	writeFileSync(join(brainDir, "carto-context.json"), originalContext);
-
-	const inventory = inventoryLegacyProducts(brainDir);
-	assert.deepEqual(inventory.active, [], "a stopped Case task is retired, not treated as resumable");
-	const migrated = migrateLegacyProducts(brainDir, { at: Date.UTC(2026, 10, 17) });
-	assert.equal(migrated.migrated, true);
-	assert.equal(existsSync(storyteller), false);
-	assert.equal(existsSync(cases), false);
-	const rawStory = join(brainDir, "legacy", "raw", "storyteller", "st1.md");
-	const rawCase = join(brainDir, "legacy", "raw", "cases", "c1.json");
-	const rawContext = join(brainDir, "legacy", "raw", "context", "carto-context.json");
-	assert.equal(readFileSync(rawStory, "utf8"), transcript);
-	assert.equal(readFileSync(rawCase, "utf8"), stoppedCase);
-	assert.equal(readFileSync(rawContext, "utf8"), originalContext, "the pre-migration context bytes are retained before its pointers are rewritten");
-	const manifest = JSON.parse(readFileSync(join(brainDir, "legacy", "cutover-v1.json"), "utf8"));
-	assert.equal(manifest.state, "completed");
-	assert.match(manifest.storyteller[0].digest, /^[a-f0-9]{64}$/);
-	assert.match(manifest.cases[0].digest, /^[a-f0-9]{64}$/);
-	assert.match(manifest.context.digest, /^[a-f0-9]{64}$/);
-	assert.match(readFileSync(join(brainDir, "legacy", "exports", "storyteller", "st1.md"), "utf8"), /static C5 archive export/);
-	assert.match(readFileSync(join(brainDir, "legacy", "exports", "cases", "c1.md"), "utf8"), /explicitly stopped before C5/);
-	assert.match(readFileSync(join(brainDir, "legacy", "exports", "context", "carto-context.json.md"), "utf8"), /oldCase/);
-	const context = JSON.parse(readFileSync(join(brainDir, "carto-context.json"), "utf8"));
-	assert.equal(context.tasks.oldCase, undefined, "retired Case task metadata is removed from live context");
-	assert.ok(context.tasks.ordinary, "ordinary task state is retained");
-	for (const item of [context.shelf[0], context.front.shelf[0]]) {
-		assert.equal(item.ref, undefined);
-		assert.equal(item.target, undefined);
-		assert.equal(item.legacyArchive.kind, "storyteller");
-		assert.match(item.snapshot, /immutable C5 migration snapshot/);
-	}
-	const exportFile = join(brainDir, "legacy", "exports", "storyteller", "st1.md");
-	rmSync(exportFile);
-	assert.equal(migrateLegacyProducts(brainDir).migrated, true, "a missing static export is recreated from retained exact bytes");
-	assert.equal(existsSync(exportFile), true);
-	assert.equal(migrateLegacyProducts(brainDir).migrated, false, "a completed intact archive is a no-op");
-});
-
-test("C5: active, unreadable, or malformed legacy Cases block cutover without an override", (t) => {
-	const { brainDir } = fresh(t);
-	const cases = join(brainDir, "cases");
-	mkdirSync(cases, { recursive: true });
-	writeFileSync(join(cases, "c7.json"), JSON.stringify({ id: "c7", status: "running" }));
-	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ tasks: { phase: { caseId: "c7", phase: "construct" } } }));
-	let inventory = inventoryLegacyProducts(brainDir);
-	assert.deepEqual(inventory.active.map((entry) => entry.id), ["c7"], "the record and task metadata produce one blocker, not duplicates");
-	assert.throws(() => migrateLegacyProducts(brainDir), (error) => error instanceof LegacyCutoverBlockedError && /explicitly stop each Case/i.test(error.message));
-	assert.equal(existsSync(join(cases, "c7.json")), true, "blocked cutover leaves the source record in place");
-
-	rmSync(join(cases, "c7.json"));
-	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ tasks: {} }));
-	writeFileSync(join(cases, "c8.json"), "{ not valid JSON");
-	inventory = inventoryLegacyProducts(brainDir);
-	assert.deepEqual(inventory.active.map((entry) => [entry.id, entry.status]), [["c8", "unreadable"]], "unreadable bytes are treated as potentially resumable");
-	assert.throws(() => migrateLegacyProducts(brainDir), LegacyCutoverBlockedError);
-
-	writeFileSync(join(cases, "c8.json"), JSON.stringify({ id: "c99", status: "stopped" }));
-	inventory = inventoryLegacyProducts(brainDir);
-	assert.deepEqual(inventory.active.map((entry) => [entry.id, entry.status]), [["c8", "malformed"]], "a mismatched stopped envelope cannot evade the blocker");
-	assert.throws(() => migrateLegacyProducts(brainDir), LegacyCutoverBlockedError);
-	assert.equal(existsSync(join(cases, "c8.json")), true, "malformed source bytes remain untouched while cutover is blocked");
-});
-
 test("harness: a cached inspect brief restores its look contract", () => {
 	assert.deepEqual(runFromBrief({ mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2 }), {
 		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
 	});
 	assert.deepEqual(runFromBrief({ mode: "change", network: false, move: "m3", revision: 4 }), { mode: "change", move: "m3", revision: 4 }, "only an explicit true carries network");
-	assert.deepEqual(runFromBrief({ mode: "look", turns: 3, caseId: "c1", phase: "falsify" }), { mode: "look", turns: 3 }, "retired Case metadata cannot revive a legacy phase route");
 	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
 });
 
-test("context window: a reported capacity is the whole active context without a reply reserve", () => {
-	assert.deepEqual(contextWindowLimits(100_000, 75_000), {
+test("context window: a reported capacity reserves configured reply room without raising the setting cap", () => {
+	assert.deepEqual(contextWindowLimits(100_000, 32_768, 75_000), {
 		configuredContextWindow: 100_000,
-		usableContextWindow: 75_000,
+		usableContextWindow: 42_232,
 		serverContextWindow: 75_000,
+		replyReserve: 32_768,
 	});
-	assert.deepEqual(contextWindowLimits(40_000, 75_000), {
+	assert.deepEqual(contextWindowLimits(40_000, 32_768, 75_000), {
 		configuredContextWindow: 40_000,
 		usableContextWindow: 40_000,
 		serverContextWindow: 75_000,
+		replyReserve: 32_768,
 	}, "metadata never raises the configured cap");
-	assert.deepEqual(contextWindowLimits(100_000, 8_192), {
+	assert.deepEqual(contextWindowLimits(100_000, 32_768, 8_192), {
 		configuredContextWindow: 100_000,
-		usableContextWindow: 8_192,
+		usableContextWindow: 4_096,
 		serverContextWindow: 8_192,
-	}, "a small server exposes its full advertised window to the collapse engine");
-	assert.deepEqual(contextWindowLimits(100_000, undefined), {
+		replyReserve: 4_096,
+	}, "a small server keeps the existing half-context split instead of losing all input room");
+	assert.deepEqual(contextWindowLimits(100_000, 32_768, undefined), {
 		configuredContextWindow: 100_000,
 		usableContextWindow: 100_000,
 	}, "without server metadata, the configured cap remains in force");
-});
-
-test("application: events and jobs publish isolated, typed asynchronous lifecycle facts", async () => {
-	let clock = Date.parse(NOW);
-	const events = createApplicationEvents({ now: () => clock, nextId: (() => { let id = 0; return () => ++id; })() });
-	const seen = [];
-	const off = events.subscribe((event) => seen.push(event));
-	events.subscribe(() => { throw new Error("a stale presentation listener"); });
-	const published = events.publish("projection.invalidated", { scope: "workspace" });
-	assert.equal(published.type, "projection.invalidated");
-	assert.equal(published.at, NOW);
-	assert.deepEqual(published.payload, { scope: "workspace" });
-	assert.deepEqual(seen.map((event) => event.type), ["projection.invalidated"], "one listener cannot stop another from seeing a durable application fact");
-
-	const jobs = createJobManager({ events, now: () => clock, nextId: (() => { let id = 0; return () => `test-${++id}`; })() });
-	const succeeded = jobs.start({
-		kind: "projection.refresh",
-		meta: { requestId: "refresh-1" },
-		run: async ({ reportProgress }) => {
-			reportProgress({ current: 1, total: 2, message: "Reading the workspace." });
-			clock += 1_000;
-			return { rows: 2 };
-		},
-	});
-	assert.equal(succeeded.snapshot().state, "queued", "job work is deferred out of the caller's render/key stack");
-	const completed = await succeeded.promise;
-	assert.equal(completed.ok, true);
-	if (!completed.ok) throw new Error(completed.error.message);
-	assert.deepEqual(completed.data, { rows: 2 });
-	assert.equal(completed.meta.jobId, "test-1");
-	assert.equal(jobs.get("test-1")?.state, "succeeded");
-	assert.deepEqual(jobs.get("test-1")?.progress, { current: 1, total: 2, message: "Reading the workspace." });
-	assert.ok(seen.some((event) => event.type === "job.progress"));
-	assert.ok(seen.some((event) => event.type === "job.succeeded"));
-
-	let began;
-	const beganPromise = new Promise((resolve) => { began = resolve; });
-	const cancelled = jobs.start({
-		kind: "editor.wait",
-		run: ({ signal }) => new Promise((resolve) => {
-			began();
-			signal.addEventListener("abort", () => resolve("too late"), { once: true });
-		}),
-	});
-	await beganPromise;
-	assert.equal(cancelled.cancel(), true);
-	const stopped = await cancelled.promise;
-	assert.equal(stopped.ok, false);
-	if (stopped.ok) throw new Error("a cancelled job must be typed as cancelled");
-	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(jobs.get(cancelled.id)?.state, "cancelled");
-	assert.equal(cancelled.cancel(), false, "settled jobs cannot be cancelled again");
-	off();
-});
-
-test("screen: deferred projection scheduling keeps cached data through stale, cancelled, failed, and invalidated reads", async () => {
-	let clock = 0;
-	const settled = [];
-	const scheduler = createProjectionScheduler({
-		now: () => ++clock,
-		onSettled: (id, state) => settled.push({ id, state: { ...state } }),
-	});
-	const deferred = () => {
-		let resolve;
-		let reject;
-		const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-		return { promise, resolve, reject };
-	};
-	const flush = () => new Promise((resolve) => setImmediate(resolve));
-
-	const first = deferred();
-	let firstSignal;
-	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { firstSignal = signal; return first.promise; }), true);
-	assert.equal(scheduler.get("carto.atlas").loading, true, "the cache enters loading before its deferred request starts");
-	assert.equal(scheduler.refresh("carto.atlas", () => Promise.resolve({ ok: true, data: { impossible: true } })), false, "an ordinary refresh never races an active request");
-	await flush();
-	const second = deferred();
-	let secondSignal;
-	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { secondSignal = signal; return second.promise; }, { force: true }), true);
-	await flush();
-	assert.equal(firstSignal.aborted, true, "a forced refresh cancels the prior reader");
-	second.resolve({ ok: true, data: { version: "fresh" } });
-	await flush();
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "fresh" });
-	first.resolve({ ok: true, data: { version: "stale" } });
-	await flush();
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "fresh" }, "a stale settlement cannot overwrite a newer projection");
-	assert.equal(secondSignal.aborted, false);
-
-	const failed = deferred();
-	assert.equal(scheduler.refresh("carto.atlas", () => failed.promise), true);
-	await flush();
-	failed.resolve({ ok: false, error: { kind: "unavailable", message: "The atlas file is malformed." } });
-	await flush();
-	assert.equal(scheduler.get("carto.atlas").loading, false);
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "fresh" }, "a failed refresh leaves cached data visible");
-	assert.equal(scheduler.get("carto.atlas").error.message, "The atlas file is malformed.");
-	const retry = deferred();
-	assert.equal(scheduler.refresh("carto.atlas", () => retry.promise), true);
-	assert.equal(scheduler.get("carto.atlas").error, undefined, "a retry clears an old cached error while it is loading");
-	retry.resolve({ ok: true, data: { version: "retried" } });
-	await flush();
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
-
-	const typedCancellation = deferred();
-	assert.equal(scheduler.refresh("carto.atlas", () => typedCancellation.promise), true);
-	await flush();
-	typedCancellation.resolve({ ok: false, error: { kind: "cancelled", message: "No longer visible." } });
-	await flush();
-	assert.equal(scheduler.get("carto.atlas").error, undefined, "a typed cancellation is not rendered as an error");
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
-
-	const stopped = deferred();
-	let stoppedSignal;
-	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { stoppedSignal = signal; return stopped.promise; }), true);
-	await flush();
-	assert.equal(scheduler.cancel("carto.atlas"), true);
-	assert.equal(stoppedSignal.aborted, true);
-	stopped.resolve({ ok: true, data: { version: "cancelled-too-late" } });
-	await flush();
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" }, "an explicitly cancelled request also settles stale");
-
-	const invalidated = deferred();
-	let invalidatedSignal;
-	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { invalidatedSignal = signal; return invalidated.promise; }), true);
-	await flush();
-	scheduler.invalidate();
-	assert.equal(invalidatedSignal.aborted, true, "an action invalidation cancels in-flight durable reads");
-	assert.equal(scheduler.get("carto.atlas").loading, false);
-	invalidated.resolve({ ok: true, data: { version: "invalidated-too-late" } });
-	await flush();
-	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
-	assert.equal(settled.length, 4, "only current success, failure, retry, and typed cancellation notify a render; stale settlements do not");
-});
-
-test("screen: the shared async boundary keeps loading, stale, error, issue, and empty data states outside feature renderers", () => {
-	let calls = 0;
-	const render = (data) => {
-		calls++;
-		return { header: [[[`Rows · ${data.rows.length}`, TOKEN.text.primary]]], items: data.rows.map((row) => ({ key: row, head: [[row, TOKEN.text.primary]] })) };
-	};
-
-	const loading = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { loading: true }, render });
-	assert.equal(calls, 0, "a first load does not call a feature renderer with no durable data");
-	assert.deepEqual(loading.header, [[["Atlas is loading…", TOKEN.text.secondary]]]);
-	assert.deepEqual(loading.items[0].head, [["  Reading the current durable view without blocking input…", TOKEN.text.muted]]);
-
-	const failed = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { error: { message: "The atlas file is malformed." } }, render });
-	assert.equal(calls, 0, "a cold failure stays in the boundary rather than asking a renderer to invent data");
-	assert.deepEqual(failed.header, [[["! The atlas file is malformed.", TOKEN.feedback.warning]]]);
-	assert.deepEqual(failed.items[0].head, [["  Atlas could not be loaded. Press r to retry.", TOKEN.text.secondary]]);
-
-	const empty = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data: { rows: [] } }, render });
-	assert.equal(calls, 1, "a successful empty collection belongs to its feature renderer");
-	assert.deepEqual(empty.header, [[["Rows · 0", TOKEN.text.primary]]]);
-
-	const stale = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data: { rows: ["cached"] }, loading: true }, render });
-	assert.equal(calls, 2, "cached data remains renderable while a replacement is in flight");
-	assert.deepEqual(stale.header, [
-		[["↻ Refreshing atlas · showing cached data", TOKEN.text.secondary]],
-		[["Rows · 1", TOKEN.text.primary]],
-	]);
-	assert.equal(stale.items[0].key, "cached");
-
-	const cachedFailure = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data: { rows: ["cached"], issues: [{ message: "One source is unavailable." }] }, error: { message: "Refresh timed out." } }, render });
-	assert.equal(calls, 3, "a cached failure also keeps its known rows visible");
-	assert.deepEqual(cachedFailure.header.slice(0, 2), [
-		[["! Refresh timed out. · showing cached data", TOKEN.feedback.warning]],
-		[["! One source is unavailable.", TOKEN.feedback.warning]],
-	]);
-	assert.equal(cachedFailure.items[0].key, "cached");
-	assert.throws(() => renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: {}, render: undefined }), /needs a data renderer/);
-});
-
-test("screen: Atlas renders settled workspace projections through its application presentation adapter", () => {
-	const presentation = createWorkspacePresentation().atlas;
-	const data = { file: "/project/.brain/carto-atlas.json", atlas: { nodes: [] } };
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return atlasView({ ...projection, presentation });
-	};
-	assert.throws(() => atlasView({ file: data.file, atlas: data.atlas }), /presentation adapter/, "Atlas cannot fall back to a direct domain formatter");
-	const loading = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Atlas is not asked to invent data while its projection is loading");
-	assert.match(loading.header[0][0][0], /Atlas is loading/, "the shared boundary names Atlas loading");
-	const failed = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { error: { message: "The graph is unavailable." } }, render });
-	assert.equal(rendered, 0, "an Atlas query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Atlas could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Atlas");
-	assert.match(empty.items.at(-1).head[0][0], /No nodes yet/, "Atlas owns its successful empty state");
-	const stale = renderAsyncBoundary({ id: "carto.atlas", name: "Atlas", projection: { data, loading: true }, render });
-	assert.equal(rendered, 2, "cached Atlas data remains renderable while its replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above the Atlas empty state");
-});
-
-test("screen: Ledger renders settled workspace projections through its application presentation adapter", () => {
-	const presentation = createWorkspacePresentation().ledger;
-	const emptyData = { file: "/project/.brain/carto-ledger.json", ledger: { items: [] } };
-	const data = {
-		file: emptyData.file,
-		ledger: { items: [{ id: "g1", kind: "goal", text: "Ship the narrow change.", doneWhen: "The focused check passes.", status: "open", added: 0 }] },
-		lines: { g1: 4 },
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return ledgerView({ ...projection, presentation });
-	};
-	assert.throws(() => ledgerView({ file: data.file, ledger: data.ledger }), /presentation adapter/, "Ledger cannot fall back to direct domain classification or formatting");
-	const loading = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Ledger is not asked to invent data while its projection is loading");
-	assert.match(loading.header[0][0][0], /Ledger is loading/, "the shared boundary names Ledger loading");
-	const failed = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { error: { message: "The ledger is unavailable." } }, render });
-	assert.equal(rendered, 0, "a Ledger query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Ledger could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { data: emptyData }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Ledger");
-	assert.match(empty.items[0].head[0][0], /ledger is empty/i, "Ledger owns its successful empty state");
-	const settled = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled Ledger projection uses its adapter for grouped rows");
-	assert.equal(settled.items.find((item) => item.key === "entry:g1")?.target?.file, data.file);
-	assert.match(settled.items.find((item) => item.key === "entry:g1")?.body ?? "", /done when: The focused check passes/);
-	const stale = renderAsyncBoundary({ id: "carto.ledger", name: "Ledger", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached Ledger data remains renderable while its replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Ledger rows");
-});
-
-test("screen: Plan renders settled workspace projections through its application presentation adapter", () => {
-	const presentation = createWorkspacePresentation().plan;
-	const emptyData = { file: "/project/.brain/carto-plan.json", plan: { items: [], moves: [] } };
-	const data = {
-		file: emptyData.file,
-		plan: { items: [{ id: "p1", mode: "look", text: "Inspect the entry point.", doneWhen: "The entry point is identified.", status: "open", revision: 1 }], moves: [] },
-		lines: { p1: 4 },
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return planView({ ...projection, presentation });
-	};
-	assert.throws(() => planView({ file: data.file, plan: data.plan }), /presentation adapter/, "Plan cannot fall back to direct domain classification or formatting");
-	const loading = renderAsyncBoundary({ id: "carto.plan", name: "Plan", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Plan is not asked to invent data while its projection is loading");
-	assert.match(loading.header[0][0][0], /Plan is loading/, "the shared boundary names Plan loading");
-	const failed = renderAsyncBoundary({ id: "carto.plan", name: "Plan", projection: { error: { message: "The plan is unavailable." } }, render });
-	assert.equal(rendered, 0, "a Plan query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Plan could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "carto.plan", name: "Plan", projection: { data: emptyData }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Plan");
-	assert.match(empty.items[0].head[0][0], /There is no plan/, "Plan owns its successful empty state");
-	const settled = renderAsyncBoundary({ id: "carto.plan", name: "Plan", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled Plan projection uses its adapter for rows and authorization state");
-	assert.equal(settled.items.find((item) => item.key === "envelope:p1")?.target?.file, data.file);
-	assert.match(settled.items.find((item) => item.key === "envelope:p1")?.body ?? "", /envelope complete when: The entry point is identified/);
-	const stale = renderAsyncBoundary({ id: "carto.plan", name: "Plan", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached Plan data remains renderable while its replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Plan rows");
-});
-
-test("screen: Requests render settled workspace projections through its application presentation adapter", () => {
-	const presentation = createWorkspacePresentation().requests;
-	const emptyData = { items: [] };
-	const data = {
-		items: [{ id: "q1", kind: "question", text: "Which release should carry the change?", file: "/project/.brain/carto-ledger.json", line: 4 }],
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return requestsView({ requests: projection.items, presentation });
-	};
-	assert.throws(() => requestsView({ requests: data.items }), /presentation adapter/, "Requests cannot fall back to direct domain classification or formatting");
-	const loading = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Requests are not asked to invent data while their projection is loading");
-	assert.match(loading.header[0][0][0], /Requests is loading/, "the shared boundary names Requests loading");
-	const failed = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { error: { message: "Requests are unavailable." } }, render });
-	assert.equal(rendered, 0, "a Requests query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Requests could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { data: emptyData }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Requests");
-	assert.match(empty.items[0].head[0][0], /Nothing waits for you/, "Requests own their successful empty state");
-	const settled = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled request projection uses its adapter for a question row");
-	assert.equal(settled.items.find((item) => item.key === "request:q1")?.target?.file, data.items[0].file);
-	assert.match(settled.items.find((item) => item.key === "request:q1")?.body ?? "", /answer with \/answer q1 words/);
-	const stale = renderAsyncBoundary({ id: "carto.requests", name: "Requests", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached Requests remain renderable while their replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above request rows");
-});
-
-test("screen: Project tree renders settled workspace projections through its application presentation adapter", () => {
-	const presentation = createWorkspacePresentation().tree;
-	const emptyData = { root: "/project", files: [], marks: {} };
-	const data = {
-		root: emptyData.root,
-		files: [{ path: "main.mjs", bytes: 1_536 }],
-		marks: { "main.mjs": ["entry"] },
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return treeView({ tree: projection, presentation }, () => false);
-	};
-	assert.throws(() => treeView({ tree: data }), /presentation adapter/, "Project tree cannot fall back to direct path or size formatting");
-	const loading = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Project tree is not asked to invent data while its projection is loading");
-	assert.match(loading.header[0][0][0], /Project tree is loading/, "the shared boundary names Project tree loading");
-	const failed = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { error: { message: "The project tree is unavailable." } }, render });
-	assert.equal(rendered, 0, "a Project tree query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Project tree could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data: emptyData }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Project tree");
-	assert.match(empty.items[0].head[0][0], /project folder is empty/i, "Project tree owns its successful empty state");
-	const settled = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled Project tree projection uses its adapter for targets and sizes");
-	assert.equal(settled.items.find((item) => item.key === "file:main.mjs")?.target?.file, "/project/main.mjs");
-	assert.match(settled.items.find((item) => item.key === "file:main.mjs")?.head[1][0] ?? "", /1\.5 KB/);
-	const stale = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached Project tree data remains renderable while its replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Project tree rows");
-});
-
-test("screen: Current shared brain renders settled workspace projections through its application presentation adapter", () => {
-	const presentation = createWorkspacePresentation().hands;
-	const emptyData = { store: { dropped: [] }, shelf: [], standing: [], archived: [] };
-	const data = {
-		store: { dropped: [] },
-		shelf: [{ item: { id: "sh1", path: "src/main.mjs" }, text: "The shelf snapshot.", file: "/project/src/main.mjs" }],
-		standing: [{ record: { id: "t1", at: 0, mode: "look", brief: "Inspect the entry point.", outcome: "It is identified." }, text: "The report body." }],
-		archived: [],
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return handsView({ context: projection, presentation });
-	};
-	assert.throws(() => handsView({ context: data }), /presentation adapter/, "Current shared brain cannot fall back to direct context formatting");
-	const loading = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Current shared brain is not asked to invent data while its projection is loading");
-	assert.match(loading.header[0][0][0], /Current shared brain is loading/, "the shared boundary names Current shared brain loading");
-	const failed = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { error: { message: "The shared brain is unavailable." } }, render });
-	assert.equal(rendered, 0, "a Current shared brain query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Current shared brain could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data: emptyData }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Current shared brain");
-	assert.ok(empty.items.some((item) => item.head?.[0]?.[0].includes("Nothing is on the shelf")), "Current shared brain owns its successful empty shelf state");
-	const settled = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled shared-brain projection uses its adapter for shelf and report rows");
-	assert.equal(settled.items.find((item) => item.key === "shelf:src/main.mjs")?.path, "/project/src/main.mjs");
-	assert.equal(settled.items.find((item) => item.key === "report:t1")?.body, "The report body.");
-	const stale = renderAsyncBoundary({ id: "carto.hands", name: "Current shared brain", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached Current shared brain data remains renderable while its replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Current shared brain rows");
-});
-
-test("screen: Review renders settled checkpoint projections through its application presentation adapter", () => {
-	const presentation = createReviewPresentation();
-	const emptyData = { root: "/project", last: undefined };
-	const data = {
-		root: emptyData.root,
-		last: {
-			item: "m1",
-			text: "Write the focused change.",
-			finished: true,
-			changes: [{ path: "src/main.mjs", status: "changed", added: 1, removed: 0 }],
-			patch: "diff --git a/src/main.mjs b/src/main.mjs\nindex 1111111..2222222 100644\n--- a/src/main.mjs\n+++ b/src/main.mjs\n@@ -1 +1 @@\n-old\n+new\n",
-		},
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return diffView({ review: projection, presentation }, "last");
-	};
-	assert.throws(() => diffView({ review: data }, "last"), /presentation adapter/, "Review cannot fall back to direct checkpoint formatting or path construction");
-	const loading = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Review is not asked to invent data while its projection is loading");
-	assert.match(loading.header[0][0][0], /Last checkpoint change is loading/, "the shared boundary names Review loading");
-	const failed = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { error: { message: "The checkpoint is unavailable." } }, render });
-	assert.equal(rendered, 0, "a Review query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Last checkpoint change could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data: emptyData }, render });
-	assert.equal(rendered, 1, "a settled empty projection reaches Review");
-	assert.match(empty.items[0].head[0][0], /No change task has run/, "Review owns its successful empty state");
-	const settled = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled Review projection uses its adapter for summaries and editor targets");
-	assert.equal(settled.items.find((item) => item.key === "change:src/main.mjs")?.target?.file, "/project/src/main.mjs");
-	assert.match(settled.items.find((item) => item.key === "change:src/main.mjs")?.body ?? "", /\+new/);
-	const stale = renderAsyncBoundary({ id: "diff.last", name: "Last checkpoint change", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached Review data remains renderable while its replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Review rows");
-});
-
-test("screen: Runtime shell views render settled projections through their application presentation adapter", () => {
-	const presentation = createRuntimePresentation().shells;
-	const window = { name: "main", state: POLICY.enums.windowStates.busy, command: "npm test", running: 1_200, cwd: ".", network: false, sandbox: true, asks: false, tail: ["TAP version 13"] };
-	const listData = { windows: [window] };
-	let rendered = 0;
-	const renderList = (projection) => {
-		rendered++;
-		return shellsView({ ...projection, presentation });
-	};
-	assert.throws(() => shellsView(listData), /presentation adapter/, "Shell windows cannot fall back to direct window-manager formatting");
-	const loading = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { loading: true }, render: renderList });
-	assert.equal(rendered, 0, "Shell windows are not asked to invent data while their projection is loading");
-	assert.match(loading.header[0][0][0], /Shell windows is loading/, "the shared boundary names Runtime shell loading");
-	const failed = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { error: { message: "The shell manager is unavailable." } }, render: renderList });
-	assert.equal(rendered, 0, "a Shell windows query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Shell windows could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { data: { windows: [] } }, render: renderList });
-	assert.equal(rendered, 1, "a settled empty shell projection reaches Runtime");
-	assert.match(empty.items[0].head[0][0], /No shell window is open/, "Runtime owns its successful empty shell state");
-	const settled = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { data: listData }, render: renderList });
-	assert.equal(rendered, 2, "a settled shell projection uses its adapter for manager-state vocabulary");
-	assert.match(settled.items[0].head.map(([text]) => text).join(""), /busy/);
-	const stale = renderAsyncBoundary({ id: "shells.list", name: "Shell windows", projection: { data: listData, loading: true }, render: renderList });
-	assert.equal(rendered, 3, "cached Shell windows remain renderable while their replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above shell rows");
-
-	let outputRendered = 0;
-	const renderOutput = (projection) => {
-		outputRendered++;
-		return shellsOutView({ ...projection, presentation });
-	};
-	assert.throws(() => shellsOutView({ window, lines: window.tail }), /presentation adapter/, "Shell output cannot fall back to direct window-manager formatting");
-	const outputLoading = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { loading: true }, render: renderOutput });
-	assert.equal(outputRendered, 0, "Shell output is not asked to invent data while its projection is loading");
-	assert.match(outputLoading.header[0][0][0], /Shell output is loading/);
-	const outputFailed = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { error: { message: "The selected shell is unavailable." } }, render: renderOutput });
-	assert.equal(outputRendered, 0, "a Shell output query error remains outside the feature renderer");
-	assert.match(outputFailed.items[0].head[0][0], /Shell output could not be loaded/);
-	const outputEmpty = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { lines: [] } }, render: renderOutput });
-	assert.equal(outputRendered, 1, "a settled empty shell-output projection reaches Runtime");
-	assert.match(outputEmpty.items[0].head[0][0], /No shell window is open/);
-	const outputSettled = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { window, lines: window.tail } }, render: renderOutput });
-	assert.equal(outputRendered, 2, "a settled shell-output projection uses its adapter for manager-state vocabulary");
-	assert.match(outputSettled.items[0].head.map(([text]) => text).join("\n"), /TAP version 13/);
-	const outputStale = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { window, lines: window.tail }, loading: true }, render: renderOutput });
-	assert.equal(outputRendered, 3, "cached Shell output remains renderable while its replacement is in flight");
-	assert.match(outputStale.header[0][0][0], /showing cached data/);
-});
-
-test("screen: Runtime wakes render settled projections through their application presentation adapter", () => {
-	const presentation = createRuntimePresentation().wakes;
-	const wake = {
-		id: "w1",
-		kind: POLICY.enums.wakeKinds.time,
-		every: 300,
-		times: 2,
-		left: 2,
-		note: "Check the handoff.",
-		fired: 0,
-		due: Date.parse(NOW) + 300_000,
-	};
-	const data = { wakes: [wake], lines: ["w1 · every 5 m · Check the handoff. · window source is not open now"] };
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return wakesView({ ...projection, presentation });
-	};
-	assert.throws(() => wakesView(data), /presentation adapter/, "Wake schedules cannot fall back to direct scheduler formatting");
-	const loading = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Wake schedules are not asked to invent data while their projection is loading");
-	assert.match(loading.header[0][0][0], /Wake schedule is loading/, "the shared boundary names Runtime wake loading");
-	const failed = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { error: { message: "The wake scheduler is unavailable." } }, render });
-	assert.equal(rendered, 0, "a wake query error remains outside the feature renderer");
-	assert.match(failed.items[0].head[0][0], /Wake schedule could not be loaded/, "the error state retains its retry affordance");
-	const empty = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { data: { wakes: [] } }, render });
-	assert.equal(rendered, 1, "a settled empty wake projection reaches Runtime");
-	assert.match(JSON.stringify(empty), /The agent has set no wake/, "Runtime owns its successful empty wake state");
-	const settled = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { data }, render });
-	assert.equal(rendered, 2, "a settled wake projection uses the application adapter for lifecycle vocabulary");
-	assert.match(JSON.stringify(settled), /every 5 m/, "the adapter keeps the established wake cadence wording");
-	assert.match(JSON.stringify(settled), /Check the handoff/, "the settled wake keeps its own note visible");
-	assert.match(JSON.stringify(settled), /window source is not open now/, "the renderer preserves the scheduler's captured window-state wording rather than probing a live manager");
-	assert.equal(settled.items.every((item) => item.editKind === undefined), true, "wake rows are not directly editable; removal crosses the confirmed Runtime action");
-	const stale = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached wakes remain renderable while their replacement is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above wake rows");
-});
-
-test("screen: Runtime model routes render settled transport projections and action targets through their application presentation adapter", () => {
-	const presentation = createRuntimePresentation().modelRoutes;
-	const data = {
-		currentId: "model-a",
-		ready: true,
-		models: [{ id: "model-a", contextWindow: 4_096 }, { id: "model-b", contextWindow: 8_192 }],
-		limits: { usableContextWindow: 4_000, serverContextWindow: 4_096, configuredContextWindow: 16_000 },
-	};
-	let rendered = 0;
-	const render = (projection) => {
-		rendered++;
-		return modelRoutesView({ routes: projection, presentation });
-	};
-	assert.throws(() => modelRoutesView({ routes: data }), /presentation adapter/, "Model routes cannot fall back to direct provider-route formatting");
-	const loading = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { loading: true }, render });
-	assert.equal(rendered, 0, "Model routes are not asked to invent connection data while their projection is loading");
-	assert.match(loading.header[0][0][0], /Model routes is loading/);
-	const failed = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { error: { message: "The model server is unavailable." } }, render });
-	assert.equal(rendered, 0, "a route-discovery error remains outside the Model renderer");
-	assert.match(failed.items[0].head[0][0], /Model routes could not be loaded/);
-	const empty = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { data: { models: [], ready: false } }, render });
-	assert.equal(rendered, 1, "a successful empty model-route projection reaches Runtime");
-	assert.match(JSON.stringify(empty), /No model routes are known yet/);
-	const settled = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { data }, render });
-	assert.equal(rendered, 2, "Model routes render their settled transport snapshot through the adapter");
-	assert.match(JSON.stringify(settled), /native GBNF validation passed/);
-	assert.equal(settled.items.find((item) => item.key === "model:model-a")?.target?.active, true, "the active row carries only its settled action target");
-	assert.deepEqual(settled.items.find((item) => item.key === "model:model-b")?.target, { modelId: "model-b", contextWindow: 8_192, active: false, ready: true }, "a non-active row supplies the typed select target without a model-manager reference");
-	const stale = renderAsyncBoundary({ id: "context.routes", name: "Model routes", projection: { data, loading: true }, render });
-	assert.equal(rendered, 3, "cached model routes remain renderable while a deliberate retry is in flight");
-	assert.match(stale.header[0][0][0], /showing cached data/);
-});
-
-test("screen: Runtime sent, audit, preview, and accounting views render settled projections through their application presentation adapter", () => {
-	const presentation = createRuntimePresentation();
-	const sent = {
-		task: false,
-		requestId: "main:1",
-		payload: { messages: [{ role: "system", content: "You are Cartographer." }], tools: [] },
-		results: new Map(),
-		at: Date.parse(NOW),
-		count: 1,
-		collapsedSince: false,
-	};
-	const accounting = { messages: [], sizes: { fixed: 120, top: 24, work: 8, frees: 4, state: 12, full: 900 }, contextWindow: 1_000 };
-	const cases = [
-		{
-			id: "context.window",
-			name: "Latest sent provider request",
-			withoutPresentation: () => contextView({ sent, windowSize: 1_000, cols: 80 }),
-			render: (data) => contextView({ sent: data.sent, windowSize: 1_000, cols: 80, presentation: presentation.sent }),
-			empty: { sent: undefined },
-			data: { sent },
-			emptyText: "Nothing has been sent to a provider",
-			settledText: "Sent provider request",
-		},
-		{
-			id: "context.raw",
-			name: "Raw provider payload",
-			withoutPresentation: () => rawPayloadView({ sent }),
-			render: (data) => rawPayloadView({ sent: data.sent, presentation: presentation.sent }),
-			empty: { sent: undefined },
-			data: { sent: { ...sent, payloadJson: "{}" } },
-			emptyText: "Nothing has been sent to a provider",
-			settledText: "Raw provider payload",
-		},
-		{
-			id: "context.preview",
-			name: "Next request preview",
-			withoutPresentation: () => previewView({ preview: { plan: { parts: [] } } }),
-			render: (data) => previewView({ preview: data.preview, presentation: presentation.preview }),
-			empty: { preview: {} },
-			data: { preview: { at: Date.parse(NOW), plan: { parts: [] } } },
-			emptyText: "No main-agent request can be planned now",
-			settledText: "Next request preview",
-		},
-		{
-			id: "context.parts",
-			name: "Current active-context accounting",
-			withoutPresentation: () => accountingProjectionView({ accounting, config: {} }),
-			render: (data) => accountingProjectionView({ accounting: data, config: {}, presentation: presentation.accounting }),
-			empty: { messages: [], sizes: {}, contextWindow: 1_000 },
-			data: accounting,
-			emptyText: "not measured yet",
-			settledText: "fixed",
-		},
-	];
-	for (const current of cases) {
-		let rendered = 0;
-		const render = (data) => {
-			rendered++;
-			return current.render(data);
-		};
-		assert.throws(current.withoutPresentation, /presentation adapter/, `${current.name} cannot fall back to direct Runtime formatting`);
-		const loading = renderAsyncBoundary({ id: current.id, name: current.name, projection: { loading: true }, render });
-		assert.equal(rendered, 0, `${current.name} is not asked to invent data while its projection is loading`);
-		assert.match(loading.header[0][0][0], /is loading/, `${current.name} has a named Runtime loading state`);
-		const failed = renderAsyncBoundary({ id: current.id, name: current.name, projection: { error: { message: "The Runtime projection is unavailable." } }, render });
-		assert.equal(rendered, 0, `${current.name} leaves query errors outside its feature renderer`);
-		assert.match(failed.items[0].head[0][0], /could not be loaded/, `${current.name} retains the shared retry affordance`);
-		const empty = renderAsyncBoundary({ id: current.id, name: current.name, projection: { data: current.empty }, render });
-		assert.equal(rendered, 1, `${current.name} receives settled successful-empty data`);
-		assert.match(JSON.stringify(empty), new RegExp(current.emptyText), `${current.name} owns its successful empty state`);
-		const settled = renderAsyncBoundary({ id: current.id, name: current.name, projection: { data: current.data }, render });
-		assert.equal(rendered, 2, `${current.name} renders its settled Runtime projection through the adapter`);
-		assert.match(JSON.stringify(settled), new RegExp(current.settledText));
-		assert.equal(settled.items.every((item) => item.editKind === undefined), true, `${current.name} stays read-only and has no mutation confirmation path`);
-		const stale = renderAsyncBoundary({ id: current.id, name: current.name, projection: { data: current.data, loading: true }, render });
-		assert.equal(rendered, 3, `${current.name} keeps cached data renderable while its replacement is in flight`);
-		assert.match(stale.header[0][0][0], /showing cached data/, `${current.name} exposes its cached-stale state`);
-	}
-});
-
-test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
-	let clock = 0;
-	const notices = createNoticeStore({ now: () => clock, limit: 2, ttlMs: 10 });
-	const first = notices.add({ message: "  Loaded   Atlas  ", level: NOTICE_LEVEL.success });
-	assert.deepEqual(noticeSpans(first), [["✓ ", TOKEN.feedback.success], ["Loaded Atlas", TOKEN.text.primary]]);
-	assert.equal(notices.latest({ live: true })?.id, first.id);
-	clock = 10;
-	assert.equal(notices.latest({ live: true }), undefined, "an expired flash leaves the footer without discarding session history");
-	assert.equal(notices.history().length, 1);
-
-	const warning = notices.add({ message: "The durable view is stale.", level: NOTICE_LEVEL.warning, ttl: Infinity });
-	const error = notices.add({ message: "Refresh failed.", level: NOTICE_LEVEL.error, ttl: Infinity });
-	assert.deepEqual(notices.history().map((notice) => notice.message), ["The durable view is stale.", "Refresh failed."], "history stays bounded to the most recent notices");
-	assert.deepEqual(noticeSpans(error), [["! ", TOKEN.feedback.danger], ["Refresh failed.", TOKEN.text.primary]]);
-	assert.equal(notices.latest({ live: true })?.id, error.id, "a persistent safety notice remains visible until it is dismissed");
-	assert.equal(notices.dismiss(error.id), true);
-	assert.equal(notices.latest({ live: true })?.id, warning.id);
-	assert.equal(notices.clear(), true);
-	assert.equal(notices.clear(), false);
-});
-
-test("screen: status bar paints settled activity, status, notice, and footer snapshots", () => {
-	let at = 1_000;
-	let busy = true;
-	const state = { restSince: 0, prefill: { phase: "sent" }, rate: 12.5 };
-	const core = {
-		busy: () => busy,
-		paused: () => true,
-		thinking: () => true,
-	};
-	const statusPresentation = createRuntimePresentation().status;
-	const runtime = statusPresentation.describe({
-		messages: [{ role: "assistant", usage: { input: 300, cacheRead: 50, output: 50 } }],
-		windows: [{ state: POLICY.enums.windowStates.busy }, { state: POLICY.enums.windowStates.gone }],
-		wakes: [{ id: "wake-1" }],
-		modelId: "status-model",
-		nextWakeDue: 3_000,
-	}, { routes: { currentId: "status-model", ready: true, models: [{ id: "status-model" }] } });
-	const rows = renderStatusBar({
-		state,
-		core,
-		chat: { doing: () => ({ task: "task-7", what: "writing a patch" }) },
-		activity: { taskActive: true },
-		brain: { plan: "plan 1/2 envelopes", ledger: "1 goal", requests: 2, waits: true },
-		runtime,
-		notice: { level: NOTICE_LEVEL.success, message: "Saved durable state." },
-		legend: "j k move · Ctrl-K palette",
-		options: { contextWindow: 1_000, gate: { yolo: true }, runner: { mode: "direct" } },
-		now: () => at,
-	});
-	const text = rows.map((row) => row.map(([value]) => value).join("")).join("\n");
-	assert.equal(state.busySince, at, "the status strip owns the local transition into active work");
-	assert.equal(state.rate, undefined, "a new run does not inherit a previous reply rate");
-	assert.match(text, /task-7.*writing a patch/);
-	assert.match(text, /ctx .*400\/1\.0k/);
-	assert.match(text, /1 goal.*plan 1\/2 envelopes.*2 requests for you/);
-	assert.match(text, /1 window, 1 busy.*1 wake.*yolo.*no sandbox/);
-	assert.match(text, /model status-model · native GBNF ready/, "the strip consumes the settled model-route readiness fact");
-	assert.match(text, /✓ Saved durable state\./);
-	assert.match(text, /j k move · Ctrl-K palette/);
-	assert.equal(rows.at(-1)[0][1], TOKEN.text.muted, "the footer remains a semantic muted shell row");
-
-	busy = false;
-	at = 2_500;
-	const resting = renderStatusBar({ state, core, chat: { doing: () => undefined }, options: { contextWindow: 1_000 }, now: () => at });
-	assert.equal(state.busySince, undefined);
-	assert.equal(state.restSince, at);
-	assert.equal(state.prefill, undefined, "leaving active work clears an unfinished prefill progress indicator");
-	assert.match(resting[0].map(([value]) => value).join(""), /resting/);
-
-	busy = true;
-	at = 3_000;
-	const question = renderStatusBar({ state, core, chat: { doing: () => undefined }, activity: { question: {} }, options: { contextWindow: 1_000 }, now: () => at });
-	assert.match(question[0].map(([value]) => value).join(""), /waiting for your answer/, "a pending question takes precedence over generic task activity");
-	const emptyRuntime = statusPresentation.describe({ messages: [], windows: [], wakes: [] }, { routes: { currentId: "status-model", ready: false, models: [] } });
-	assert.deepEqual(emptyRuntime.windows, { count: 0, busy: 0 }, "a successful empty runtime snapshot stays a quiet valid strip state");
-	assert.deepEqual(emptyRuntime.wakes, { count: 0 });
-	const loadingRuntime = statusPresentation.describe(undefined, { statusLoading: true, routesLoading: true });
-	assert.match(loadingRuntime.diagnostic?.text ?? "", /runtime status loading/, "the status projection names its deferred first load without a manager read");
-	assert.match(loadingRuntime.transport.text, /model route status loading/);
-	const staleRuntime = statusPresentation.describe({ messages: [], windows: [], wakes: [] }, { statusLoading: true, routes: { currentId: "status-model", ready: true, models: [] }, routesLoading: true });
-	assert.match(staleRuntime.diagnostic?.text ?? "", /refreshing/, "a cached status snapshot stays visible while its replacement is in flight");
-	assert.match(staleRuntime.transport.text, /native GBNF ready.*refreshing/);
-	const failedRuntime = statusPresentation.describe(undefined, { statusError: { message: "status reader failed" }, routesError: { message: "model server failed" } });
-	assert.match(failedRuntime.diagnostic?.text ?? "", /unavailable.*status reader failed/);
-	assert.match(failedRuntime.transport.text, /unavailable.*model server failed/);
-	assert.throws(() => renderStatusBar({ state }), /terminal activity/);
-});
-
-test("screen: shared key hints keep shell navigation while hiding unavailable capability actions", () => {
-	const keyHints = createKeyHints({
-		typing: "Esc: commands · Ctrl-K: palette",
-		fallback: ["j k move", "Enter open"],
-		global: ["Ctrl-K palette", "? all keys"],
-		routes: {
-			"carto.atlas": [
-				"j k move",
-				{ text: "d delete", capability: "workspace.delete" },
-				{ text: "v archive", capabilities: ["workspace.archive", "workspace.unarchive"] },
-				{ text: "x unshelve", when: (context) => context?.shelved === true },
-			],
-		},
-	});
-	assert.equal(keyHints.text({ mode: "type", route: "carto.atlas" }), "Esc: commands · Ctrl-K: palette");
-	assert.equal(keyHints.text({ route: "carto.atlas" }), "j k move · d delete · v archive · Ctrl-K palette · ? all keys", "component-only rendering keeps configured hints when no capability snapshot was supplied");
-	assert.equal(keyHints.text({
-		route: "carto.atlas",
-		capabilities: [
-			{ id: "workspace.delete", availability: { enabled: false } },
-			{ id: "workspace.archive", availability: { enabled: true } },
-		],
-		context: { shelved: true },
-	}), "j k move · v archive · x unshelve · Ctrl-K palette · ? all keys", "a footer keeps shell hints but removes a registered action that is unavailable");
-	assert.equal(keyHints.text({ route: "other" }), "j k move · Enter open · Ctrl-K palette · ? all keys");
-	assert.throws(() => createKeyHints({ typing: "type", routes: { bad: [{ text: "d delete", capability: "" }] } }), /capability/);
-	assert.throws(() => keyHints.text({ capabilities: {} }), /presentation/);
-});
-
-test("screen: command palette filters registered actions, keeps disabled reasons visible, and gates asynchronous activation", async () => {
-	const source = [
-		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation and Work." },
-		{ id: "workspace.delete", label: "Delete", category: "workspace", availability: { enabled: false, reason: "Choose a durable row first." } },
-		{ id: "review.undo", label: "Undo last checkpoint change", category: "review", keywords: "recover checkpoint" },
-	];
-	assert.deepEqual(normalizePaletteItems([{ id: "same", label: "First" }, { id: "same", label: "Second" }]).map((item) => item.id), ["same", "same:2"], "a palette keeps every registry item distinguishable");
-	assert.deepEqual(filterPaletteItems(source, "checkpoint").map((item) => item.id), ["review.undo"], "keywords make a registered capability discoverable without duplicating its label");
-	assert.equal(filterPaletteItems(source, "delete")[0]?.disabled, true);
-	assert.throws(() => normalizePaletteItems([undefined]), /must be an object/);
-
-	const flashes = [];
-	let closes = 0;
-	let activations = 0;
-	let settle;
-	const palette = new CommandPalette({
-		items: source,
-		keyOf: (key) => key,
-		close: () => { closes++; },
-		flash: (message) => flashes.push(message),
-		activate: (item) => {
-			activations++;
-			assert.equal(item.id, "review.undo");
-			return new Promise((resolve) => { settle = resolve; });
-		},
-	});
-	palette.handleInput("d");
-	palette.handleInput("e");
-	palette.handleInput("l");
-	palette.handleInput("e");
-	assert.equal(palette.selected()?.id, "workspace.delete", "printable keys stay in the palette search field");
-	palette.handleInput("enter");
-	assert.equal(activations, 0, "a disabled capability cannot be dispatched from the palette");
-	assert.match(flashes.at(-1), /Choose a durable row first/);
-
-	palette.setQuery("checkpoint");
-	assert.match(palette.render(56).join("\n"), /Undo last checkpoint change/);
-	palette.handleInput("enter");
-	palette.handleInput("enter");
-	assert.equal(activations, 1, "a pending activation is not started twice");
-	assert.match(flashes.at(-1), /opening/);
-	settle(true);
-	await Promise.resolve();
-	await Promise.resolve();
-	assert.equal(closes, 1, "only a successful asynchronous palette activation dismisses its overlay");
-});
-
-test("screen: shared forms keep local required, field-validation, help, disabled, and focus behavior without bypassing action saves", () => {
-	const flashes = [];
-	const saves = [];
-	let closed = 0;
-	const form = new Form({
-		title: "New record",
-		fields: [
-			{ id: "title", label: "Title", limit: 24, required: true, help: "A short durable label." },
-			{ id: "system", label: "System", limit: 24, value: "managed", disabled: true },
-			{ id: "mode", label: "Mode", limit: 8, value: "no", validate: (value) => value === "yes" ? undefined : "Mode must be yes." },
-		],
-		keyOf: (key) => key,
-		flash: (message) => flashes.push(message),
-		close: () => { closed++; },
-		save: (drafts) => { saves.push(new Map(drafts)); return true; },
-	});
-	assert.equal(form.field.id, "title");
-	assert.match(form.render(60).join("\n"), /A short durable label/);
-	form.handleInput("enter");
-	assert.equal(saves.length, 0, "a required local field is shown for correction before an action starts");
-	assert.match(flashes.at(-1), /Title is required/);
-	assert.match(form.render(60).join("\n"), /Title \*/);
-	form.text = "Refresh the durable view";
-	form.handleInput("tab");
-	assert.equal(form.field.id, "mode", "Tab skips a disabled field rather than focusing an unusable control");
-	form.handleInput("enter");
-	assert.equal(saves.length, 0, "field validation keeps its draft open instead of calling the durable action");
-	assert.match(form.render(60).join("\n"), /Mode must be yes/);
-	form.text = "yes";
-	form.handleInput("enter");
-	assert.equal(saves.length, 1);
-	assert.equal(saves[0].get("title"), "Refresh the durable view");
-	assert.equal(closed, 1, "the form retains the established close-on-success contract");
-	assert.throws(() => new Form({ fields: [] }), /needs one or more fields/);
-});
-
-test("screen: shared selection retains identity across projection rebuilds and falls back only when the target disappears", () => {
-	const selection = createSelection({ keyOf: (item) => item?.id });
-	const first = [{ id: "atlas" }, { id: "ledger" }, { id: undefined }];
-	assert.equal(selection.reconcile(first), "atlas", "the first actionable identity is selected on an empty collection state");
-	assert.equal(selection.select(first, "ledger"), true);
-	const rebuilt = [{ id: "atlas", fresh: true }, { id: "ledger", fresh: true }];
-	assert.equal(selection.reconcile(rebuilt), "ledger", "a rebuilt projection keeps the stable selected identity rather than an old object reference");
-	assert.equal(selection.selected(rebuilt)?.fresh, true);
-	assert.equal(selection.move(rebuilt, 99), true);
-	assert.equal(selection.key(), "ledger", "movement clamps at a collection boundary");
-	assert.equal(selection.move(rebuilt, -99), true);
-	assert.equal(selection.key(), "atlas");
-	assert.equal(selection.reconcile([{ id: "plan" }]), "plan", "a removed selection falls back to the first current row");
-	assert.equal(selection.select([{ id: "plan" }], "missing"), false);
-	assert.equal(selection.clear(), true);
-	assert.equal(selection.clear(), false);
-	assert.throws(() => createSelection({ keyOf: "id" }), /identity reader/);
-
-	const list = createList();
-	list.set({ items: [{ key: "heading", plain: true, head: [["Heading", ""]] }, { key: "a", head: [["A", ""]] }, { key: "b", head: [["B", ""]] }] });
-	list.select("b");
-	list.set({ items: [{ key: "b", head: [["B refreshed", ""]] }, { key: "a", head: [["A refreshed", ""]] }] });
-	assert.equal(list.selected()?.key, "b", "the list consumes the same stable selection model across a projection rebuild");
-	list.set({ items: [{ key: "a", head: [["A only", ""]] }] });
-	assert.equal(list.selected()?.key, "a");
-});
-
-test("screen: shared focus restores the last viable shell region after temporary overlays and handoffs", () => {
-	const targets = { composer: { name: "composer" }, commands: { name: "commands" } };
-	const applied = [];
-	const focus = createFocusManager({
-		initial: "composer",
-		resolve: (region) => targets[region],
-		apply: (target, region) => applied.push([target.name, region]),
-	});
-	assert.equal(focus.active(), "composer");
-	assert.equal(focus.restore(), true);
-	assert.deepEqual(applied.at(-1), ["composer", "composer"]);
-	assert.equal(focus.focus("commands"), true);
-	assert.equal(focus.is("commands"), true);
-	delete targets.commands;
-	assert.equal(focus.restore(), false, "a temporarily unavailable focus target does not overwrite the last known region");
-	assert.equal(focus.active(), "commands");
-	assert.equal(focus.focus("missing"), false);
-	assert.equal(focus.active(), "commands");
-	assert.throws(() => createFocusManager({ initial: "composer", resolve: () => ({}) }), /focus applier/);
-});
-
-test("screen: shared routes retain per-tab views and publish one atomic navigation change", () => {
-	const state = { tab: "chat", view: { chat: "conversation" } };
-	const changes = [];
-	const routes = createRouteManager({
-		tabs: [{ id: "chat" }, { id: "carto" }],
-		views: { chat: [{ id: "conversation" }, { id: "work" }], carto: [{ id: "atlas" }, { id: "ledger" }] },
-		state,
-		onChange: (change) => changes.push(change),
-	});
-	assert.deepEqual(state.view, { chat: "conversation", carto: "atlas" }, "missing remembered views start at their tab's first stable route");
-	assert.equal(routes.setRoute({ tab: "carto", view: "ledger" }), true);
-	assert.deepEqual(changes.map(({ previous, current, changed }) => [previous.id, current.id, changed]), [["chat.conversation", "carto.ledger", true]], "a destination transition has no intermediate tab-only route");
-	assert.equal(routes.setTab("chat"), true);
-	assert.equal(routes.id(), "chat.conversation", "each tab retains its own selected subview");
-	assert.equal(routes.stepView(1), true);
-	assert.equal(routes.id(), "chat.work");
-	assert.equal(routes.stepTab(1), true);
-	assert.equal(routes.id(), "carto.ledger", "cycling back to a tab restores its remembered subview");
-	const before = structuredClone(state);
-	assert.equal(routes.setRoute({ tab: "carto", view: "missing" }), false);
-	assert.equal(routes.setView("missing"), false);
-	assert.equal(routes.stepView(Number.NaN), false);
-	assert.deepEqual(state, before, "invalid navigation leaves the active route untouched");
-	assert.equal(routes.setTab("carto"), true);
-	assert.equal(changes.at(-1).changed, false, "an explicit visit to the current route remains observable for caller-owned refresh behavior");
-	assert.throws(() => createRouteManager({ tabs: [{ id: "chat" }], views: { other: [] }, state: { tab: "chat", view: {} } }), /unknown tab/);
-});
-
-test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {
-	let hidden = 0;
-	let restored = 0;
-	let redrawn = 0;
-	let closeFirst;
-	const manager = createOverlayManager({
-		show: (component, options) => {
-			assert.equal(typeof component.render, "function");
-			assert.deepEqual(options, { anchor: "center" });
-			return { hide: () => { hidden++; } };
-		},
-		restoreFocus: () => { restored++; },
-		redraw: () => { redrawn++; },
-	});
-	const first = manager.open(({ close }) => {
-		closeFirst = close;
-		return { render: () => [] };
-	}, { anchor: "center" });
-	assert.ok(first?.isOpen(), "the first application modal becomes the active focus-capturing overlay");
-	assert.equal(manager.open(() => ({ render: () => [] })), undefined, "a delayed action cannot stack another modal above a draft");
-	assert.equal(closeFirst(), true);
-	assert.equal(closeFirst(), false, "a modal closes exactly once");
-	assert.equal(manager.hasOpen(), false);
-	assert.deepEqual([hidden, restored, redrawn], [1, 1, 1], "dismissal removes the overlay and returns keyboard focus to the shell");
-	assert.throws(() => createOverlayManager(), /needs a show function/);
-
-	const flashes = [];
-	let closes = 0;
-	let confirms = 0;
-	const acknowledgement = new ConfirmDialog({
-		title: "Delete permanently?",
-		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "acknowledge" },
-		keyOf: (key) => key,
-		close: () => { closes++; },
-		confirm: () => { confirms++; return true; },
-		flash: (text) => flashes.push(text),
-	});
-	assert.match(acknowledgement.render(48).join("\n"), /Delete permanently\?/);
-	acknowledgement.handleInput("n");
-	assert.equal(closes, 1, "n cancels an acknowledgement dialog");
-	acknowledgement.handleInput("enter");
-	assert.equal(confirms, 1, "Enter confirms an acknowledgement dialog");
-	assert.equal(closes, 2, "a successful action closes the dialog");
-
-	let typedConfirms = 0;
-	const typed = new ConfirmDialog({
-		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "typed" },
-		keyOf: (key) => key,
-		close: () => { closes++; },
-		confirm: () => { typedConfirms++; return true; },
-		flash: (text) => flashes.push(text),
-	});
-	typed.handleInput("n");
-	typed.handleInput("enter");
-	assert.equal(typedConfirms, 0, "a typed confirmation cannot execute until its exact target is entered");
-	typed.handleInput("backspace");
-	typed.handleInput("n");
-	typed.handleInput("4");
-	typed.handleInput("enter");
-	assert.equal(typedConfirms, 1, "typing the exact scoped target permits confirmation");
-
-	let resolve;
-	const pending = new ConfirmDialog({
-		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "acknowledge" },
-		keyOf: (key) => key,
-		close: () => { closes++; },
-		confirm: () => new Promise((done) => { resolve = done; }),
-		flash: (text) => flashes.push(text),
-	});
-	pending.handleInput("enter");
-	assert.equal(pending.pending, true, "an asynchronous confirmation disables duplicate input while it settles");
-	pending.handleInput("escape");
-	assert.match(flashes.at(-1), /still finishing/);
-	resolve(true);
-	await new Promise((done) => setImmediate(done));
-	await new Promise((done) => setImmediate(done));
-	assert.equal(pending.pending, false);
-	assert.ok(closes >= 4, "a successful asynchronous acknowledgement also dismisses its modal");
-});
-
-test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
-	const { brainDir } = fresh(t);
-	const scratch = await writeScratch(brainDir, "message.md", "A draft from the editor");
-	assert.equal(await pathExists(scratch), true);
-	assert.equal(await pathExists(join(brainDir, "missing.md")), false);
-	const sources = join(brainDir, "sources");
-	mkdirSync(sources);
-	writeFileSync(join(sources, "a.txt"), "name: \"kept\"\n");
-	writeFileSync(join(sources, "b.mjs"), "first\nname: \"kept\"\n");
-	assert.deepEqual(await findTextSource(sources, "name: \"kept\"", { suffix: ".mjs" }), { file: join(sources, "b.mjs"), line: 2 });
-	assert.equal(await findTextSource(sources, "not here", { suffix: ".mjs" }), undefined);
-	const writes = [];
-	const calls = [];
-	const ways = await toClipboard("copied words", {
-		write: (sequence) => writes.push(sequence),
-		env: { WAYLAND_DISPLAY: "wayland-1" },
-		run: async (command, args, options) => {
-			calls.push({ command, args, input: options.input, timeoutMs: options.timeoutMs });
-			return { status: 0 };
-		},
-	});
-	assert.deepEqual(ways, ["the terminal (OSC 52)", "wl-copy"]);
-	assert.equal(writes.length, 1, "OSC 52 remains immediate terminal feedback while helper work is asynchronous");
-	assert.deepEqual(calls, [{ command: "wl-copy", args: [], input: "copied words", timeoutMs: POLICY.limits.screen.copyTimeoutMs }]);
-	const exported = await copyOut("exported words", {
-		brainDir,
-		name: "session",
-		now: Date.parse(NOW),
-		env: {},
-		write: () => {},
-	});
-	assert.match(exported.file, /export\/session-20261115-000000\.md$/);
-	assert.equal(readFileSync(exported.file, "utf8"), "exported words\n");
-});
-
-test("application: workspace queries defer readers and return typed empty, unavailable, and cancelled outcomes", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let ledgerReads = 0;
-	let planReads = 0;
-	let assessmentReads = 0;
-	let contextReads = 0;
-	mkdirSync(join(brainDir, "reports"), { recursive: true });
-	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
-	writeFileSync(join(root, "tree.txt"), "abc");
-	const contextStore = {
-		rows: [{ id: "t1", species: "composed", mode: "look", at: 0, brief: "Inspect", outcome: "Done." }],
-		shelf: [{ id: "sh1", path: "README.md", snapshot: "Shelf snapshot." }],
-		dropped: [],
-		last: { reason: "You asked for it", before: 9000, after: 800, kept: { tasks: 1, shelf: 1, talk: 2 } },
-		front: { kept: { tasks: 1, shelf: 1, talk: 2 }, left: [{ item: { id: "sh2", path: "old.md" }, why: "it changed" }] },
-	};
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		readers: {
-			loadAtlas: () => ({ atlas: { nodes: [] } }),
-			loadAssessment: () => {
-				assessmentReads++;
-				return { text: "A deferred assessment.", written: Date.parse(NOW) };
-			},
-			loadLedger: () => {
-				ledgerReads++;
-				return { ledger: { items: [] } };
-			},
-			loadPlan: () => {
-			planReads++;
-			return { plan: { items: [], moves: [] } };
-		},
-			loadContext: () => {
-				contextReads++;
-				return contextStore;
-			},
-		},
-	});
-	const pending = queries.ledger({ requestId: "ledger-query" });
-	assert.equal(ledgerReads, 0, "the legacy reader is not called in the render/key stack that asked for a projection");
-	const empty = await pending;
-	assert.equal(empty.ok, true);
-	if (!empty.ok) throw new Error(empty.error.message);
-	assert.equal(ledgerReads, 1);
-	assert.deepEqual(empty.data.ledger.items, []);
-	assert.equal(empty.data.file, join(brainDir, "carto-ledger.json"), "the real Ledger query owns its editor target before rendering begins");
-	assert.equal(empty.meta.requestId, "ledger-query");
-	const pendingPlan = queries.plan({ requestId: "plan-query" });
-	assert.equal(planReads, 0, "the plan reader also leaves a terminal lifecycle callback before reading durable state");
-	const projectedPlan = await pendingPlan;
-	assert.equal(projectedPlan.ok, true);
-	if (!projectedPlan.ok) throw new Error(projectedPlan.error.message);
-	assert.deepEqual(projectedPlan.data.plan, { items: [], moves: [] });
-	assert.equal(projectedPlan.meta.requestId, "plan-query");
-	assert.equal(planReads, 1);
-	const pendingAssessment = queries.assessment({ requestId: "assessment-query" });
-	assert.equal(assessmentReads, 0, "the lightweight assessment reader also stays outside the current UI stack");
-	const projectedAssessment = await pendingAssessment;
-	assert.equal(projectedAssessment.ok, true);
-	if (!projectedAssessment.ok) throw new Error(projectedAssessment.error.message);
-	assert.equal(projectedAssessment.data.assessment.text, "A deferred assessment.");
-	assert.equal(projectedAssessment.meta.requestId, "assessment-query");
-	assert.equal(assessmentReads, 1);
-	const stoppedAssessment = new AbortController();
-	stoppedAssessment.abort();
-	const cancelledAssessment = await queries.assessment({ signal: stoppedAssessment.signal });
-	assert.equal(cancelledAssessment.ok, false);
-	if (cancelledAssessment.ok) throw new Error("an aborted assessment projection must not inspect durable state");
-	assert.equal(cancelledAssessment.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(assessmentReads, 1, "cancellation leaves the deferred assessment reader untouched");
-	const listed = await queries.tree({ requestId: "tree-query" });
-	assert.equal(listed.ok, true);
-	if (!listed.ok) throw new Error(listed.error.message);
-	assert.equal(listed.data.root, root, "the settled tree projection owns the target root");
-	assert.deepEqual(listed.data.files.find((file) => file.path === "tree.txt"), { path: "tree.txt", bytes: 3 });
-	assert.equal(listed.meta.requestId, "tree-query");
-	const current = queries.context({ requestId: "context-query" });
-	assert.equal(contextReads, 0, "the shared-brain reader also waits until after the current UI stack");
-	const shared = await current;
-	assert.equal(shared.ok, true);
-	if (!shared.ok) throw new Error(shared.error.message);
-	assert.equal(contextReads, 1);
-	assert.equal(shared.data.shelf[0].text, "Shelf snapshot.");
-	assert.equal(shared.data.shelf[0].file, join(root, "README.md"), "the shared-brain projection owns a shelf editor target");
-	assert.equal(shared.data.standing[0].text, "The report body.");
-	assert.deepEqual(shared.data.store.last, contextStore.last, "the same deferred context projection keeps the collapse marker metadata");
-	assert.deepEqual(shared.data.store.front, contextStore.front);
-	assert.equal(shared.meta.requestId, "context-query");
-	const report = await queries.report("t1", { requestId: "report-query" });
-	assert.equal(report.ok, true);
-	if (!report.ok) throw new Error(report.error.message);
-	assert.equal(report.data.text, "The report body.");
-	assert.equal(report.meta.requestId, "report-query");
-	const missingReport = await queries.report("t404");
-	assert.equal(missingReport.ok, false);
-	if (missingReport.ok) throw new Error("a missing report must stay an explicit typed outcome");
-	assert.equal(missingReport.error.code, UI_ERROR_CODE.notFound);
-	const sharedView = handsView({ context: shared.data, presentation: createWorkspacePresentation().hands });
-	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
-	const treeViewProjection = treeView({ tree: listed.data, presentation: createWorkspacePresentation().tree }, () => false);
-	assert.match(treeViewProjection.items.find((item) => item.key === "file:tree.txt")?.head[1][0] ?? "", /3 B/);
-	const absent = await queries.entry({ book: "ledger", id: "g1" });
-	assert.equal(absent.ok, false);
-	if (absent.ok) throw new Error("a missing entry must be explicit");
-	assert.equal(absent.error.code, UI_ERROR_CODE.notFound);
-	const invalid = await queries.entry({ book: "unknown", id: "x1" });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("an unknown book must be refused before its reader runs");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	const stopped = new AbortController();
-	stopped.abort();
-	const cancelled = await queries.plan({ signal: stopped.signal });
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("an aborted projection must not read disk");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(planReads, 1, "cancellation leaves the deferred plan reader untouched");
-
-	const unavailable = createWorkspaceQueries({
-		brainDir,
-		readers: {
-			loadAtlas: () => ({ atlas: { nodes: [] } }),
-			loadLedger: () => ({ ledger: { items: [] } }),
-			loadPlan: () => ({ error: "carto-plan.json is not valid JSON" }),
-		},
-	});
-	const broken = await unavailable.plan();
-	assert.equal(broken.ok, false);
-	if (broken.ok) throw new Error("unreadable durable state must not masquerade as an empty plan");
-	assert.equal(broken.error.kind, UI_ERROR_KIND.unavailable);
-	assert.equal(broken.error.retryable, true);
-	const status = await unavailable.status();
-	assert.equal(status.ok, true, "status retains readable ledger information while naming a separate plan issue");
-	if (!status.ok) throw new Error(status.error.message);
-	assert.deepEqual(status.data.issues, [{ source: "plan", message: "carto-plan.json is not valid JSON" }]);
-});
-
-test("application: nonempty request projections retain the established terminal summaries", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const { plan } = loadPlan(brainDir);
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten the request projection.", done_when: "The pending request is visible.", network: true }, NOW);
-	applyPlanOp(plan, {
-		action: "addMove",
-		parent: "p1",
-		text: "Edit src/requests.mjs",
-		done_when: "The terminal shows the move summary.",
-		targets: ["src/requests.mjs"],
-		proof: "The request projection is tested.",
-		capabilities: { network: true },
-		budget: { replies: 2, fileOps: 1, commandStarts: 0 },
-	}, NOW);
-	savePlan(brainDir, plan);
-	const { ledger } = loadLedger(brainDir);
-	applyOp(ledger, { action: "add", kind: "question", text: "Should the request remain compact?" }, NOW);
-	saveLedger(brainDir, ledger);
-	const expected = listRequests(brainDir);
-	const result = await createWorkspaceQueries({ brainDir, root, now: () => Date.parse(NOW) }).requests();
-	assert.equal(result.ok, true);
-	if (!result.ok) throw new Error(result.error.message);
-	assert.deepEqual(result.data.items.map(({ id, kind, text }) => ({ id, kind, text })), expected, "the query preserves every nonempty legacy terminal row verbatim");
-	const approval = result.data.items.find((item) => item.kind === "approval");
-	assert.match(approval?.text ?? "", /src\/requests\.mjs/);
-	assert.match(approval?.text ?? "", /2 replies · 1 file ops · 0 commands · network/);
-	assert.equal(Object.hasOwn(approval ?? {}, "detail"), false, "the established request schema has no separate detail rows; itemLine carries the complete compact move contract");
-	assert.ok(Number.isFinite(approval?.line), "the query preserves the source position for an actionable request");
-	const question = result.data.items.find((item) => item.kind === POLICY.enums.ledgerKind.question);
-	assert.equal(question?.text, "q1  Should the request remain compact?");
-});
-
-test("application: review queries defer checkpoint and Git projections", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const reads = { last: 0, session: 0, git: 0 };
-	const lastChange = { item: "m1", text: "write the report", finished: true, changes: [], patch: "" };
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		reviewReaders: {
-			lastChange: () => { reads.last++; return lastChange; },
-			changeSince: () => { reads.session++; return { steps: 2, changes: [], patch: "" }; },
-			uncommitted: () => { reads.git++; return undefined; },
-		},
-	});
-	const pending = queries.review.last({ requestId: "review-last" });
-	assert.equal(reads.last, 0, "checkpoint inspection leaves the render/key stack before its synchronous legacy reader runs");
-	const last = await pending;
-	assert.equal(last.ok, true);
-	if (!last.ok) throw new Error(last.error.message);
-	assert.equal(last.data.root, root, "the settled Review projection owns its project target root");
-	assert.equal(last.data.last, lastChange);
-	assert.equal(last.meta.requestId, "review-last");
-	const session = await queries.review.session({ started: Date.parse(NOW) });
-	assert.equal(session.ok, true);
-	if (!session.ok) throw new Error(session.error.message);
-	assert.equal(reads.session, 1);
-	const git = await queries.review.git();
-	assert.equal(git.ok, true);
-	if (!git.ok) throw new Error(git.error.message);
-	assert.equal(git.data.own, undefined, "no project Git repository is an empty successful projection");
-	assert.equal(reads.git, 1);
-	const invalid = await queries.review.session({ started: "not a timestamp" });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("a review session needs its start time");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	const controller = new AbortController();
-	controller.abort();
-	const cancelled = await queries.review.git({ signal: controller.signal });
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled review query must not inspect Git");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads.git, 1);
-	const view = diffView({ review: last.data, presentation: createReviewPresentation() }, "last");
-	assert.match(view.header[0][0][0], /m1/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
-	assert.equal(view.items.find((item) => item.key === "last:task")?.copy, "write the report", "the complete task text stays reachable when its Review header does not fit");
-});
-
-test("application: review undo previews, acknowledges, and defers checkpoint recovery", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const undone = { item: "m1", text: "restore the original file", changes: [{ path: "src/main.mjs", status: "changed", added: 0, removed: 1 }] };
-	let checkpoint = undone;
-	const app = createReviewApplication({
-		root,
-		brainDir,
-		now: () => Date.parse(NOW),
-		operations: {
-			lastChange: () => { calls.push("last"); return checkpoint; },
-			undo: () => { calls.push("undo"); return undone; },
-			loadPlan: () => { calls.push("plan"); return { plan: { moves: [] } }; },
-			undoMove: (plan, id, at) => {
-				calls.push({ action: "undo-move", plan, id, at });
-				return { line: "m1 is open again and needs approval.", stale: 0 };
-			},
-			savePlan: (dir, plan) => calls.push({ action: "save-plan", dir, plan }),
-		},
-	});
-	const pending = app.execute(REVIEW_ACTION.undo, {}, { requestId: "undo-1" });
-	assert.deepEqual(calls, [], "checkpoint recovery leaves the command/render stack before its synchronous domain seam runs");
-	const asked = await pending;
-	assert.equal(asked.ok, false);
-	if (asked.ok || asked.confirmation === undefined) throw new Error("undo must ask for its scoped acknowledgement before recovery");
-	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
-	assert.deepEqual(asked.confirmation, {
-		actionId: REVIEW_ACTION.undo,
-		target: "m1",
-		summary: "Undo m1 · restore the original file. This restores the files changed by this checkpoint. It also reopens the move as an unapproved revision.",
-		strength: "acknowledge",
-	});
-	assert.deepEqual(calls, ["last"], "the confirmation previews the current checkpoint but does not recover it");
-	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.intent, "destructive");
-	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.confirmation, "acknowledge");
-	const result = await app.execute(REVIEW_ACTION.undo, {}, {
-		requestId: "undo-2",
-		confirmation: { ...asked.confirmation, acknowledged: true },
-	});
-	assert.equal(result.ok, true);
-	if (!result.ok) throw new Error(result.error.message);
-	assert.equal(result.meta.requestId, "undo-2");
-	assert.equal(result.data.undone, undone);
-	assert.deepEqual(result.data.plan, { state: "updated", line: "m1 is open again and needs approval.", stale: 0 });
-	assert.deepEqual(calls, [
-		"last",
-		"last",
-		"undo",
-		"plan",
-		{ action: "undo-move", plan: { moves: [] }, id: "m1", at: NOW },
-		{ action: "save-plan", dir: brainDir, plan: { moves: [] } },
-	]);
-	const none = createReviewApplication({
-		root,
-		brainDir,
-		operations: { lastChange: () => undefined, undo: () => { throw new Error("an empty Review recovery must not call undo"); } },
-	});
-	const empty = await none.execute(REVIEW_ACTION.undo);
-	assert.equal(empty.ok, true);
-	if (!empty.ok) throw new Error(empty.error.message);
-	assert.equal(empty.data.undone, undefined, "no checkpoint left is an empty successful recovery outcome");
-	checkpoint = { windows: ["build"], text: "restore the shell window checkpoint" };
-	const stale = await app.execute(REVIEW_ACTION.undo, {}, { confirmation: { ...asked.confirmation, acknowledged: true } });
-	assert.equal(stale.ok, false);
-	if (stale.ok) throw new Error("a changed checkpoint must reject stale confirmation");
-	assert.equal(stale.error.code, UI_ERROR_CODE.confirmationRequired);
-	assert.equal(stale.confirmation.target, "window build");
-	assert.deepEqual(calls.slice(-1), ["last"]);
-	checkpoint = { item: "m2", text: "partially write the migration", finished: false };
-	const cutOff = await app.execute(REVIEW_ACTION.undo);
-	assert.equal(cutOff.ok, false);
-	if (cutOff.ok || cutOff.confirmation === undefined) throw new Error("a cut-off checkpoint still needs acknowledgement");
-	assert.match(cutOff.confirmation.summary, /cut off/i);
-	assert.match(cutOff.confirmation.summary, /later uncheckpointed changes/i, "the acknowledgement names the broader recovery scope of a cut-off task");
-	const unavailable = createReviewApplication({
-		root,
-		brainDir,
-		operations: { lastChange: () => undone, undo: () => { throw new CheckpointError("git is not installed"); } },
-	});
-	const unavailableAsked = await unavailable.execute(REVIEW_ACTION.undo);
-	assert.equal(unavailableAsked.ok, false);
-	if (unavailableAsked.ok || unavailableAsked.confirmation === undefined) throw new Error("unavailable recovery still asks before it changes files");
-	const failed = await unavailable.execute(REVIEW_ACTION.undo, {}, { confirmation: { ...unavailableAsked.confirmation, acknowledged: true } });
-	assert.equal(failed.ok, false);
-	if (failed.ok) throw new Error("checkpoint trouble must remain a typed unavailable result");
-	assert.equal(failed.error.kind, UI_ERROR_KIND.unavailable);
-	assert.equal(failed.error.retryable, true);
-	const cancelledController = new AbortController();
-	const cancelled = none.execute(REVIEW_ACTION.undo, {}, { signal: cancelledController.signal });
-	cancelledController.abort();
-	const stopped = await cancelled;
-	assert.equal(stopped.ok, false);
-	if (stopped.ok) throw new Error("a cancelled undo must not reach checkpoint recovery");
-	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
-});
-
-test("application: review records shell-window checkpoints through its typed boundary", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const step = { names: ["main"], text: "npm test", changes: [{ path: "src/main.mjs", status: "changed" }] };
-	const app = createReviewApplication({
-		root,
-		brainDir,
-		windows: { takeActive: () => { calls.push("active"); return ["main"]; } },
-		now: () => Date.parse(NOW),
-		operations: {
-			windowStep: (receivedRoot, receivedBrain, names) => {
-				calls.push({ action: "window-step", root: receivedRoot, brainDir: receivedBrain, names });
-				return step;
-			},
-		},
-	});
-	const pending = app.execute(REVIEW_ACTION.recordWindows, {}, { requestId: "windows-1" });
-	assert.deepEqual(calls, [], "window checkpointing leaves terminal/render work before consuming live window activity");
-	const recorded = await pending;
-	assert.equal(recorded.ok, true);
-	if (!recorded.ok) throw new Error(recorded.error.message);
-	assert.equal(recorded.meta.requestId, "windows-1");
-	assert.equal(recorded.data.step, step);
-	assert.deepEqual(calls, [
-		"active",
-		{ action: "window-step", root, brainDir, names: ["main"] },
-	]);
-	assert.deepEqual(app.capabilities.list({ windows: { takeActive() {} } }).find((capability) => capability.id === REVIEW_ACTION.recordWindows)?.availability, { enabled: true });
-
-	const none = createReviewApplication({
-		root,
-		brainDir,
-		windows: { takeActive: () => [] },
-		operations: { windowStep: () => undefined },
-	});
-	const empty = await none.execute(REVIEW_ACTION.recordWindows);
-	assert.equal(empty.ok, true);
-	if (!empty.ok) throw new Error(empty.error.message);
-	assert.equal(empty.data.step, undefined, "no active window changes are an honest empty success");
-	const unavailable = createReviewApplication({
-		root,
-		brainDir,
-		windows: { takeActive: () => ["main"] },
-		operations: { windowStep: () => { throw new CheckpointError("git is not installed"); } },
-	});
-	const failed = await unavailable.execute(REVIEW_ACTION.recordWindows);
-	assert.equal(failed.ok, false);
-	if (failed.ok) throw new Error("checkpoint trouble must remain a typed unavailable result");
-	assert.equal(failed.error.kind, UI_ERROR_KIND.unavailable);
-	const cancelledCalls = [];
-	const cancelledApp = createReviewApplication({
-		root,
-		brainDir,
-		windows: { takeActive: () => { cancelledCalls.push("active"); return ["main"]; } },
-		operations: { windowStep: () => { cancelledCalls.push("window-step"); } },
-	});
-	const controller = new AbortController();
-	const cancelledPending = cancelledApp.execute(REVIEW_ACTION.recordWindows, {}, { signal: controller.signal });
-	controller.abort();
-	const cancelled = await cancelledPending;
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled window checkpoint must not consume live window activity");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(cancelledCalls, []);
-});
-
-test("application: runtime controls defer shell and wake mutations behind typed outcomes", async () => {
-	const calls = [];
-	const windows = {
-		send: async (name, line, options) => {
-			calls.push({ action: "send", name, line, options });
-			return { reason: "quiet", name };
-		},
-		close: (name, options) => {
-			calls.push({ action: "close", name, options });
-			return { name, ...(name === "busy" ? { running: "npm test" } : {}) };
-		},
-		closeAll: (options) => {
-			calls.push({ action: "close-all", options });
-			return ["main", "worker"];
-		},
-	};
-	const wakes = {
-		remove: (id) => {
-			calls.push({ action: "remove", id });
-			return id === "all" ? [{ id: "w1" }, { id: "w2" }] : [{ id }];
-		},
-	};
-	const app = createRuntimeApplication({ windows, wakes, shellSendWaitMs: 321, now: () => Date.parse(NOW) });
-	const pending = app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" }, { requestId: "send-1" });
-	assert.deepEqual(calls, [], "runtime mutations leave the caller stack before touching a live manager");
-	const sent = await pending;
-	assert.equal(sent.ok, true);
-	if (!sent.ok) throw new Error(sent.error.message);
-	assert.equal(sent.meta.requestId, "send-1");
-	assert.equal(sent.data.report.reason, "quiet");
-	assert.deepEqual(calls, [{ action: "send", name: "main", line: "yes", options: { waitMs: 321, signal: undefined } }]);
-
-	const closeAsked = await app.execute(RUNTIME_ACTION.closeShell, { name: "busy", reason: "The user stopped it." });
-	assert.equal(closeAsked.ok, false);
-	if (closeAsked.ok) throw new Error("closing a shell must request acknowledgement first");
-	assert.equal(closeAsked.error.code, UI_ERROR_CODE.confirmationRequired);
-	assert.deepEqual(calls.map((call) => call.action), ["send"]);
-	const closed = await app.execute(RUNTIME_ACTION.closeShell, { name: "busy", reason: "The user stopped it." }, { confirmation: { ...closeAsked.confirmation, acknowledged: true } });
-	assert.equal(closed.ok, true);
-	if (!closed.ok) throw new Error(closed.error.message);
-	assert.equal(closed.data.closed.running, "npm test");
-	assert.deepEqual(calls.at(-1), { action: "close", name: "busy", options: { why: "The user stopped it." } });
-
-	const allAsked = await app.execute(RUNTIME_ACTION.closeAllShells, { reason: "Switching sandbox." });
-	assert.equal(allAsked.ok, false);
-	if (allAsked.ok) throw new Error("closing all shells must request acknowledgement first");
-	const allClosed = await app.execute(RUNTIME_ACTION.closeAllShells, { reason: "Switching sandbox." }, { confirmation: { ...allAsked.confirmation, acknowledged: true } });
-	assert.equal(allClosed.ok, true);
-	if (!allClosed.ok) throw new Error(allClosed.error.message);
-	assert.deepEqual(allClosed.data.closed, ["main", "worker"]);
-	assert.deepEqual(calls.at(-1), { action: "close-all", options: { why: "Switching sandbox." } });
-
-	const removeAsked = await app.execute(RUNTIME_ACTION.removeWake, { id: "all" });
-	assert.equal(removeAsked.ok, false);
-	if (removeAsked.ok) throw new Error("removing wakes must request acknowledgement first");
-	assert.equal(removeAsked.confirmation?.target, "all");
-	const removed = await app.execute(RUNTIME_ACTION.removeWake, { id: "all" }, { confirmation: { ...removeAsked.confirmation, acknowledged: true } });
-	assert.equal(removed.ok, true);
-	if (!removed.ok) throw new Error(removed.error.message);
-	assert.deepEqual(removed.data.removed.map((wake) => wake.id), ["w1", "w2"]);
-	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
-
-	const invalid = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "   " });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("blank shell input must be refused");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(invalid.error.field, "line");
-	const cancelledController = new AbortController();
-	const cancelledPending = app.execute(RUNTIME_ACTION.removeWake, { id: "w1" }, { signal: cancelledController.signal });
-	cancelledController.abort();
-	const cancelled = await cancelledPending;
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled runtime action must not reach its manager");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
-
-	const noWindows = createRuntimeApplication({});
-	const unavailable = await noWindows.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" });
-	assert.equal(unavailable.ok, false);
-	if (unavailable.ok) throw new Error("a session without windows must expose a typed unavailable action");
-	assert.equal(unavailable.error.code, UI_ERROR_CODE.policyBlocked);
-	const noTaskRouter = await noWindows.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Continue." });
-	assert.equal(noTaskRouter.ok, false);
-	if (noTaskRouter.ok) throw new Error("a session without a task router must expose a typed unavailable action");
-	assert.equal(noTaskRouter.error.code, UI_ERROR_CODE.policyBlocked);
-	const missingWake = createRuntimeApplication({ wakes: { remove: () => { throw new WakeError("No wake is set."); } } });
-	const missingAsked = await missingWake.execute(RUNTIME_ACTION.removeWake, { id: "w1" });
-	assert.equal(missingAsked.ok, false);
-	if (missingAsked.ok) throw new Error("removing a wake still needs confirmation");
-	const missing = await missingWake.execute(RUNTIME_ACTION.removeWake, { id: "w1" }, { confirmation: { ...missingAsked.confirmation, acknowledged: true } });
-	assert.equal(missing.ok, false);
-	if (missing.ok) throw new Error("a missing wake must stay a typed not-found outcome");
-	assert.equal(missing.error.code, UI_ERROR_CODE.notFound);
-	const busyWindow = createRuntimeApplication({ windows: { send: async () => { throw new WindowError("Nothing is running in window main, so there is nothing to send input to."); } } });
-	const refused = await busyWindow.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" });
-	assert.equal(refused.ok, false);
-	if (refused.ok) throw new Error("a shell that cannot accept input must remain a typed refusal");
-	assert.equal(refused.error.code, UI_ERROR_CODE.actionRefused);
-
-	let modelCalls = 0;
-	const modelApp = createRuntimeApplication({ models: {
-		ensure: async () => { modelCalls++; return { usableContextWindow: 4_000 }; },
-		select: async (modelId, limits) => { modelCalls++; return { usableContextWindow: limits.contextWindow, modelId }; },
-	} });
-	const readyPending = modelApp.execute(RUNTIME_ACTION.ensureModel, {}, { requestId: "model-ready" });
-	assert.equal(modelCalls, 0, "model lifecycle controls leave the terminal stack before touching the manager");
-	const ready = await readyPending;
-	assert.equal(ready.ok, true);
-	if (!ready.ok) throw new Error(ready.error.message);
-	assert.equal(ready.meta.requestId, "model-ready");
-	assert.equal(ready.confirmation, undefined, "connecting a route is not destructive and needs no acknowledgement dialog");
-	assert.equal(ready.data.line, "The active model route is ready.");
-	assert.equal(ready.data.limits.usableContextWindow, 4_000);
-	const selected = await modelApp.execute(RUNTIME_ACTION.selectModel, { modelId: "other-model", contextWindow: 8_192 });
-	assert.equal(selected.ok, true);
-	if (!selected.ok) throw new Error(selected.error.message);
-	assert.equal(selected.data.modelId, "other-model");
-	assert.equal(selected.data.line, "Selected model route other-model.");
-	assert.equal(selected.data.limits.usableContextWindow, 8_192);
-	assert.equal(modelCalls, 2);
-	const badModel = await modelApp.execute(RUNTIME_ACTION.selectModel, { modelId: "   " });
-	assert.equal(badModel.ok, false);
-	if (badModel.ok) throw new Error("a blank model route must be refused");
-	assert.equal(badModel.error.field, "modelId");
-	const blockedModels = createRuntimeApplication({ models: {
-		ensure: async () => { throw new ModelServerUnavailableError("http://127.0.0.1:8080", "ECONNREFUSED"); },
-		select: async () => { throw new ModelRouteError("missing-model", ["model-a"]); },
-	} });
-	const offline = await blockedModels.execute(RUNTIME_ACTION.ensureModel);
-	assert.equal(offline.ok, false);
-	if (offline.ok) throw new Error("an offline model route must stay a typed transport outcome");
-	assert.equal(offline.error.code, UI_ERROR_CODE.transportFailed);
-	assert.equal(offline.error.kind, UI_ERROR_KIND.transport);
-	const missingRoute = await blockedModels.execute(RUNTIME_ACTION.selectModel, { modelId: "missing-model" });
-	assert.equal(missingRoute.ok, false);
-	if (missingRoute.ok) throw new Error("a missing model route must stay a typed not-found outcome");
-	assert.equal(missingRoute.error.code, UI_ERROR_CODE.notFound);
-	const grammarModels = createRuntimeApplication({ models: { ensure: async () => { throw new NativeGrammarError("The route ignored GBNF."); } } });
-	const grammar = await grammarModels.execute(RUNTIME_ACTION.ensureModel);
-	assert.equal(grammar.ok, false);
-	if (grammar.ok) throw new Error("a grammar-invalid route must stay a typed native-grammar outcome");
-	assert.equal(grammar.error.code, UI_ERROR_CODE.nativeGrammarRequired);
-
-	const taskMessages = [];
-	const taskApp = createRuntimeApplication({ work: {
-		tell: async (text) => {
-			if (text === "Continue.") return false;
-			taskMessages.push(text);
-			return true;
-		},
-	} });
-	const taskPending = taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Follow the narrower contract." }, { requestId: "task-route" });
-	assert.deepEqual(taskMessages, [], "task steering leaves the terminal input stack before it touches private task state");
-	const taskRouted = await taskPending;
-	assert.equal(taskRouted.ok, true);
-	if (!taskRouted.ok) throw new Error(taskRouted.error.message);
-	assert.equal(taskRouted.meta.requestId, "task-route");
-	assert.equal(taskRouted.data.routed, true);
-	assert.deepEqual(taskMessages, ["Follow the narrower contract."]);
-	const noTask = await taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Continue." });
-	assert.equal(noTask.ok, true);
-	if (!noTask.ok) throw new Error(noTask.error.message);
-	assert.equal(noTask.data.routed, false, "a task that ended between keypress and deferred routing falls back to the main agent");
-	const stoppedTaskRoute = new AbortController();
-	const cancelledTaskRoute = taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Do not deliver this." }, { signal: stoppedTaskRoute.signal });
-	stoppedTaskRoute.abort();
-	const cancelledTask = await cancelledTaskRoute;
-	assert.equal(cancelledTask.ok, false);
-	if (cancelledTask.ok) throw new Error("a cancelled task message must not reach private task state");
-	assert.equal(cancelledTask.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(taskMessages, ["Follow the narrower contract."], "cancellation leaves the task message queue untouched");
-	const blankTaskMessage = await taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "   " });
-	assert.equal(blankTaskMessage.ok, false);
-	if (blankTaskMessage.ok) throw new Error("a blank task message must be refused");
-	assert.equal(blankTaskMessage.error.field, "text");
-});
-
-test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let reads = 0;
-	const store = loadContext(brainDir);
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		runtimeContextReader: async () => {
-			reads++;
-			return {
-				messages: [{ role: "user", content: "Current words" }],
-				sizes: {
-					fixed: 120,
-					top: 24,
-					work: 8,
-					frees: 4,
-					state: 12,
-					full: 900,
-					store,
-				},
-				contextWindow: 1_000,
-			};
-		},
-	});
-	const pending = queries.runtime.context({ requestId: "runtime-context" });
-	assert.equal(reads, 0, "live conversation accounting leaves the current render/key stack before it reaches the session reader");
-	const result = await pending;
-	assert.equal(result.ok, true);
-	if (!result.ok) throw new Error(result.error.message);
-	assert.equal(result.meta.requestId, "runtime-context");
-	assert.equal(result.data.contextWindow, 1_000);
-	assert.equal(result.data.sizes.fixed, 120);
-	assert.equal(reads, 1);
-	const controller = new AbortController();
-	const cancelledPending = queries.runtime.context({ signal: controller.signal });
-	controller.abort();
-	const cancelled = await cancelledPending;
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled runtime projection must not ask the session for accounting");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads, 1);
-	const view = accountingProjectionView({ accounting: result.data, config: { chatWindow: 200, collapseTokens: 400, collapseMinutes: 0 }, presentation: createRuntimePresentation().accounting });
-	const shown = [...view.header, ...view.items.map((item) => item.head)].flat().flat().map((part) => Array.isArray(part) ? part[0] : part).join("\n");
-	assert.match(shown, /Current active-context accounting/);
-	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
-});
-
-test("application: runtime view, status, activity, and model projections defer shell, wake, engine, model, question, task, and preview snapshots", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusSize: 0, statusWindows: 0, statusWakes: 0, statusModel: 0, activityQuestion: 0, activityTask: 0, modelInspect: 0, modelCurrent: 0 };
-	const sent = {
-		task: false,
-		requestId: "main:1",
-		payload: { messages: [{ role: "system", content: "You are Cartographer." }], tools: [] },
-		results: new Map(),
-		at: Date.parse(NOW),
-		count: 1,
-		collapsedSince: false,
-	};
-	const window = { name: "main", state: "busy", command: "npm test", running: 1_200, cwd: ".", network: false, sandbox: true, asks: false, tail: ["TAP version 13"] };
-	const wake = { id: "w1", kind: "time", at: Date.parse(NOW) + 1_000 };
-	const wakeReader = createRuntimeViewReader({ wakes: {
-		list: () => { reads.wakes++; return [wake]; },
-		lines: () => { reads.wakeLines++; return ["w1 · every 5 minutes"]; },
-	} });
-	const statusReader = createRuntimeStatusReader({
-		main: { id: "main", context: async () => { reads.statusContext++; return { messages: [{ role: "assistant", usage: { input: 20, cacheRead: 4, output: 2 } }] }; } },
-		context: {},
-		engine: { usedBy: (id) => { reads.statusSize++; assert.equal(id, "main"); return 30; } },
-		windows: { list: (tail) => { reads.statusWindows++; assert.equal(tail, 0); return [window]; } },
-		wakes: { list: () => { reads.statusWakes++; return [wake]; }, nextDue: () => 3_000 },
-		model: async () => { reads.statusModel++; return { modelId: "status-model" }; },
-	});
-	const activityReader = createRuntimeActivityReader({
-		asks: { pending: () => { reads.activityQuestion++; return { since: Date.parse(NOW), text: "Private prompt text is not a status projection." }; } },
-		activeTask: () => { reads.activityTask++; return "task-7"; },
-	});
-	const modelReader = createRuntimeModelsReader({ models: {
-		known: () => ["known-model"],
-		ready: () => true,
-		inspect: async () => {
-			reads.modelInspect++;
-			return { listing: { entries: [{ id: "known-model", context_length: 4_096 }, { id: "other-model", meta: { n_ctx: 8_192 } }] }, limits: { usableContextWindow: 4_000 } };
-		},
-		current: async () => { reads.modelCurrent++; return { modelId: "known-model" }; },
-	} });
-	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		runtimeStatusReader: statusReader,
-		runtimeActivityReader: activityReader,
-		runtimeModelReader: modelReader,
-		runtimeViewReader: {
-			sent: (scope) => { reads.sent++; return scope === "main" ? sent : { ...sent, requestId: "newest:1" }; },
-			shells: ({ tail }) => { reads.shells++; assert.equal(tail, POLICY.limits.screen.windowsListed); return { windows: [window] }; },
-			shellOutput: ({ name, tail }) => { reads.output++; assert.equal(name, "main"); assert.equal(tail, POLICY.limits.screen.shellViewLines); return { window, lines: ["TAP version 13"] }; },
-			wakes: wakeReader.wakes,
-			preview: async () => { reads.preview++; return preview; },
-		},
-	});
-	const pending = queries.runtime.sent({ scope: "main", requestId: "sent-query" });
-	assert.equal(reads.sent, 0, "the engine request snapshot is not calculated from a render/key stack");
-	const current = await pending;
-	assert.equal(current.ok, true);
-	if (!current.ok) throw new Error(current.error.message);
-	assert.equal(current.data.sent, sent);
-	assert.equal(current.meta.requestId, "sent-query");
-	const pendingStatus = queries.runtime.status({ requestId: "status-query" });
-	assert.deepEqual([reads.statusContext, reads.statusSize, reads.statusWindows, reads.statusWakes, reads.statusModel], [0, 0, 0, 0, 0], "runtime status leaves the current render/key stack before reading live session managers");
-	const status = await pendingStatus;
-	assert.equal(status.ok, true);
-	if (!status.ok) throw new Error(status.error.message);
-	assert.equal(status.meta.requestId, "status-query");
-	assert.equal(status.data.modelId, "status-model");
-	assert.equal(status.data.contextSize, 30, "the deferred status snapshot owns the current engine accounting too");
-	assert.equal(status.data.nextWakeDue, 3_000);
-	assert.deepEqual(status.data.windows, [window]);
-	assert.deepEqual(status.data.wakes, [wake]);
-	assert.deepEqual([reads.statusContext, reads.statusSize, reads.statusWindows, reads.statusWakes, reads.statusModel], [1, 1, 1, 1, 1]);
-	const pendingActivity = queries.runtime.activity({ requestId: "activity-query" });
-	assert.deepEqual([reads.activityQuestion, reads.activityTask], [0, 0], "question and task ownership leave the screen render stack before their live session readers run");
-	const activity = await pendingActivity;
-	assert.equal(activity.ok, true);
-	if (!activity.ok) throw new Error(activity.error.message);
-	assert.equal(activity.meta.requestId, "activity-query");
-	assert.deepEqual(activity.data, { question: { since: Date.parse(NOW) }, taskActive: true });
-	assert.deepEqual([reads.activityQuestion, reads.activityTask], [1, 1]);
-	const pendingModels = queries.runtime.models({ requestId: "models-query" });
-	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [0, 0], "model discovery leaves the terminal render stack before provider inspection");
-	const models = await pendingModels;
-	assert.equal(models.ok, true);
-	if (!models.ok) throw new Error(models.error.message);
-	assert.equal(models.meta.requestId, "models-query");
-	assert.equal(models.data.currentId, "known-model");
-	assert.equal(models.data.ready, true, "route readiness stays distinct from discovery and is captured with the deferred model projection");
-	assert.deepEqual(models.data.models, [{ id: "known-model", contextWindow: 4_096 }, { id: "other-model", contextWindow: 8_192 }]);
-	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [1, 1]);
-	const shells = await queries.runtime.shells();
-	assert.equal(shells.ok, true);
-	if (!shells.ok) throw new Error(shells.error.message);
-	assert.deepEqual(shells.data.windows, [window]);
-	const output = await queries.runtime.shellOutput({ name: "main" });
-	assert.equal(output.ok, true);
-	if (!output.ok) throw new Error(output.error.message);
-	assert.equal(output.data.window, window);
-	assert.deepEqual(output.data.lines, ["TAP version 13"]);
-	const wakes = await queries.runtime.wakes();
-	assert.equal(wakes.ok, true);
-	if (!wakes.ok) throw new Error(wakes.error.message);
-	assert.deepEqual(wakes.data.wakes, [wake]);
-	assert.deepEqual(wakes.data.lines, ["w1 · every 5 minutes"], "wake display lines are also captured before the terminal renders them");
-	const planned = await queries.runtime.preview();
-	assert.equal(planned.ok, true);
-	if (!planned.ok) throw new Error(planned.error.message);
-	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusSize: 1, statusWindows: 1, statusWakes: 1, statusModel: 1, activityQuestion: 1, activityTask: 1, modelInspect: 1, modelCurrent: 1 });
-	const stoppedWakes = new AbortController();
-	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
-	stoppedWakes.abort();
-	const cancelledWakes = await cancelledWakesPending;
-	assert.equal(cancelledWakes.ok, false);
-	if (cancelledWakes.ok) throw new Error("a cancelled wake projection must not reach its live reader");
-	assert.equal(cancelledWakes.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads.wakes, 1);
-	const stopped = new AbortController();
-	const cancelledPending = queries.runtime.preview({ signal: stopped.signal });
-	stopped.abort();
-	const cancelled = await cancelledPending;
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled Runtime view projection must not reach its live reader");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads.preview, 1);
-	const brokenWakes = createWorkspaceQueries({
-		brainDir,
-		root,
-		runtimeViewReader: { wakes: () => { throw new Error("wake manager failed"); } },
-	});
-	const wakeFailure = await brokenWakes.runtime.wakes();
-	assert.equal(wakeFailure.ok, false);
-	if (wakeFailure.ok) throw new Error("a failed runtime reader must remain a typed outcome");
-	assert.equal(wakeFailure.error.kind, UI_ERROR_KIND.internal);
-	assert.equal(wakeFailure.error.retryable, true);
-	assert.match(wakeFailure.error.message, /wake schedule/i);
-	const runtimePresentation = createRuntimePresentation();
-	assert.match(shellsView({ ...shells.data, presentation: runtimePresentation.shells }).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
-	assert.match(shellsOutView({ ...output.data, presentation: runtimePresentation.shells }).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
-	assert.match(contextView({ sent: current.data.sent, windowSize: 1_000, cols: 80, presentation: runtimePresentation.sent }).header[0][0][0], /Sent provider request/, "the sent-request renderer consumes its typed engine snapshot");
-	assert.match(rawPayloadView({ sent: current.data.sent, presentation: runtimePresentation.sent }).header[0][0][0], /Raw provider payload/, "the raw audit renderer reuses that same projection");
-	assert.match(previewView({ preview: planned.data.preview, presentation: runtimePresentation.preview }).header[0][0][0], /Next request preview/, "the preview renderer receives prepared runtime data");
-	const stoppedActivity = new AbortController();
-	stoppedActivity.abort();
-	const cancelledActivity = await queries.runtime.activity({ signal: stoppedActivity.signal });
-	assert.equal(cancelledActivity.ok, false);
-	if (cancelledActivity.ok) throw new Error("a cancelled activity projection must not inspect live question or task state");
-	assert.equal(cancelledActivity.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual([reads.activityQuestion, reads.activityTask], [1, 1]);
-	const stoppedModels = new AbortController();
-	stoppedModels.abort();
-	const cancelledModels = await queries.runtime.models({ signal: stoppedModels.signal });
-	assert.equal(cancelledModels.ok, false);
-	if (cancelledModels.ok) throw new Error("a cancelled model projection must not inspect provider routes");
-	assert.equal(cancelledModels.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual([reads.modelInspect, reads.modelCurrent], [1, 1]);
-	const offlineModels = createWorkspaceQueries({
-		brainDir,
-		root,
-		runtimeModelReader: createRuntimeModelsReader({ models: {
-			known: () => ["cached-model"],
-			inspect: async () => { throw new Error("server is offline"); },
-			current: async () => ({ modelId: "cached-model" }),
-		} }),
-	});
-	const offlineRoutes = await offlineModels.runtime.models();
-	assert.equal(offlineRoutes.ok, true);
-	if (!offlineRoutes.ok) throw new Error(offlineRoutes.error.message);
-	assert.deepEqual(offlineRoutes.data.models, [{ id: "cached-model" }]);
-	assert.match(offlineRoutes.data.issue?.message ?? "", /offline/);
-});
-
-test("application: assessment projection defers its runtime summary", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const reads = { assessment: 0, atlas: 0, top: 0, since: 0 };
-	const assessment = { text: "The project has a bounded assessment.", written: Date.parse(NOW) };
-	const atlas = { nodes: [] };
-	const top = { at: NOW, reason: "the initial summary" };
-	const changes = { assessment: false, written: ["docs"], removed: [] };
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		runtimeReaders: {
-			loadAssessment: () => { reads.assessment++; return assessment; },
-			loadAtlas: () => { reads.atlas++; return { atlas }; },
-			loadTop: () => { reads.top++; return top; },
-			sinceTop: (dir, current, text) => {
-				reads.since++;
-				assert.equal(dir, brainDir);
-				assert.equal(current, atlas);
-				assert.equal(text, assessment.text);
-				return changes;
-			},
-		},
-	});
-	const pending = queries.runtime.assessment({ requestId: "assessment-query" });
-	assert.deepEqual(reads, { assessment: 0, atlas: 0, top: 0, since: 0 }, "assessment and top readers leave the command/render stack before inspecting disk");
-	const result = await pending;
-	assert.equal(result.ok, true);
-	if (!result.ok) throw new Error(result.error.message);
-	assert.equal(result.data.assessment, assessment);
-	assert.equal(result.data.atlas, atlas);
-	assert.equal(result.data.top, top);
-	assert.equal(result.data.changes, changes);
-	assert.equal(result.meta.requestId, "assessment-query");
-	assert.deepEqual(reads, { assessment: 1, atlas: 1, top: 1, since: 1 });
-	const controller = new AbortController();
-	controller.abort();
-	const cancelled = await queries.runtime.assessment({ signal: controller.signal });
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled assessment projection must not inspect durable runtime state");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(reads, { assessment: 1, atlas: 1, top: 1, since: 1 });
-});
-
-test("application: consult projection defers its isolated audit list", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let reads = 0;
-	const conference = { id: "co1", question: "Does the cache stay private?", status: "running" };
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		consultReaders: { listConferences: () => { reads++; return [{ id: "co1", conference }]; } },
-	});
-	const pending = queries.consult.list({ requestId: "consult-list" });
-	assert.equal(reads, 0, "Consult audit discovery leaves the active render/key stack before its legacy reader runs");
-	const listed = await pending;
-	assert.equal(listed.ok, true);
-	if (!listed.ok) throw new Error(listed.error.message);
-	assert.deepEqual(listed.data.conferences, [{ id: "co1", conference }]);
-	assert.equal(listed.meta.requestId, "consult-list");
-	const selectedPending = queries.consult.get("co1", { requestId: "consult-get" });
-	assert.equal(reads, 1, "an explicit Consult record also leaves the active render/key stack before its audit reader runs");
-	const selected = await selectedPending;
-	assert.equal(selected.ok, true);
-	if (!selected.ok) throw new Error(selected.error.message);
-	assert.equal(selected.data.conference, conference);
-	assert.equal(selected.meta.requestId, "consult-get");
-	const missing = await queries.consult.get("co404");
-	assert.equal(missing.ok, false);
-	if (missing.ok) throw new Error("a missing Consult record must not masquerade as an empty parent projection");
-	assert.equal(missing.error.code, UI_ERROR_CODE.notFound);
-	const controller = new AbortController();
-	controller.abort();
-	const cancelled = await queries.consult.list({ signal: controller.signal });
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled Consult projection must not inspect its audit directory");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads, 3);
-	const chat = createChat();
-	const chatText = (projection) => chat.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
-	chat.setConsultProjection({ loading: true });
-	const loadingVersion = chat.version;
-	assert.match(chatText("consult"), /Loading consultation conferences/, "Consult names its asynchronous cache state rather than reading audit files while it renders");
-	assert.equal(chat.version, loadingVersion, "painting a loading Consult cache does not transition or synchronize Chat state");
-	chat.setConsultProjection({ data: { conferences: [] } });
-	assert.match(chatText("consult"), /No consultation conferences yet/, "an empty settled audit cache is a successful Consult state");
-	chat.setConsultProjection({ error: { message: "The private audit is unavailable." } });
-	assert.match(chatText("consult"), /Consult could not be loaded/, "an uncached query failure is explicit and retryable");
-	chat.setConsultProjection({ data: { conferences: [{ id: "co1", conference }] }, loading: true });
-	assert.match(chatText("consult"), /Refreshing consultation conferences · showing cached audit/, "a refresh keeps its cached Consult audit visible as stale");
-	chat.setConsultProjection({ data: { conferences: [{ id: "co1", conference }] }, error: { message: "The refresh failed." } });
-	assert.match(chatText("consult"), /The refresh failed\. · showing cached audit/, "a failed refresh keeps its cached Consult audit visible");
-	assert.match(chatText("consult"), /Consultation co1/);
-	assert.doesNotMatch(chatText("work"), /Does the cache stay private/, "a cached conference remains exclusive to Consult");
-});
-
-test("application: consult routing projection defers opaque child identity and speaker state", async (t) => {
-	const { root, brainDir } = fresh(t);
-	let reads = 0;
-	const privateProse = "The private consultation evidence stays in its audit.";
-	const privateTurn = "The participant's private reasoning stays in Consult.";
-	const conference = {
-		id: "co1",
-		childConversationId: "child-7",
-		status: "running",
-		question: "Must this material stay private?",
-		sources: [{ id: "s1", text: "A captured private source." }],
-		active: { participant: "atlas" },
-		final: { participant: "cartographer" },
-		activities: [
-			{ participant: "atlas", prose: privateProse },
-			{ participant: "cartographer", calls: [{ id: "call-7", arguments: { advisory: "private" } }] },
-		],
-		turns: [{ participant: "atlas", text: privateTurn }],
-	};
-	const queries = createWorkspaceQueries({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		consultReaders: { listConferences: () => { reads++; return [{ id: "co1", conference }, { id: "co2", error: "unreadable" }]; } },
-	});
-	const pending = queries.consult.routing({ requestId: "consult-routing" });
-	assert.equal(reads, 0, "ordinary lifecycle routing leaves the render/key stack before opening a Consult audit");
-	const routed = await pending;
-	assert.equal(routed.ok, true);
-	if (!routed.ok) throw new Error(routed.error.message);
-	assert.equal(routed.meta.requestId, "consult-routing");
-	assert.deepEqual(routed.data.routes, [{
-		conference: "co1",
-		childConversationId: "child-7",
-		status: "running",
-		activeParticipant: "atlas",
-		finalParticipant: "cartographer",
-		activity: [
-			{ participant: "atlas", proseHash: consultMessageFingerprint(privateProse) },
-			{ participant: "cartographer", callIds: ["call-7"] },
-		],
-		turns: [{ participant: "atlas", textHash: consultMessageFingerprint(privateTurn) }],
-	}]);
-	const serialized = JSON.stringify(routed.data.routes);
-	assert.doesNotMatch(serialized, /Must this material stay private|captured private source|private consultation evidence|private reasoning|advisory/, "the lifecycle route exposes neither conference material nor tool arguments");
-	const controller = new AbortController();
-	controller.abort();
-	const cancelled = await queries.consult.routing({ signal: controller.signal });
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("a cancelled Consult route must not inspect private audit records");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(reads, 1);
-});
-
-test("application: durable action adapters leave the render and key stack before legacy mutations", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const workspace = createWorkspaceApplication({
-		brainDir,
-		root,
-		operations: { archiveRow: () => { calls.push("workspace"); return "a1 archived"; } },
-	});
-	const workspacePending = workspace.execute(WORKSPACE_ACTION.archive, { id: "a1" });
-	assert.deepEqual(calls, [], "workspace mutations do not start while a key handler still owns the stack");
-	assert.equal((await workspacePending).ok, true);
-	const context = createContextApplication({
-		brainDir,
-		operations: { clearFront: () => { calls.push("context"); }, pin: () => ({ changed: false }) },
-	});
-	const contextPending = context.execute(CONTEXT_ACTION.clearKept);
-	assert.deepEqual(calls, ["workspace"], "context mutations yield before touching durable state");
-	assert.equal((await contextPending).ok, true);
-	const requests = createRequestApplication({
-		brainDir,
-		operations: {
-			approveRequests: () => { calls.push("requests"); return { items: ["m1"], unknown: [] }; },
-			denyRequest: () => undefined,
-			answerQuestion: () => undefined,
-		},
-	});
-	const requestPending = requests.execute(REQUEST_ACTION.approve, { ids: ["m1"] });
-	assert.deepEqual(calls, ["workspace", "context"], "request decisions also leave the current UI stack");
-	assert.equal((await requestPending).ok, true);
-	const talk = createTalkApplication({
-		brainDir,
-		operations: {
-			talkSourceKey: (source) => source?.callId === "call-1" ? "chat-call:main:call-1" : undefined,
-			reviseTalkSource: () => { calls.push("talk"); return true; },
-			removeTalkSource: () => false,
-		},
-	});
-	const talkPending = talk.execute(TALK_ACTION.revise, { source: { kind: "chat-call", conversationId: "main", callId: "call-1" }, text: "Keep the corrected source." });
-	assert.deepEqual(calls, ["workspace", "context", "requests"], "kept-talk mutations cannot block a render either");
-	assert.equal((await talkPending).ok, true);
-	assert.deepEqual(calls, ["workspace", "context", "requests", "talk"]);
-	const controller = new AbortController();
-	const cancelled = workspace.execute(WORKSPACE_ACTION.archive, { id: "a2" }, { signal: controller.signal });
-	controller.abort();
-	const outcome = await cancelled;
-	assert.equal(outcome.ok, false);
-	if (outcome.ok) throw new Error("a cancellation between dispatch and legacy work must be explicit");
-	assert.equal(outcome.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(calls, ["workspace", "context", "requests", "talk"], "a cancelled action never reaches its legacy mutation");
-});
-
-test("application: composed facade dispatches actions and publishes cache-invalidating facts", async (t) => {
-	const { brainDir, root } = fresh(t);
-	const events = [];
-	const app = createApplication({
-		brainDir,
-		root,
-		now: () => Date.parse(NOW),
-		workspace: { operations: {
-			addMove: () => "",
-			addTemplate: () => ({}),
-			applyAdd: () => "",
-			archiveRow: () => "archived entry",
-			dropRow: () => "",
-			editRow: () => "",
-			focusAtlas: () => "",
-			foldRow: () => "",
-			recallReport: () => undefined,
-			settleRow: () => "",
-			unarchiveRow: () => "",
-			unfocusAtlas: () => "",
-			unshelveRow: () => "",
-			foldReports: () => "",
-			shelveForUser: () => "",
-		} },
-		review: { operations: { lastChange: () => undefined, undo: () => undefined } },
-		runtime: {
-			windows: { send: async () => ({ reason: "quiet" }), close: () => ({ name: "main" }), closeAll: () => ["main"] },
-			wakes: { remove: () => [{ id: "w1" }] },
-			work: { tell: (text) => text === "Tell the task." },
-			models: {
-				known: () => ["model-a", "model-b"],
-				inspect: async () => ({ listing: { entries: [{ id: "model-a", context_length: 4_096 }, { id: "model-b", context_length: 8_192 }] } }),
-				current: async () => ({ modelId: "model-a" }),
-				ensure: async () => ({ usableContextWindow: 4_000 }),
-				select: async (_id, limits) => ({ usableContextWindow: limits.contextWindow }),
-			},
-		},
-	});
-	app.events.subscribe((event) => events.push(event));
-	const result = await app.execute(WORKSPACE_ACTION.archive, { id: "a1" }, { requestId: "archive-1" });
-	assert.equal(result.ok, true);
-	assert.equal(result.meta.requestId, "archive-1");
-	const undone = await app.execute(REVIEW_ACTION.undo, {}, { requestId: "undo-1" });
-	assert.equal(undone.ok, true);
-	assert.equal(undone.meta.requestId, "undo-1");
-	assert.deepEqual(events.at(-1).payload.scopes, ["review", "workspace", "context", "requests"]);
-	const sent = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "continue" }, { requestId: "send-1" });
-	assert.equal(sent.ok, true);
-	assert.equal(sent.meta.requestId, "send-1");
-	const taskMessage = await app.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Tell the task." }, { requestId: "task-1" });
-	assert.equal(taskMessage.ok, true);
-	if (!taskMessage.ok) throw new Error(taskMessage.error.message);
-	assert.equal(taskMessage.data.routed, true);
-	const routes = await app.queries.runtime.models({ requestId: "routes-1" });
-	assert.equal(routes.ok, true);
-	if (!routes.ok) throw new Error(routes.error.message);
-	assert.equal(routes.meta.requestId, "routes-1");
-	assert.deepEqual(routes.data.models, [{ id: "model-a", contextWindow: 4_096 }, { id: "model-b", contextWindow: 8_192 }]);
-	const routeReady = await app.execute(RUNTIME_ACTION.ensureModel, {}, { requestId: "ready-1" });
-	assert.equal(routeReady.ok, true);
-	if (!routeReady.ok) throw new Error(routeReady.error.message);
-	assert.equal(routeReady.data.limits.usableContextWindow, 4_000);
-	const routeSelected = await app.execute(RUNTIME_ACTION.selectModel, { modelId: "model-b", contextWindow: 8_192 }, { requestId: "select-1" });
-	assert.equal(routeSelected.ok, true);
-	if (!routeSelected.ok) throw new Error(routeSelected.error.message);
-	assert.equal(routeSelected.data.limits.usableContextWindow, 8_192);
-	assert.deepEqual(events.map((event) => [event.type, event.payload.action]), [
-		["action.completed", WORKSPACE_ACTION.archive],
-		["projection.invalidated", WORKSPACE_ACTION.archive],
-		["action.completed", REVIEW_ACTION.undo],
-		["projection.invalidated", REVIEW_ACTION.undo],
-		["action.completed", RUNTIME_ACTION.sendShell],
-		["projection.invalidated", RUNTIME_ACTION.sendShell],
-		["action.completed", RUNTIME_ACTION.routeTaskMessage],
-		["projection.invalidated", RUNTIME_ACTION.routeTaskMessage],
-		["action.completed", RUNTIME_ACTION.ensureModel],
-		["projection.invalidated", RUNTIME_ACTION.ensureModel],
-		["action.completed", RUNTIME_ACTION.selectModel],
-		["projection.invalidated", RUNTIME_ACTION.selectModel],
-	]);
-	assert.deepEqual(events.at(-1).payload.scopes, ["runtime"]);
-	assert.equal(app.capabilities.get(WORKSPACE_ACTION.archive)?.label, "Archive");
-	assert.equal(app.capabilities.get(REVIEW_ACTION.undo)?.label, "Undo last checkpoint change");
-	assert.equal(app.capabilities.get(RUNTIME_ACTION.sendShell)?.label, "Send shell input");
-	assert.equal(app.capabilities.get(RUNTIME_ACTION.routeTaskMessage)?.label, "Message active task");
-	assert.equal(app.capabilities.get(RUNTIME_ACTION.selectModel)?.label, "Select model route");
-	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
-	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
-	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
-	const unknown = await app.execute("workspace.unknown", {});
-	assert.equal(unknown.ok, false);
-	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");
-	assert.equal(unknown.error.code, UI_ERROR_CODE.unknownAction);
-});
-
-test("application: request decisions have typed validation and durable-operation outcomes", async (t) => {
-	const { brainDir } = fresh(t);
-	const calls = [];
-	const app = createRequestApplication({
-		brainDir,
-		now: () => Date.parse(NOW),
-		operations: {
-			approveRequests: (_dir, ids, at) => {
-				calls.push({ action: "approve", ids, at });
-				return { items: ids, unknown: [] };
-			},
-			denyRequest: (_dir, id, reason, at) => {
-				calls.push({ action: "deny", id, reason, at });
-				return id === "m1" ? { kind: "approval", text: "Run the check." } : undefined;
-			},
-			answerQuestion: (_dir, id, text, at) => {
-				calls.push({ action: "answer", id, text, at });
-				return id === "q1" ? { kind: "question", text: "Which wording?" } : undefined;
-			},
-		},
-	});
-	const invalid = await app.execute(REQUEST_ACTION.answer, { id: "q1", text: "  " });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("an empty question answer must be refused");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(invalid.error.field, "text");
-	const approved = await app.execute(REQUEST_ACTION.approve, { ids: ["m1"] }, { requestId: "approve-1" });
-	assert.equal(approved.ok, true);
-	if (!approved.ok) throw new Error(approved.error.message);
-	assert.deepEqual(approved.data.approved, ["m1"]);
-	assert.equal(approved.meta.requestId, "approve-1");
-	const denied = await app.execute(REQUEST_ACTION.deny, { id: "m1", reason: "Not this release." });
-	assert.equal(denied.ok, true);
-	if (!denied.ok) throw new Error(denied.error.message);
-	assert.match(denied.data.line, /Not this release/);
-	const answered = await app.execute(REQUEST_ACTION.answer, { id: "q1", text: "Use the concise wording." });
-	assert.equal(answered.ok, true);
-	const absent = await app.execute(REQUEST_ACTION.deny, { id: "m404" });
-	assert.equal(absent.ok, false);
-	if (absent.ok) throw new Error("a non-waiting request must be explicit");
-	assert.equal(absent.error.code, UI_ERROR_CODE.notFound);
-	assert.deepEqual(calls, [
-		{ action: "approve", ids: ["m1"], at: NOW },
-		{ action: "deny", id: "m1", reason: "Not this release.", at: Date.parse(NOW) },
-		{ action: "answer", id: "q1", text: "Use the concise wording.", at: Date.parse(NOW) },
-		{ action: "deny", id: "m404", reason: "", at: Date.parse(NOW) },
-	]);
-	const approveCapability = app.capabilities.list().find((entry) => entry.id === REQUEST_ACTION.approve);
-	assert.equal(approveCapability?.intent, "mutate");
-});
-
-test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const app = createWorkspaceApplication({ brainDir, root, now: () => Date.parse(NOW) });
-	const invalid = await app.execute(WORKSPACE_ACTION.add, { book: "unknown", text: "{}" }, { requestId: "invalid-add" });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("an invalid book must not add a row");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(invalid.error.kind, UI_ERROR_KIND.validation);
-	assert.equal(invalid.error.field, "book");
-	assert.equal(invalid.meta.requestId, "invalid-add");
-	assert.equal(invalid.meta.at, NOW);
-
-	const added = await app.execute(WORKSPACE_ACTION.add, {
-		book: "ledger",
-		text: JSON.stringify({ kind: "note", text: "Move UI actions behind the application boundary", salient: false, done_when: "" }),
-	});
-	assert.equal(added.ok, true);
-	if (!added.ok) throw new Error(added.error.message);
-	assert.equal(added.data.action, WORKSPACE_ACTION.add);
-	assert.equal(added.notices[0].level, "success");
-	const incompleteMove = await app.execute(WORKSPACE_ACTION.addMove, { parent: "p1", text: "Read the entry point." });
-	assert.equal(incompleteMove.ok, false);
-	if (incompleteMove.ok) throw new Error("a move without done-when text must be refused before the plan operation");
-	assert.equal(incompleteMove.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(incompleteMove.error.field, "doneWhen");
-	const envelope = await app.execute(WORKSPACE_ACTION.add, {
-		book: "plan",
-		text: JSON.stringify({ mode: "look", text: "Inspect the entry point.", done_when: "The entry point is identified." }),
-	});
-	assert.equal(envelope.ok, true);
-	if (!envelope.ok) throw new Error(envelope.error.message);
-	const moved = await app.execute(WORKSPACE_ACTION.addMove, {
-		parent: "p1",
-		text: "Read src/index.mjs.",
-		doneWhen: "The entry point is identified.",
-	});
-	assert.equal(moved.ok, true);
-	if (!moved.ok) throw new Error(moved.error.message);
-	assert.equal(moved.data.action, WORKSPACE_ACTION.addMove);
-	assert.equal(loadPlan(brainDir).plan.moves[0]?.parent, "p1", "a typed plan-move action uses the durable plan operation");
-	const missingShelfPath = await app.execute(WORKSPACE_ACTION.shelve, { path: "   " });
-	assert.equal(missingShelfPath.ok, false);
-	if (missingShelfPath.ok) throw new Error("a shelf action without a target must be refused before the context mutation");
-	assert.equal(missingShelfPath.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(missingShelfPath.error.field, "path");
-	const malformedShelfRange = await app.execute(WORKSPACE_ACTION.shelve, { path: "shelf.txt", lines: "around here" });
-	assert.equal(malformedShelfRange.ok, false);
-	if (malformedShelfRange.ok) throw new Error("an invalid shelf range must be refused before the context mutation");
-	assert.equal(malformedShelfRange.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(malformedShelfRange.error.field, "lines");
-	writeFileSync(join(root, "shelf.txt"), "first\nsecond\n");
-	const shelved = await app.execute(WORKSPACE_ACTION.shelve, { path: "shelf.txt", lines: "1-1" });
-	assert.equal(shelved.ok, true);
-	if (!shelved.ok) throw new Error(shelved.error.message);
-	assert.equal(shelved.data.action, WORKSPACE_ACTION.shelve);
-	const shelf = loadContext(brainDir).shelf[0];
-	assert.equal(shelf?.path, "shelf.txt", "the typed shelf action owns the context placement");
-	assert.ok(shelf?.id, "the typed shelf action allocates a durable placement id");
-	const unshelved = await app.execute(WORKSPACE_ACTION.unshelve, { id: shelf.id });
-	assert.equal(unshelved.ok, true);
-	assert.equal(loadContext(brainDir).shelf.length, 0, "the existing unshelve action clears the placement through the same facade");
-	const missingFocusReason = await app.execute(WORKSPACE_ACTION.focusAtlas, { target: "focus.txt", reason: "   " });
-	assert.equal(missingFocusReason.ok, false);
-	if (missingFocusReason.ok) throw new Error("an atlas focus needs a reason before it mutates the atlas");
-	assert.equal(missingFocusReason.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(missingFocusReason.error.field, "reason");
-	writeFileSync(join(root, "focus.txt"), "follow this path\n");
-	const focused = await app.execute(WORKSPACE_ACTION.focusAtlas, { target: "focus.txt", reason: "Trace the application boundary." });
-	assert.equal(focused.ok, true);
-	if (!focused.ok) throw new Error(focused.error.message);
-	assert.deepEqual(loadAtlas(brainDir).atlas?.view.focus?.target, { kind: "path", path: "focus.txt" }, "the typed atlas action persists its explicit lens");
-	const unfocused = await app.execute(WORKSPACE_ACTION.unfocusAtlas);
-	assert.equal(unfocused.ok, true);
-	assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the typed atlas action clears only the explicit lens");
-	const entry = loadLedger(brainDir).ledger.items[0];
-	assert.ok(entry, "the successful result comes from the same durable row operation the terminal already uses");
-	const cannotFold = await app.execute(WORKSPACE_ACTION.toggleFold, { id: entry.id });
-	assert.equal(cannotFold.ok, false);
-	if (cannotFold.ok) throw new Error("a ledger entry cannot be folded as a report");
-	assert.equal(cannotFold.error.code, UI_ERROR_CODE.actionRefused);
-	assert.equal(cannotFold.error.kind, UI_ERROR_KIND.validation);
-
-	const cancelledController = new AbortController();
-	cancelledController.abort();
-	const cancelled = await app.execute(WORKSPACE_ACTION.archive, { id: entry.id }, { signal: cancelledController.signal });
-	assert.equal(cancelled.ok, false);
-	if (cancelled.ok) throw new Error("an aborted action must not run");
-	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.equal(loadLedger(brainDir).ledger.items[0].archived, undefined, "cancellation occurs before the legacy mutation seam");
-
-	const missing = await app.execute(WORKSPACE_ACTION.archive, { id: "g999" });
-	assert.equal(missing.ok, false);
-	if (missing.ok) throw new Error("a missing row must be a typed failure");
-	assert.equal(missing.error.code, UI_ERROR_CODE.notFound);
-	assert.equal(missing.error.kind, UI_ERROR_KIND.notFound);
-
-	const asked = await app.execute(WORKSPACE_ACTION.delete, { id: entry.id });
-	assert.equal(asked.ok, false);
-	if (asked.ok) throw new Error("delete needs confirmation");
-	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
-	assert.deepEqual(asked.confirmation, {
-		actionId: WORKSPACE_ACTION.delete,
-		target: entry.id,
-		summary: `Delete ${entry.id} permanently. This cannot be undone.`,
-		strength: "acknowledge",
-	});
-	assert.ok(loadLedger(brainDir).ledger.items.some((item) => item.id === entry.id), "a confirmation request does not mutate durable state");
-
-	const deleted = await app.execute(WORKSPACE_ACTION.delete, { id: entry.id }, {
-		confirmation: { actionId: WORKSPACE_ACTION.delete, target: entry.id, acknowledged: true },
-	});
-	assert.equal(deleted.ok, true);
-	assert.equal(loadLedger(brainDir).ledger.items.some((item) => item.id === entry.id), false);
-	const deleteCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.delete);
-	assert.deepEqual(deleteCapability?.availability, { enabled: true });
-	assert.equal(deleteCapability?.confirmation, "acknowledge");
-	const shelfCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.shelve);
-	assert.deepEqual(shelfCapability?.availability, { enabled: true });
-	assert.equal(shelfCapability?.intent, "mutate");
-	const focusCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.focusAtlas);
-	assert.deepEqual(focusCapability?.availability, { enabled: true });
-	assert.equal(focusCapability?.intent, "mutate");
-});
-
-test("application: context top refresh has typed validation, persistence, and unavailable outcomes", async (t) => {
-	const { brainDir } = fresh(t);
-	const app = createContextApplication({ brainDir, now: () => Date.parse(NOW) });
-	const invalid = await app.execute(CONTEXT_ACTION.pinTop, { reason: "   " }, { requestId: "blank-pin" });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("a top refresh needs a reason before it writes context state");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(invalid.error.field, "reason");
-	assert.equal(invalid.meta.requestId, "blank-pin");
-	const pinned = await app.execute(CONTEXT_ACTION.pinTop, { reason: "Refresh the project copy." });
-	assert.equal(pinned.ok, true);
-	if (!pinned.ok) throw new Error(pinned.error.message);
-	assert.equal(pinned.data.changed, true);
-	assert.equal(existsSync(topPath(brainDir)), true, "the typed action persists the stable top-of-context copy");
-	const current = await app.execute(CONTEXT_ACTION.pinTop, { reason: "Check the unchanged copy." });
-	assert.equal(current.ok, true);
-	if (!current.ok) throw new Error(current.error.message);
-	assert.equal(current.data.changed, false, "an unchanged top does not rewrite what the provider already knows");
-	noteChat(brainDir, "user", Date.parse(NOW), "Clear this only from the kept context.");
-	updateContext(brainDir, (store) => { store.shelf.push({ type: "file", path: "shelf.txt", id: "sh1", snapshot: "== shelf.txt ==" }); });
-	const cleared = await app.execute(CONTEXT_ACTION.clearKept);
-	assert.equal(cleared.ok, true);
-	assert.equal(loadContext(brainDir).chat.length, 0, "clearing a fresh context removes the mutable kept talk");
-	assert.equal(loadContext(brainDir).shelf.length, 0, "clearing a fresh context removes its shelf placements");
-	const capability = app.capabilities.list().find((entry) => entry.id === CONTEXT_ACTION.pinTop);
-	assert.deepEqual(capability?.availability, { enabled: true });
-	assert.equal(capability?.intent, "mutate");
-	const clearCapability = app.capabilities.list().find((entry) => entry.id === CONTEXT_ACTION.clearKept);
-	assert.deepEqual(clearCapability?.availability, { enabled: true });
-	assert.equal(clearCapability?.intent, "mutate");
-
-	const unavailable = createContextApplication({ brainDir: join(brainDir, "bad"), now: () => Date.parse(NOW) });
-	mkdirSync(join(brainDir, "bad"), { recursive: true });
-	writeFileSync(join(brainDir, "bad", "carto-atlas.json"), "not json");
-	const refused = await unavailable.execute(CONTEXT_ACTION.pinTop, { reason: "Try a broken graph." });
-	assert.equal(refused.ok, false);
-	if (refused.ok) throw new Error("an unreadable graph must not replace the current top copy");
-	assert.equal(refused.error.code, UI_ERROR_CODE.actionRefused);
-	assert.equal(refused.error.kind, UI_ERROR_KIND.unavailable);
-	assert.equal(refused.error.retryable, true);
-});
-
-test("application: kept-talk actions preserve the durable transcript boundary and require confirmation to forget", async (t) => {
-	const { brainDir } = fresh(t);
-	const app = createTalkApplication({ brainDir, now: () => Date.parse(NOW) });
-	const source = { kind: "chat-call", conversationId: "root", callId: "call-1" };
-	noteChat(brainDir, "user", Date.parse(NOW), "Keep this wording for a future collapse.", { source });
-	const invalid = await app.execute(TALK_ACTION.revise, { source, text: "   " });
-	assert.equal(invalid.ok, false);
-	if (invalid.ok) throw new Error("empty kept talk must be refused");
-	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
-	assert.equal(invalid.error.field, "text");
-	const revised = await app.execute(TALK_ACTION.revise, { source, text: "Keep the corrected wording for a future collapse." });
-	assert.equal(revised.ok, true);
-	if (!revised.ok) throw new Error(revised.error.message);
-	assert.equal(loadContext(brainDir).chat[0]?.text, "Keep the corrected wording for a future collapse.");
-	const asked = await app.execute(TALK_ACTION.forget, { source });
-	assert.equal(asked.ok, false);
-	if (asked.ok) throw new Error("forgetting kept talk needs confirmation");
-	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
-	assert.ok(asked.confirmation, "the action gives the screen a scoped acknowledgement request");
-	assert.equal(loadContext(brainDir).chat.length, 1, "asking for confirmation does not alter the kept talk");
-	const forgotten = await app.execute(TALK_ACTION.forget, { source }, { confirmation: { ...asked.confirmation, acknowledged: true } });
-	assert.equal(forgotten.ok, true);
-	assert.equal(loadContext(brainDir).chat.length, 0, "only the acknowledged action removes the future-collapse source");
-	const forgetCapability = app.capabilities.list().find((capability) => capability.id === TALK_ACTION.forget);
-	assert.equal(forgetCapability?.confirmation, "acknowledge");
-});
-
-test("model listing: llama-swap context_length wins over legacy metadata", () => {
-	assert.equal(modelContextWindow({ context_length: 64_000, context_window: 64_000, meta: { n_ctx: 100_000 } }), 64_000);
-	assert.equal(modelContextWindow({ context_window: 65_536 }), 65_536, "the OpenAI-gateway mirror is accepted when context_length is absent");
-	assert.equal(modelContextWindow({ meta: { n_ctx: 32_768, n_ctx_train: 131_072 } }), 32_768, "legacy llama.cpp n_ctx is runtime capacity, unlike n_ctx_train");
-	assert.equal(modelContextWindow({ context_length: 0, meta: { n_ctx: "64k" } }), undefined, "only a positive integer is trustworthy server capacity");
 });
 
 // ─── The wake notes ──────────────────────────────────────────────────────────
@@ -2669,9 +165,7 @@ test("plan: an envelope is not runnable and closes only after a declared move is
 	assert.equal(started.move.status, "running");
 	reportMove(plan, "m1", 1, { done: true, report: "t1", proof: "src/index.mjs was read" }, NOW);
 	savePlan(brainDir, plan);
-	assert.match(settleRow(brainDir, "m1", null), /needs an acceptance review/);
-	assert.match(settleRow(brainDir, "m1", null, "The recorded source read identifies the entry point required by this move."), /m1 accepted\./);
-	assert.equal(loadPlan(brainDir).plan.moves[0].acceptedReview, "The recorded source read identifies the entry point required by this move.");
+	assert.match(settleRow(brainDir, "m1", null), /m1 accepted\./);
 	assert.match(settleRow(brainDir, "p1", null), /p1 is done\./);
 	assert.equal(loadPlan(brainDir).plan.items[0].status, POLICY.enums.entryStatus.done);
 });
@@ -2782,23 +276,6 @@ test("assessment: the book tool writes it whole, and /assessment reads the file"
 
 // ─── The plan: approval in the user's own words ─────────────────────────────
 
-test("approval word targets are a pure current-plan projection for the typed request action", (t) => {
-	const { brainDir } = fresh(t);
-	const { plan } = loadPlan(brainDir);
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten the local check.", done_when: "The local check is tighter." }, NOW);
-	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/check.mjs", done_when: "The check covers the path.", targets: ["src/check.mjs"], proof: "Focused test output." }, NOW);
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Check the published schema.", done_when: "The schema response is checked.", network: true }, NOW);
-	applyPlanOp(plan, { action: "addMove", parent: "p2", text: "Run the schema check", done_when: "The command reports the schema version.", targets: ["src/schema.mjs"], proof: "Command output.", capabilities: { network: true } }, NOW);
-	assert.equal(isApprovalWords("i yes"), true);
-	assert.equal(isApprovalWords("yes but not p1"), false);
-	assert.deepEqual(approvalWordTargets(plan, "i yes"), ["m1"], "a bare affirmative chooses the one current non-network move");
-	assert.deepEqual(approvalWordTargets(plan, "approved the plan"), ["m1"], "a scoped affirmative still excludes network work");
-	assert.deepEqual(approvalWordTargets(plan, "approved p2"), ["m2"], "a named envelope resolves its current child move before dispatch");
-	assert.equal(approvalWordTargets(plan, "approved m99"), undefined, "stale names do not create a no-op application mutation");
-	assert.equal(approvalWordTargets(plan, "maybe"), undefined);
-	assert.equal(plan.moves.every((move) => move.approvedRevision === undefined), true, "target resolution is pure and never writes the plan");
-});
-
 test("approval words: i yes approves the one waiting move revision, while a named move may deliberately allow network", (t) => {
 	const { brainDir } = fresh(t);
 	const { plan } = loadPlan(brainDir);
@@ -2887,13 +364,11 @@ test("plan: a reported change move needs report, checkpoints, changed paths and 
 	reportMove(plan, "m1", 1, { done: true, report: "t1", checkpoints: { before: "c1", after: "c2" }, changes: [{ path: "src/other.mjs" }], proof: "test output" }, NOW);
 	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /outside its declared targets/);
 	plan.moves[0].reported.changes = [{ path: "src/one.mjs" }];
-	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW), /`review`/);
-	assert.doesNotThrow(() => applyPlanOp(plan, { action: "acceptMove", id: "m1", review: "The focused test output witnesses that the export changed." }, NOW));
-	assert.equal(plan.moves[0].acceptedReview, "The focused test output witnesses that the export changed.");
+	assert.doesNotThrow(() => applyPlanOp(plan, { action: "acceptMove", id: "m1" }, NOW));
 	assert.throws(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW), /still has m2 \(open\)/);
 	startMove(plan, "m2", NOW);
 	reportMove(plan, "m2", 1, { done: true, report: "t2", checkpoints: { before: "c2", after: "c3" }, changes: [{ path: "src/two.mjs" }], proof: "second test output" }, NOW);
-	applyPlanOp(plan, { action: "acceptMove", id: "m2", review: "The second test output witnesses that the check passed." }, NOW);
+	applyPlanOp(plan, { action: "acceptMove", id: "m2" }, NOW);
 	assert.doesNotThrow(() => applyPlanOp(plan, { action: "done", id: "p1" }, NOW));
 	undoMove(plan, "m1", NOW);
 	assert.equal(plan.moves[0].status, "open");
@@ -2901,29 +376,6 @@ test("plan: a reported change move needs report, checkpoints, changed paths and 
 	assert.equal(plan.items[0].status, "open");
 	assert.equal(plan.items[0].closed, undefined);
 	assert.equal(plan.moves[1].status, "blocked", "a later accepted sibling is stale after an earlier undo");
-});
-
-test("plan: a recorded closure gap blocks a completion claim and survives a hand-edited reported state", (t) => {
-	const { plan } = loadPlan(fresh(t).brainDir);
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Show the simulation.", done_when: "The browser visibly runs it." }, NOW);
-	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Create js/main.js", done_when: "The browser loads the simulation.", targets: ["js/main.js"], proof: "Browser observation shows the running simulation." }, NOW);
-	approve(plan, NOW, ["m1"]);
-	startMove(plan, "m1", NOW);
-	reportMove(plan, "m1", 1, {
-		done: true,
-		report: "t1",
-		checkpoints: { before: "c1", after: "c2" },
-		changes: [{ path: "js/main.js" }],
-		proof: "node --check js/main.js exits zero.",
-		closureGap: "index.html must load js/main.js before the browser witness is reachable.",
-	}, NOW);
-	assert.equal(plan.moves[0].status, "blocked");
-	assert.equal(plan.moves[0].reported.claimed, false);
-	assert.match(plan.moves[0].blocked, /Closure gap: index\.html/);
-	assert.equal(plan.moves[0].reported.closureGap, "index.html must load js/main.js before the browser witness is reachable.");
-	plan.moves[0].status = "reported";
-	plan.moves[0].reported.claimed = true;
-	assert.throws(() => applyPlanOp(plan, { action: "acceptMove", id: "m1", review: "A syntax check proves the browser runs it." }, NOW), /reported a closure gap/);
 });
 
 // ─── The atlas ──────────────────────────────────────────────────────────────
@@ -3090,28 +542,6 @@ test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
 	assert.equal(describeCall({ name: "read", arguments: { id: ref.id } }), `read ${ref.id}`);
 });
 
-test("application: deferred reference labels keep screen activity out of synchronous catalog reads", async (t) => {
-	const { brainDir, root } = fresh(t);
-	mkdirSync(join(root, "src"), { recursive: true });
-	writeFileSync(join(root, "src", "activity.mjs"), "export const activity = true;\n");
-	const { ref } = observeFile(root, brainDir, "src/activity.mjs");
-	const resolved = [];
-	const labels = createDeferredReferenceLabels({ brainDir, onResolved: (_ref, label) => resolved.push(label) });
-	assert.equal(labels.describe(ref), ref.id, "a render/key caller receives a safe opaque id before the legacy catalog reader runs");
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.equal(labels.describe(ref), `activity.mjs (${ref.id})`);
-	assert.deepEqual(resolved, [`activity.mjs (${ref.id})`]);
-	let label = ref.id;
-	const chat = createChat({ describeRef: () => label });
-	chat.entry(0, { model: [{ role: "assistant", content: [{ type: "toolCall", id: "call-ref", name: "read", arguments: { id: ref.id } }] }] });
-	const text = () => chat.lines(120, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	assert.match(text(), new RegExp(`read ${ref.id}`));
-	label = `activity.mjs (${ref.id})`;
-	assert.equal(chat.refreshActivityLabels(), true, "a resolved label updates the already-recorded Work activity without rereading durable state in render");
-	assert.match(text(), /read activity\.mjs/);
-	labels.dispose();
-});
-
 test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t) => {
 	const { brainDir, root } = fresh(t);
 	mkdirSync(join(root, "src"), { recursive: true });
@@ -3184,97 +614,12 @@ test("shell: a read-only inline run with a cross-action argument still runs, and
 
 test("shell: TOOLS.shell distinguishes the confined inline lane from an authorized direct move", () => {
 	assert.match(TOOLS.shell, /Inline commands from the orchestrating context always use the read-only lane; in direct mode that lane still needs working bubblewrap and is refused without it\./);
-	assert.match(TOOLS.shell, /A declared change move is different in direct mode: it runs directly under its live move token with detection-only final checkpoint scope checking/);
-	assert.match(TOOLS.shell, /private disposable source copy/i);
+	assert.match(TOOLS.shell, /A declared change move is different: in direct mode it runs directly under its live move token even when bubblewrap is unavailable/);
 	assert.match(TOOLS.shell, /read, wait, stop and close work for every context/i);
 });
 
-test("stage: a sandbox command candidate cannot touch the live tree before its approved promotion", (t) => {
-	const { root, brainDir } = fresh(t);
-	mkdirSync(join(root, "src"), { recursive: true });
-	mkdirSync(join(root, ".git"), { recursive: true });
-	writeFileSync(join(root, "src", "format.mjs"), "export const value = 1;\n");
-	writeFileSync(join(root, ".git", "secret"), "not source\n");
-	writeFileSync(join(brainDir, "private"), "not source\n");
-	const stage = createStage({ root });
-	t.after(() => disposeStage(stage));
-	assert.equal(existsSync(join(stage.work, ".git")), false, "the source projection excludes git metadata");
-	assert.equal(existsSync(join(stage.work, ".brain")), false, "the source projection excludes the durable brain");
-	writeFileSync(join(stage.work, "src", "format.mjs"), "export const value = 2;\n");
-	assert.equal(readFileSync(join(root, "src", "format.mjs"), "utf8"), "export const value = 1;\n", "the stage copy cannot mutate the live source before promotion");
-	const candidate = collectStageCandidate(stage);
-	assert.deepEqual(candidate.changes.map(({ path, status }) => ({ path, status })), [{ path: "src/format.mjs", status: "changed" }]);
-	const prepared = prepareStagePromotion({ root, brainDir, record: stage, targets: ["src/format.mjs"], fileOpsLimit: 1 });
-	const applied = applyStagePromotion(prepared);
-	assert.deepEqual(applied.changes, [{ path: "src/format.mjs", status: "changed", added: 1, removed: 1 }], "the candidate is a normal bounded file change only after validation");
-	assert.equal(readFileSync(join(root, "src", "format.mjs"), "utf8"), "export const value = 2;\n");
-	assert.equal(disposeStage(stage).removed, true, "normal completion removes the private stage root");
-	assert.equal(existsSync(stage.root), false);
-});
-
-test("stage: the sandbox launch binds only the disposable work tree writable and blocks the brain without network", (t) => {
-	const { root, brainDir } = fresh(t);
-	writeFileSync(join(root, "source.txt"), "source\n");
-	const stage = createStage({ root });
-	t.after(() => disposeStage(stage));
-	const launch = sandboxArgs({ root: stage.work, target: STAGE_WORK_DIR, cwd: STAGE_WORK_DIR, brainDir, sandboxHome: stage.home, bindBrain: false, hide: [brainDir, join(root, ".git")] });
-	const pairs = launch.args.join("\u0000");
-	const stageBind = launch.args.findIndex((entry, index) => entry === "--bind" && launch.args[index + 1] === stage.work && launch.args[index + 2] === STAGE_WORK_DIR);
-	const tmpfs = launch.args.findIndex((entry, index) => entry === "--tmpfs" && launch.args[index + 1] === "/tmp");
-	const stageDir = launch.args.findIndex((entry, index) => entry === "--dir" && launch.args[index + 1] === STAGE_WORK_DIR);
-	assert.ok(stageBind >= 0, "the stage work copy is the writable project-shaped mount");
-	assert.ok(tmpfs >= 0 && stageDir > tmpfs, "the stage mount target is made inside the writable /tmp tmpfs, never under the read-only system root");
-	assert.match(pairs, /--tmpfs\u0000.*\.brain/, "the live durable brain is covered after the system read-only bind");
-	assert.ok(launch.args.includes("--unshare-net"), "network is off unless the move explicitly enables it");
-	assert.doesNotMatch(pairs, new RegExp(`--bind\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\u0000${root.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), "the live project is never rebound writable");
-});
-
-test("stage: stale, forbidden, out-of-target, and oversized candidate paths are refused without promotion", (t) => {
-	const { root, brainDir } = fresh(t);
-	mkdirSync(join(root, "src"), { recursive: true });
-	writeFileSync(join(root, "src", "one.mjs"), "export const one = 1;\n");
-	writeFileSync(join(root, "src", "two.mjs"), "export const two = 2;\n");
-	const wrongTarget = createStage({ root });
-	t.after(() => disposeStage(wrongTarget));
-	writeFileSync(join(wrongTarget.work, "src", "one.mjs"), "export const one = 3;\n");
-	assert.throws(() => prepareStagePromotion({ root, brainDir, record: wrongTarget, targets: ["src/two.mjs"], fileOpsLimit: 1 }), /outside this move's declared targets/);
-	assert.equal(readFileSync(join(root, "src", "one.mjs"), "utf8"), "export const one = 1;\n");
-
-	const forbidden = createStage({ root });
-	t.after(() => disposeStage(forbidden));
-	mkdirSync(join(forbidden.work, ".brain"), { recursive: true });
-	writeFileSync(join(forbidden.work, ".brain", "bypass"), "no\n");
-	assert.throws(() => collectStageCandidate(forbidden), /forbidden .brain/);
-
-	const stale = createStage({ root });
-	t.after(() => disposeStage(stale));
-	writeFileSync(join(stale.work, "src", "one.mjs"), "export const one = 4;\n");
-	writeFileSync(join(root, "src", "two.mjs"), "export const two = 5;\n");
-	assert.throws(() => prepareStagePromotion({ root, brainDir, record: stale, targets: ["src/one.mjs"], fileOpsLimit: 1 }), /live project changed after this command stage was materialized/);
-	assert.equal(readFileSync(join(root, "src", "one.mjs"), "utf8"), "export const one = 1;\n", "a stale candidate never overwrites the live source");
-});
-
-test("stage: a failed promotion restores every earlier live path and cleans its disposable root", (t) => {
-	const { root, brainDir } = fresh(t);
-	mkdirSync(join(root, "src", "nested"), { recursive: true });
-	writeFileSync(join(root, "src", "a.mjs"), "export const a = 1;\n");
-	writeFileSync(join(root, "src", "nested", "b.mjs"), "export const b = 1;\n");
-	const stage = createStage({ root });
-	writeFileSync(join(stage.work, "src", "a.mjs"), "export const a = 2;\n");
-	writeFileSync(join(stage.work, "src", "nested", "b.mjs"), "export const b = 2;\n");
-	const prepared = prepareStagePromotion({ root, brainDir, record: stage, targets: ["src/a.mjs", "src/nested/b.mjs"], fileOpsLimit: 2 });
-	// This mimics a concurrent filesystem failure after the whole candidate was validated: the first path has
-	// already landed when the second's parent becomes a file. The staged apply must put the first one back.
-	rmSync(join(root, "src", "nested"), { recursive: true, force: true });
-	writeFileSync(join(root, "src", "nested"), "not a folder\n");
-	assert.throws(() => applyStagePromotion(prepared), StageError);
-	assert.equal(readFileSync(join(root, "src", "a.mjs"), "utf8"), "export const a = 1;\n", "the first promoted path was rolled back");
-	assert.equal(disposeStage(stage).removed, true, "a failed promotion still cleans its own stage root");
-	assert.equal(existsSync(stage.root), false);
-});
-
 test("shell: a live move owns its window, spends command starts, and loses stop authority when its revision changes", async (t) => {
-	const { root, brainDir } = fresh(t);
+	const { brainDir } = fresh(t);
 	const { plan } = loadPlan(brainDir);
 	applyPlanOp(plan, { action: "add", mode: "change", text: "Run the narrow check.", done_when: "The check is recorded." }, NOW);
 	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Run npm test", done_when: "The test exits.", targets: ["src/check.mjs"], proof: "Test output.", budget: { replies: 3, fileOps: 0, commandStarts: 1 } }, NOW);
@@ -3286,25 +631,19 @@ test("shell: a live move owns its window, spends command starts, and loses stop 
 	const open = new Set();
 	const result = (window, more = {}) => ({ text: "", ms: 1, reason: "time", window, cwd: ".", lines: 0, kept: 0, sandbox: true, network: false, state: "busy", ...more });
 	let stopped = 0;
-	let launched;
 	const windows = {
 		list: () => [...open].map((name) => ({ name, state: "busy" })),
-		run: async (name, command, options) => { launched = { name, command, options }; open.add(name); return result(name); },
+		run: async (name) => { open.add(name); return result(name); },
 		send: async (name) => result(name),
 		stop: async (name) => { stopped++; return result(name, { wasBusy: true, ended: true, exit: 130, state: "idle" }); },
 		close: (name) => ({ wasGone: !open.delete(name) }),
 	};
-	const tool = shellTool({ root, brainDir, config: { shellWait: 30 }, gate: { yolo: false }, runner: { mode: "sandbox" }, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
+	const tool = shellTool({ brainDir, config: { shellWait: 30 }, gate: { yolo: false }, runner: { mode: "sandbox" }, windows, runOf: () => ({ mode: "change", move: "m1", revision: 1 }) });
 	const api = { conversationId: focus, taskId: "shell-focus" };
 	const started = await tool.execute({ action: "run", command: "npm test", window: "check" }, api, {});
 	assert.equal(started.isError, false, started.output[0].text);
 	assert.equal(loadContext(brainDir).tasks[focus].commandUses, 1);
 	assert.deepEqual(loadContext(brainDir).tasks[focus].windows, ["check"]);
-	const stageReceipt = loadContext(brainDir).tasks[focus].stage;
-	assert.match(stageReceipt.id, /./, "a sandboxed change command receives a task-owned stage receipt");
-	assert.equal(launched.options.stage.id, stageReceipt.id, "the writable window receives that stage rather than the live project");
-	assert.equal(existsSync(stageReceipt.root), true, "the receipt names the disposable root until task finalization");
-	t.after(() => disposeStage(stageReceipt));
 	const sent = await tool.execute({ action: "send", window: "check", text: "q" }, api, {});
 	assert.equal(sent.isError, false, sent.output[0].text);
 	const exhausted = await tool.execute({ action: "run", command: "npm test", window: "other" }, api, {});
@@ -3570,7 +909,6 @@ test("state: Dispatch is main-only mechanical evidence, not an automatic task co
 	assert.match(main, /Dispatch\n/);
 	assert.match(main, /Eligible move facts:/);
 	assert.match(main, /m1 revision 1/);
-	assert.match(main, /Closure facts — boundary: src\.txt\. Claim: The source has the local edit\. Witness: A named check passes\./);
 	assert.match(main, /src\.txt: .*shelf sh1 current/);
 	assert.match(main, /This lens neither delegates work nor approves a move/);
 	assert.doesNotMatch(main, /I call `task` with `move:m1`/, "a ready move is a fact, not an imperative");
@@ -3746,7 +1084,6 @@ test("task: selected main shelf evidence is captured into the durable focus caps
 	assert.match(run.brief, /Boundary and facts from the main context/);
 	assert.match(run.brief, /captured first version/);
 	assert.match(run.brief, /do not add targets, capabilities, proof, approval, or completion authority/);
-	assert.match(run.brief, /Closure: this focus is done only when its declared result is observed within its declared authority/);
 	writeFileSync(join(root, "evidence.txt"), "later live version\n");
 	updateContext(brainDir, (store) => {
 		store.shelf = [];
@@ -4144,70 +1481,6 @@ test("prepareArguments: book, read, and shelf repair deeply frozen harness argum
 	assert.throws(() => book.prepareArguments({ target: "file", action: "edit", id: "f1", ref: { id: "f2" }, oldText: "a", newText: "b" }), /matching `id` and `ref\.id`/);
 });
 
-test("book: target-family reads preserve their live and stale reference results", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const engine = { messagesOf: () => [], want: () => {}, callWords: () => "book" };
-	const registry = {
-		tools: () => [{
-			extension: { name: "demo" },
-			tool: { name: "echo", description: "Echo a value.", parameters: { type: "object", properties: { value: { type: "string" } } } },
-		}],
-	};
-	const tool = bookTool({ root, brainDir, config: {}, engine, gate: { yolo: false } });
-	let serial = 0;
-	const api = () => ({
-		conversationId: ROOT_CONVERSATION_ID,
-		taskId: `family-${++serial}`,
-		now: () => 1_700_000_000_000,
-		registry,
-		executeTool: async () => { throw new Error("unexpected nested tool"); },
-	});
-	const run = (args) => tool.execute(tool.prepareArguments(args), api(), undefined);
-
-	const durableList = await run({ target: "tool", action: "list" });
-	assert.equal(durableList.isError, undefined, durableList.output[0].text);
-	assert.deepEqual(durableList.details, { target: "tool", count: 1, shown: 1 });
-	assert.equal(JSON.parse(durableList.output[0].text)[0].ref.kind, "tool");
-	const durableLive = await run({ target: "tool", action: "read", id: "demo:echo" });
-	assert.equal(durableLive.isError, undefined, durableLive.output[0].text);
-	assert.deepEqual(JSON.parse(durableLive.output[0].text), { extension: "demo", name: "echo", description: "Echo a value.", schema: { type: "object", properties: { value: { type: "string" } } } });
-	assert.equal(durableLive.details.status, "live");
-	assert.equal(durableLive.details.ref.kind, "tool");
-	const durableStale = await run({ target: "tool", action: "read", ref: { id: "demo:echo", version: "0".repeat(64) } });
-	assert.equal(durableStale.isError, true);
-	assert.match(durableStale.output[0].text, /tool reference is stale: requested 0+, current [0-9a-f]{64}; the requested immutable version is unavailable/);
-
-	const added = await run({ target: "ledger", action: "add", kind: "note", text: "Keep this exact." });
-	assert.equal(added.isError, undefined, added.output[0].text);
-	const brainList = await run({ target: "ledger", action: "list" });
-	assert.equal(brainList.isError, undefined, brainList.output[0].text);
-	assert.deepEqual(brainList.details, { target: "ledger", count: 1, shown: 1 });
-	assert.equal(JSON.parse(brainList.output[0].text)[0].ref.kind, "ledger");
-	const brainLive = await run({ target: "ledger", action: "read", id: "n1" });
-	assert.equal(brainLive.isError, undefined, brainLive.output[0].text);
-	assert.equal(JSON.parse(brainLive.output[0].text).text, "Keep this exact.");
-	assert.equal(brainLive.details.status, "live");
-	assert.equal(brainLive.details.ref.kind, "ledger");
-	const brainStale = await run({ target: "ledger", action: "read", ref: { id: "n1", version: "0".repeat(64) } });
-	assert.equal(brainStale.isError, true);
-	assert.match(brainStale.output[0].text, /ledger reference is stale: requested 0+, current [0-9a-f]{64}; historical content is unavailable/);
-
-	addRecord(brainDir, { id: "t1", at: 1_700_000_000_000, mode: "look", brief: "Review routing", report: "The route stayed exact.", summary: "Routing reviewed." });
-	const reportList = await run({ target: "report", action: "list" });
-	assert.equal(reportList.isError, undefined, reportList.output[0].text);
-	assert.deepEqual(reportList.details, { target: "report", count: 1, shown: 1 });
-	assert.equal(JSON.parse(reportList.output[0].text)[0].ref.kind, "report");
-	const reportLive = await run({ target: "report", action: "read", id: "t1" });
-	assert.equal(reportLive.isError, undefined, reportLive.output[0].text);
-	assert.match(reportLive.output[0].text, /^Report t1 /);
-	assert.equal(reportLive.details.status, "live");
-	assert.equal(reportLive.details.ref.kind, "report");
-
-	const assessment = await run({ target: "assessment", action: "write", text: "The router is central." });
-	assert.equal(assessment.isError, undefined, assessment.output[0].text);
-	assert.deepEqual(assessment.details, { target: "assessment", action: "write", shown: ["assessment written, 22 characters"] });
-});
-
 test("return: a declared proof is durable and separate from the task report", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const tool = returnTool({ root, brainDir, config: {} });
@@ -4216,20 +1489,6 @@ test("return: a declared proof is durable and separate from the task report", as
 	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.report, "The targeted test passed.");
 	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.proof, "npm test -- focused exits 0.");
 	assert.equal(loadContext(brainDir).tasks["proof-focus"].returned.done, true);
-});
-
-test("return: a closure gap cannot accompany a completion claim and is kept for the orchestrator", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const tool = returnTool({ root, brainDir, config: {} });
-	const api = { conversationId: "gap-focus", now: () => Date.parse(NOW) };
-	const contradictory = await tool.execute({ report: "The script parses, but the page cannot load it.", proof: "node --check exits 0.", done: true, closure_gap: "index.html is outside the declared targets." }, api, undefined);
-	assert.equal(contradictory.isError, true);
-	assert.match(contradictory.output[0].text, /`closure_gap`.*`done` must be false/);
-	assert.equal(loadContext(brainDir).tasks["gap-focus"], undefined, "a contradictory return does not end or persist the focus");
-	const blocked = await tool.execute({ report: "The script parses, but the page cannot load it.", proof: "node --check exits 0.", done: false, closure_gap: "index.html is outside the declared targets." }, api, undefined);
-	assert.equal(blocked.isError, undefined, blocked.output[0].text);
-	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.done, false);
-	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.closureGap, "index.html is outside the declared targets.");
 });
 
 test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
@@ -4250,8 +1509,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	startMove(reportPlan, "m1", NOW);
 	reportMove(reportPlan, "m1", 1, { done: true, report: "t-flat", proof: "src/index.mjs was read" }, NOW);
 	savePlan(brainDir, reportPlan);
-	assert.throws(() => tool.prepareArguments({ target: "plan", action: "acceptMove", id: "m1" }), /review/);
-	const mDone = await run({ target: "plan", action: "acceptMove", id: "m1", review: "Reading src/index.mjs witnesses that its entry point is named." });
+	const mDone = await run({ target: "plan", action: "acceptMove", id: "m1" });
 	assert.ok(!mDone.isError && /m1 accepted\./.test(mDone.output[0].text), mDone.output[0].text);
 	const pDone = await run({ target: "plan", action: "done", id: "p1", text: "Mapped src/index.js." });
 	assert.ok(!pDone.isError && /p1 is done\./.test(pDone.output[0].text), pDone.output[0].text);
@@ -4338,7 +1596,7 @@ test("book: flat plan, ledger, context recall, task report, and prompt contract"
 	assert.match(TOOLS.shelf, /action/);
 });
 
-test("prepend: the user's own markdown is read before the prompt as source of truth; nothing when absent", (t) => {
+test("prepend: the user's own markdown is read before the prompt — core first, brain second; nothing when absent", (t) => {
 	const { root, brainDir } = fresh(t);
 	const core = join(root, "PREPEND.md");
 	// Nothing anywhere: nothing to prepend.
@@ -4346,23 +1604,26 @@ test("prepend: the user's own markdown is read before the prompt as source of tr
 	// The core alone.
 	writeFileSync(core, "Be brief.\n");
 	const coreOnly = loadPrepend(brainDir, core);
-	assert.equal(coreOnly, "Source of Truth:\nBe brief.");
-	assert.equal(coreOnly.includes("Always sign off"), false, "only what exists is read");
-	// Both: the core is read before the brain, so the closer instruction comes last.
+	assert.match(coreOnly, /PREPEND\.md \(the installation/);
+	assert.ok(coreOnly.includes(`written by ${USER_NAME}`));
+	assert.match(coreOnly, /Be brief\./);
+	assert.equal(coreOnly.includes("this project's brain"), false, "only what exists is read");
+	// Both: the core is read before the brain (the closer one said last, so it wins).
 	writeFileSync(join(brainDir, "PREPEND.md"), "Always sign off as Molly.\n");
 	const both = loadPrepend(brainDir, core);
-	assert.equal(both, "Source of Truth:\nBe brief.\n\nSource of Truth:\nAlways sign off as Molly.");
+	assert.ok(both.indexOf("Be brief.") < both.indexOf("Always sign off as Molly."), "core before brain");
+	assert.match(both, /this project's brain/);
 	// A whitespace-only brain file is nothing, not even a header.
 	writeFileSync(join(brainDir, "PREPEND.md"), "  \n\n");
 	const after = loadPrepend(brainDir, core);
 	assert.equal(after.includes("Molly"), false);
-	assert.equal(after, "Source of Truth:\nBe brief.");
+	assert.match(after, /Be brief\./);
 	// An unreadable core (a folder) is skipped, not fatal.
 	assert.equal(loadPrepend(brainDir, root), undefined, "a folder where the file would be: nothing added");
 	// Line endings and a byte order mark do not stand in the way.
 	writeFileSync(core, "\uFEFFBe terse.\r\n");
 	const crlf = loadPrepend(brainDir, core);
-	assert.equal(crlf, "Source of Truth:\nBe terse.");
+	assert.match(crlf, /Be terse\./);
 	assert.equal(crlf.includes("\r"), false);
 });
 
@@ -4435,41 +1696,6 @@ test("engine: task read turnover drops only redundant task steps, never schedule
 	assert.equal(task.dropped.s1, "An earlier read of the same lines stood here; the newer one is further down.");
 });
 
-test("engine: the optional context handoff is a raw no-tools native grammar decision and fails closed", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	const ignored = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
-	t.after(async () => { await server.close(); await ignored.close(); });
-	const payload = {
-		model: "stand-in",
-		messages: [
-			{ role: "system", content: "ordinary system prompt" },
-			{ role: "user", content: "ON COLLAPSE: preserve this one fact" },
-		],
-		tools: [{ type: "function", function: { name: "book", parameters: {} } }],
-		tool_choice: "auto",
-		stream: true,
-	};
-	const prepare = (url) => {
-		const engine = createEngine({ root, brainDir, config: { server: url, model: "stand-in", contextWindow: 10_000, collapseFull: 80 } });
-		engine.sending(ROOT_CONVERSATION_ID, payload, { provider: "local", id: "stand-in" });
-		engine.replied(ROOT_CONVERSATION_ID, { content: [{ type: "text", text: "A normal participant reply." }] });
-		return engine;
-	};
-	const choice = await prepare(server.url).ask(ROOT_CONVERSATION_ID, { reason: "a test collapse" });
-	assert.equal(choice.handoff, true);
-	const request = server.nativeRequests.at(-1);
-	assert.equal(request.stream, false);
-	assert.equal(request.tools, undefined, "the host decision never copies ordinary provider tools");
-	assert.equal(request.tool_choice, undefined);
-	assert.match(request.grammar, /handoff/);
-	assert.match(request.messages.at(-1).content, /Answer \{\"handoff\": true\}/);
-
-	const refused = await prepare(ignored.url).ask(ROOT_CONVERSATION_ID, { reason: "a test collapse" });
-	assert.equal(refused.handoff, false, "an ignored grammar cannot be accepted by a prompt-only parser");
-	assert.match(refused.error, /required native grammar handoff decision failed/i);
-});
-
 test("engine: a sent provider request is an immutable snapshot with separate provider usage", (t) => {
 	const { root, brainDir } = fresh(t);
 	const engine = createEngine({ root, brainDir, config: { contextWindow: 10_000, collapseFull: 80 } });
@@ -4507,600 +1733,392 @@ test("legacy `<shelf-ask>` blocks in older stored transcripts are stripped clean
 	assert.equal(withoutAdditions(legacy), "file body");
 });
 
-// ─── Same-model consultation conference ─────────────────────────────────────
+// ─── The consult tool ────────────────────────────────────────────────────────
 
-test("native grammar is Cartographer's hard host-decision boundary, not an OpenAI custom-tool option", async (t) => {
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	t.after(() => server.close());
-	const capability = await probeNativeGrammarCapability({ server: server.url, modelId: "stand-in", cache: false });
-	assert.equal(capability.ok, true);
-	const probe = server.nativeRequests.at(-1);
-	assert.equal(probe.tools, undefined);
-	assert.equal(probe.tool_choice, undefined);
-	assert.equal(probe.stream, false);
-	assert.match(probe.grammar, /"cartographer"/);
-	assert.match(probe.messages.at(-1).content, /outside-the-allowed-native-grammar-set/);
-
-	const choice = await chooseNativeGrammar({
-		server: server.url,
-		modelId: "stand-in",
-		messages: [{ role: "user", content: "Choose the next host role." }],
-		grammar: nativeLiteralGrammar(["atlas", "ledger"]),
-		eligible: ["atlas", "ledger"],
-	});
-	assert.equal(choice.value, "atlas");
-	assert.equal(choice.record.request.tools, undefined);
-
-	const ignored = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
-	t.after(() => ignored.close());
-	const refused = await probeNativeGrammarCapability({ server: ignored.url, modelId: "stand-in", cache: false });
-	assert.equal(refused.ok, false, "a server that accepts but ignores grammar never becomes a valid Cartographer route");
-	assert.match(refused.error, /outside the grammar/i);
-});
-
-test("harness: a direct Durable submission cannot bypass the deferred native grammar gate", async (t) => {
-	const { root, brainDir } = fresh(t);
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ prefill: false }));
-	const server = await startStandIn({ tokenDelayMs: 0, ignoreNativeGrammar: true });
-	let session;
-	t.after(async () => {
-		await session?.harness.close(session.context);
-		await server.close();
-	});
-	const config = loadConfig({
-		brainDir,
-		flags: { url: server.url, model: "stand-in" },
-		env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" },
-	});
-	session = await openSession({ root, brainDir, config, runner: createRunner() });
-	assert.equal(server.nativeRequests.length, 0, "opening a local Durable session does not preflight the server");
-	assert.equal(server.requests.length, 0);
-
-	// This deliberately calls Durable directly, without terminal.submit()/ensureModelReady(). The provider wrapper
-	// remains the non-bypassable last gate for resumed work and other integration entry points.
-	const submission = await session.main.submit({ type: "input", content: "say: this ordinary request must not be sent || sleep" }, session.context);
-	const outcome = await submission.wait(session.context);
-	await session.harness.waitForIdle(session.context);
-	assert.equal(outcome.status, "unanswered");
-	assert.equal(outcome.reason, "model_error");
-	assert.match(outcome.detail, /requires llama\.cpp native GBNF grammar enforcement/i);
-	assert.equal(server.nativeRequests.length, 1, "the direct path sends only the mandatory native proof");
-	assert.equal(server.requests.length, 0, "an ignored native grammar still receives no ordinary provider request");
-});
-
-test("conference C1-C4: an independent same-model child preserves the handoff prefix, reaches a bounded return, and lets the root rest", async (t) => {
-	const { root, brainDir } = fresh(t);
-	writeFileSync(join(root, "source.txt"), "first captured line\nsecond captured line\n");
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false }));
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	let session;
-	t.after(async () => {
-		await session?.harness.close(session.context);
-		await server.close();
-	});
-	const config = loadConfig({
-		brainDir,
-		flags: { url: server.url, model: "stand-in" },
-		env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" },
-	});
-	session = await openSession({ root, brainDir, config, runner: createRunner() });
-	const input = {
-		question: "Which bounded fixture path should we choose?",
-		context: "COMMON CONTEXT SENTINEL",
-		files: [{ path: "source.txt", range: "1-1" }],
-		myPersona: "OPENING PERSONA SENTINEL",
-	};
-	const submitted = await session.main.submit({ type: "input", content: `PARENT-EXCLUSION-SENTINEL || consult: ${JSON.stringify(input)}` }, session.context);
-	const settled = await submitted.wait(session.context);
-	assert.equal(settled.status, "done", "the root ends after its post-consult sleep rather than repeatedly accepting the completed receipt");
-	assert.equal(server.requests.length, 5, "root call, two bounded debate turns, host-authorized Cartographer report, then one root receipt turn");
-	const [rootBefore, opening, selected, report, rootAfter] = server.requests;
-	assert.equal(rootBefore.model, "stand-in");
-	const [capability, firstSelector, reportSelector] = server.nativeRequests;
-	const tools = (request) => (request.tools ?? []).map((tool) => `function:${tool.function?.name}`);
-	const messageText = (message) => typeof message.content === "string" ? message.content : (message.content ?? []).filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
-	const joined = (request) => request.messages.map(messageText).join("\n");
-
-	assert.equal(capability.model, "stand-in");
-	assert.match(capability.grammar, /"cartographer"/);
-	assert.deepEqual(tools(opening), ["function:consult_source"], "an opening/debate participant cannot receive consult_return");
-	assert.equal(opening.tool_choice, undefined);
-	assert.deepEqual(tools(selected), ["function:consult_source"], "an arbitrary selected debater cannot return the conference");
-	assert.equal(selected.tool_choice, undefined);
-	assert.deepEqual(tools(report), ["function:consult_source", "function:consult_return"], "only the host-authorized Cartographer report receives the terminal tool");
-	assert.equal(report.tool_choice, undefined);
-	for (const selector of [firstSelector, reportSelector]) {
-		assert.equal(selector.tools, undefined, "the raw native selector has no tool surface");
-		assert.equal(selector.tool_choice, undefined);
+const consultConfig = { server: "http://127.0.0.1:8888/v1", consultModel: "MythosNano", consultMaxTokens: 40960, consultTemperature: 0.6, consultTimeoutSeconds: 1800, contextWindow: 100000 };
+const consultApi = (conversationId) => ({ conversationId, taskId: "c1", now: () => 1726000000000, executeTool: () => Promise.reject(new Error("unexpected nested tool")) });
+/** An SSE body the way the endpoint streams one: deltas, a final finish_reason with usage, a [DONE]. */
+const sseAnswer = (content = "The answer is 42.", finishReason = "stop", completionTokens = 1234) => {
+	const frames = [];
+	for (const piece of String(content).split(/(?<=\n)/)) {
+		if (piece === "") continue;
+		frames.push(`data: ${JSON.stringify({ choices: [{ delta: { content: piece }, finish_reason: null }] })}\n\n`);
 	}
-	assert.match(firstSelector.grammar, /"continue:atlas"/);
-	assert.doesNotMatch(firstSelector.grammar, /"report:cartographer"/, "the host gate physically removes the report choice before two members have debated");
-	assert.doesNotMatch(firstSelector.grammar, /"continue:cartographer"/, "the prior speaker is physically absent from the finite grammar");
-	assert.match(reportSelector.grammar, /"report:cartographer"/, "only the host-native selector can authorize Cartographer's final report");
-	for (const request of [opening, selected, report]) {
-		assert.equal(request.model, "stand-in", "every participant request uses the caller's resolved model");
-		assert.doesNotMatch(joined(request), /PARENT-EXCLUSION-SENTINEL/, "the independent child has no parent transcript");
-	}
-	const firstSelectorText = firstSelector.messages.map(messageText).join("\n");
-	const reportSelectorText = reportSelector.messages.map(messageText).join("\n");
-	assert.match(joined(opening), /OPENING PERSONA SENTINEL/, "Cartographer alone receives the request-local opening persona");
-	assert.match(joined(opening), /COMMON CONTEXT SENTINEL/, "the captured caller context is part of the immutable common packet");
-	assert.doesNotMatch(firstSelectorText, /OPENING PERSONA SENTINEL/, "the native selector receives no active persona packet");
-	assert.doesNotMatch(firstSelectorText, /COMMON CONTEXT SENTINEL/, "the native selector receives no raw captured project context");
-	assert.doesNotMatch(joined(selected), /OPENING PERSONA SENTINEL/, "the selected participant does not inherit the prior persona tail");
-	assert.match(joined(selected), /You are Atlas \(atlas\)/);
-	assert.match(joined(selected), /private entry-time atlas snapshot.*empty snapshot/is, "even an empty Atlas book remains a real role packet");
-	assert.match(joined(selected), /OPENING CONFERENCE CONTRIBUTION/, "the selected participant retains the completed shared contribution");
-	assert.match(joined(selected), /Native GBNF selected atlas to continue the bounded debate/, "the host records the native continuation handoff in the durable child");
-	assert.match(reportSelectorText, /Host debate gate: 2\/2 completed contributions and 2\/2 distinct participants \(met\)/, "the host-native selector receives explicit debate evidence before it may conclude");
-	assert.match(joined(report), /host's native GBNF decision found the bounded debate ready for a final advisory/i);
-	assert.match(joined(report), /Native GBNF authorized Cartographer to write the final advisory report/);
-	assert.match(messageText(rootAfter.messages.at(-1)), /Consult conference co1 returned answered from cartographer/);
+	frames.push(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: finishReason }], usage: { prompt_tokens: 256, completion_tokens: completionTokens, total_tokens: 256 + completionTokens } })}\n\n`);
+	frames.push("data: [DONE]\n\n");
+	return new Response(frames.join(""), { status: 200, headers: { "content-type": "text/event-stream" } });
+};
+const okAnswer = sseAnswer;
 
-	const { conference } = loadConference(brainDir, "co1");
-	assert.equal(conference.status, "returned");
-	assert.notEqual(conference.childConversationId, session.main.id, "the conference owns a new Durable conversation, not a parent fork");
-	assert.deepEqual(conference.model, { provider: "local", modelId: "stand-in" });
-	assert.deepEqual(conference.turns.map((turn) => turn.participant), ["cartographer", "atlas"]);
-	assert.deepEqual(conference.selectorEvents.map((event) => [event.after, event.participant, event.decision]), [["cartographer", "atlas", "continue"], ["atlas", "cartographer", "report"]]);
-	assert.equal(conference.final.participant, "cartographer", "only host-authorized Cartographer can return the conference");
-	assert.equal(conference.requestPlans.length, 5);
-	assert.ok(conference.requestPlans.length <= POLICY.limits.conference.requestPlans, "the audit cap is above this complete bounded handoff and did not discard its evidence");
-	assert.ok(POLICY.limits.conference.requestPlans >= Math.max(8, POLICY.limits.conference.turns * 4 + 4) + POLICY.limits.conference.turns, "the request-plan audit cap covers every bounded child request plus each possible raw selector handoff");
-});
-
-test("conference C1/C2: host-native choices gate the terminal report and debate payloads cannot expose it", () => {
-	const declared = {
-		model: "fixture",
-		tool_choice: "required",
-		tools: [
-			{ type: "function", function: { name: "consult_source", parameters: {} } },
-			{ type: "function", function: { name: "consult_return", parameters: {} } },
-		],
+test("consult: one plain chat completion, the answer in a file, shelved", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		calls.push({ url, init });
+		return okAnswer("The answer is 42.\n");
 	};
-	const deliberation = restrictParticipantPayload(declared);
-	assert.deepEqual(deliberation.tools.map((tool) => tool.function.name), ["consult_source"]);
-	assert.equal(deliberation.tool_choice, undefined, "a participant never inherits host routing control");
-	const report = restrictParticipantPayload(declared, { allowReturn: true });
-	assert.deepEqual(report.tools.map((tool) => tool.function.name), ["consult_source", "consult_return"]);
-	assert.throws(() => restrictParticipantPayload({ tools: [{ type: "function", function: { name: "consult_source" } }] }, { allowReturn: true }), ConferenceError);
-	const record = {
-		id: "co1",
-		question: "Which role should inspect the boundary?",
-		turns: [{ participant: "cartographer", text: "The opening contribution is complete." }],
-		active: { kind: "selector", previousSpeaker: "cartographer" },
-	};
-	assert.deepEqual(debateStatus(record), { turns: 1, participants: ["cartographer"], debateTurns: POLICY.limits.conference.debateTurns, debateParticipants: POLICY.limits.conference.debateParticipants, ready: false });
-	const firstOptions = selectorOptions(record, ["atlas", "ledger"]);
-	assert.deepEqual(firstOptions.map((option) => option.value), ["continue:atlas", "continue:ledger"]);
-	assert.equal(selectorGrammar(firstOptions), 'root ::= "continue:atlas" | "continue:ledger"');
-	const messages = selectorMessages(record, ["atlas", "ledger"]);
-	assert.equal(messages.length, 2);
-	assert.match(messages[1].content, /continue:atlas, continue:ledger/);
-	assert.match(messages[1].content, /Host debate gate: 1\/2 completed contributions and 1\/2 distinct participants \(not met\)/);
-	assert.match(messages[1].content, /opening contribution/);
-	assert.doesNotMatch(messages.map((message) => message.content).join("\n"), /consult_source|consult_return|select_persona/);
-	assert.equal(enumGrammar(["atlas", "ledger"]), 'root ::= "atlas" | "ledger"');
-	const ready = {
-		...record,
-		turns: [...record.turns, { participant: "atlas", text: "A second perspective completed the debate." }],
-		active: { kind: "selector", previousSpeaker: "atlas" },
-	};
-	const readyOptions = selectorOptions(ready, ["cartographer", "ledger"]);
-	assert.deepEqual(readyOptions.map((option) => option.value), ["continue:cartographer", "continue:ledger", "report:cartographer"]);
-	assert.match(selectorTail(ready, ["cartographer", "ledger"]), /report:cartographer/);
-	assert.throws(() => selectorMessages({ ...record, active: { kind: "selector", previousSpeaker: "invented" } }), /unvalidated state|invalid previous/i, "a corrupt routing record cannot widen a native grammar");
-	assert.throws(() => selectorTail(record, ["cartographer", "atlas"]), /immediately prior participant/, "a caller cannot reinsert the prior speaker into an explicit eligible set");
-});
-
-test("conference recovery resumes a pending native selector and commits its labelled handoff once", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	t.after(() => server.close());
-	const conference = createConferenceCapture({
-		root,
-		brainDir,
-		question: "Which fresh perspective should inspect the recovery boundary?",
-		myPersona: "Keep the host handoff auditable.",
-		model: { provider: "local", modelId: "stand-in" },
-		caller: { conversationId: "parent", taskId: "outer", callId: "consult" },
-		at: 1,
-	});
-	attachChildConference(brainDir, conference.id, "recovery-child", 2);
-	// This is the durable state a process can leave after recording a no-tool turn
-	// and before it finishes the raw selector HTTP call.
-	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "The opening contribution survived the restart." }] }, 3);
-	assert.equal(loadConference(brainDir, conference.id).conference.active.kind, "selector");
-
-	const extension = createConferenceExtension({ brainDir, server: server.url });
-	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
-	const planned = await generation.beforeRequest({ messages: [{ role: "user", content: "Conference entry packet" }] }, { conversationId: "recovery-child", now: () => 4 });
-	const joined = planned.messages.map((message) => message.content).join("\n");
-	assert.match(joined, /Native GBNF selected atlas to continue the bounded debate/, "recovery recreates the labelled host handoff before the selected participant request");
-	assert.match(joined, /You are Atlas \(atlas\)/, "the recovered request uses the selected participant's private tail");
-	assert.equal(server.nativeRequests.length, 2, "cold recovery first proves native enforcement, then makes its bounded selector decision");
-	const [capability, selector] = server.nativeRequests;
-	assert.equal(capability.tools, undefined);
-	assert.match(capability.grammar, /"cartographer"/);
-	assert.equal(selector.tools, undefined);
-	assert.match(selector.grammar, /"continue:atlas"/);
-	assert.doesNotMatch(selector.grammar, /"continue:cartographer"/);
-	assert.doesNotMatch(selector.grammar, /"report:cartographer"/, "a recovered one-member opening cannot skip the debate gate");
-	const resumed = loadConference(brainDir, conference.id).conference;
-	assert.equal(resumed.active.participant, "atlas");
-	assert.equal(resumed.active.nativeSelectionPending, undefined, "the restart path consumes the handoff marker before a provider request can replay it");
-	assert.equal(resumed.selectorEvents.length, 1);
-	assert.equal(resumed.requestPlans.filter((plan) => plan.kind === "native-selector").length, 1);
-	assert.equal(generation.onYield({ stopReason: "stop", content: [] }, { conversationId: "recovery-child", now: () => 5 }), undefined, "a recovered handoff is not appended again after Atlas speaks");
-});
-
-test("conference C2/C3: entry snapshots stay immutable, persona tails are private, and routing excludes the previous speaker", (t) => {
-	const { root, brainDir } = fresh(t);
-	writeFileSync(join(root, "source.txt"), "one\ntwo\nthree\n");
-	const conference = createConferenceCapture({
-		root,
-		brainDir,
-		question: "Which bounded migration is safer?",
-		context: "Caller fact A.",
-		files: [{ path: "source.txt", range: "2-3" }],
-		myPersona: "Care about a reversible migration boundary.",
-		model: { provider: "local", modelId: "fixture" },
-		caller: { conversationId: "main", taskId: "task-1", callId: "call-1" },
-		at: 1,
-	});
-	assert.equal(conference.id, "co1");
-	assert.equal(readConferenceSource(brainDir, conference, "s1").text, "two\nthree");
-	writeFileSync(join(root, "source.txt"), "mutated live project bytes\n");
-	assert.equal(readConferenceSource(brainDir, loadConference(brainDir, "co1").conference, "s1").text, "two\nthree", "the conference reads its frozen source, not the changed project path");
-	assert.throws(() => readConferenceSource(brainDir, conference, "b-atlas"), /only inspect c0 or one captured s<N> source/);
-	assert.throws(() => createConferenceCapture({ root, brainDir, question: "q", myPersona: "p", files: ["../escape.txt"], model: {}, caller: {} }), /Supplied file refused/);
-	assert.throws(() => createConferenceCapture({ root, brainDir, question: "q", myPersona: "p", files: [{ path: "source.txt", range: "1-99999" }], model: {}, caller: {} }), /at most/);
-
-	const running = attachChildConference(brainDir, conference.id, "conference-child", 2);
-	const opening = participantTail(withConferenceBrain(running, brainDir));
-	assert.match(opening, /Care about a reversible migration boundary/);
-	assert.doesNotMatch(opening, /Atlas entry snapshot/);
-	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
-	assert.throws(() => recordSelectorChoice(brainDir, conference.id, "continue:cartographer", { at: 4 }), /not an eligible native decision/);
-	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
-	const atlas = loadConference(brainDir, conference.id).conference;
-	const atlasTail = participantTail(withConferenceBrain(atlas, brainDir));
-	assert.match(atlasTail, /You are Atlas \(atlas\)/);
-	assert.match(atlasTail, /empty snapshot/);
-	assert.doesNotMatch(atlasTail, /Care about a reversible migration boundary/, "the next participant never inherits Cartographer's request-local persona");
-	const neutral = selectorTail({ ...running, turns: [{ participant: "cartographer" }], active: { kind: "selector", previousSpeaker: "cartographer" } });
-	assert.match(neutral, /continue:atlas, continue:ledger, continue:plan, continue:assessment, continue:context/);
-	assert.doesNotMatch(neutral, /Care about a reversible migration boundary/);
-	assert.doesNotMatch(neutral, /Atlas entry snapshot/);
-	assert.equal(loadConference(brainDir, conference.id).conference.turns[0].participant, "cartographer");
-	assert.equal(loadConference(brainDir, conference.id).conference.selectorEvents[0].participant, "atlas");
-});
-
-test("conference C4: request-plan audit retention stays bounded with monotonic provenance indexes", (t) => {
-	const { root, brainDir } = fresh(t);
-	const conference = createConferenceCapture({ root, brainDir, question: "Bound the audit.", myPersona: "Keep the handoff evidence finite.", model: {}, caller: {}, at: 1 });
-	const total = POLICY.limits.conference.requestPlans + 3;
-	for (let index = 0; index < total; index++) {
-		recordRequestPlan(brainDir, conference.id, index % 2 === 0 ? "participant" : "selector", [{ role: "user", content: `stable ${index}` }], `tail ${index}`, index + 2);
-	}
-	const bounded = loadConference(brainDir, conference.id).conference;
-	assert.equal(bounded.requestPlans.length, POLICY.limits.conference.requestPlans);
-	assert.equal(bounded.requestPlanCount, total);
-	assert.equal(bounded.requestPlans[0].index, total - POLICY.limits.conference.requestPlans + 1);
-	assert.equal(bounded.requestPlans.at(-1).index, total);
-	assert.match(renderConference(bounded), new RegExp(`${total} total`));
-});
-
-test("conference C4: private activity and receipt retention use durable event identities and bounded monotonic indexes", (t) => {
-	const { root, brainDir } = fresh(t);
-	const conference = createConferenceCapture({ root, brainDir, question: "Can the audit remain bounded?", myPersona: "Keep every retained response attributable.", model: {}, caller: {}, at: 1 });
-	attachChildConference(brainDir, conference.id, "retention-child", 2);
-	const repeated = { stopReason: "toolUse", content: [{ type: "text", text: "The same short local observation." }, { type: "toolCall", id: "same-local-call", name: "consult_source", arguments: { action: "list" } }] };
-	const totalActivities = POLICY.limits.conference.activities + 3;
-	for (let index = 1; index <= totalActivities; index++) recordParticipantActivity(brainDir, conference.id, "cartographer", repeated, index + 1, `generation-${index}`);
-	// A restart of one generation must not create another activity, but identical words from another generation do.
-	recordParticipantActivity(brainDir, conference.id, "cartographer", repeated, totalActivities + 2, `generation-${totalActivities}`);
-	let bounded = loadConference(brainDir, conference.id).conference;
-	assert.equal(bounded.activities.length, POLICY.limits.conference.activities);
-	assert.equal(bounded.activityCount, totalActivities);
-	assert.equal(bounded.activities[0].index, totalActivities - POLICY.limits.conference.activities + 1);
-	assert.equal(bounded.activities.at(-1).index, totalActivities);
-	assert.equal(bounded.activities.at(-1).eventId, `generation-${totalActivities}`);
-
-	const totalReceipts = POLICY.limits.conference.toolReceipts + 3;
-	for (let index = 1; index <= totalReceipts; index++) {
-		recordToolReceipt(brainDir, conference.id, { id: `source-${index}`, callId: `call-${index}`, participant: "cartographer", action: "list", result: `listed source snapshot ${index}`, at: new Date(index).toISOString() });
-	}
-	// A replay of the most recent tool call keeps the original receipt rather than duplicating it.
-	recordToolReceipt(brainDir, conference.id, { id: `source-${totalReceipts}`, callId: `call-${totalReceipts}`, participant: "cartographer", action: "list", result: "replayed", at: new Date(totalReceipts).toISOString() });
-	bounded = loadConference(brainDir, conference.id).conference;
-	assert.equal(bounded.toolReceipts.length, POLICY.limits.conference.toolReceipts);
-	assert.equal(bounded.toolReceiptCount, totalReceipts);
-	assert.equal(bounded.toolReceipts[0].index, totalReceipts - POLICY.limits.conference.toolReceipts + 1);
-	assert.equal(bounded.toolReceipts.at(-1).index, totalReceipts);
-	assert.match(renderConference(bounded), new RegExp(`${totalActivities} total`));
-	assert.match(renderConference(bounded), new RegExp(`${totalReceipts} total`));
-});
-
-test("conference C4: a recovered completed turn is idempotent after the selector has advanced", (t) => {
-	const { root, brainDir } = fresh(t);
-	const conference = createConferenceCapture({ root, brainDir, question: "Can recovered turns replay safely?", myPersona: "Keep audit provenance stable.", model: {}, caller: {}, at: 1 });
-	attachChildConference(brainDir, conference.id, "replay-child", 2);
-	const response = { id: "durable-generation-7", content: [{ type: "text", text: "The first member completed this contribution." }] };
-	recordParticipantTurn(brainDir, conference.id, "cartographer", response, 3, "durable-generation-7");
-	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
-	const before = loadConference(brainDir, conference.id).conference;
-	assert.equal(before.active.participant, "atlas");
-	// Durable may replay its afterResponse hook after the selector has moved on. This must be an idempotent no-op,
-	// not an active-speaker failure and not a second activity/turn.
-	const replayed = recordParticipantTurn(brainDir, conference.id, "cartographer", response, 5, "durable-generation-7");
-	assert.equal(replayed.active.participant, "atlas");
-	const after = loadConference(brainDir, conference.id).conference;
-	assert.equal(after.activities.length, 1);
-	assert.equal(after.turns.length, 1);
-	assert.equal(after.selectorEvents.length, 1);
-	assert.equal(after.activities[0].eventId, "durable-generation-7");
-	assert.equal(after.turns[0].eventId, "durable-generation-7");
-});
-
-test("conference C4: tool activity keeps its speaker, malformed returns and limits preserve an auditable incomplete state, and a valid return carries provenance", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	t.after(() => server.close());
-	writeFileSync(join(root, "packet.txt"), "captured evidence\n");
-	const captured = createConferenceCapture({
-		root,
-		brainDir,
-		question: "How should the bounded conference end?",
-		context: "captured context",
-		files: ["packet.txt"],
-		myPersona: "Opening perspective.",
-		model: { provider: "local", modelId: "fixture" },
-		caller: { conversationId: "parent", taskId: "outer-tool", callId: "call-consult" },
-		at: 1,
-	});
-	attachChildConference(brainDir, captured.id, "conference-child", 2);
-	assert.throws(() => completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Opening prose is not a host-authorized conclusion." }, 3), /host-authorized Cartographer report state/, "a direct storage call cannot turn the opening contribution into a final advisory");
-	const extension = createConferenceExtension({ brainDir, server: server.url });
-	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
-	const source = extension.tools.find((tool) => tool.name === "consult_source");
-	const returned = extension.tools.find((tool) => tool.name === "consult_return");
-	assert.equal(extension.tools.length, 2, "the child exposes only participant tools; native selection is outside Durable's tool registry");
-	const api = { conversationId: "conference-child", now: () => 10 };
-
-	await generation.afterResponse({ stopReason: "toolUse", content: [
-		{ type: "text", text: "I will inspect the packet before I hand off." },
-		{ type: "toolCall", id: "source-1", name: "consult_source", arguments: { action: "read", id: "s1" } },
-	] }, api);
-	const afterToolResponse = loadConference(brainDir, captured.id).conference;
-	assert.deepEqual(afterToolResponse.active, { kind: "participant", participant: "cartographer", opening: true }, "text plus a tool call does not trigger a selector handoff");
-	assert.deepEqual(afterToolResponse.activities.map((activity) => [activity.participant, activity.reasoning, activity.prose, activity.calls?.[0]?.name]), [["cartographer", undefined, "I will inspect the packet before I hand off.", "consult_source"]], "the private co<N> audit retains a persona-attributed response and local call without placing it in parent context");
-	const read = await source.execute({ action: "read", id: "s1" }, api);
-	assert.equal(read.isError, undefined);
-	assert.match(read.output[0].text, /captured evidence/);
-	assert.equal(loadConference(brainDir, captured.id).conference.toolReceipts.length, 1);
-	assert.match(loadConference(brainDir, captured.id).conference.toolReceipts[0].result, /captured evidence/, "a consult-local tool receipt retains its bounded result for the separate audit view");
-
-	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "My completed contribution." }] }, api);
-	let running = loadConference(brainDir, captured.id).conference;
-	assert.equal(running.active.kind, "participant");
-	assert.equal(running.active.participant, "atlas", "the raw native grammar selector activates the validated next participant");
-	assert.equal(running.turns.length, 1, "only the no-tool response closes the participant turn");
-	assert.equal(running.active.phase, "debate");
-	assert.equal(running.selectorEvents[0].method, "llama.cpp-native-gbnf");
-	assert.equal(running.selectorEvents[0].grammarEnforced, true);
-	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF selected atlas to continue the bounded debate/);
-	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined, "the labelled host continuation is consumed exactly once");
-
-	const premature = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
-	assert.equal(premature.isError, true);
-	assert.match(premature.output[0].text, /host must first make a native-GBNF report decision/i);
-	running = loadConference(brainDir, captured.id).conference;
-	assert.equal(running.status, "running");
-	assert.equal(running.active.participant, "atlas", "a deliberating participant cannot end the conference even by calling the registered tool directly");
-	assert.equal(running.active.phase, "debate");
-	assert.throws(() => validateConsultReturn({ outcome: "answered", synthesis: "x", alternatives: [{ option: "", tradeoff: "missing option" }] }), /alternatives/);
-
-	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "Atlas completed the second bounded contribution." }] }, api);
-	running = loadConference(brainDir, captured.id).conference;
-	assert.equal(running.active.participant, "cartographer");
-	assert.equal(running.active.phase, "report", "the native selector alone advances a completed debate to Cartographer's report state");
-	assert.equal(running.turns.length, 2);
-	assert.equal(running.selectorEvents.at(-1).decision, "report");
-	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /Native GBNF authorized Cartographer to write the final advisory report/);
-	assert.equal(loadConference(brainDir, captured.id).conference.active.nativeSelectionPending, undefined);
-
-	const malformed = await returned.execute({ outcome: "needs_input", synthesis: "A choice is needed.", evidence: [{ source: "not-a-source", claim: "invented citation" }] }, api);
-	assert.equal(malformed.isError, true);
-	running = loadConference(brainDir, captured.id).conference;
-	assert.equal(running.status, "running");
-	assert.equal(running.active.participant, "cartographer", "a malformed host-authorized return leaves Cartographer active to correct it");
-	assert.equal(running.active.phase, "report");
-
-	const final = await returned.execute({
-		outcome: "answered",
-		synthesis: "Use the captured evidence and keep the conclusion advisory.",
-		evidence: [{ source: "c0", claim: "The caller captured bounded common context." }],
-		uncertainties: ["No live project verification happened."],
-	}, api);
-	assert.equal(final.isError, undefined);
-	assert.equal(final.control.terminate, true);
-	const returnedRecord = loadConference(brainDir, captured.id).conference;
-	assert.equal(returnedRecord.status, "returned");
-	assert.deepEqual(returnedRecord.final.provenance.participantPacket, { kind: "opening-persona", id: "myPersona", digest: returnedRecord.myPersona.digest });
-	assert.deepEqual(returnedRecord.final.provenance.selectorHistory.map((event) => [event.after, event.participant, event.decision]), [["cartographer", "atlas", "continue"], ["atlas", "cartographer", "report"]]);
-	assert.match(renderConference(returnedRecord), /authorize Cartographer final report/);
-	assert.match(renderConference(returnedRecord), /grammar enforced yes/);
-	assert.match(conferenceStatusLine(returnedRecord), /returned/);
-
-	const limited = createConferenceCapture({ root, brainDir, question: "What if output ends?", myPersona: "Bound the output.", model: {}, caller: {}, at: 20 });
-	attachChildConference(brainDir, limited.id, "limited-child", 21);
-	await generation.afterResponse({ stopReason: "length", content: [{ type: "text", text: "partial" }] }, { conversationId: "limited-child", now: () => 22 });
-	const limitedRecord = loadConference(brainDir, limited.id).conference;
-	assert.equal(limitedRecord.status, "interrupted");
-	assert.equal(limitedRecord.final, undefined, "an output limit never fabricates a synthesis");
-	assert.match(renderConference(limitedRecord), /No synthesis was fabricated/);
-
-	const cancelled = createConferenceCapture({ root, brainDir, question: "What if routing is stopped?", myPersona: "Keep cancellation explicit.", model: { provider: "local", modelId: "stand-in" }, caller: {}, at: 30 });
-	attachChildConference(brainDir, cancelled.id, "cancelled-selector-child", 31);
-	const controller = new AbortController();
-	controller.abort();
-	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "A turn whose native routing was stopped." }] }, { conversationId: "cancelled-selector-child", now: () => 32 }, { abortSignal: controller.signal });
-	const cancelledRecord = loadConference(brainDir, cancelled.id).conference;
-	assert.equal(cancelledRecord.status, "cancelled", "aborting an in-flight raw selector preserves cancellation instead of recording a generic failure");
-	assert.match(cancelledRecord.ended.reason, /native selector/i);
-
-	const chat = createChat();
-	chat.setConsultProjection({ data: { conferences: [{ id: captured.id, conference: returnedRecord }] } });
-	chat.entry(0, { id: "entry-1", conversationId: "parent", model: [
-		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-call", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
-		{ role: "toolResult", toolCallId: "consult-call", toolName: "consult", isError: false, details: { conference: captured.id }, content: [{ type: "text", text: "Only the compact parent receipt." }] },
-	] });
-	const group = chat.items.find((item) => item.type === "group");
-	const viewText = (instance, projection) => instance.lines(120, projection).map((line) => line.spans.map(([text]) => text).join("")).join("\n");
-	assert.doesNotMatch(viewText(chat, "work"), /Consult conference|Only the compact parent receipt/, "the parent Work projection has no conference notebook or receipt");
-	assert.equal(chat.textOf(group.key, 0), "Private consultation activity is available only in Chat · Consult.", "copying a hidden parent pointer cannot export conference activity");
-	assert.match(viewText(chat, "consult"), /Consultation co1/, "only Consult renders the local co<N> notebook");
-
-	let liveAudit = { ...returnedRecord, status: "running", final: undefined, ended: undefined, active: { kind: "participant", participant: "cartographer" } };
-	const liveChat = createChat();
-	liveChat.setConsultProjection({ data: { conferences: [{ id: captured.id, conference: liveAudit }] } });
-	liveChat.entry(0, { id: "entry-live", conversationId: "parent", model: [
-		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "consult-live", name: "consult", arguments: { question: captured.question, myPersona: captured.myPersona.text } }] },
-	] });
-	liveChat.liveTools(0, [{ callId: "consult-live", status: "running", details: { conference: captured.id } }]);
-	assert.match(viewText(liveChat, "consult"), /Cartographer · active/, "Consult reads live conference status without exposing it through parent Work");
-	liveAudit = { ...liveAudit, active: { kind: "participant", participant: "atlas" } };
-	liveChat.setConsultProjection({ data: { conferences: [{ id: captured.id, conference: liveAudit }] } });
-	assert.match(viewText(liveChat, "consult"), /Atlas · active/, "Consult ingests its refreshed private audit without exposing it through parent Work");
-	assert.doesNotMatch(viewText(liveChat, "work"), /Cartographer · active|Atlas · active/, "Work remains isolated from private conference activity");
-});
-
-test("conference C4: an authorized report that omits consult_return fails closed", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const conference = createConferenceCapture({ root, brainDir, question: "Must a report use the terminal boundary?", myPersona: "Preserve the final-return contract.", model: { provider: "local", modelId: "fixture" }, caller: {}, at: 1 });
-	attachChildConference(brainDir, conference.id, "report-child", 2);
-	recordParticipantTurn(brainDir, conference.id, "cartographer", { content: [{ type: "text", text: "Opening contribution." }] }, 3);
-	recordSelectorChoice(brainDir, conference.id, "continue:atlas", { at: 4 });
-	recordParticipantTurn(brainDir, conference.id, "atlas", { content: [{ type: "text", text: "Second contribution." }] }, 5);
-	recordSelectorChoice(brainDir, conference.id, "report:cartographer", { at: 6 });
-	const extension = createConferenceExtension({ brainDir, server: "http://unused.invalid" });
-	const generation = extension.hooks.find((entry) => entry.task === "pi.generation").handlers;
-	const api = { conversationId: "report-child", now: () => 7 };
-	assert.match(generation.onYield({ stopReason: "stop", content: [] }, api).continue, /authorized Cartographer to write the final advisory report/);
-	await generation.afterResponse({ stopReason: "stop", content: [{ type: "text", text: "An unstructured final-looking sentence." }] }, api);
-	const failed = loadConference(brainDir, conference.id).conference;
-	assert.equal(failed.status, "failed");
-	assert.equal(failed.final, undefined);
-	assert.match(failed.ended.reason, /ended without consult_return/);
-	assert.match(renderConference(failed), /No synthesis was fabricated/);
-});
-
-test("conference C4: recovery resumes the captured child and captured model rather than allocating or adopting a later model", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const server = await startStandIn({ tokenDelayMs: 0 });
-	t.after(() => server.close());
-	const captured = createConferenceCapture({
-		root,
-		brainDir,
-		question: "Can recovery preserve the model boundary?",
-		myPersona: "Keep recovery deterministic.",
-		model: { provider: "frozen-provider", modelId: "frozen-model" },
-		caller: { conversationId: "caller", taskId: "recover-task", callId: "recover-call" },
-		at: 1,
-	});
-	const selected = [];
-	const submissions = [];
-	const frozenModel = { provider: "frozen-provider", id: "frozen-model", api: "openai-completions", baseUrl: server.url };
-	const models = {
-		getModel(provider, modelId) {
-			selected.push([provider, modelId]);
-			return provider === "frozen-provider" && modelId === "frozen-model" ? frozenModel : undefined;
-		},
-	};
-	const tool = consultTool({ root, brainDir, config: {}, conferenceExtension: { name: "consult-conference", tools: [{}, {}] } });
-	const api = {
-		conversationId: "caller",
-		taskId: "recover-task",
-		callId: "recover-call",
-		now: () => 3,
-		models,
-		agent: async () => { throw new Error("a resumed conference must not read a later caller model"); },
-		commit: async (work) => work({
-			createConversation: async () => { throw new Error("a resumed conference must not create another child"); },
-			scanConversations: async () => ({ items: [{ id: "unrelated-child", parent: { at: 1 } }, { id: "existing-private-child", parent: { at: 1 } }] }),
-			scanEntries: async ({ conversationId }) => ({ items: [{ conversationId, kind: "carto.conference-seed", data: { conference: conversationId === "existing-private-child" ? captured.id : "co999", version: captured.version } }] }),
-		}),
-		details: async () => {},
-		conversation: async (id) => {
-			assert.equal(id, "existing-private-child");
-			return {
-				submit: async (input) => {
-					submissions.push(input);
-					recordParticipantTurn(brainDir, captured.id, "cartographer", { content: [{ type: "text", text: "Recovered opening contribution." }] }, 4);
-					recordSelectorChoice(brainDir, captured.id, "continue:atlas", { at: 5 });
-					recordParticipantTurn(brainDir, captured.id, "atlas", { content: [{ type: "text", text: "Recovered second contribution." }] }, 6);
-					recordSelectorChoice(brainDir, captured.id, "report:cartographer", { at: 7 });
-					completeConference(brainDir, captured.id, "cartographer", { outcome: "answered", synthesis: "Recovered from the existing isolated child.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [] }, 8);
-					return { wait: async () => ({ status: "done" }) };
-				},
-				abort: async () => {},
-			};
-		},
-	};
-	const result = await tool.execute({ question: captured.question, myPersona: captured.myPersona.text }, api, undefined);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const chunks = [];
+	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
+	const result = await tool.execute({ question: "What is the answer?", context: "It was asked before." }, api, undefined);
 	assert.equal(result.isError, undefined, result.output[0].text);
-	assert.deepEqual(selected, [["frozen-provider", "frozen-model"]]);
-	assert.deepEqual(submissions, [{ type: "continue", requestId: "consult:recover-task" }]);
-	const resumed = loadConference(brainDir, captured.id).conference;
-	assert.equal(resumed.childConversationId, "existing-private-child");
-	assert.equal(resumed.status, "returned");
-	assert.match(result.output[0].text, /Recovered from the existing isolated child/);
+	assert.equal(chunks.join(""), "The answer is 42.\n", "the words are reported as they stream, token for token");
+	// The request: same endpoint, plain chat completion, no tools, no grammar, the question last.
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url, "http://127.0.0.1:8888/v1/chat/completions");
+	assert.equal(calls[0].init.method, "POST");
+	const sent = JSON.parse(calls[0].init.body);
+	assert.equal(sent.model, "MythosNano");
+	assert.equal(sent.max_tokens, 40960);
+	assert.equal(sent.temperature, 0.6);
+	assert.equal(sent.stream, true, "the story streams token by token");
+	assert.equal(sent.stream_options?.include_usage, true, "and asks the server for usage at the end");
+	assert.equal("tools" in sent, false, "no tool definitions are sent");
+	assert.equal(sent.messages.length, 1);
+	assert.equal(sent.messages[0].role, "user");
+	assert.ok(sent.messages[0].content.endsWith("What is the answer?"), "the question is last");
+	assert.ok(sent.messages[0].content.startsWith("It was asked before."), "the context comes first");
+	// The answer lands in the brain under a thread; the question stands in the story for whoever reads it later.
+	const thread = result.details.thread;
+	assert.match(thread, /^st\d+$/, "a fresh story mints the short thread marker, like every other id");
+	assert.equal(result.details.rounds, 1);
+	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
+	assert.ok(file.includes("What is the answer?"));
+	assert.ok(file.includes("The answer is 42."));
+	assert.ok(file.includes("finish: stop"));
+	assert.equal(result.output[0].text.includes(".brain"), false, "the receipt never names a path");
+	assert.equal(result.output[0].text.includes("storyteller/"), false, "the receipt never names the file");
+	// Shelved for the main agent as a story reference; the receipt names the placement, not the answer.
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 1);
+	assert.equal(store.shelf[0].ref.type, "story");
+	assert.equal(store.shelf[0].ref.id, thread);
+	assert.match(result.output[0].text, new RegExp(`shelved as placement ${store.shelf[0].id}`, "i"));
+	assert.match(result.output[0].text, new RegExp(`thread: "${thread}"`), "the receipt says how to ask on");
+	assert.doesNotMatch(result.output[0].text, /The answer is 42/, "the answer is not dumped into the context");
+	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance");
 });
 
-test("conference C4: stopping the outer tool records cancellation rather than a made-up answer", async (t) => {
+test("consult: a focus shelves the answer into its own shelf, not the main one", async (t) => {
 	const { root, brainDir } = fresh(t);
-	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ initiate: false, prefill: false }));
-	const server = await startStandIn({
-		tokenDelayMs: 0,
-		holdWhen: (request) => (request.tools ?? []).some((tool) => tool.function?.name === "consult_source")
-			&& request.messages.some((message) => typeof message.content === "string" && message.content.includes("Active participant packet")),
-	});
-	let session;
-	t.after(async () => {
-		await session?.harness.close(session.context);
-		await server.close();
-	});
-	const config = loadConfig({ brainDir, flags: { url: server.url, model: "stand-in" }, env: { ...process.env, CARTO_CONFIG: join(root, "no-install-config.json"), CARTO_SERVER: "", CARTO_MODEL: "" } });
-	session = await openSession({ root, brainDir, config, runner: createRunner() });
-	const submitted = await session.main.submit({ type: "input", content: `consult: ${JSON.stringify({ question: "Stop this child.", myPersona: "Observe cancellation." })}` }, session.context);
-	const deadline = Date.now() + 2_000;
-	while (server.heldCount() === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
-	assert.equal(server.heldCount(), 1, "the test stopped an active participant request, not a completed consultation");
-	await session.main.abort(session.context);
-	const settled = await submitted.wait(session.context);
-	assert.equal(settled.status, "unanswered");
-	const cancelled = loadConference(brainDir, "co1").conference;
-	assert.equal(cancelled.status, "cancelled");
-	assert.equal(cancelled.final, undefined);
-	assert.match(cancelled.ended.reason, /caller stopped/i);
+	const fetchImpl = async () => okAnswer("Task-scoped answer.");
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "Settle this kernel." }, consultApi(7777), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 0, "the main shelf is untouched");
+	assert.equal(taskState(store, "7777").shelf.length, 1, "the focus shelf holds it");
+	assert.equal(taskState(store, "7777").shelf[0].ref.id, result.details.thread);
 });
 
-
-test("conference C4/C5: final objects require an honest structured return and legacy thread revival is refused before model work", async (t) => {
-	assert.throws(() => validateConsultReturn({ outcome: "needs_input", synthesis: "Need a choice." }), /blocking_question/);
-	assert.deepEqual(validateConsultReturn({ outcome: "answered", synthesis: "Use the frozen packet.", evidence: [{ source: "s1", claim: "The captured file says so." }], uncertainties: ["No live verification yet."] }), {
-		outcome: "answered",
-		synthesis: "Use the frozen packet.",
-		evidence: [{ source: "s1", claim: "The captured file says so." }],
-		assumptions: [],
-		uncertainties: ["No live verification yet."],
-		alternatives: [],
-		next_checks: [],
-	});
+test("consult: the context is clipped to the cap, in prepareArguments and at send time", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const tool = consultTool({ root, brainDir });
-	const result = await tool.execute({ question: "q", myPersona: "p", thread: "st1" }, {}, undefined);
+	const big = "c".repeat(65000);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => okAnswer("clipped ok") });
+	const prepared = tool.prepareArguments({ question: "q?", context: big });
+	assert.equal(prepared.context.length, 64000, "prepareArguments clips to the cap before validation sees it");
+	const calls = [];
+	const spy = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("clipped ok"); } });
+	const result = await spy.execute({ question: "q?", context: big }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const sent = calls[0].messages[0].content;
+	assert.ok(sent.includes("c".repeat(64000)) && !sent.includes("c".repeat(64001)), "only the head is sent");
+	assert.match(result.output[0].text, /clipped to the first/);
+});
+
+test("consult: an HTTP error names the model and the setting that fixes it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => new Response("unknown model: MythosNano", { status: 404 });
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
 	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /thread.*removed by the C5 cutover/i);
+	assert.match(result.output[0].text, /HTTP 404/);
+	assert.match(result.output[0].text, /consultModel/, "it says which setting names the model");
+});
+
+test("consult: a cut-off answer says the ending is incomplete", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => okAnswer("Partial reasoning…", "length", 40960);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.match(result.output[0].text, /ran out of room/);
+	assert.match(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8"), /finish: length/);
+});
+
+test("consult: an empty consultModel switches the tool off and asks nothing", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: { ...consultConfig, consultModel: "" }, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /switched off/);
+	assert.equal(called, 0, "the endpoint is never hit");
+});
+
+test("consult: the stream is read the way llama.cpp frames it — pings, CRLF, and frames split mid-frame across chunks", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const encoder = new TextEncoder();
+	const frames = [
+		": ping\r\n\r\n",
+		`data: {"choices":[{"delta":{"role":"assistant","content":"It "},"finish_reason":null}]}\r\n\r\n`,
+		`data: {"choices":[{"delta":{"content":"is 42."},"finish_reason":null}]}\r\n\r\n`,
+		": ping\r\n\r\n",
+		`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"completion_tokens":12}}\r\n\r\n`,
+		"data: [DONE]\r\n\r\n",
+	];
+	// Bytes, not frames: every TCP chunk boundary is fair game.
+	const bytes = encoder.encode(frames.join(""));
+	const stream = new ReadableStream({
+		async start(controller) {
+			for (let at = 0; at < bytes.length; at += 7) controller.enqueue(bytes.slice(at, at + 7));
+			controller.close();
+		},
+	});
+	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+	const chunks = [];
+	const api = { ...consultApi(ROOT_CONVERSATION_ID), output: (chunk) => chunks.push(chunk) };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, api, undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(chunks.join(""), "It is 42.", "the pieces are reassembled across chunk boundaries");
+	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("It is 42."));
+});
+
+test("consult: a story that breaks mid-answer leaves the partial in the file, marked as cut off", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const encoder = new TextEncoder();
+	const frames = `data: ${JSON.stringify({ choices: [{ delta: { content: "It is not. Roll twice." }, finish_reason: null }] })}\n\n`;
+	let sent = false;
+	const stream = new ReadableStream({
+		pull(controller) {
+			if (!sent) {
+				controller.enqueue(encoder.encode(frames));
+				sent = true;
+				return;
+			}
+			controller.error(new Error("connection reset"));
+		},
+	});
+	const fetchImpl = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true, "a broken story is an error");
+	assert.match(result.output[0].text, /broke off mid-answer/);
+	const file = readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8");
+	assert.ok(file.includes("It is not. Roll twice."), "what was written stands in the story");
+	assert.match(file, /broke off mid-answer/, "and says it broke off");
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 1, "the partial is shelved all the same");
+});
+
+test("consult: a server that refuses stream_options is asked again without it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		const sent = JSON.parse(init.body);
+		calls.push(sent);
+		if (sent.stream_options !== undefined) return new Response("unknown field: stream_options", { status: 400 });
+		return okAnswer("Plain answer.");
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.equal(calls.length, 2, "the refusal is answered with one retry, no more");
+	assert.equal(calls[1].stream_options, undefined, "without stream_options the second time");
+});
+
+test("consult: a server that answers with one plain JSON body all the same reads the story out of it", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const fetchImpl = async () => new Response(JSON.stringify({ choices: [{ message: { content: "42." }, finish_reason: "stop" }], usage: { completion_tokens: 7 } }), { status: 200, headers: { "content-type": "application/json" } });
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, undefined, result.output[0].text);
+	assert.ok(readFileSync(join(brainDir, "storyteller", `${result.details.thread}.md`), "utf8").includes("42."));
+});
+
+test("consult: a timeout is reported as a timeout and writes nothing", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { throw new DOMException("The operation timed out.", "TimeoutError"); } });
+	const result = await tool.execute({ question: "q?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /did not answer within 1800 seconds/);
+	assert.equal(existsSync(join(brainDir, "storyteller")), false, "no story is written");
+});
+
+test("consult: a follow-up carries the whole story — the original question and the answer — and appends its round", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		calls.push(JSON.parse(init.body));
+		return okAnswer(calls.length === 1 ? "Roll twice, not once, or the die never lands on six." : "Once lands on six only half the time.");
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "Is the roller sound?", context: "It rolls one die." }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(first.isError, undefined, first.output[0].text);
+	const thread = first.details.thread;
+	assert.equal(first.details.rounds, 1);
+	const second = await tool.execute({ question: "Why twice?", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(second.isError, undefined, second.output[0].text);
+	assert.equal(second.details.thread, thread, "the follow-up keeps the same thread");
+	assert.equal(second.details.rounds, 2);
+	// The storyteller sees round one whole: the context, the question, the answer — then this question.
+	const sent = calls[1];
+	assert.equal(sent.messages.length, 3);
+	assert.equal(sent.messages[0].role, "user");
+	assert.ok(sent.messages[0].content.startsWith("It rolls one die."), "round one's context stands first");
+	assert.ok(sent.messages[0].content.endsWith("Is the roller sound?"), "and its question last within the round");
+	assert.equal(sent.messages[1].role, "assistant");
+	assert.equal(sent.messages[1].content, "Roll twice, not once, or the die never lands on six.");
+	assert.equal(sent.messages[2].role, "user");
+	assert.equal(sent.messages[2].content, "Why twice?");
+	// One story on disk, both rounds, in order.
+	const file = readFileSync(join(brainDir, "storyteller", `${thread}.md`), "utf8");
+	assert.match(file, /## Round 1 — /);
+	assert.match(file, /## Round 2 — /);
+	assert.ok(file.indexOf("## Round 1") < file.indexOf("## Round 2"));
+	assert.ok(file.includes("Roll twice") && file.includes("Once lands on six"));
+	// One placement on the shelf, re-shelved with the whole exchange; no path and no model name in it.
+	const store = loadContext(brainDir);
+	assert.equal(store.shelf.length, 1, "the story is one placement, re-shelved, not minted twice");
+	assert.equal(store.shelf[0].ref.type, "story");
+	assert.equal(store.shelf[0].ref.id, thread);
+	assert.ok(store.shelf[0].snapshot.includes("Is the roller sound?"));
+	assert.ok(store.shelf[0].snapshot.includes("Roll twice"));
+	assert.ok(store.shelf[0].snapshot.includes("Why twice?"));
+	assert.ok(store.shelf[0].snapshot.includes("Once lands on six"));
+	assert.doesNotMatch(store.shelf[0].snapshot, /MythosNano|storyteller\//, "the shelf carries the exchange, not the provenance or the path");
+	// The round-two receipt says where in the story it stands, and never carries the answer.
+	assert.match(second.output[0].text, /^Round 2\./);
+	assert.ok(second.output[0].text.includes(`thread: "${thread}"`));
+	assert.doesNotMatch(second.output[0].text, /Once lands on six/);
+});
+
+test("consult: a fresh round-two of the same story re-uses the placement id", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let n = 0;
+	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const second = await tool.execute({ question: "q2", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const placement = loadContext(brainDir).shelf[0].id;
+	assert.equal(first.details.placement, second.details.placement, "the placement is re-used, not re-minted");
+	assert.equal(loadContext(brainDir).shelf[0].id, placement);
+	assert.ok(loadContext(brainDir).shelf[0].snapshot.includes("Answer 1.") && loadContext(brainDir).shelf[0].snapshot.includes("Answer 2."));
+});
+
+test("consult: a thread that is not a storyteller thread is refused before anything is asked", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	for (const bad of ["../etc/passwd", "st-20261115", "st-20261115-143022-XYZ!", "story:st-20261115-143022-k7q2", `/abs/path/st-20261115-143022-k7q2`]) {
+		const result = await tool.execute({ question: "q?", thread: bad }, consultApi(ROOT_CONVERSATION_ID), undefined);
+		assert.equal(result.isError, true, bad);
+		assert.match(result.output[0].text, /not a thread the storyteller minted/);
+	}
+	assert.equal(called, 0, "a bad thread never reaches the endpoint");
+});
+
+test("consult: fresh stories mint short thread markers from the folder, and legacy markers stay valid", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let n = 0;
+	const fetchImpl = async () => { n += 1; return okAnswer(`Answer ${n}.`); };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	// Two new stories in a fresh brain: st1, then st2.
+	const first = await tool.execute({ question: "q1" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const second = await tool.execute({ question: "q2" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(first.details.thread, "st1");
+	assert.equal(second.details.thread, "st2");
+	// A follow-up to the legacy story minted before the short markers: the marker stays as it was.
+	const legacy = "st-20261115-143022-k7q2";
+	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
+	writeFileSync(join(brainDir, "storyteller", `${legacy}.md`), "<!-- storyteller v1 -->\nThe storyteller — one long problem, kept whole\n\nModel: MythosNano\nStarted: 2026-11-15T14:30:22.000Z\n\n## Round 1 — 2026-11-15T14:30:22.000Z\n\nQuestion:\n```text\nlegacy question?\n```\n\nAnswer:\n```text\nlegacy answer.\n```\n");
+	const third = await tool.execute({ question: "and then?", thread: legacy }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(third.isError, undefined, third.output[0].text);
+	assert.equal(third.details.thread, legacy, "a legacy thread keeps its marker");
+	// The next fresh story after legacy files still mints the short form from the short ids in the folder — st3.
+	const fourth = await tool.execute({ question: "q4" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(fourth.details.thread, "st3");
+});
+
+test("consult: a well-formed thread with no story behind it is refused before anything is asked", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	const result = await tool.execute({ question: "q?", thread: "st-20261115-000000-zzzz" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /No story stands under thread st-20261115-000000-zzzz/);
+	assert.equal(called, 0);
+});
+
+test("consult: a story file that does not parse is refused, never guessed at", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const id = "st-20261115-000000-a1b2";
+	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
+	writeFileSync(join(brainDir, "storyteller", `${id}.md`), "The storyteller — one long problem, kept whole\n\n## Round 1 — nope\n\nQuestion:\naaa\nAnswer:\nbbb\n");
+	let called = 0;
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => { called += 1; return okAnswer(); } });
+	const result = await tool.execute({ question: "follow up?", thread: id }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(result.isError, true);
+	assert.match(result.output[0].text, /cannot be read as a story/);
+	assert.equal(called, 0, "a broken story never reaches the endpoint");
+});
+
+test("consult: a follow-up whose story grows is sent the whole conversation — round one is not re-sent by the agent", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const fetchImpl = async (url, init) => {
+		calls.push(JSON.parse(init.body));
+		return okAnswer(`Answer ${calls.length}.`);
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "Round one question." }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const second = await tool.execute({ question: "Round two question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const third = await tool.execute({ question: "Round three question.", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(third.details.rounds, 3);
+	const sent = calls[2];
+	assert.deepEqual(sent.messages.map((m) => m.role), ["user", "assistant", "user", "assistant", "user"]);
+	assert.equal(sent.messages[0].content, "Round one question.");
+	assert.equal(sent.messages[1].content, "Answer 1.");
+	assert.equal(sent.messages[2].content, "Round two question.");
+	assert.equal(sent.messages[3].content, "Answer 2.");
+	assert.equal(sent.messages[4].content, "Round three question.");
+	assert.equal(second.details.rounds, 2);
+});
+
+test("consult: a story survives a question that carries its own fenced blocks and labels", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const tricky = "It failed with:\n\nQuestion:\n```text\nAnswer:\n```\n\n## Round 99 — fake\n\nWhat does it print?";
+	const fetchImpl = async (url, init) => { calls.push(JSON.parse(init.body)); return okAnswer("The exit code is 1.\n```\nb ```\nDone."); };
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: tricky }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(first.isError, undefined, first.output[0].text);
+	const second = await tool.execute({ question: "And the sign?", thread: first.details.thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(second.isError, undefined, second.output[0].text);
+	const sent = calls[1];
+	assert.equal(sent.messages.length, 3);
+	assert.equal(sent.messages[0].content, tricky, "the tricky round-one payload round-trips byte for byte");
+	assert.equal(sent.messages[1].content, "The exit code is 1.\n```\nb ```\nDone.");
+});
+
+test("consult: a server refusing an over-long conversation is said as such — the story outgrew the storyteller", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let call = 0;
+	const fetchImpl = async () => {
+		call += 1;
+		if (call === 1) return okAnswer("Roll twice.");
+		return new Response("request (99999 tokens) exceeds the available context size (65536 tokens)", { status: 400 });
+	};
+	const tool = consultTool({ root, brainDir, config: consultConfig, fetchImpl });
+	const first = await tool.execute({ question: "Is the roller sound?" }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	const thread = first.details.thread;
+	const second = await tool.execute({ question: "Go on.", thread }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(second.isError, true);
+	assert.match(second.output[0].text, /outgrown what the storyteller can hold/);
+	assert.match(second.output[0].text, /let it rest, or begin a new one with the crux/);
+	assert.doesNotMatch(second.output[0].text, /consultModel/, "an overflow is not a model-name problem");
+	// Round one overflow names the ask, not a story:
+	const solo = await consultTool({ root, brainDir, config: consultConfig, fetchImpl: async () => new Response("prompt is too long: 99999 tokens", { status: 400 }) }).execute({ question: "x".repeat(50000) }, consultApi(ROOT_CONVERSATION_ID), undefined);
+	assert.equal(solo.isError, true);
+	assert.match(solo.output[0].text, /outgrew what the storyteller can hold/);
 });

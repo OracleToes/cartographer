@@ -1,10 +1,11 @@
 // The full screen: tabs, a status strip that is always there, and a place to type.
 //
-//   1 Chat     Conversation is user-directed exchange; Work is private shared-brain activity; Consult is its isolated conference audit (src/screen/chat.mjs)
-//   2 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
-//   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
-//   4 Shells   the shell windows, live
-//   5 Model    route readiness, sent provider payloads, next-request preview, and current accounting
+//   1 Talk     what reached the user or is being sent (src/screen/chat.mjs)
+//   2 Work     the private shared-brain activity, not user-directed speech
+//   3 Carto    the live shared brain: Atlas, Ledger, Plan, Requests, Tree, Current shared brain
+//   4 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
+//   5 Shells   the shell windows, live
+//   6 Model    sent provider payloads, next-request preview, and current accounting
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -17,63 +18,41 @@
 // whatever way the terminal speaks (the Kitty keyboard protocol where there is one), lays the parts out, scrolls
 // them, lets text be selected with the mouse and copies it, lays sheets over the screen, and writes only the rows
 // that changed. What is Cartographer's own is in the other files of this folder: what the tabs hold (chat.mjs,
-// workspace.mjs, review.mjs, runtime.mjs, list.mjs), how it is coloured (theme.mjs), and how the two are fitted to
-// the screen (parts.mjs).
+// list.mjs, views.mjs), how it is coloured (theme.mjs), and how the two are fitted to the screen (parts.mjs).
 //
 // And it is a face, not a second program. The session is run by the plain terminal (src/terminal.mjs), which is
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
 // everything Cartographer has to say, exactly as it does line by line.
 import { DEFAULTS, POLICY } from "../config.mjs";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { basename, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
+import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
+import { readStory } from "../story.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
-import { createApplication } from "../application/app.mjs";
-import { createChatPresentation } from "../application/chat.mjs";
-import { createReviewPresentation } from "../application/review-presentation.mjs";
-import { createRuntimePresentation } from "../application/runtime-presentation.mjs";
-import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
-import { REQUEST_ACTION } from "../application/requests.mjs";
-import { REVIEW_ACTION } from "../application/review.mjs";
-import { TALK_ACTION } from "../application/talk.mjs";
-import { WORKSPACE_ACTION } from "../application/workspace.mjs";
-import { RUNTIME_ACTION } from "../application/runtime-actions.mjs";
-import { launchEditor } from "../infrastructure/editor.mjs";
-import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
+import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { assessmentPath } from "../assessment.mjs";
+import { atlasPath, loadAtlas } from "../atlas.mjs";
+import { loadLedger, open as openEntries } from "../ledger.mjs";
+import { applyPlanOp, isAuthorized, loadPlan, planPath, PlanError, savePlan, waiting } from "../plan.mjs";
+import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
-import { CommandPalette } from "./command-palette.mjs";
-import { ConfirmDialog } from "./confirm-dialog.mjs";
-import { createDeferredReferenceLabels } from "../application/references.mjs";
+import { createRefDescriber } from "../refs.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
-import { createFocusManager } from "./focus.mjs";
-import { createKeyHints } from "./key-hints.mjs";
 import { createList } from "./list.mjs";
-import { createRouteManager } from "./routes.mjs";
-import { renderAsyncBoundary } from "./async-boundary.mjs";
-import { createNoticeStore, NOTICE_LEVEL } from "./notices.mjs";
-import { createOverlayManager } from "./overlays.mjs";
-import { renderStatusBar } from "./status.mjs";
-import { createProjectionScheduler } from "./projections.mjs";
-import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
-import { applyTheme, cut, sgr } from "./text.mjs";
+import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
+import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { TOKEN } from "./tokens.mjs";
-import { editorCommand } from "./views.mjs";
-import { diffView } from "./review.mjs";
-import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
-import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
+import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
-const TOOL_SOURCE_DIR = fileURLToPath(new URL("../tools", import.meta.url));
-const PROMPT_SOURCE = fileURLToPath(new URL("../prompt.mjs", import.meta.url));
-const promptSource = async () => (await pathExists(PROMPT_SOURCE) ? PROMPT_SOURCE : undefined);
-const toolSource = (name) => findTextSource(TOOL_SOURCE_DIR, `name: "${name}"`, { suffix: ".mjs" });
-
 export const TABS = [
-	{ id: "chat", name: "Chat" },
+	{ id: "chat", name: "Talk" },
+	{ id: "work", name: "Work" },
 	{ id: "carto", name: "Carto" },
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
@@ -81,11 +60,6 @@ export const TABS = [
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
 export const VIEWS = {
-	chat: [
-		{ id: "conversation", name: "Conversation" },
-		{ id: "work", name: "Work" },
-		{ id: "consult", name: "Consult" },
-	],
 	carto: [
 		{ id: "atlas", name: "Atlas" },
 		{ id: "ledger", name: "Ledger" },
@@ -102,40 +76,22 @@ export const VIEWS = {
 	shells: [
 		{ id: "list", name: "List" },
 		{ id: "out", name: "Output" },
-		{ id: "wakes", name: "Wakes" },
 	],
 	context: [
-		{ id: "routes", name: "Routes" },
 		{ id: "window", name: "Latest sent" },
 		{ id: "main", name: "Main sent" },
-		{ id: "raw", name: "Raw payload" },
 		{ id: "preview", name: "Next preview" },
 		{ id: "parts", name: "Current accounting" },
 	],
 };
-/** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
+/** Every view of every tab but Talk and Work, by the name it is kept under. */
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
-/** How long each spinner mark stands; the status strip owns its visible marks. */
+/** The marks of the spinner that turns while the agent works, and how long each stands. */
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPIN_MS = POLICY.timing.spinnerMs;
-
-// A palette may safely expose every registered capability before every feature has a dedicated control. Selecting an
-// item goes to the narrowest existing screen seam; only that screen's contextual action supplies target/input and
-// crosses the application action boundary. Unmigrated runtime controls stay discoverable with their terminal path.
-const paletteDestinationFor = (id) => {
-	if (id.startsWith("talk.")) return { tab: "chat", view: "conversation", name: "Chat · Conversation", hint: "Choose kept talk, then use its contextual action." };
-	if (id.startsWith("workspace.")) return { tab: "carto", view: "atlas", name: "Carto", hint: "Choose the relevant record, then use its contextual action." };
-	if (id.startsWith("request.")) return { tab: "carto", view: "requests", name: "Carto · Requests", hint: "Choose a request, then approve, deny, answer, or forget it." };
-	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Inspect the latest checkpoint change, then use its contextual recovery action." };
-	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
-	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
-	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
-	if (id.startsWith("runtime.model.")) return { tab: "context", view: "routes", name: "Model · Routes", hint: "Choose a route, then connect or select it through the Runtime action boundary." };
-	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
-	return undefined;
-};
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
 const COMMANDS = [
@@ -152,7 +108,7 @@ const COMMANDS = [
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
+	["stop", "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
 	["model", "the models the server serves; /model NAME (or a number) switches to one"],
@@ -160,7 +116,7 @@ const COMMANDS = [
 	["fold", "take a kept report out of the context's view, leaving its one line"],
 	["archive", "take a row out of what the agent reads: a report, ledger entry, plan envelope or move, or node"],
 	["unarchive", "bring an archived row back into what the agent reads"],
-	["done", "settle a row; a reported move opens an evidence-review prompt before it can be accepted"],
+	["done", "settle a row the way the agent does: a ledger entry, reported move after review, completed envelope, or node of the graph"],
 	["delete", "a row is gone for good, and the agent is not told: a report, ledger entry, plan envelope or move, or node"],
 	["recall", "bring a kept report back into view in full"],
 	["shelve", "snapshot a file into view now and carry it through collapse: /shelve PATH [lines]"],
@@ -198,17 +154,16 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
-	"  [ and ]          the previous and the next view inside Chat, Carto, Diff, Shells and Model (H and L do the same)",
+	"  1 to 6           go to a tab (Talk is direct speech; Work is private shared-brain activity)",
+	"  [ and ]          the previous and the next view inside Carto, Diff and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back); in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another route.",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d opens a confirmation before it deletes for good, in Requests before it forgets without a word to the agent, and in Shells → Wakes before it removes the selected wake; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
-	"  u                in Diff, asks before taking the latest checkpoint change back and reopening its move for approval when it has one",
+	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Talk, Work, Model), e is this same door: in Talk it rewords a stable source for a future kept talk; private work cannot be edited; sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row outside Talk and Work: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d deletes it for good (d again), and in Requests forgets it without a word to the agent; t settles it the way the agent settles one (a ledger entry is closed, a reported move is accepted after review, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Talk, d removes one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
@@ -225,7 +180,6 @@ export const KEYS_HELP = [
 	"  Ctrl-C           clear what you have typed; with the line empty, again (soon after) leaves, the way /quit does",
 	"  Ctrl-X           stop the agent; Ctrl-V pauses it: holds the agent in its stream mid-reply; until you unpause, it starts nothing of its own (a line or command you write ends the held stream)",
 	"  Ctrl-L           draw the screen again",
-	"  Ctrl-K           search navigation and registered actions in the command palette",
 	"  Ctrl-O           the $EDITOR door, in every tab and mode, including while typing",
 	"  F1               this sheet",
 	"",
@@ -255,6 +209,20 @@ class Term extends ProcessTerminal {
 /** Ctrl-Shift-F, as a terminal with the Kitty keyboard protocol sends it. */
 const SEARCH_KEY = "\x1b[102;6u";
 
+/** The program `name` on the PATH, or undefined. */
+function onPath(name) {
+	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+		if (dir === "") continue;
+		try {
+			accessSync(join(dir, name), constants.X_OK);
+			return join(dir, name);
+		} catch {
+			// Not here.
+		}
+	}
+	return undefined;
+}
+
 /**
  * Run carto in the full screen.
  * @param {any} session
@@ -264,10 +232,8 @@ const SEARCH_KEY = "\x1b[102;6u";
 export async function runScreen(session, options, runTerminal) {
 	const { root, brainDir, config = {} } = options;
 	const started = Date.now();
-	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`): ephemeral local activity only. */
-	let core = { busy: () => false, paused: () => false, thinking: () => true };
-	// The file-completion helper is resolved before the terminal starts, never by a render or key handler.
-	const fileSearch = await findExecutable(["fd", "fdfind"]);
+	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
+	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
 
 	// ─── The terminal, in pi-tui's hands ─────────────────────────────────────
 	// The lines that break in what is typed, and the keys that bring back what was sent before.
@@ -287,10 +253,10 @@ export async function runScreen(session, options, runTerminal) {
 		mouse: true,
 		wheelScrollLines: POLICY.limits.screen.wheelScrollLines,
 		// What is selected with the mouse is copied when the button is let go, every way there is.
-		copySelection: async (text) => ((await toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) })).length > 0 ? true : "no way to the clipboard was found"),
-		scrollToEndIndicator: () => `${sgr(TOKEN.interaction.selected)} ↓ the newest · G or End \x1b[0m`,
-		searchMatchStyle: (text) => `${sgr(TOKEN.emphasis.underline)}${text}\x1b[24m`,
-		searchCurrentMatchStyle: (text) => `${sgr(TOKEN.interaction.chip)}${text}\x1b[0m`,
+		copySelection: async (text) => (toClipboard(selectionText(text), { write: (sequence) => terminal.write(sequence) }).length > 0 ? true : "no way to the clipboard was found"),
+		scrollToEndIndicator: () => `${sgr("bgSel")} ↓ the newest · G or End \x1b[0m`,
+		searchMatchStyle: (text) => `${sgr("under")}${text}\x1b[24m`,
+		searchCurrentMatchStyle: (text) => `${sgr("chip")}${text}\x1b[0m`,
 	});
 
 	// ─── Colours (src/screen/theme.mjs) ──────────────────────────────────────
@@ -311,23 +277,10 @@ export async function runScreen(session, options, runTerminal) {
 		const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
-	let refreshReferenceLabels = () => {};
-	const referenceLabels = createDeferredReferenceLabels({ brainDir, onResolved: () => refreshReferenceLabels() });
-	const describeRef = referenceLabels.describe;
-	const workspacePresentation = createWorkspacePresentation();
-	const reviewPresentation = createReviewPresentation();
-	const runtimePresentation = createRuntimePresentation();
-	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
-	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
-	const CONSULT_PROJECTION = "chat.consult";
-	let settleConsultProjection = () => {};
-	const consultProjections = createProjectionScheduler({ onSettled: (id, projection) => settleConsultProjection(id, projection) });
-	const consultProjection = () => consultProjections.get(CONSULT_PROJECTION);
-	const chat = createChat({
-		markdown,
-		presentation: createChatPresentation({ describeRef }),
-	});
-	chat.setConsultProjection(consultProjection());
+	const describeRef = createRefDescriber({ brainDir });
+	// For a consult row in Work: the story is read from the brain under its thread, never from the session.
+	const readStoryRaw = (thread) => readStory(brainDir, thread);
+	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -346,10 +299,11 @@ export async function runScreen(session, options, runTerminal) {
 
 	const state = {
 		tab: "chat",
-		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "routes" },
+		view: { carto: "atlas", diff: "last", shells: "list", context: "window" },
 		shell: undefined, // the shell window whose output the Output view shows
+		deleteArm: undefined, // a report or Talk source marked for its second d
 		mode: "type",
-		selected: undefined, // a stop of the Conversation, Work, or Consult projection
+		selected: undefined, // a stop of the Talk or Work projection
 		pending: "", // the first key of a command of two (z, then R)
 		prompt: "› ",
 		busySince: undefined,
@@ -357,36 +311,10 @@ export async function runScreen(session, options, runTerminal) {
 		rate: undefined,
 		prefill: undefined,
 		lastPrefill: undefined,
-		// Terminal core failures that must remain visible even when the chat has scrolled: an offline model server
-		// is recoverable, but it is not an idle Cartographer session.
-		modelError: undefined,
 		closed: false,
 	};
 	const draw = () => {
 		if (!state.closed) tui.requestRender();
-	};
-	// A route is tab plus its remembered subview. Its shell effects are installed after projection refresh exists;
-	// the manager itself is ready now so every later reader gets the same validated route identity.
-	let settleRoute = () => {};
-	const routes = createRouteManager({ tabs: TABS, views: VIEWS, state, onChange: (change) => settleRoute(change) });
-	// Replaced once the composer and command sink exist. Keeping a harmless coordinator here makes early lifecycle
-	// callbacks unable to trip over a temporal focus dependency.
-	let shellFocus = Object.freeze({ focus: () => false, restore: () => false });
-	const notices = createNoticeStore({ ttlMs: POLICY.timing.screen.flashMs });
-	const noticeLevel = (text) => {
-		const message = String(text ?? "").trim();
-		if (/^(?:!|could not\b|cannot\b|failed\b|error\b)/i.test(message)) return NOTICE_LEVEL.error;
-		if (/^(?:nothing\b|no\b|not\b|only\b|the .* is not\b)/i.test(message)) return NOTICE_LEVEL.warning;
-		return NOTICE_LEVEL.info;
-	};
-	refreshReferenceLabels = () => {
-		if (state.closed || !chat.refreshActivityLabels()) return;
-		draw();
-	};
-	settleConsultProjection = (id, projection) => {
-		if (id !== CONSULT_PROJECTION) return;
-		chat.setConsultProjection(projection);
-		if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
 	};
 	/** The cells between the margins, as the parts count them. */
 	const innerCols = () => Math.max(8, terminal.columns - 2 * marginOf(terminal.columns));
@@ -398,13 +326,9 @@ export async function runScreen(session, options, runTerminal) {
 		chat.setThinking(lastThinking);
 		draw();
 	};
-	/** Something to say in passing: a flash for immediacy, plus a bounded notice that stays in the shell footer. */
-	const flash = (text, level = noticeLevel(text)) => {
-		if (state.closed) return undefined;
-		const notice = notices.add({ message: text, level });
-		tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, POLICY.timing.screen.flashMs);
-		draw();
-		return notice;
+	/** Something to say in passing, which is not worth a line of the conversation. */
+	const flash = (text) => {
+		if (!state.closed) tui.flash(` ${cut(text, Math.max(16, Math.min(56, terminal.columns - 50)))} `, POLICY.timing.screen.flashMs);
 	};
 
 	// ─── The terminal core's side ────────────────────────────────────────────
@@ -435,17 +359,17 @@ export async function runScreen(session, options, runTerminal) {
 			chat.block(label, text);
 			draw();
 		},
-		entry(depth, entry, printed, consult) {
+		entry(depth, entry, printed) {
 			chat.seal();
-			chat.entry(depth, entry, printed, consult);
+			chat.entry(depth, entry, printed);
 			draw();
 		},
-		live(depth, message, consult) {
-			chat.live(depth, message, consult);
+		live(depth, message) {
+			chat.live(depth, message);
 			draw();
 		},
-		liveTools(depth, slots, consult) {
-			chat.liveTools(depth, slots, consult);
+		liveTools(depth, slots) {
+			chat.liveTools(depth, slots);
 			draw();
 		},
 		attach(given) {
@@ -454,19 +378,6 @@ export async function runScreen(session, options, runTerminal) {
 		notice(text) {
 			syncThinking();
 			flash(text);
-		},
-		/** A required model-route gate failed. Keep it in the strip as well as the Chat notice. */
-		modelError(message) {
-			state.modelError = String(message);
-			draw();
-		},
-		/** A successful first-turn proof clears the stale unavailable-route status and replaces its cached route fact. */
-		modelReady() {
-			const hadError = state.modelError !== undefined;
-			state.modelError = undefined;
-			refreshRuntimeModelProjection(true);
-			refreshRuntimeStatusProjection(true);
-			if (hadError) draw();
 		},
 	};
 	for (const line of options.intro ?? []) chat.print(`${line}\n`, { keep: true });
@@ -498,307 +409,141 @@ export async function runScreen(session, options, runTerminal) {
 			rateMark = { at: now, size };
 		}
 	};
-	let brain = { at: 0, loading: false, request: 0 };
-	/** Refresh status outside rendering. The newest request alone may replace the strip's cached projection. */
-	const refreshBrain = (force = false) => {
-		if (brain.loading || (!force && Date.now() - brain.at < POLICY.timing.screen.stateCacheMs)) return;
-		const request = brain.request + 1;
-		brain = { ...brain, at: Date.now(), loading: true, request };
-		void queries.status({ yolo: options.gate?.yolo === true })
-			.then((result) => {
-				if (brain.request !== request) return;
-				if (!result.ok) {
-					brain = { ...brain, loading: false };
-					return;
-				}
-				const { plan, ledger, requests, waits } = result.data;
-				brain = {
-					at: brain.at,
-					loading: false,
-					request,
-					requests,
-					waits,
-					...(plan === undefined || plan.total === 0 ? {} : { plan: `plan ${plan.total - plan.open}/${plan.total} envelopes · ${plan.moves} moves${plan.awaiting > 0 ? ` · ${plan.awaiting} awaiting` : plan.ready ? " · move ready" : ""}` }),
-					...(ledger === undefined ? {} : { ledger: ledger.goals === 0 ? "no goal" : `${ledger.goals === 1 ? "1 goal" : `${ledger.goals} goals`}` }),
-				};
-				draw();
-			})
-			.catch(() => {
-				if (brain.request === request) brain = { ...brain, loading: false };
-			});
+	let brain = { at: 0 };
+	const readBrain = () => {
+		if (Date.now() - brain.at < POLICY.timing.screen.stateCacheMs) return brain;
+		const next = { at: Date.now() };
+		try {
+			const requests = listRequests(brainDir, { yolo: options.gate?.yolo === true });
+			next.requests = requests.length;
+			next.waits = requests.some((request) => request.kind === "approval");
+			const { plan } = loadPlan(brainDir);
+			if (plan !== undefined && plan.items.length > 0) {
+				const open = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true).length;
+				const awaiting = waiting(plan).length;
+				const ready = isAuthorized(plan);
+				next.plan = `plan ${plan.items.length - open}/${plan.items.length} envelopes · ${plan.moves.length} moves${awaiting > 0 ? ` · ${awaiting} awaiting` : ready ? " · move ready" : ""}`;
+			}
+			const { ledger } = loadLedger(brainDir);
+			if (ledger !== undefined) {
+				const goals = openEntries(ledger, POLICY.enums.ledgerKind.goal).length;
+				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}`;
+			}
+		} catch {
+			// A file edited into something unreadable is said by its tab, not by the strip.
+		}
+		brain = next;
+		return brain;
 	};
-	/** The status strip reads its settled snapshot only; the clock and invalidations below own replacement reads. */
-	const readBrain = () => brain;
-	/** Drop a possibly stale status result after a durable workspace action, then request a replacement. */
-	const invalidateBrain = () => {
-		brain = { at: 0, loading: false, request: brain.request + 1 };
-		refreshBrain(true);
-	};
-	/** The strip and composer read one deferred activity snapshot rather than probing asks/task state while they render. */
-	const currentRuntimeActivity = () => runtimeActivityProjection().data ?? {};
-	/** The strip paints only cached projections; refreshBrain and the projection clock own all deferred reads. */
-	const status = () => renderStatusBar({
-		state,
-		core,
-		chat,
-		activity: currentRuntimeActivity(),
-		brain: readBrain(),
-		runtime: runtimeStatusForStrip(),
-		notice: notices.latest({ live: true }),
-		legend: legend(),
-		config,
-		options,
-	});
+	/** The two rows of the strip, as spans. */
+	const status = () => {
+		const busy = core.busy();
+		if (busy && state.busySince === undefined) {
+			state.busySince = Date.now();
+			state.rate = undefined;
+		}
+		if (!busy && state.busySince !== undefined) {
+			state.busySince = undefined;
+			state.restSince = Date.now();
+			state.prefill = undefined;
+		}
+		const question = session.asks?.pending();
+		const first = [];
+		if (question !== undefined) first.push([`? waiting for your answer since ${stamp(question.since).split(", ").at(-1)}`, "warn bold"], [" · type it below", "muted"]);
+		else if (busy) {
+			const doing = chat.doing();
+			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
+			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
+			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
+			if (reading) {
+				const { fresh, done, ms } = state.prefill;
+				const rate = ms > 0 ? done / (ms / 1000) : 0;
+				const left = rate > 0 ? (fresh - done) / rate : undefined;
+				first.push([` · reading ${short(done)} of ${short(fresh)} new ${bar(done / fresh)} ${Math.round((done / fresh) * 100)}%`, "tool"], [`${rate > 0 ? ` · ${Math.round(rate)} tok/s` : ""}${left !== undefined ? ` · writing in ~${Math.max(1, Math.round(left))} s` : ""}`, "muted"]);
+			} else if (doing !== undefined) first.push([` · ${doing.what}`, ""]);
+			else if (state.prefill?.phase === "sent") first.push([" · waiting for the model", "muted"]);
+			first.push([` · ${span(Date.now() - state.busySince)}`, "muted"]);
+			if (state.rate !== undefined && !reading) first.push([` · ${state.rate < POLICY.limits.format.rateDecimalBelow ? state.rate.toFixed(1) : Math.round(state.rate)} tok/s`, "muted"]);
+			if (state.lastPrefill !== undefined && Date.now() - state.lastPrefill.at < POLICY.timing.screen.prefillRecentMs && !reading) first.push([` · read ${short(state.lastPrefill.fresh)} new in ${span(state.lastPrefill.ms)}`, "muted"]);
+		} else first.push(["○ ", "muted"], ["resting", ""], [` · ${span(Date.now() - state.restSince)}`, "muted"]);
+		if (core.paused?.()) first.push([" · paused: held · /pause or Ctrl-V lets it go on", "warn"]);
 
-	/** The footer has route-local meanings, but capability-backed actions remain tied to the one registered availability source. */
-	const keyHints = createKeyHints({
-		typing: "Esc: commands · Ctrl-K: palette · Ctrl-O: $EDITOR · ? all keys",
-		fallback: ["j k move", "Enter open"],
-		global: ["Ctrl-K palette", "? all keys"],
-		routes: {
-			"chat.conversation": [
-				"j k move",
-				"Enter open",
-				{ text: "e reword kept talk", capability: TALK_ACTION.revise },
-				{ text: "d remove kept talk", capability: TALK_ACTION.forget },
-				"y copy",
-			],
-			"chat.work": ["j k move", "Enter open", "y copy"],
-			"chat.consult": ["j k move", "Enter open", "+ all", "y copy"],
-			"carto.atlas": [
-				{ text: "t confirm", capability: WORKSPACE_ACTION.settle },
-				{ text: "n new", capability: WORKSPACE_ACTION.add },
-				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
-				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
-				"e edit",
-			],
-			"carto.ledger": [
-				{ text: "t settle", capability: WORKSPACE_ACTION.settle },
-				{ text: "n new", capability: WORKSPACE_ACTION.add },
-				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
-				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
-				"e edit",
-			],
-			"carto.plan": [
-				{ text: "t done/review", capability: WORKSPACE_ACTION.settle },
-				{ text: "n new", capabilities: [WORKSPACE_ACTION.add, WORKSPACE_ACTION.addMove] },
-				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
-				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
-				"e edit",
-			],
-			"carto.requests": [
-				{ text: "a approve", capability: REQUEST_ACTION.approve },
-				{ text: "n deny", capability: REQUEST_ACTION.deny },
-				{ text: "d forget", capability: WORKSPACE_ACTION.delete },
-				"e edit",
-			],
-			"carto.tree": ["Enter fold", "y copy", "e edit"],
-			"carto.hands": [
-				{ text: "f fold", capability: WORKSPACE_ACTION.toggleFold },
-				{ text: "v archive", capabilities: [WORKSPACE_ACTION.archive, WORKSPACE_ACTION.unarchive] },
-				{ text: "d delete", capability: WORKSPACE_ACTION.delete },
-				{ text: "x unshelve", capability: WORKSPACE_ACTION.unshelve },
-				"e edit",
-			],
-			"diff.last": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
-			"diff.session": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
-			"diff.git": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
-			"shells.list": ["Enter output", "y copy"],
-			"shells.out": ["Enter back"],
-			"shells.wakes": [{ text: "d remove", capability: RUNTIME_ACTION.removeWake }, "Enter open", "y copy"],
-			"context.routes": [{ text: "Enter connect/select", capabilities: [RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel] }, "y copy"],
-			"context.window": ["Enter open", "y copy"],
-			"context.main": ["Enter open", "y copy"],
-			"context.raw": ["Enter open", "y copy"],
-			"context.preview": ["Enter open", "y copy"],
-			"context.parts": ["Enter open", "+ all", "y copy"],
-		},
-	});
-	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: paletteCapabilities });
+		const second = [];
+		const size = core.contextSize();
+		// /model re-fits the window while running; options.config is the shared object that follows it.
+		const windowSize = options.config?.contextWindow ?? options.contextWindow;
+		second.push([`ctx ${bar((size ?? 0) / windowSize)} ${size === undefined ? "?" : short(size)}/${short(windowSize)}`, size !== undefined && size / windowSize > POLICY.limits.screen.contextWarnPercent / 100 ? "warn" : ""]);
+		const { plan, ledger, waits, requests } = readBrain();
+		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
+		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
+		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
+		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+		if (windows.length > 0) {
+			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
+			second.push([` · ${windows.length === 1 ? "1 window" : `${windows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
+		}
+		const wakes = session.wakes?.list() ?? [];
+		if (wakes.length > 0) second.push([` · ${wakes.length === 1 ? "1 wake" : `${wakes.length} wakes`}`, "muted"]);
+		if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
+		if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
+		if (!core.thinking()) second.push([" · notes hidden", "muted"]);
+		return [first, second, [[` ${legend()}`, "faint"]]];
+	};
+
+	/** The keys this view takes, then what every view takes: one line, at the bottom, the same place everywhere. */
+	const LEGEND = {
+		chat: "j k move · Enter open · e reword kept talk · d remove kept talk · y copy",
+		"carto.atlas": "t confirm · n new · v archive · d delete · e edit",
+		"carto.ledger": "t settle · n new · v archive · d delete · e edit",
+		"carto.plan": "t done · n new · v archive · d delete · e edit",
+		"carto.requests": "a approve · n deny · d forget · e edit",
+		"carto.tree": "Enter fold · y copy · e edit",
+		"carto.hands": "f fold · v archive · d delete · x unshelve · e edit",
+		"diff.last": "Enter open · y copy · e edit",
+		"diff.session": "Enter open · y copy · e edit",
+		"diff.git": "Enter open · y copy · e edit",
+		"shells.list": "Enter output · y copy",
+		"shells.out": "Enter back",
+		"context.window": "Enter open · y copy",
+		"context.main": "Enter open · y copy",
+		"context.preview": "Enter open · y copy",
+		"context.parts": "Enter open · + all · y copy",
+		work: "j k move · Enter open · y copy",
+	};
+	const legend = () => {
+		if (state.mode === "type") return "Esc: commands · Ctrl-O: $EDITOR · ? all keys";
+		const id = state.tab === "chat" ? "chat" : state.tab === "work" ? "work" : viewId();
+		return `${LEGEND[id] ?? "j k move · Enter open"} · ? all keys`;
+	};
 	// ─── The tabs that are lists ─────────────────────────────────────────────
-	const viewId = () => routes.id();
+	const viewId = (tab = state.tab) => (VIEWS[tab] !== undefined ? `${tab}.${state.view[tab]}` : tab);
 	/** The file a view comes from, for `e` when no item names one. */
 	const fileOf = (id) =>
 		({
-			"carto.atlas": queries.paths.atlas,
-			"carto.ledger": queries.paths.ledger,
-			"carto.plan": queries.paths.plan,
+			"carto.atlas": atlasPath(brainDir),
+			"carto.ledger": join(brainDir, "carto-ledger.json"),
+			"carto.plan": planPath(brainDir),
 		})[id];
-	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
-	// narrow transitional seams; keyboard actions and overlays consume typed results.
-	const application = options.application ?? createApplication({
-		brainDir,
-		root,
-		config,
-		runtime: {
-			main: session.main,
-			context: session.context,
-			engine: session.engine,
-			windows: session.windows,
-			wakes: session.wakes,
-			asks: session.asks,
-			activeTask: session.activeTask,
-			work: session.work,
-			model: session.models?.current ?? session.model,
-			models: session.models,
-			preview: session.preview,
-			runner: options.runner,
-			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
-		},
-	});
-	const queries = application.queries;
-	// Availability is a composition-time snapshot: opening the palette never consults a manager from a key handler
-	// or render pass. The registered capability remains its single metadata source, including disabled reasons.
-	const paletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
-	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
-	const review = Object.freeze({ execute: application.execute });
-	const talk = Object.freeze({ execute: application.execute });
-	/** Consult records are loaded only through the application facade and stay in Chat · Consult's private cache. */
-	const refreshConsultProjection = (force = false) => {
-		const prior = consultProjection();
-		if (!force && Date.now() - (prior.requestedAt ?? 0) < (EVERY.chat ?? POLICY.timing.screenRefreshMs.fallback)) return false;
-		const started = consultProjections.refresh(CONSULT_PROJECTION, ({ signal }) => queries.consult.list({ signal }), { force });
-		if (started) chat.setConsultProjection(consultProjection());
-		return started;
-	};
-	const cancelConsultProjection = () => {
-		const cancelled = consultProjections.cancel(CONSULT_PROJECTION);
-		if (cancelled) chat.setConsultProjection(consultProjection());
-		return cancelled;
-	};
-	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
-	const DEFERRED_PROJECTION = Object.freeze({
-		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
-		"carto.ledger": ({ signal }) => queries.ledger({ signal }),
-		"carto.plan": ({ signal }) => queries.plan({ signal }),
-		"carto.requests": ({ signal }) => queries.requests({ yolo: options.gate?.yolo === true, signal }),
-		"carto.tree": ({ signal }) => queries.tree({ signal }),
-		"carto.hands": ({ signal }) => queries.context({ signal }),
-		"diff.last": ({ signal }) => queries.review.last({ signal }),
-		"diff.session": ({ signal }) => queries.review.session({ started, signal }),
-		"diff.git": ({ signal }) => queries.review.git({ signal }),
-		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
-		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
-		"shells.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
-		"runtime.status": ({ signal }) => queries.runtime.status({ signal }),
-		"context.routes": ({ signal }) => queries.runtime.models({ signal }),
-		"context.window": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
-		"context.main": ({ signal }) => queries.runtime.sent({ scope: "main", signal }),
-		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
-		"context.preview": ({ signal }) => queries.runtime.preview({ signal }),
-		"context.parts": ({ signal }) => queries.runtime.context({ signal }),
-	});
-	const PROJECTION_NAME = Object.freeze({
-		"carto.atlas": "Atlas",
-		"carto.ledger": "Ledger",
-		"carto.plan": "Plan",
-		"carto.requests": "Requests",
-		"carto.tree": "Project tree",
-		"carto.hands": "Current shared brain",
-		"diff.last": "Last checkpoint change",
-		"diff.session": "Session changes",
-		"diff.git": "Git changes",
-		"shells.list": "Shell windows",
-		"shells.out": "Shell output",
-		"shells.wakes": "Wake schedule",
-		"runtime.status": "Runtime status",
-		"context.routes": "Model routes",
-		"context.window": "Latest sent provider request",
-		"context.main": "Main sent provider request",
-		"context.raw": "Raw provider payload",
-		"context.preview": "Next request preview",
-		"context.parts": "Current active-context accounting",
-	});
-	let settleProjection = () => {};
-	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
-	const projectionFor = (id) => projections.get(id);
-	const RUNTIME_ACTIVITY_PROJECTION = "runtime.activity";
-	const runtimeActivityProjection = () => projectionFor(RUNTIME_ACTIVITY_PROJECTION);
-	let runtimeActivityAt = 0;
-	/** Questions and task ownership are live lifecycle state, so the screen refreshes a small deferred snapshot instead of reading them while it paints. */
-	const refreshRuntimeActivity = (force = false) => {
-		if (!force && Date.now() - runtimeActivityAt < EVERY.chat) return false;
-		runtimeActivityAt = Date.now();
-		return projections.refresh(RUNTIME_ACTIVITY_PROJECTION, ({ signal }) => queries.runtime.activity({ signal }), { force });
-	};
-	// Feature renderers receive settled data only. The shared boundary owns the shell language for first load,
-	// stale cache, retryable failure, and projection issues without letting a paint trigger another read.
-	const projectionView = (id, render) => renderAsyncBoundary({
-		id,
-		name: PROJECTION_NAME[id] ?? "view",
-		projection: projectionFor(id),
-		render,
-	});
-	const refreshProjection = (id, force = false) => {
-		const query = DEFERRED_PROJECTION[id];
-		return query === undefined ? false : projections.refresh(id, query, { force });
-	};
-	const cancelProjection = (id) => projections.cancel(id);
-	const RUNTIME_STATUS_PROJECTION = "runtime.status";
-	const RUNTIME_MODEL_PROJECTION = "context.routes";
-	const runtimeStatusProjection = () => projectionFor(RUNTIME_STATUS_PROJECTION);
-	const runtimeModelProjection = () => projectionFor(RUNTIME_MODEL_PROJECTION);
-	let runtimeStatusAt = 0;
-	/** The persistent strip owns this timed Runtime snapshot rather than asking live conversation/shell/wake managers while it paints. */
-	const refreshRuntimeStatusProjection = (force = false) => {
-		if (!force && Date.now() - runtimeStatusAt < POLICY.timing.screen.stateCacheMs) return false;
-		runtimeStatusAt = Date.now();
-		return refreshProjection(RUNTIME_STATUS_PROJECTION, force);
-	};
-	/** Route discovery can reach a server, so it refreshes on opening, explicit retry, and route lifecycle changes—not every frame. */
-	const refreshRuntimeModelProjection = (force = false) => refreshProjection(RUNTIME_MODEL_PROJECTION, force);
-	/** Status formatting stays in Runtime presentation; this shell component receives only its settled display facts. */
-	const runtimeStatusForStrip = () => {
-		const statusProjection = runtimeStatusProjection();
-		const routesProjection = runtimeModelProjection();
-		return runtimePresentation.status.describe(statusProjection.data, {
-			routes: routesProjection.data,
-			statusLoading: statusProjection.loading === true,
-			statusError: statusProjection.error,
-			routesLoading: routesProjection.loading === true,
-			routesError: routesProjection.error,
-			reportedError: state.modelError,
-		});
-	};
-	const invalidateProjections = () => projections.invalidate();
-	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
-	const stopApplicationEvents = application.events.subscribe((event) => {
-		if (event.type !== "projection.invalidated") return;
-		const scopes = event.payload.scopes ?? [];
-		const brainChanged = scopes.some((scope) => ["workspace", "context", "requests"].includes(scope));
-		const runtimeChanged = scopes.includes("runtime");
-		const projectionChanged = brainChanged || runtimeChanged || scopes.includes("review");
-		if (!projectionChanged) return;
-		if (brainChanged) invalidateBrain();
-		invalidateProjections();
-		if (runtimeChanged) {
-			refreshRuntimeStatusProjection(true);
-			if ([RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel].includes(event.payload.action)) refreshRuntimeModelProjection(true);
-		}
-		refresh(viewId(), true);
-	});
+	const env = { root, brainDir, session, started };
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
 	const build = (id, isOpen, cols) => {
-		if (id === "carto.atlas") return projectionView(id, (data) => atlasView({ file: data.file, atlas: data.atlas, attention: data.attention, lines: data.lines, presentation: workspacePresentation.atlas }));
-		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ file: data.file, ledger: data.ledger, lines: data.lines, presentation: workspacePresentation.ledger }));
-		if (id === "carto.plan") return projectionView(id, (data) => planView({ file: data.file, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, presentation: workspacePresentation.plan }));
-		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ requests: data.items, presentation: workspacePresentation.requests }));
-		if (id === "carto.tree") return projectionView(id, (data) => treeView({ tree: data, presentation: workspacePresentation.tree }, isOpen));
-		if (id === "carto.hands") return projectionView(id, (data) => handsView({ context: data, presentation: workspacePresentation.hands }));
-		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ review: data, presentation: reviewPresentation }, id.slice(5)));
-		if (id === "shells.list") return projectionView(id, (data) => shellsView({ ...data, presentation: runtimePresentation.shells }));
-		if (id === "shells.out") return projectionView(id, (data) => shellsOutView({ ...data, presentation: runtimePresentation.shells }));
-		if (id === "shells.wakes") return projectionView(id, (data) => wakesView({ wakes: data.wakes, lines: data.lines, presentation: runtimePresentation.wakes }));
-		if (id === "context.routes") return projectionView(id, (data) => modelRoutesView({ routes: data, presentation: runtimePresentation.modelRoutes }));
-		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
-			const sent = data.sent;
-			return contextView({ sent, windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, presentation: runtimePresentation.sent });
-		});
-		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView({ sent: data.sent, presentation: runtimePresentation.sent }));
-		if (id === "context.preview") return projectionView(id, (data) => previewView({ preview: data.preview, presentation: runtimePresentation.preview }));
-		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView({ accounting: data, config, presentation: runtimePresentation.accounting }));
+		if (id === "carto.atlas") return atlasView(env);
+		if (id === "carto.ledger") return ledgerView(env);
+		if (id === "carto.plan") return planView({ ...env, yolo: options.gate?.yolo === true });
+		if (id === "carto.requests") return requestsView({ brainDir, yolo: options.gate?.yolo === true });
+		if (id === "carto.tree") return treeView(env, isOpen);
+		if (id === "carto.hands") return handsView({ root, brainDir });
+		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
+		if (id === "shells.list") return shellsView(env);
+		if (id === "shells.out") return shellsOutView(env, state.shell);
+		if (id === "context.window" || id === "context.main") {
+			const sent = session.engine?.window(id === "context.main" ? "main" : "newest");
+			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
+		}
+		if (id === "context.preview") return previewView(pageOf(id).preview);
+		if (id === "context.parts") return accountingView(pageOf(id).text ?? "  …");
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -810,133 +555,53 @@ export async function runScreen(session, options, runTerminal) {
 			page.list.set({ header: [[[`! ${error?.message ?? error}`, "warn"]]], items: [] });
 		}
 	};
-	settleProjection = (id) => {
-		if (state.closed) return;
-		if (id === RUNTIME_ACTIVITY_PROJECTION || id === RUNTIME_STATUS_PROJECTION) return void draw();
-		rebuild(id);
-		if (viewId() === id) draw();
-	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
-		if (id === "chat.consult") {
-			if (refreshConsultProjection(force)) draw();
-			return;
-		}
 		const page = pageOf(id);
 		if (page === undefined) return;
-		// Unlike frozen payload/context projections, route discovery reaches the model server. Opening, r, and lifecycle
-		// events own retries; an idle frame must not keep issuing `/models` checks.
-		if (id === RUNTIME_MODEL_PROJECTION && !force) return;
 		if (!force && Date.now() - page.at < (EVERY[id.split(".")[0]] ?? POLICY.timing.screenRefreshMs.fallback)) return;
 		page.at = Date.now();
-		refreshProjection(id, force);
+		if (id === "context.preview" && page.loading !== true) {
+			page.loading = true;
+			Promise.resolve(session.preview?.())
+				.then((preview) => {
+					page.loading = false;
+					page.preview = preview;
+					rebuild(id);
+					draw();
+				})
+				.catch((error) => {
+					page.loading = false;
+					page.preview = { error: error?.message ?? String(error) };
+					rebuild(id);
+					draw();
+				});
+		}
+		if (id === "context.parts") {
+			Promise.resolve(core.capture("/context"))
+				.then((text) => {
+					const next = String(text ?? "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+					if (next !== page.text) {
+						page.text = next;
+						rebuild(id);
+						draw();
+					}
+				})
+				.catch(() => {});
+		}
 		const before = page.list.version;
 		rebuild(id);
 		if (page.list.version !== before) draw();
 	};
 
-	/** Present one typed workspace outcome, then redraw the projection that started the action. */
-	const presentWorkspaceResult = (result, id = viewId()) => {
-		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
-		if (!result.ok) refresh(id, true);
-		draw();
-		return result.ok;
-	};
-	/** Runtime controls use the same typed result/confirmation boundary as terminal commands and other feature actions. */
-	const presentRuntimeResult = (result, id = viewId()) => {
-		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
-		if (!result.ok) refresh(id, true);
-		draw();
-		return result.ok;
-	};
-	/** Choose or validate a settled route row through the typed Runtime model boundary; there is no provider call in this key handler. */
-	const requestModelRoute = (target) => {
-		if (target === undefined || typeof target.modelId !== "string" || target.modelId === "") return flash("choose a model route before connecting");
-		const route = viewId();
-		const action = target.active === true ? RUNTIME_ACTION.ensureModel : RUNTIME_ACTION.selectModel;
-		const input = action === RUNTIME_ACTION.ensureModel
-			? {}
-			: { modelId: target.modelId, ...(Number.isInteger(target.contextWindow) && target.contextWindow > 0 ? { contextWindow: target.contextWindow } : {}) };
-		void application.execute(action, input)
-			.then((result) => presentRuntimeResult(result, route))
-			.catch((error) => flash(`could not prepare that model route: ${error?.message ?? error}`));
-	};
-	const requestWakeRemoval = (wake) => {
-		if (wake === undefined || typeof wake.id !== "string" || wake.id === "") return flash("choose a wake before removing it");
-		const route = viewId();
-		void application.execute(RUNTIME_ACTION.removeWake, { id: wake.id })
-			.then((asked) => {
-				if (asked.confirmation === undefined) return presentRuntimeResult(asked, route);
-				openConfirmation(asked.confirmation, () => application.execute(RUNTIME_ACTION.removeWake, { id: wake.id }, {
-					confirmation: { ...asked.confirmation, acknowledged: true },
-				}).then((result) => presentRuntimeResult(result, route)), { title: wake.id === "all" ? "Remove every wake?" : "Remove wake?" });
-			})
-			.catch((error) => flash(`could not prepare that wake removal: ${error?.message ?? error}`));
-	};
-	/** Run a row action through the typed application boundary, then redraw its projection after it settles. */
-	const runWorkspaceAction = (action, input, options_ = {}) => {
-		const id = viewId();
-		void workspace.execute(action, input, options_)
-			.then((result) => presentWorkspaceResult(result, id))
-			.catch((error) => flash(`could not complete that workspace action: ${error?.message ?? error}`));
-	};
-	/** A destructive workspace action first receives the application's scoped confirmation request, then the shared modal acknowledges that exact action and target. */
-	const requestWorkspaceDelete = (id) => {
-		const route = viewId();
-		void workspace.execute(WORKSPACE_ACTION.delete, { id })
-			.then((asked) => {
-				if (asked.confirmation === undefined) return presentWorkspaceResult(asked, route);
-				openConfirmation(asked.confirmation, () => workspace.execute(WORKSPACE_ACTION.delete, { id }, {
-					confirmation: { ...asked.confirmation, acknowledged: true },
-				}).then((result) => presentWorkspaceResult(result, route)), {
-					title: route === "carto.requests" ? "Forget request?" : "Delete permanently?",
-				});
-			})
-			.catch((error) => flash(`could not prepare that deletion: ${error?.message ?? error}`));
-	};
-	/** Undo crosses the same typed boundary as /undo; Screen schedules ingress and owns only the acknowledgement overlay. */
-	const presentReviewResult = (result, id = viewId()) => {
-		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
-		if (!result.ok) refresh(id, true);
-		draw();
-		return result.ok;
-	};
-	const requestReviewUndo = () => {
-		if (core.busy()) return flash("The agent is working. Stop it first, then undo its checkpoint change.");
-		const route = viewId();
-		void (async () => {
-			// Match /undo: active shell changes become their own latest checkpoint before this recovery is named.
-			if (application.capabilities.availability(REVIEW_ACTION.recordWindows)?.enabled === true) {
-				const recorded = await review.execute(REVIEW_ACTION.recordWindows);
-				if (!recorded.ok) return presentReviewResult(recorded, route);
-			}
-			const asked = await review.execute(REVIEW_ACTION.undo);
-			if (asked.confirmation === undefined) return presentReviewResult(asked, route);
-			openConfirmation(asked.confirmation, () => review.execute(REVIEW_ACTION.undo, {}, {
-				confirmation: { ...asked.confirmation, acknowledged: true },
-			}).then((result) => presentReviewResult(result, route)), { title: "Undo checkpoint change?" });
-		})().catch((error) => flash(`could not prepare that recovery: ${error?.message ?? error}`));
-	};
-	/** A reported move needs its evidence review in the composer; every other row can settle immediately. */
-	const settleWorkspaceRow = async (rowKey, id) => {
-		if (!rowKey.startsWith("move:")) return runWorkspaceAction(WORKSPACE_ACTION.settle, { id });
-		const found = await queries.entry({ book: "plan", id });
-		if (!found.ok) return flash(found.error.message);
-		if (found.data.item.status !== POLICY.enums.moveStatus.reported) return runWorkspaceAction(WORKSPACE_ACTION.settle, { id });
-		if (viewId() !== "carto.plan") return;
-		setMode("type");
-		prompt.insertTextAtCursor(`/done ${id} -- `);
-		flash(`Write why ${id}'s reported proof witnesses its done-when, then press Enter.`);
-	};
-
 	// ─── Copying ─────────────────────────────────────────────────────────────
-	const copy = async (text, name, what, extension = "md") => {
+	const copy = (text, name, what, extension = "md") => {
 		if (String(text).trim() === "") {
 			flash(`nothing to copy: ${what} is empty`);
 			return void chat.print(`  Nothing to copy: ${what} is empty.\n`);
 		}
 		try {
-			const done = await copyOut(text, { brainDir, name, extension, write: (sequence) => terminal.write(sequence) });
+			const done = copyOut(text, { brainDir, name, extension, write: (sequence) => terminal.write(sequence) });
 			chat.print(`  Copied ${what} (${done.chars.toLocaleString("en-US")} characters) to the clipboard by way of ${done.ways.join(", ") || "nothing that was found"}.\n  Also written to ${done.file}\n`);
 			if (process.env.TMUX) chat.print("  In tmux the clipboard needs `set -g set-clipboard on`; without it, paste from tmux's buffer (prefix ]) or take the file.\n");
 			// (Said shortly: it is laid over the row of tabs. The file is named in Chat.)
@@ -947,9 +612,9 @@ export async function runScreen(session, options, runTerminal) {
 		chat.seal();
 		draw();
 	};
-	const tabName = () => `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`;
+	const tabName = () => ((state.tab === "chat" || state.tab === "work") ? `the ${TABS.find((tab) => tab.id === state.tab).name} tab` : `the ${TABS.find((tab) => tab.id === state.tab).name} tab${VIEWS[state.tab] ? ` (${VIEWS[state.tab].find((view) => view.id === state.view[state.tab]).name})` : ""}`);
 	const copyTab = () => {
-		if (state.tab === "chat") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), `chat-${state.view.chat}`, tabName(), "txt");
+		if (state.tab === "chat" || state.tab === "work") return copy(chatBody.lines().map((line) => line.spans.map(([text]) => text).join("")).join("\n"), state.tab, tabName(), "txt");
 		return copy(pageOf().list.text(), viewId().replace(".", "-"), tabName(), "txt");
 	};
 	const copyCommand = (argument) => {
@@ -961,24 +626,28 @@ export async function runScreen(session, options, runTerminal) {
 	};
 
 	// ─── Tabs, views and what scrolls ───────────────────────────────────────
-	const chatTab = () => state.tab === "chat";
+	const chatTab = () => state.tab === "chat" || state.tab === "work";
 	const scrollOf = () => (chatTab() ? chatScroll : pageOf().scroll);
-	// One route transition owns selection reset, stale-query cancellation, replacement reads, and redraw. Its callback
-	// still runs for an explicit visit to the current route, preserving the old click/key refresh behavior.
-	settleRoute = ({ previous, current, changed }) => {
-		if (changed) {
-			cancelProjection(previous.id);
-			if (previous.id === "chat.consult") cancelConsultProjection();
-		}
+	const setTab = (id) => {
+		if (!TABS.some((tab) => tab.id === id)) return;
+		state.tab = id;
 		tui.resetTextSelection();
-		refresh(current.id, true);
+		refresh(viewId(), true);
 		draw();
 	};
-	const setTab = (id) => routes.setTab(id);
-	const stepTab = (by) => routes.stepTab(by);
-	const setView = (id) => routes.setView(id);
-	const stepView = (by) => routes.stepView(by);
-	const setRoute = (route) => routes.setRoute(route);
+	const stepTab = (by) => setTab(TABS[(TABS.findIndex((tab) => tab.id === state.tab) + by + TABS.length) % TABS.length].id);
+	const setView = (id) => {
+		if (VIEWS[state.tab] === undefined) return;
+		state.view[state.tab] = id;
+		tui.resetTextSelection();
+		refresh(viewId(), true);
+		draw();
+	};
+	const stepView = (by) => {
+		const views = VIEWS[state.tab];
+		if (views === undefined) return;
+		setView(views[(views.findIndex((view) => view.id === state.view[state.tab]) + by + views.length) % views.length].id);
+	};
 	/** Scroll a view so that a row of it shows. */
 	const reveal = (scroll, row, { top = false, header = 0 } = {}) => {
 		const rows = scroll.viewportHeight;
@@ -993,7 +662,7 @@ export async function runScreen(session, options, runTerminal) {
 	const setMode = (mode) => {
 		state.mode = mode;
 		state.pending = "";
-		shellFocus.focus(mode === "type" ? "composer" : "commands");
+		tui.setFocus(mode === "type" ? prompt : commands);
 		draw();
 	};
 	/** What was typed and sent. */
@@ -1001,9 +670,8 @@ export async function runScreen(session, options, runTerminal) {
 		const text = given.trim();
 		if (text === "") return;
 		prompt.addToHistory(text);
-		// New user speech belongs in Chat's Conversation view, even when private Work was open.
+		// New user speech belongs in Talk, even when private Work was open.
 		if (state.tab !== "chat") setTab("chat");
-		if (state.view.chat !== "conversation") setView("conversation");
 		chatScroll.scrollToEnd();
 		const [name, argument] = text.slice(1).trim().split(/\s+/);
 		if (text.startsWith("/") && !text.includes("\n")) {
@@ -1022,22 +690,22 @@ export async function runScreen(session, options, runTerminal) {
 		draw();
 	};
 	/** Give the terminal to another program for a while (an editor), then take it back. */
-	const lend = async (work) => {
+	const lend = (work) => {
 		process.stdin.off("data", watchInput);
 		tui.stop({ preserveScreen: true });
 		try {
-			return await work();
+			return work();
 		} finally {
 			process.stdin.on("data", watchInput);
 			tui.start();
-			shellFocus.restore();
+			tui.setFocus(state.mode === "type" ? prompt : commands);
 			tui.requestRender(true);
 		}
 	};
 	/** Hand the terminal to the editor over `file`; false when the editor could not be run. */
-	const runEditor = async (file, line) => {
+	const runEditor = (file, line) => {
 		const editor = process.env.VISUAL || process.env.EDITOR || "vi";
-		const done = await lend(() => launchEditor(editorCommand(editor, file, line)));
+		const done = lend(() => spawnSync(editorCommand(editor, file, line), { stdio: "inherit", shell: true }));
 		if (done.error !== undefined || (done.status !== 0 && done.status !== null)) {
 			const why = done.error?.message ?? `it ended with exit ${done.status}`;
 			chat.print(`! The editor could not be run (${editor}): ${why}. Set $EDITOR to the editor you use.\n`);
@@ -1047,105 +715,95 @@ export async function runScreen(session, options, runTerminal) {
 		return true;
 	};
 	/** A file to edit a thing in, under the brain's scratch folder. */
-	const scratch = (name, text) => writeScratch(brainDir, name, text);
-	/** e in Conversation changes only a row that names the source it changes. Work and Consult are private/read-only. */
-	const editChat = async () => {
+	const scratch = (name, text) => {
+		const dir = join(brainDir, "scratch");
+		mkdirSync(dir, { recursive: true });
+		const file = join(dir, name);
+		writeFileSync(file, `${text}\n`);
+		return file;
+	};
+	/** e in Talk changes only a row that names the source it changes. Work is private and read-only. */
+	const editChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be edited");
+		if (state.tab === "work") return flash("private work cannot be edited");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech cannot be edited");
 		if (!chat.editable(line.item)) return flash(line.kind === "console" ? "what Cartographer printed cannot be edited" : "only delivered or submitted speech can be edited");
-		if (item?.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
-		const file = await scratch("message.md", item.text);
-		if (!(await runEditor(file))) return;
-		const now = (await readText(file)).replace(/\n+$/, "");
+		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
+		const file = scratch("message.md", item.text);
+		if (!runEditor(file)) return;
+		const now = readFileSync(file, "utf8").replace(/\n+$/, "");
 		if (now === item.text || now === "") return flash("the message stands as it was");
-		void talk.execute(TALK_ACTION.revise, { source: item.source, text: now })
-			.then((result) => {
-				if (!result.ok) return flash(result.error.message);
-				inPlace(() => chat.revise(item.key, now));
-				flash(result.data.line);
-				draw();
-			})
-			.catch((error) => flash(`could not edit that kept source: ${error?.message ?? error}`));
+		if (!reviseTalkSource(brainDir, item.source, now)) return flash("this source is no longer in the kept talk, so it is left unchanged");
+		inPlace(() => chat.revise(item.key, now));
+		flash(item.type === "user" ? "your future kept speech is edited · a later collapse may copy these words; active context and sent requests stay unchanged" : "the delivered agent speech is edited for future kept talk · a later collapse may copy it; sent requests stay as sent");
 	};
 	/** Remove one selected source from a future collapse; it does not omit its Durable entry or rewrite a sent request. */
 	const removeChat = () => {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		if (chatProjection() !== "talk") return flash("private Work and Consult activity cannot be removed from future kept talk");
+		if (state.tab === "work") return flash("private work cannot be removed from future kept talk");
 		const item = chat.items.find((entry) => entry.key === line.item);
 		if (item?.type === "agent" && item.delivery !== "delivered") return flash("undelivered agent speech is not kept talk");
 		if (item?.type !== "user" && item?.type !== "agent") return flash("only submitted or delivered speech can be removed from future kept talk");
-		if (item?.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
-		void talk.execute(TALK_ACTION.forget, { source: item.source })
-			.then((asked) => {
-				if (asked.confirmation === undefined) return flash(asked.ok ? asked.data.line : asked.error.message);
-				openConfirmation(asked.confirmation, async () => {
-					const result = await talk.execute(TALK_ACTION.forget, { source: item.source }, { confirmation: { ...asked.confirmation, acknowledged: true } });
-					if (!result.ok) {
-						flash(result.error.message);
-						return false;
-					}
-					inPlace(() => chat.forget(item.key));
-					flash(result.data.line);
-					draw();
-					return true;
-				}, { title: "Remove kept talk?" });
-			})
-			.catch((error) => flash(`could not prepare that kept-source removal: ${error?.message ?? error}`));
+		if (item.source === undefined) return flash("this speech has no stable source yet, so it is left unchanged");
+		const arm = `talk:${item.key}`;
+		if (state.deleteArm?.id !== arm || Date.now() - state.deleteArm.at >= POLICY.timing.screen.deleteConfirmMs) {
+			state.deleteArm = { id: arm, at: Date.now() };
+			return flash("Press d again: remove this source from future kept talk; sent requests and the active conversation stay unchanged");
+		}
+		state.deleteArm = undefined;
+		if (!removeTalkSource(brainDir, item.source)) return flash("this source is no longer in the kept talk, so it is left unchanged");
+		inPlace(() => chat.forget(item.key));
+		flash("removed from future kept talk · the Durable transcript, active conversation, and sent requests stay unchanged");
 	};
 	/** e in Model opens only code and current Carto sources; sent request rows are historical and read-only. */
-	/** n in a book view: the external editor stays a transitional handoff; its template and saved row use the typed action boundary. */
-	const newEntry = async (book) => {
-		const id = viewId();
-		try {
-			const template = await workspace.template(book);
-			if (!template.ok) return presentWorkspaceResult(template, id);
-			const file = await scratch(`new-${book}.json`, template.data.text);
-			if (!(await runEditor(file))) return false;
-			return presentWorkspaceResult(await workspace.execute(WORKSPACE_ACTION.add, { book, text: await readText(file) }), id);
-		} catch (error) {
-			flash(`could not prepare that new row: ${error?.message ?? error}`);
-			return false;
-		}
+	/** n in a book view: an editor opens on a template; on save the entry goes in through the same operations the agent uses. */
+	const newEntry = (book) => {
+		const template = addTemplate(book);
+		if (template === undefined) return flash("this view has no add");
+		const file = scratch(`new-${book}.json`, template);
+		if (!runEditor(file)) return;
+		const said = applyAdd(brainDir, book, readFileSync(file, "utf8"), root);
+		flash(said);
+		refresh(viewId(), true);
 	};
 	const BOOK_VIEWS = { "carto.ledger": "ledger", "carto.plan": "plan", "carto.atlas": "atlas" };
 	/** e in Model, or on a Current shared brain record that has its own source. */
-	const editCurrent = async () => {
+	const editCurrent = () => {
 		const item = pageOf().list.selected();
 		if (item === undefined) return flash("nothing is selected");
 		switch (item.editKind) {
 			case "prompt": {
-				const file = await promptSource();
+				const file = promptSource();
 				if (file === undefined) return flash("the source of the prompt is not here");
-				if (!(await runEditor(file))) return;
+				if (!runEditor(file)) return;
 				return flash("the prompt's wording is code: the next run of carto reads it as it is now");
 			}
 			case "tool": {
 				const name = String(item.key).startsWith("tool:") ? String(item.key).slice(5) : String(item.key);
-				const found = await toolSource(name);
+				const found = toolSource(name);
 				if (found === undefined) return flash(`no source file defines the ${name} tool`);
-				if (!(await runEditor(found.file, found.line))) return;
+				if (!runEditor(found.file, found.line)) return;
 				return flash(`${name}'s description is code: the next run of carto reads it as it is now`);
 			}
 			case "tools":
 				return flash("the tools are one block; Enter opens it to a line per tool, and e on one opens where it is defined");
 			case "assessment": {
-				const file = queries.paths.assessment;
-				if (!(await runEditor(file))) return;
+				const file = assessmentPath(brainDir);
+				if (!runEditor(file)) return;
 				refresh(viewId(), true);
 				return flash("edited; the copy at the top of the context is rewritten at the next collapse, or /pin now");
 			}
 			case "store": {
-				if (!(await runEditor(queries.paths.context))) return;
+				if (!runEditor(contextPath(brainDir))) return;
 				refresh(viewId(), true);
 				return flash("the store of what the collapse keeps, edited by hand · take care: a file that does not parse falls back to a fresh one");
 			}
 			case "chat-you":
 			case "chat-agent":
-				return flash("this is a frozen sent-request row. Open Chat's Conversation view to change a current kept source; sent requests stay as sent.");
+				return flash("this is a frozen sent-request row. Open Talk to change a current kept source; sent requests stay as sent.");
 			case "reply":
 				return flash("the reply is being written; e on it works once it is done");
 			case "result":
@@ -1161,95 +819,102 @@ export async function runScreen(session, options, runTerminal) {
 				if (typeof item.key === "string" && item.key.startsWith("entry:")) return void openFieldBox(viewId(), item.key);
 				// Current shared brain: a shelved file is its file; a report is its file in .brain/reports.
 				if (typeof item.path === "string" && item.path !== "") {
-					if (!(await pathExists(item.path))) return flash("the shelved file is not there");
-					if (!(await runEditor(item.path))) return;
+					if (!existsSync(item.path)) return flash("the shelved file is not there");
+					if (!runEditor(item.path)) return;
 					refresh(viewId(), true);
 					return flash("edited; the shelf reads it anew at the next collapse");
 				}
 				if (typeof item.key === "string" && item.key.startsWith("report:")) {
 					const file = join(brainDir, "reports", `${item.key.slice(7)}.md`);
-					if (!(await pathExists(file))) return flash("the report's file is not there");
-					if (!(await runEditor(file))) return;
+					if (!existsSync(file)) return flash("the report's file is not there");
+					if (!runEditor(file)) return;
 					return flash("the report's file is edited; the record line keeps the summary it was written with");
 				}
 				return flash("that is what was sent, and what was sent cannot be changed");
 			}
 		}
 	};
-	// ─── The shared form fields ───────────────────────────────────────────────
+	// ─── The fields the small box edits ───────────────────────────────────────
 	// The book views open one of these on e; E keeps the editor on the entry's own JSON. The limits are the books'
-	// own, so the form never holds more than the book would; the counter shows how much of the field is used.
+	// own, so the box never holds more than the book would; the counter shows how much of the field is used.
 	const ROW_KEY = /^(?:entry|item|envelope|move|node):/;
 	const boxWidth = (fields, cols) => {
 		const longest = Math.max(...fields.map((field) => Math.min(field.limit, 80)));
 		const single = !fields.some((field) => field.multiline);
 		return Math.max(46, Math.min(cols - 4, single ? longest + 14 : 78));
 	};
-	/** The fields of the row the list has selected, read through the workspace query boundary. */
-	const editFieldsFor = async (viewId_, rowKey) => {
+	/** The fields of the row the list has selected, with their current values; undefined when the row is not an entry. */
+	const editFieldsFor = (viewId_, rowKey) => {
 		const id = rowKey.slice(rowKey.indexOf(":") + 1);
-		const book = viewId_ === "carto.atlas" ? "atlas" : viewId_ === "carto.plan" ? "plan" : (viewId_ === "carto.ledger" || ((viewId_ === "context.main" || viewId_ === "context.window") && rowKey.startsWith("entry:"))) ? "ledger" : undefined;
-		if (book === undefined) return undefined;
-		const found = await queries.entry({ book, id });
-		if (!found.ok) return { error: found.error.message };
-		const { item } = found.data;
-		if (book === "ledger") {
+		if (viewId_ === "carto.ledger" || (viewId_ === "context.main" || viewId_ === "context.window") && rowKey.startsWith("entry:")) {
+			const { ledger } = loadLedger(brainDir);
+			const item = ledger?.items.find((entry) => entry.id === id);
+			if (item === undefined) return undefined;
 			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.ledger.textChars, value: item.text }];
 			if (item.kind === POLICY.enums.ledgerKind.goal) fields.push({ id: "doneWhen", label: "Done when", limit: POLICY.limits.ledger.textChars, multiline: true, value: item.doneWhen ?? "" });
 			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.ledger.textChars, value: item.outcome ?? "" });
 			return { id, fields };
 		}
-		if (book === "plan") {
-			if (!rowKey.startsWith("move:")) {
+		if (viewId_ === "carto.plan") {
+			const { plan } = loadPlan(brainDir);
+			const envelope = plan?.items.find((entry) => entry.id === id);
+			if (envelope !== undefined) {
 				const fields = [
-					{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: item.text },
-					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: item.doneWhen ?? "" },
+					{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: envelope.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: envelope.doneWhen ?? "" },
 				];
-				if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
+				if (envelope.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: envelope.outcome ?? "" });
 				return { id, fields };
 			}
-			const changing = found.data.parent?.mode === POLICY.enums.planMode.change;
-			const budget = item.budget ?? { replies: item.turns, fileOps: 0, commandStarts: 0 };
+			const move = plan?.moves.find((entry) => entry.id === id);
+			if (move === undefined) return undefined;
+			const parent = plan?.items.find((entry) => entry.id === move.parent);
+			const changing = parent?.mode === POLICY.enums.planMode.change;
+			const budget = move.budget ?? { replies: move.turns, fileOps: 0, commandStarts: 0 };
 			return {
 				id,
 				fields: [
-					{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: item.action ?? item.text },
-					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: item.doneWhen ?? "" },
-					{ id: "proof", label: changing ? "Required proof" : "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: item.proof ?? "" },
-					{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: (item.targets ?? []).join("\n") },
+					{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: move.action ?? move.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: move.doneWhen ?? "" },
+					{ id: "proof", label: changing ? "Required proof" : "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: move.proof ?? "" },
+					{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: (move.targets ?? []).join("\n") },
 					...(changing ? [
-						{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: String(item.capabilities?.files === true) },
-						{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: String(item.capabilities?.commands === true) },
-						{ id: "networkAllowed", label: "Network allowed", limit: 5, value: String(item.capabilities?.network === true) },
-						{ id: "replies", label: "Reply budget", limit: 1, value: String(budget.replies ?? item.turns ?? POLICY.limits.plan.moveTurns.change) },
+						{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: String(move.capabilities?.files === true) },
+						{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: String(move.capabilities?.commands === true) },
+						{ id: "networkAllowed", label: "Network allowed", limit: 5, value: String(move.capabilities?.network === true) },
+						{ id: "replies", label: "Reply budget", limit: 1, value: String(budget.replies ?? move.turns ?? POLICY.limits.plan.moveTurns.change) },
 						{ id: "fileOps", label: "File-operation budget", limit: 1, value: String(budget.fileOps ?? POLICY.limits.plan.moveBudget.fileOps) },
 						{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(budget.commandStarts ?? POLICY.limits.plan.moveBudget.commandStarts) },
 					] : []),
 				],
 			};
 		}
-		return {
-			id,
-			fields: [
-				{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: item.gist },
-				{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: item.detail ?? "" },
-				{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: item.name },
-			],
-		};
+		if (viewId_ === "carto.atlas") {
+			const { atlas } = loadAtlas(brainDir);
+			const node = atlas?.nodes.find((entry) => entry.name === id);
+			if (node === undefined) return undefined;
+			return {
+				id,
+				fields: [
+					{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: node.gist },
+					{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: node.detail ?? "" },
+					{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: node.name },
+				],
+			};
+		}
+		return undefined;
 	};
 	// Snapshot of what the box opens with, so a save knows which fields were edited.
-	const openFieldBox = async (viewId_, rowKey) => {
-		const found = await editFieldsFor(viewId_, rowKey);
-		if (viewId() !== viewId_) return;
+	const openFieldBox = (viewId_, rowKey) => {
+		const found = editFieldsFor(viewId_, rowKey);
 		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
-		if (found.error !== undefined) return flash(found.error);
 		const { id, fields } = found;
-		openModal(({ close }) => new Form({
+		const handle = tui.showOverlay(new Box({
 			title: id,
 			fields,
 			keyOf,
 			flash,
-			close,
+			close: () => handle.hide(),
 			save: (drafts) => {
 				/** @type {Record<string, string>} */
 				const changes = {};
@@ -1277,10 +942,13 @@ export async function runScreen(session, options, runTerminal) {
 					}
 					if (Object.keys(budget).length > 0) changes.budget = budget;
 				}
-				return workspace.execute(WORKSPACE_ACTION.edit, { id, changes })
-					.then((result) => presentWorkspaceResult(result, viewId_));
+				const said = editRow(brainDir, id, changes, root);
+				flash(said.replace(/\n+/g, " "));
+				if (said.startsWith("! ")) return false;
+				brain.at = 0;
+				refresh(viewId(), true);
+				return true;
 			},
-			redraw: draw,
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
 	/** The fields of a new entry of `book`, from the same template n used to open in the editor. */
@@ -1323,25 +991,28 @@ export async function runScreen(session, options, runTerminal) {
 	const openAddBox = (book) => {
 		const template = ADD_FIELDS[book];
 		if (template === undefined) return flash("this view has no add");
-		const id = viewId();
 		const fields = template();
-		openModal(({ close }) => new Form({
+		const handle = tui.showOverlay(new Box({
 			title: `new ${book}`,
 			fields,
 			keyOf,
 			flash,
-			close,
-			save: (drafts) => workspace.execute(WORKSPACE_ACTION.add, { book, text: JSON.stringify(addOpOf(book, drafts)) })
-				.then((result) => presentWorkspaceResult(result, id)),
-			redraw: draw,
+			close: () => handle.hide(),
+			save: (drafts) => {
+				const said = applyAdd(brainDir, book, JSON.stringify(addOpOf(book, drafts)), root);
+				flash(said.replace(/\n+/g, " "));
+				if (said.startsWith("! ")) return false;
+				brain.at = 0;
+				refresh(viewId(), true);
+				return true;
+			},
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
-	/** `n` on an envelope declares a child move through the typed workspace action. */
-	const openMoveBox = async (parentId) => {
-		const found = await queries.entry({ book: "plan", id: parentId });
-		if (viewId() !== "carto.plan") return;
-		if (!found.ok || found.data.item.parent !== undefined) return flash(found.ok ? "that envelope is no longer in the plan" : found.error.message);
-		const parent = found.data.item;
+	/** `n` on an envelope declares a child move through the same plan operation as the agent. */
+	const openMoveBox = (parentId) => {
+		const { plan } = loadPlan(brainDir);
+		const parent = plan?.items.find((item) => item.id === parentId);
+		if (parent === undefined) return flash("that envelope is no longer in the plan");
 		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) return flash(`${parent.id} is not an open envelope`);
 		const changing = parent.mode === POLICY.enums.planMode.change;
 		const fields = [
@@ -1358,45 +1029,58 @@ export async function runScreen(session, options, runTerminal) {
 				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
 			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
 		];
-		openModal(({ close }) => new Form({
+		const handle = tui.showOverlay(new Box({
 			title: `new move under ${parent.id}`,
 			fields,
 			keyOf,
 			flash,
-			close,
+			close: () => handle.hide(),
 			save: (drafts) => {
 				const said = (key) => drafts.get(key) ?? "";
 				const number = (key) => {
 					const raw = said(key).trim();
 					return /^\d+$/.test(raw) ? Number(raw) : raw;
 				};
-				return workspace.execute(WORKSPACE_ACTION.addMove, {
+				const op = {
+					action: "addMove",
 					parent: parent.id,
 					text: said("text"),
-					doneWhen: said("doneWhen"),
+					done_when: said("doneWhen"),
 					...(changing ? {
 						targets: said("targets").split(/[\n,]/).map((path) => path.trim()).filter((path) => path !== ""),
 						proof: said("proof"),
 						capabilities: { files: boolOf(said("filesAllowed")), commands: boolOf(said("commandsAllowed")), network: boolOf(said("networkAllowed")) },
 						budget: { replies: number("replies"), fileOps: number("fileOps"), commandStarts: number("commandStarts") },
 					} : said("proof").trim() !== "" ? { proof: said("proof") } : {}),
-				}).then((result) => presentWorkspaceResult(result, "carto.plan"));
+				};
+				try {
+					const current = loadPlan(brainDir).plan;
+					if (current === undefined) return false;
+					const result = applyPlanOp(current, op, new Date().toISOString());
+					savePlan(brainDir, current);
+					flash(result.line);
+					brain.at = 0;
+					refresh(viewId(), true);
+					return true;
+				} catch (error) {
+					flash(error instanceof PlanError ? error.message : String(error.message ?? error));
+					return false;
+				}
 			},
-			redraw: draw,
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
 	/** The $EDITOR on the file of the row, or on the whole book by the row's line: the door Ctrl-O keeps open everywhere. */
-	const editTarget = async () => {
+	const editTarget = () => {
 		const item = pageOf().list.selected();
 		const target = item?.target ?? (fileOf(viewId()) !== undefined ? { file: fileOf(viewId()) } : undefined);
 		if (target === undefined) return flash("this line has no file to open");
 		if (target.folder) return flash("that is a folder: open it with Enter, and press e on a file");
-		if (!(await pathExists(target.file))) return flash(`${relative(root, target.file)} does not exist`);
-		if (!(await runEditor(target.file, target.line))) return;
-		invalidateBrain();
+		if (!existsSync(target.file)) return flash(`${relative(root, target.file)} does not exist`);
+		if (!runEditor(target.file, target.line)) return;
+		brain.at = 0;
 		refresh(viewId(), true);
 	};
-	const edit = async () => {
+	const edit = () => {
 		if (chatTab()) return editChat();
 		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		if (BOOK_VIEWS[viewId()] !== undefined) {
@@ -1404,12 +1088,12 @@ export async function runScreen(session, options, runTerminal) {
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			if (rowKey !== undefined && ROW_KEY.test(rowKey)) return void openFieldBox(viewId(), rowKey);
 			// Not an entry (the book could not be read, or it is empty): the editor door is what is left.
-			return editTarget();
+			return void editTarget();
 		}
-		return editTarget();
+		editTarget();
 	};
 	/** E, or Ctrl-O in any tab and mode: the $EDITOR door — the entry's own JSON, or the add template on a line that is no entry. */
-	const editInEditor = async () => {
+	const editInEditor = () => {
 		if (chatTab()) return editChat();
 		if (state.tab === "context" || viewId() === "carto.hands") return editCurrent();
 		const book = BOOK_VIEWS[viewId()];
@@ -1418,7 +1102,7 @@ export async function runScreen(session, options, runTerminal) {
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			if (rowKey === undefined || !ROW_KEY.test(rowKey)) return newEntry(book);
 		}
-		return editTarget();
+		editTarget();
 	};
 
 	// ─── Selecting in Chat ───────────────────────────────────────────────────
@@ -1446,8 +1130,8 @@ export async function runScreen(session, options, runTerminal) {
 		change();
 		reveal(chatScroll, selectedRow() + chatBody.leadNow());
 	};
-	/** The shared chat model shown in Chat's Conversation, Work, or isolated Consult subtab. */
-	const chatProjection = () => (state.view.chat === "work" ? "work" : state.view.chat === "consult" ? "consult" : "talk");
+	/** The shared chat model shown in the projection selected by the top-level Talk or Work tab. */
+	const chatProjection = () => (state.tab === "work" ? "work" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
 		if (all.length === 0) return;
@@ -1467,16 +1151,16 @@ export async function runScreen(session, options, runTerminal) {
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return;
 		if (line.kind === "live") return void inPlace(() => chat.toggleLive(line.liveDepth, to));
-		else if (line.kind === "group" || line.kind === "block" || line.kind === "consult") inPlace(() => chat.toggle(line.item, to));
-		else if (line.kind === "consult-event") inPlace(() => chat.toggleRow(line.item, line.row, to));
+		else if (line.kind === "group" || line.kind === "block") inPlace(() => chat.toggle(line.item, to));
 		else if (line.kind === "call" || line.kind === "note" || line.kind === "reasoning" || line.kind === "detail") {
 			const item = chat.items.find((entry) => entry.key === line.item);
 			const row = item?.rows?.[line.row];
 			const home = row?.kind === "call" ? homeOf(row.name, row.args) : undefined;
 			// Work that lives in a tab is shown there; anything else opens where it stands.
 			if (jump && home !== undefined && line.kind === "call" && !row.open && row.state !== "failed") {
-				const view = home.tab === "diff" ? "last" : home.view;
-				return void setRoute({ tab: home.tab, ...(view === undefined ? {} : { view }) });
+				if (home.view !== undefined) state.view[home.tab] = home.view;
+				if (home.tab === "diff") state.view.diff = "last";
+				return void setTab(home.tab);
 			}
 			inPlace(() => chat.toggleRow(line.item, line.row, to));
 		}
@@ -1490,13 +1174,14 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		const line = chatBody.lines()[selectedRow()];
 		if (line === undefined) return flash("nothing is selected: j and k select");
-		copy(chat.textOf(line.item, line.row), "message", line.kind === "consult" ? "that consultation" : line.kind === "consult-event" ? "that consultation activity" : line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : line.kind === "live" ? "that live reasoning" : "that message");
+		copy(chat.textOf(line.item, line.row), "message", line.kind === "call" || line.kind === "detail" ? "that call and its result" : line.kind === "group" ? "that run of calls" : line.kind === "live" ? "that live reasoning" : "that message");
 	};
 
 	// ─── The commands mode ───────────────────────────────────────────────────
 	const showKeys = () => {
 		if (tui.hasOverlay()) return;
-		openModal(({ close }) => new Sheet({ title: "Keys", text: KEYS_HELP, rows: () => terminal.rows, keyOf, close }), { width: Math.max(20, Math.min(108, terminal.columns - 4)), anchor: "center" });
+		const sheet = new Sheet({ title: "Keys", text: KEYS_HELP, rows: () => terminal.rows, keyOf, close: () => handle.hide() });
+		const handle = tui.showOverlay(sheet, { width: Math.max(20, Math.min(108, terminal.columns - 4)), anchor: "center" });
 	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
@@ -1518,20 +1203,48 @@ export async function runScreen(session, options, runTerminal) {
 		// They stand on a report or shelved file in Current shared brain, a graph node, a ledger entry, a plan envelope
 		// or move, or a request. Model rows are frozen or prospective and have no mutable-record action.
 		if (!inChat) {
-			if (key === "u" && viewId().startsWith("diff.")) return void requestReviewUndo();
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
 			const deletable = rowKey !== undefined && /^(?:report|entry|item|envelope|move|node|request):/.test(rowKey);
-			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) return void runWorkspaceAction(WORKSPACE_ACTION.toggleFold, { id: bookId });
-			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void runWorkspaceAction(item.archived === true ? WORKSPACE_ACTION.unarchive : WORKSPACE_ACTION.archive, { id: bookId });
-			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
-			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
-			if (viewId() === "context.routes" && (key === "enter" || key === " " || key === "o")) return void requestModelRoute(item?.target);
-			if (key === "d" && viewId() === "shells.wakes" && rowKey?.startsWith("wake:")) return void requestWakeRemoval({ id: rowKey.slice(5) });
-			// Deleting is for good, so it always opens the same scoped confirmation. A request is not deleted but
-			// forgotten: the agent is told nothing of it, and so forgets it had asked.
-			if (key === "d" && deletable) return void requestWorkspaceDelete(bookId);
+			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
+				const said = foldRow(brainDir, bookId);
+				flash(said.replace(/\n+/g, " "));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
+				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
+				flash(settleRow(brainDir, bookId, root));
+				refresh(viewId(), true);
+				return;
+			}
+			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) {
+				try {
+					flash(unshelveRow(brainDir, bookId));
+				} catch (error) {
+					flash(error.message);
+				}
+				refresh(viewId(), true);
+				return;
+			}
+			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
+			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
+			if (key === "d" && deletable) {
+				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
+					state.deleteArm = undefined;
+					flash(dropRow(brainDir, bookId));
+					refresh(viewId(), true);
+					return;
+				}
+				state.deleteArm = { id: rowKey, at: Date.now() };
+				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : `Press d again: ${bookId} goes for good`);
+				return;
+			}
 			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
 			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
 			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
@@ -1563,7 +1276,7 @@ export async function runScreen(session, options, runTerminal) {
 			return;
 		}
 		if (key === "/") return void terminal.press?.(SEARCH_KEY);
-		if (/^[1-5]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
+		if (/^[1-6]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
 		if (key === "?") return void showKeys();
 		if (key === "]" || key === "L") return void stepView(1);
 		if (key === "[" || key === "H") return void stepView(-1);
@@ -1572,7 +1285,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "e") return void edit();
 		if (key === "E") return void editInEditor();
 		if (key === "r") {
-			invalidateBrain();
+			brain.at = 0;
 			refresh(viewId(), true);
 			return void flash("read again");
 		}
@@ -1712,31 +1425,19 @@ export async function runScreen(session, options, runTerminal) {
 		},
 		/** The line the place to type shows in the commands mode. */
 		commandLine() {
-			const question = currentRuntimeActivity().question;
+			const question = session.asks?.pending();
 			const typed = prompt.getText();
 			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
-			let hint = "Esc or i to write";
-			if (question !== undefined) hint = "the agent waits for your answer: Esc, then type it";
-			if (state.pending !== "") hint = `${state.pending}…`;
-			return [[" COMMAND MODE ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
+			const hint = state.pending !== "" ? `${state.pending}…` : question !== undefined ? "the agent waits for your answer: Esc, then type it" : "Esc or i to type";
+			return [[" COMMANDS ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
 		prompt() {
-			const activity = currentRuntimeActivity();
-			if (activity.question !== undefined) return { text: "Answer › ", style: "warn bold" };
-			// Keep the terminal core's safety marks at the place someone acts, but give the words a stable human role
-			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
-			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
-			const task = activity.taskActive && core.busy();
-			const role = task ? "Task" : "You";
-			if (marks !== "") return { text: `${marks} ${role} › `, style: "warn bold" };
-			if (task) return { text: "Task › ", style: "tool bold" };
-			return { text: "You › ", style: "user bold" };
+			const question = session.asks?.pending();
+			if (question !== undefined) return { text: "? ", style: "warn bold" };
+			// What is switched off is in the strip; here stands only where the words go.
+			return { text: session.activeTask?.() !== undefined && core.busy() ? "→ task › " : "› ", style: "user bold" };
 		},
-		placeholder: () => {
-			if (currentRuntimeActivity().question !== undefined) return "Write the answer";
-			if (core.busy()) return "Message the agent while it works · Esc for commands";
-			return "Message Cartographer, or /help · Esc for commands";
-		},
+		placeholder: () => (session.asks?.pending() !== undefined ? "your answer" : core.busy() ? "type to speak to the agent while it works · Esc for commands" : "type a message, or /help · Esc for commands"),
 	};
 	const chatBody = new ChatBody(ui);
 	const scrollbar = { scrollbar: "auto", scrollbarTrackStyle: (text) => `${sgr("faint")}${text}\x1b[39m`, scrollbarThumbStyle: (text) => `${sgr("muted")}${text}\x1b[39m` };
@@ -1756,8 +1457,7 @@ export async function runScreen(session, options, runTerminal) {
 			chat.print(`! ${error?.message ?? error}\n`);
 		}
 	};
-	/** Command completion uses the same cached shell projection as the view; it never probes the live window manager from a key handler. */
-	const windowNames = () => (projectionFor("shells.list").data?.windows ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone).map((win) => win.name);
+	const windowNames = () => (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone).map((win) => win.name);
 	prompt.setAutocompleteProvider(
 		new CombinedAutocompleteProvider(
 			COMMANDS.map(([name, description, words]) => ({
@@ -1774,94 +1474,9 @@ export async function runScreen(session, options, runTerminal) {
 					: {}),
 			})),
 			root,
-			fileSearch ?? null,
+			onPath("fd") ?? onPath("fdfind") ?? null,
 		),
 	);
-	// Modes, overlays, and external-editor handoffs restore one named shell focus rather than each choosing a
-	// component independently. Modal components retain their own internal field/cursor focus while they are open.
-	shellFocus = createFocusManager({
-		initial: "composer",
-		resolve: (region) => region === "composer" ? prompt : region === "commands" ? commands : undefined,
-		apply: (component) => tui.setFocus(component),
-	});
-	// Forms, help, and destructive acknowledgements share one focus-capturing modal owner. pi-tui restores the
-	// normal editor/command focus after a hidden overlay; the explicit fallback also covers a modal that settles
-	// after a terminal resize or action error.
-	const overlays = createOverlayManager({
-		show: (component, overlayOptions) => tui.showOverlay(component, overlayOptions),
-		restoreFocus: () => {
-			if (!state.closed) shellFocus.restore();
-		},
-		redraw: draw,
-	});
-	const openModal = (create, overlayOptions) => {
-		if (tui.hasOverlay() && !overlays.hasOpen()) {
-			flash("finish or cancel the open dialog first");
-			return undefined;
-		}
-		const opened = overlays.open(create, overlayOptions);
-		if (opened === undefined) flash("finish or cancel the open dialog first");
-		return opened;
-	};
-	const openConfirmation = (confirmation, confirm, { title } = {}) => openModal(({ close }) => new ConfirmDialog({
-		title,
-		confirmation,
-		keyOf,
-		close,
-		confirm,
-		flash,
-		redraw: draw,
-	}), { width: Math.max(20, Math.min(76, terminal.columns - 4)), anchor: "center" });
-	const paletteItems = () => [
-		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation, private Work, and isolated Consult.", destination: { tab: "chat", view: "conversation", name: "Chat" } },
-		{ id: "navigate.carto", label: "Go to Carto", category: "navigation", description: "Atlas, Ledger, Plan, Requests, Tree, and the shared brain.", destination: { tab: "carto", view: "atlas", name: "Carto" } },
-		{ id: "navigate.review", label: "Go to Diff and review", category: "navigation", description: "Last-step, session, and git change inspection.", destination: { tab: "diff", view: "last", name: "Diff · Last step" } },
-		{ id: "navigate.shells", label: "Go to Shells", category: "navigation", description: "Open shell windows and their captured output.", destination: { tab: "shells", view: "list", name: "Shells · List" } },
-		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Model-route readiness, sent requests, preview, and current context accounting.", destination: { tab: "context", view: "routes", name: "Model · Routes" } },
-		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
-		...paletteCapabilities.map((capability) => {
-			const destination = paletteDestinationFor(capability.id);
-			return {
-				id: `capability:${capability.id}`,
-				label: capability.label,
-				category: capability.category,
-				availability: capability.availability,
-				description: destination === undefined
-					? `${capability.id} is registered but remains on the terminal command surface until its focused screen control migrates.`
-					: `${destination.name}. ${destination.hint}`,
-				keywords: capability.id,
-				destination,
-			};
-		}),
-	];
-	const openPaletteDestination = (destination) => {
-		if (destination === undefined) return false;
-		const current = routes.current();
-		if (current.tab === destination.tab && (destination.view === undefined || current.view === destination.view)) return true;
-		return setRoute({ tab: destination.tab, ...(destination.view === undefined ? {} : { view: destination.view }) });
-	};
-	const showPalette = () => openModal(({ close }) => new CommandPalette({
-		title: "Command palette",
-		items: paletteItems,
-		keyOf,
-		close,
-		flash,
-		redraw: draw,
-		activate: (item) => {
-			if (item.id === "shell.refresh") {
-				invalidateBrain();
-				refresh(viewId(), true);
-				flash("read again", NOTICE_LEVEL.info);
-				return true;
-			}
-			if (openPaletteDestination(item.destination)) {
-				flash(`opened ${item.destination.name}`, NOTICE_LEVEL.info);
-				return true;
-			}
-			flash(`${item.label} is available through the terminal command surface.`, NOTICE_LEVEL.info);
-			return true;
-		},
-	}), { width: Math.max(20, Math.min(82, terminal.columns - 4)), anchor: "center" });
 	const full = { basis: 0, grow: 1, minSize: 1 };
 	const airy = ({ height }) => height >= AIRY_ROWS;
 	tui.setLayoutRoot(
@@ -1883,7 +1498,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pasted = createPasteWatch();
 	const watchInput = (chunk) => pasted.read(chunk);
 	/** The keys the commands mode takes that the editor has no use for with Alt held. */
-	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazuR+-[]HL?/: "]);
+	const AFTER_ESCAPE = new Set([..."123456jkgGhloeYriazR+-[]HL?/: "]);
 	tui.addInputListener((data) => {
 		if (state.closed || isKeyRelease(data)) return undefined;
 		// A sheet lies over the screen: the keys are its own.
@@ -1917,7 +1532,6 @@ export async function runScreen(session, options, runTerminal) {
 		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
-		else if (key === "ctrl+k") showPalette();
 		else if (key === "ctrl+o") editInEditor();
 		else if (key === "f1") showKeys();
 		else if (key === "shift+tab") stepTab(-1);
@@ -1948,16 +1562,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (state.closed) return;
 		measure();
 		syncThinking();
-		refreshBrain();
 		if (!chatTab()) refresh();
-		else if (state.view.chat === "consult") refresh("chat.consult");
-		// The strip owns one compact deferred Runtime status snapshot. It supersedes the old off-screen shell/wake
-		// probes while keeping shell and wake view reads bound to their own visible projections.
-		refreshRuntimeStatusProjection();
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
-		if (chatTab() && chatBody.rows !== chatScroll.viewportHeight) draw();
-		refreshRuntimeActivity();
+		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
 		const busy = core.busy();
 		if (Date.now() - lastFrame >= (busy ? SPIN_MS : POLICY.timing.screen.idleFrameMs)) {
 			lastFrame = Date.now();
@@ -1969,10 +1577,6 @@ export async function runScreen(session, options, runTerminal) {
 	const stop = ({ farewell = false } = {}) => {
 		if (stopped) return;
 		stopped = true;
-		stopApplicationEvents();
-		referenceLabels.dispose();
-		for (const id of projections.keys()) cancelProjection(id);
-		cancelConsultProjection();
 		clearInterval(tick);
 		process.stdin.off("data", watchInput);
 		// What stays on the terminal: the conversation, as it stood. A process that is going down in a hurry
@@ -1988,18 +1592,14 @@ export async function runScreen(session, options, runTerminal) {
 	process.once("exit", onExit);
 	process.stdin.on("data", watchInput);
 	tui.start();
-	refreshBrain(true);
-	refreshRuntimeStatusProjection(true);
-	refreshRuntimeModelProjection(true);
-	refreshRuntimeActivity(true);
 	terminal.setTitle(`carto · ${basename(root)}`);
-	shellFocus.restore();
+	tui.setFocus(prompt);
 	askColors();
 	// A terminal that tells when its colours change (the desktop went from light to dark) is asked again then.
 	tui.setTerminalColorSchemeNotifications(true);
 	tui.onTerminalColorSchemeChange(() => askColors());
 	try {
-		return await runTerminal(session, { ...options, application, interactive: true, screen });
+		return await runTerminal(session, { ...options, interactive: true, screen });
 	} finally {
 		state.closed = true;
 		stop({ farewell: true });

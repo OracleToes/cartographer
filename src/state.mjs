@@ -90,11 +90,10 @@ function dispatch(ledger, plan, brainDir, root, yolo = false) {
 			lines.push("Review before acceptance:");
 			for (const move of reports.slice(0, POLICY.limits.state.listedNames)) {
 				const checkpoints = move.reported?.checkpoints;
-				const gap = typeof move.reported?.closureGap === "string" && move.reported.closureGap.trim() !== "" ? `gap ${clip(move.reported.closureGap, 120)}` : "no recorded gap";
-				lines.push(`  ${move.id}: report ${move.reported?.id ?? "missing"}; checkpoints ${checkpoints?.before && checkpoints?.after ? `${checkpoints.before} → ${checkpoints.after}` : "missing"}; proof ${move.reported?.proof ? "stated" : "missing"}; ${gap}; targets ${(move.targets ?? []).join(", ") || "none"}.`);
+				lines.push(`  ${move.id}: report ${move.reported?.id ?? "missing"}; checkpoints ${checkpoints?.before && checkpoints?.after ? `${checkpoints.before} → ${checkpoints.after}` : "missing"}; proof ${move.reported?.proof ? "stated" : "missing"}; targets ${(move.targets ?? []).join(", ") || "none"}.`);
 			}
 		}
-		if (blocked.length > 0) lines.push(`Blocked: ${blocked.map((move) => `${move.id}${typeof move.reported?.closureGap === "string" && move.reported.closureGap.trim() !== "" ? ` (closure gap: ${clip(move.reported.closureGap, 100)})` : ""}`).join(", ")}.`);
+		if (blocked.length > 0) lines.push(`Blocked: ${names(blocked.map((move) => move.id))}.`);
 		const undeclared = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true && movesOf(plan, item.id).length === 0);
 		if (undeclared.length > 0) lines.push(`Needs executable moves: ${names(undeclared.map((item) => item.id))}.`);
 		if (ready.length > 0) {
@@ -102,8 +101,8 @@ function dispatch(ledger, plan, brainDir, root, yolo = false) {
 			for (const move of ready.slice(0, POLICY.limits.state.listedNames)) {
 				const approval = move.capabilities?.files === true || move.capabilities?.commands === true ? (move.approvedRevision === move.revision || yolo ? "approved/current" : "awaits approval") : "read-only";
 				lines.push(`  ${move.id} revision ${move.revision} · ${approval}`);
-					lines.push(`    Action: ${clip(move.action ?? move.text)}.`);
-				lines.push(`    Closure facts — boundary: ${(move.targets ?? []).join(", ") || "none"}. Claim: ${clip(move.doneWhen).replace(/[.!?]+$/, "")}. Witness: ${clip(move.proof ?? "none").replace(/[.!?]+$/, "")}.`);
+				lines.push(`    Action: ${clip(move.action ?? move.text)}.`);
+				lines.push(`    Targets: ${(move.targets ?? []).join(", ") || "none"}. Done when: ${clip(move.doneWhen)}. Proof: ${clip(move.proof ?? "none")}.`);
 				lines.push(`    Capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}.`);
 				for (const path of move.targets ?? []) {
 					const matched = shelfFacts(path);
@@ -119,7 +118,7 @@ function dispatch(ledger, plan, brainDir, root, yolo = false) {
 		});
 		lines.push(`Main shelf: ${entries.join("; ")}${shelf.length > entries.length ? `; and ${shelf.length - entries.length} more` : ""}.`);
 	} else lines.push("Main shelf: empty.");
-	lines.push("Before a focus, I decide whether one local outcome can close here: a current claim, a boundary that can realize it, and a reachable witness. If not, I read, map, or revise first. I choose selected shelf evidence and a narrowing boundary. This lens neither delegates work nor approves a move.");
+	lines.push("Before a focus, I decide whether one local outcome and current evidence are clear; if not, I read, map, or revise first. I choose selected shelf evidence and a narrowing boundary. This lens neither delegates work nor approves a move.");
 	return lines.join("\n");
 }
 

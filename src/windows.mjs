@@ -23,7 +23,7 @@ import { join, relative, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { killFamily } from "./reaper.mjs";
-import { HEAD_LINES, LINE_MAX, Output, QUIET, sandboxArgs, SandboxError, STAGE_WORK_DIR } from "./sandbox.mjs";
+import { HEAD_LINES, LINE_MAX, Output, QUIET, sandboxArgs, SandboxError } from "./sandbox.mjs";
 
 /** Windows open at one time. */
 export const WINDOWS_MAX = POLICY.limits.windows.open;
@@ -132,10 +132,8 @@ export function createWindows({ root, brainDir, config, runner }) {
 		}
 	};
 
-	const where = (cwd, stageWork, stageCwd) => {
+	const where = (cwd) => {
 		if (typeof cwd !== "string" || cwd === "") return ".";
-		const stagedRoot = typeof stageCwd === "string" ? stageCwd : stageWork;
-		if (typeof stagedRoot === "string" && (cwd === stagedRoot || cwd.startsWith(stagedRoot + sep))) return cwd === stagedRoot ? "(staged work)" : `(staged work)/${relative(stagedRoot, cwd)}`;
 		if (cwd === root) return ".";
 		return cwd.startsWith(root + sep) ? relative(root, cwd) : cwd;
 	};
@@ -275,69 +273,40 @@ export function createWindows({ root, brainDir, config, runner }) {
 		if (was === "busy" && !watched && why === "its shell ended") emit({ type: "closed", name: win.name, command: win.command, ms: Date.now() - win.since, at: Date.now() });
 	};
 
-	const open = async (name, network, readOnly = false, stage) => {
+	const open = async (name, network, readOnly = false) => {
 		const mode = runner.mode;
-		const staged = stage !== undefined;
 		// A read-only window is a promise the sandbox keeps; bwrap being present is what makes it possible, even with the sandbox switched off.
 		const canSandbox = mode === "sandbox" || (mode === "direct" && runner.available?.ok === true);
 		if (mode === "none") throw new SandboxError(runner.available?.why ?? "no sandbox");
-		if (staged && (mode !== "sandbox" || readOnly === true)) throw new SandboxError("a normal command stage needs the active bubblewrap sandbox; direct and read-only windows are not staged");
 		if (readOnly === true && !canSandbox) throw new SandboxError(mode === "direct" ? "a read-only window needs bubblewrap, and it is not working here: without it nothing holds a command to read-only" : "a read-only window needs the sandbox: it mounts the project read-only and blocks the network, and without the sandbox nothing holds a command to either");
 		if (!findScript()) throw new SandboxError("the `script` program (part of util-linux) was not found, and a shell window needs it for its terminal");
 		const confined = readOnly === true && canSandbox;
 		if ((mode === "sandbox" || confined) && runner.available?.shell !== undefined && runner.available.shell !== "bash") throw new SandboxError("bash was not found, and a shell window needs it");
-		if (staged && (![stage.root, stage.work, stage.home].every((path) => typeof path === "string" && path.startsWith("/")))) throw new SandboxError("the command-stage paths are invalid");
-		mkdirSync(staged ? stage.home : dir, { recursive: true, mode: 0o700 });
+		mkdirSync(dir, { recursive: true });
+		const rc = join(dir, "rc");
+		writeFileSync(rc, RC);
+		const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(rc)} --noediting -i`, "/dev/null"];
 		const win = {
 			name,
 			network: confined ? false : mode === "direct" ? true : network,
 			sandbox: mode === "sandbox" || confined,
 			readOnly: confined,
-			...(staged ? { stage: stage.id, stageWork: stage.work, stageCwd: STAGE_WORK_DIR } : {}),
 			state: POLICY.enums.windowStates.starting,
 			lines: [],
 			dropped: 0,
 			partial: "",
 			pending: "",
 			waiters: new Set(),
-			cwd: staged ? stage.work : root,
+			cwd: root,
 			outputs: 0,
 			lastOutputAt: 0,
 			head: [],
 		};
 		let child;
 		if (mode === "sandbox" || confined) {
-			const mounted = staged
-				? (stage.mounts ?? []).map((mount) => ({ source: mount.source, target: join(STAGE_WORK_DIR, mount.target) }))
-				: [];
-			const sandbox = sandboxArgs(staged
-				? {
-					root: stage.work,
-					target: STAGE_WORK_DIR,
-					cwd: STAGE_WORK_DIR,
-					brainDir,
-					network,
-					read: [],
-					sandboxHome: stage.home,
-					bindBrain: false,
-					hide: [brainDir, join(root, ".brain"), join(root, ".git")],
-					readOnlyBinds: mounted,
-				}
-				: { root, brainDir, network: confined ? false : network, read: config.shellRead, readOnly: confined });
-			// `sandbox.home` is the path visible inside bwrap; the staged home is its private host-side backing
-			// directory. Keep generated shell files in that backing directory, then name their bound path to bash.
-			const rc = staged ? join(stage.home, ".cartographer-stage-rc") : join(dir, "rc");
-			const sandboxRc = staged ? join(sandbox.home, ".cartographer-stage-rc") : rc;
-			const fileLimit = Math.max(1, Math.floor(POLICY.limits.stage.storageBytes / 512));
-			writeFileSync(rc, staged ? `${RC}\nulimit -f ${fileLimit} 2>/dev/null || true\n` : RC);
-			const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(sandboxRc)} --noediting -i`, "/dev/null"];
-			win.commandHome = staged ? stage.home : undefined;
-			win.commandTarget = staged ? sandbox.home : undefined;
-			child = spawn("bwrap", [...sandbox.args, "--", ...inner], { env: sandbox.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
+			const { args, env } = sandboxArgs({ root, brainDir, network: confined ? false : network, read: config.shellRead, readOnly: confined });
+			child = spawn("bwrap", [...args, "--", ...inner], { env, stdio: ["pipe", "pipe", "pipe"], detached: true });
 		} else {
-			const rc = join(dir, "rc");
-			writeFileSync(rc, RC);
-			const inner = ["script", "-qfec", `bash --noprofile --rcfile ${quote(rc)} --noediting -i`, "/dev/null"];
 			child = spawn(inner[0], inner.slice(1), { cwd: root, env: { ...process.env, ...QUIET }, stdio: ["pipe", "pipe", "pipe"], detached: true });
 		}
 		win.child = child;
@@ -467,11 +436,10 @@ export function createWindows({ root, brainDir, config, runner }) {
 			text: output.text(),
 			lines: output.lines,
 			last: output.last,
-			cwd: where(win.cwd, win.stageWork, win.stageCwd),
+			cwd: where(win.cwd),
 			network: win.network,
 			sandbox: win.sandbox,
 			readOnly: win.readOnly === true,
-			...(win.stage ? { stage: win.stage } : {}),
 			...(win.state === POLICY.enums.windowStates.busy ? { command: win.command, running: Date.now() - win.since } : {}),
 		};
 	};
@@ -494,19 +462,17 @@ export function createWindows({ root, brainDir, config, runner }) {
 	 * Type a command into a window, opening the window when it is not there, and wait for it at most `waitMs`.
 	 * @param {string} name
 	 * @param {string} command
-	 * @param {{ network?: boolean, waitMs: number, signal?: AbortSignal, readOnly?: boolean, stage?: { id: string, root: string, work: string, home: string, mounts?: { source: string, target: string }[] } }} options
+	 * @param {{ network?: boolean, waitMs: number, signal?: AbortSignal, readOnly?: boolean }} options
 	 */
-	async run(name, command, { network = false, waitMs, signal, readOnly = false, stage }) {
+	async run(name, command, { network = false, waitMs, signal, readOnly = false }) {
 		checkName(name);
 		// "Read-only" is a promise the sandbox keeps; bubblewrap being available is what makes it possible, even with the sandbox switched off.
 		const spawnsSandbox = runner.mode === "sandbox" || (runner.mode === "direct" && runner.available?.ok === true);
 		const confined = readOnly === true && spawnsSandbox;
-		const staged = stage !== undefined;
-		if (staged && (readOnly === true || runner.mode !== "sandbox")) throw new WindowError("A normal command stage is available only to a writable change move while bubblewrap is active.");
 		let win = windows.get(name);
 		if (win === undefined) {
 			if (windows.size >= WINDOWS_MAX) throw new WindowError(`${WINDOWS_MAX} windows are open, which is the limit: ${[...windows.keys()].join(", ")}. Close one with \`window\` first, or run this in one of them.`);
-			win = await open(name, network === true, confined, stage);
+			win = await open(name, network === true, confined);
 		} else {
 			if (win.state === POLICY.enums.windowStates.busy) {
 				throw new WindowError(`Window ${name} is busy with ${busyLine(win)}. To run this beside it, give \`shell\` another \`window\` name. To deal with what is running, use this tool's other actions: wait for it, stop it, or send it a line of input.`);
@@ -515,9 +481,6 @@ export function createWindows({ root, brainDir, config, runner }) {
 				throw new WindowError(win.readOnly
 					? `Window ${name} is a read-only window: commands there cannot write anything, and cannot reach the network. Close it with \`window\`, then run this in a window of another name.`
 					: `Window ${name} may change files. A read-only command runs in a window of another name.`);
-			}
-			if ((win.stage ?? undefined) !== (stage?.id ?? undefined)) {
-				throw new WindowError(win.stage ? `Window ${name} belongs to a disposable command stage. Close it before using this name outside that stage.` : `Window ${name} is not in this move's disposable command stage. Close it before reusing the name.`);
 			}
 			// The terminal closes every window when the user switches the sandbox; this is for a switch it did not see.
 			// A window opened read-only rides bwrap either way, so its provenance survives the switch only that far.
@@ -534,9 +497,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 				}
 			}
 			const began = Date.now();
-			const commandFile = win.commandHome ? `.cartographer-stage-${name}.cmd` : `${name}.cmd`;
-			const file = win.commandHome ? join(win.commandHome, commandFile) : join(dir, commandFile);
-			const sandboxFile = win.commandTarget ? join(win.commandTarget, commandFile) : file;
+			const file = join(dir, `${name}.cmd`);
 			writeFileSync(file, `${command}\n`);
 			const shown = command.split("\n");
 			push(win, `$ ${shown[0]}`);
@@ -546,8 +507,7 @@ export function createWindows({ root, brainDir, config, runner }) {
 			active.add(name);
 			record();
 			// Read from a file, so that a command with a mistake in it cannot leave bash waiting for the rest of a line.
-			// A stage writes the file in its private host home and sources it through that home's bwrap bind.
-			win.child.stdin.write(` source ${quote(sandboxFile)}\n`);
+			win.child.stdin.write(` source ${quote(file)}\n`);
 			const reason = await watch(win, { from, waitMs, signal });
 			if (reason === POLICY.enums.windowWaitReasons.stopped) await interrupt(win);
 			return report(win, reason, from, began);
@@ -631,11 +591,10 @@ export function createWindows({ root, brainDir, config, runner }) {
 				return {
 					name: win.name,
 					state: win.state,
-					cwd: where(win.cwd, win.stageWork, win.stageCwd),
+					cwd: where(win.cwd),
 					network: win.network,
 					sandbox: win.sandbox,
 					readOnly: win.readOnly === true,
-					...(win.stage ? { stage: win.stage } : {}),
 					...(win.state === POLICY.enums.windowStates.busy ? { command: win.command, running: now - win.since, quiet: win.lastOutputAt > 0 ? now - win.lastOutputAt : now - win.since, asks: partial.trim() !== "" && now - win.lastOutputAt >= ASKS_AFTER_MS } : {}),
 					...(win.last ? { last: { ...win.last, ago: now - win.last.endedAt } } : {}),
 					tail: lines.slice(-tail),
