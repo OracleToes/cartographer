@@ -621,6 +621,8 @@ export async function runScreen(session, options, runTerminal) {
 			"context.raw": ["Enter open", "y copy"],
 			"context.preview": ["Enter open", "y copy"],
 			"context.parts": ["Enter open", "+ all", "y copy"],
+			"settings.overview": ["j k move", "Enter open", "y copy"],
+			"settings.assessment": ["j k move", "Enter open", "e edit", "y copy"],
 		},
 	});
 	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: paletteCapabilities });
@@ -1901,7 +1903,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pasted = createPasteWatch();
 	const watchInput = (chunk) => pasted.read(chunk);
 	/** The keys the commands mode takes that the editor has no use for with Alt held. */
-	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazuR+-[]HL?/: "]);
+	const AFTER_ESCAPE = new Set([..."123456jkgGhloeYriazuR+-[]HL?/: "]);
 	tui.addInputListener((data) => {
 		if (state.closed || isKeyRelease(data)) return undefined;
 		// A sheet lies over the screen: the keys are its own.
