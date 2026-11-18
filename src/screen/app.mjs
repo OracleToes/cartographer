@@ -35,7 +35,7 @@ import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
-import { createRefDescriber } from "../refs.mjs";
+import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
@@ -271,7 +271,9 @@ export async function runScreen(session, options, runTerminal) {
 		const strip = (line) => line.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
-	const describeRef = createRefDescriber({ brainDir });
+	let refreshReferenceLabels = () => {};
+	const referenceLabels = createDeferredReferenceLabels({ brainDir, onResolved: () => refreshReferenceLabels() });
+	const describeRef = referenceLabels.describe;
 	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
 	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
 	const CONSULT_PROJECTION = "chat.consult";
@@ -324,6 +326,10 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const draw = () => {
 		if (!state.closed) tui.requestRender();
+	};
+	refreshReferenceLabels = () => {
+		if (state.closed || !chat.refreshActivityLabels()) return;
+		draw();
 	};
 	settleConsultProjection = (id) => {
 		if (id !== CONSULT_PROJECTION) return;
@@ -1727,6 +1733,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (stopped) return;
 		stopped = true;
 		stopApplicationEvents();
+		referenceLabels.dispose();
 		for (const id of projections.keys()) cancelProjection(id);
 		cancelConsultProjection();
 		clearInterval(tick);

@@ -682,7 +682,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 							rows.set(call.id, { quiet: true, name: "chat", speech });
 							continue;
 						}
-						const row = { kind: "call", depth, id: call.id, name: call.name, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}), ...(call.name === "consult" ? { hiddenInAll: true, hiddenInWork: true } : {}) };
+						const row = { kind: "call", depth, id: call.id, name: call.name, call, label: describeCall(call, describeRef), args: call.arguments ?? {}, state: "running", started: now(), ...(call.name === "ask" || call.name === "return" ? { hiddenInAll: true } : {}), ...(call.name === "consult" ? { hiddenInAll: true, hiddenInWork: true } : {}) };
 						if (call.name === "consult") {
 							const conference = ensureConsult({ callId: call.id, question: call.arguments?.question, depth });
 							row.consultKey = conference.key;
@@ -908,6 +908,19 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			for (const item of items) delete item.md;
 			styleRev++;
 			touch();
+		},
+		/** Replace opaque reference ids after the deferred application label cache resolves them. */
+		refreshActivityLabels() {
+			let changed = false;
+			for (const row of rows.values()) {
+				if (row?.kind !== "call" || row.call === undefined) continue;
+				const label = describeCall(row.call, describeRef);
+				if (label === row.label) continue;
+				row.label = label;
+				changed = true;
+			}
+			if (changed) touch();
+			return changed;
 		},
 		/** The reply that is being written at a depth, as far as it has come. */
 		liveMessage: (depth) => live.get(depth)?.message,

@@ -14,6 +14,7 @@ import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
+import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
 import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
@@ -1558,6 +1559,28 @@ test("refs: the chat shows a file ref as its file, not as a bare id", (t) => {
 	assert.equal(describeCall({ name: "shelf", arguments: { action: "add", id: ref.id } }, describeRef), `shelf add index.html (${ref.id})`);
 	// What a call means without a describer is unchanged: the bare id.
 	assert.equal(describeCall({ name: "read", arguments: { id: ref.id } }), `read ${ref.id}`);
+});
+
+test("application: deferred reference labels keep screen activity out of synchronous catalog reads", async (t) => {
+	const { brainDir, root } = fresh(t);
+	mkdirSync(join(root, "src"), { recursive: true });
+	writeFileSync(join(root, "src", "activity.mjs"), "export const activity = true;\n");
+	const { ref } = observeFile(root, brainDir, "src/activity.mjs");
+	const resolved = [];
+	const labels = createDeferredReferenceLabels({ brainDir, onResolved: (_ref, label) => resolved.push(label) });
+	assert.equal(labels.describe(ref), ref.id, "a render/key caller receives a safe opaque id before the legacy catalog reader runs");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(labels.describe(ref), `activity.mjs (${ref.id})`);
+	assert.deepEqual(resolved, [`activity.mjs (${ref.id})`]);
+	let label = ref.id;
+	const chat = createChat({ describeRef: () => label });
+	chat.entry(0, { model: [{ role: "assistant", content: [{ type: "toolCall", id: "call-ref", name: "read", arguments: { id: ref.id } }] }] });
+	const text = () => chat.lines(120, "work").map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	assert.match(text(), new RegExp(`read ${ref.id}`));
+	label = `activity.mjs (${ref.id})`;
+	assert.equal(chat.refreshActivityLabels(), true, "a resolved label updates the already-recorded Work activity without rereading durable state in render");
+	assert.match(text(), /read activity\.mjs/);
+	labels.dispose();
 });
 
 test("refs: the chat shows an atlas ref as its node, not as a bare id", async (t) => {
