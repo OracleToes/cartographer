@@ -17,7 +17,7 @@ import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
-import { createRuntimeViewReader } from "../src/application/runtime.mjs";
+import { createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
@@ -874,9 +874,9 @@ test("application: active-context accounting is a deferred typed runtime project
 	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
 });
 
-test("application: runtime view projections defer shell, wake, engine, and preview snapshots", async (t) => {
+test("application: runtime view and status projections defer shell, wake, engine, model, and preview snapshots", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0 };
+	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusWindows: 0, statusWakes: 0, statusModel: 0 };
 	const sent = {
 		task: false,
 		requestId: "main:1",
@@ -892,11 +892,19 @@ test("application: runtime view projections defer shell, wake, engine, and previ
 		list: () => { reads.wakes++; return [wake]; },
 		lines: () => { reads.wakeLines++; return ["w1 · every 5 minutes"]; },
 	} });
+	const statusReader = createRuntimeStatusReader({
+		main: { context: async () => { reads.statusContext++; return { messages: [{ role: "assistant", usage: { input: 20, cacheRead: 4, output: 2 } }] }; } },
+		context: {},
+		windows: { list: (tail) => { reads.statusWindows++; assert.equal(tail, 0); return [window]; } },
+		wakes: { list: () => { reads.statusWakes++; return [wake]; }, nextDue: () => 3_000 },
+		model: async () => { reads.statusModel++; return { modelId: "status-model" }; },
+	});
 	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
 	const queries = createWorkspaceQueries({
 		brainDir,
 		root,
 		now: () => Date.parse(NOW),
+		runtimeStatusReader: statusReader,
 		runtimeViewReader: {
 			sent: (scope) => { reads.sent++; return scope === "main" ? sent : { ...sent, requestId: "newest:1" }; },
 			shells: ({ tail }) => { reads.shells++; assert.equal(tail, POLICY.limits.screen.windowsListed); return { windows: [window] }; },
@@ -912,6 +920,17 @@ test("application: runtime view projections defer shell, wake, engine, and previ
 	if (!current.ok) throw new Error(current.error.message);
 	assert.equal(current.data.sent, sent);
 	assert.equal(current.meta.requestId, "sent-query");
+	const pendingStatus = queries.runtime.status({ requestId: "status-query" });
+	assert.deepEqual([reads.statusContext, reads.statusWindows, reads.statusWakes, reads.statusModel], [0, 0, 0, 0], "runtime status leaves the current render/key stack before reading live session managers");
+	const status = await pendingStatus;
+	assert.equal(status.ok, true);
+	if (!status.ok) throw new Error(status.error.message);
+	assert.equal(status.meta.requestId, "status-query");
+	assert.equal(status.data.modelId, "status-model");
+	assert.equal(status.data.nextWakeDue, 3_000);
+	assert.deepEqual(status.data.windows, [window]);
+	assert.deepEqual(status.data.wakes, [wake]);
+	assert.deepEqual([reads.statusContext, reads.statusWindows, reads.statusWakes, reads.statusModel], [1, 1, 1, 1]);
 	const shells = await queries.runtime.shells();
 	assert.equal(shells.ok, true);
 	if (!shells.ok) throw new Error(shells.error.message);
@@ -930,7 +949,7 @@ test("application: runtime view projections defer shell, wake, engine, and previ
 	assert.equal(planned.ok, true);
 	if (!planned.ok) throw new Error(planned.error.message);
 	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1 });
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusWindows: 1, statusWakes: 1, statusModel: 1 });
 	const stoppedWakes = new AbortController();
 	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
 	stoppedWakes.abort();

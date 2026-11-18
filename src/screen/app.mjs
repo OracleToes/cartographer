@@ -583,6 +583,7 @@ export async function runScreen(session, options, runTerminal) {
 			engine: session.engine,
 			windows: session.windows,
 			wakes: session.wakes,
+			model: session.model,
 			preview: session.preview,
 			runner: options.runner,
 			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,

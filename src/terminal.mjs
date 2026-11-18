@@ -110,6 +110,7 @@ export async function runTerminal(session, options) {
 			engine,
 			windows,
 			wakes,
+			model: session.model,
 			preview: session.preview,
 			runner: options.runner,
 			contextWindow: () => options.contextWindow,
@@ -1685,7 +1686,7 @@ export async function runTerminal(session, options) {
 				streamFreeze.abandon();
 				await main.abort(context);
 				line(dim("  stopped"));
-				runningLine();
+				await runningLine();
 				return true;
 			}
 			case "pause": {
@@ -1799,21 +1800,21 @@ export async function runTerminal(session, options) {
 				line(dim("  fresh context; earlier messages are no longer in view, and nothing was kept of them (/collapse keeps the talk, the task records and the shelf)"));
 				return true;
 			case "status": {
-				const view = await main.context(context);
-				const last = view.messages.filter((message) => message.role === "assistant").at(-1);
+				const projection = await queries.runtime.status();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const snapshot = projection.data;
+				const last = snapshot.messages.filter((message) => message.role === "assistant").at(-1);
 				const size = last?.usage ? (last.usage.input ?? 0) + (last.usage.cacheRead ?? 0) + (last.usage.output ?? 0) : 0;
-				const on = await session.model?.();
-				line(`  ${withoutQuietWakes(view.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${on?.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
+				line(`  ${withoutQuietWakes(snapshot.messages).length} messages in view · context ${count(size)} of ${count(options.contextWindow)} tokens · model ${snapshot.modelId ?? config.model} · ${busy ? "working" : "idle"}`);
 				if (options.runner !== undefined) line(`  ${sandboxLine(options.runner)}`);
-				const all = (windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
+				const all = snapshot.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
 				if (all.length > 0) line(`  ${plural(all.length, "shell window")} open, ${all.filter((win) => win.state === POLICY.enums.windowStates.busy).length} busy · /shells shows them`);
 				if (gate.yolo) line(`  ${YOLO_LINE}`);
 				line(initiation.on ? dim("  the agent starts on its own (/initiate off keeps it waiting)") : dim("  the agent waits for you (/initiate on lets it start on its own)"));
-				const set = wakes?.list() ?? [];
-				if (set.length > 0) {
-					const due = wakes.nextDue();
-					line(`  ${plural(set.length, "wake")} set${due === undefined ? "" : `, the next in ${took(due)}`} · /wakes shows them`);
-				}
+				if (snapshot.wakes.length > 0) line(`  ${plural(snapshot.wakes.length, "wake")} set${snapshot.nextWakeDue === undefined ? "" : `, the next in ${took(snapshot.nextWakeDue)}`} · /wakes shows them`);
 				return true;
 			}
 			case "model": {
@@ -1982,8 +1983,10 @@ export async function runTerminal(session, options) {
 	}
 
 	/** Which windows are still at work, said after the agent was stopped. */
-	function runningLine() {
-		const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
+	async function runningLine() {
+		const projection = await queries.runtime.shells();
+		if (!projection.ok) return void line(`! ${projection.error.message}`);
+		const running = projection.data.windows.filter((win) => win.state === POLICY.enums.windowStates.busy);
 		if (running.length > 0) line(dim(`  still running: ${running.map((win) => `window ${win.name}`).join(", ")} · /shells shows them, /kill NAME ends one, /kill all every one`));
 	}
 
@@ -2001,8 +2004,12 @@ export async function runTerminal(session, options) {
 	ledgerLine();
 	planLine();
 	atlasLine();
-	const lost = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.gone);
-	if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
+	const shellSnapshot = await queries.runtime.shells();
+	if (!shellSnapshot.ok) line(`! ${shellSnapshot.error.message}`);
+	else {
+		const lost = shellSnapshot.data.windows.filter((win) => win.state === POLICY.enums.windowStates.gone);
+		if (lost.length > 0) line(dim(`windows: ${lost.map((win) => win.name).join(", ")} ended with the last session${lost.some((win) => win.command) ? ", with what ran there" : ""} · the agent is told`));
+	}
 	await follow(main.id, 0);
 	// A restarted outer tool normally names its child in a live slot, but a settled/recovered watch can arrive
 	// without that transient slot. Follow any still-running co<N> child directly so Consult continues to show its
@@ -2164,8 +2171,12 @@ export async function runTerminal(session, options) {
 			unlisten?.();
 			if (busy) line(dim("Leaving. Unfinished work continues the next time carto starts here."));
 			else await recordWindows();
-			const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
-			if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
+			const shellSnapshot = await queries.runtime.shells();
+			if (!shellSnapshot.ok) line(`! ${shellSnapshot.error.message}`);
+			else {
+				const running = shellSnapshot.data.windows.filter((win) => win.state === POLICY.enums.windowStates.busy);
+				if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
+			}
 			await stop();
 			resolve(0);
 		};

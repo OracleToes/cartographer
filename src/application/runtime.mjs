@@ -4,6 +4,7 @@
 import { stateBlock } from "../state.mjs";
 
 const positiveInteger = (value) => Number.isInteger(value) && value > 0 ? value : undefined;
+const finite = (value) => Number.isFinite(value) ? value : undefined;
 
 /**
  * Build the narrow live dependency needed by Runtime → Current accounting.
@@ -34,6 +35,38 @@ export function createRuntimeContextReader({ main, context, engine, brainDir, ro
 		const sizes = engine.sizes(messages, state);
 		const reportedWindow = positiveInteger(typeof contextWindow === "function" ? contextWindow() : contextWindow);
 		return { messages, sizes, ...(reportedWindow === undefined ? {} : { contextWindow: reportedWindow }) };
+	};
+}
+
+/**
+ * Build the narrow live dependency needed by the terminal and Runtime status strip. It reports facts only: the
+ * terminal decides how to describe a resting or working agent, while this reader keeps conversation, shell, wake,
+ * and model-manager access out of display code.
+ * @param {{
+ *   main?: { context?: (context: any) => Promise<{ messages?: readonly any[] }> },
+ *   context?: any,
+ *   windows?: { list?: (tail?: number) => any[] },
+ *   wakes?: { list?: () => any[], nextDue?: () => number | undefined },
+ *   model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined,
+ * }} options
+ */
+export function createRuntimeStatusReader({ main, context, windows, wakes, model } = {}) {
+	return async ({ signal } = {}) => {
+		if (signal?.aborted === true) return undefined;
+		const view = typeof main?.context === "function" ? await main.context(context) : undefined;
+		if (signal?.aborted === true) return undefined;
+		const current = typeof model === "function" ? await model() : undefined;
+		if (signal?.aborted === true) return undefined;
+		const listedWindows = typeof windows?.list === "function" ? windows.list(0) : [];
+		const listedWakes = typeof wakes?.list === "function" ? wakes.list() : [];
+		const nextWakeDue = typeof wakes?.nextDue === "function" ? finite(wakes.nextDue()) : undefined;
+		return {
+			messages: Array.isArray(view?.messages) ? view.messages : [],
+			windows: Array.isArray(listedWindows) ? listedWindows : [],
+			wakes: Array.isArray(listedWakes) ? listedWakes : [],
+			...(typeof current?.modelId === "string" && current.modelId !== "" ? { modelId: current.modelId } : {}),
+			...(nextWakeDue === undefined ? {} : { nextWakeDue }),
+		};
 	};
 }
 

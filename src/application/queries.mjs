@@ -45,6 +45,7 @@ export const CONSULT_QUERY = Object.freeze({
 export const RUNTIME_QUERY = Object.freeze({
 	assessment: "runtime.assessment",
 	context: "runtime.context",
+	status: "runtime.status",
 	shells: "runtime.shells",
 	shellOutput: "runtime.shell-output",
 	wakes: "runtime.wakes",
@@ -106,11 +107,12 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
+ *   runtimeStatusReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages?: readonly any[], windows?: any[], wakes?: any[], modelId?: string, nextWakeDue?: number } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeViewReader, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeViewReader, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -443,6 +445,31 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
+	/** A compact runtime status has its own reader so terminal status does not need a live conversation or manager. */
+	const runtimeStatus = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (typeof runtimeStatusReader !== "function") return unavailable("runtime status", "the running session does not expose a status snapshot", ready.meta);
+		try {
+			const snapshot = await runtimeStatusReader({ signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			if (snapshot === undefined || snapshot === null || typeof snapshot !== "object") return unavailable("runtime status", "the running session did not provide a status snapshot", ready.meta);
+			return uiSuccess({
+				messages: Array.isArray(snapshot.messages) ? snapshot.messages : [],
+				windows: Array.isArray(snapshot.windows) ? snapshot.windows : [],
+				wakes: Array.isArray(snapshot.wakes) ? snapshot.wakes : [],
+				...(typeof snapshot.modelId === "string" && snapshot.modelId !== "" ? { modelId: snapshot.modelId } : {}),
+				...(Number.isFinite(snapshot.nextWakeDue) ? { nextWakeDue: snapshot.nextWakeDue } : {}),
+			}, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read runtime status.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
 	/** A shell snapshot is always safe to show as an empty collection when this session has no shell manager. */
 	const runtimeShells = async (options = {}) => {
 		const ready = await prepare(options);
@@ -548,6 +575,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 	const runtime = Object.freeze({
 		assessment: runtimeAssessment,
 		context: runtimeContext,
+		status: runtimeStatus,
 		shells: runtimeShells,
 		shellOutput: runtimeShellOutput,
 		wakes: runtimeWakes,

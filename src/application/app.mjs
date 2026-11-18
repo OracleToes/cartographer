@@ -6,7 +6,7 @@ import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplicatio
 import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
-import { createRuntimeContextReader, createRuntimeViewReader } from "./runtime.mjs";
+import { createRuntimeContextReader, createRuntimeStatusReader, createRuntimeViewReader } from "./runtime.mjs";
 import { RUNTIME_ACTION, RUNTIME_CAPABILITY_DEFINITIONS, createRuntimeApplication } from "./runtime-actions.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
 import { REVIEW_ACTION, REVIEW_CAPABILITY_DEFINITIONS, createReviewApplication } from "./review.mjs";
@@ -65,7 +65,7 @@ const metadata = (options, now) => ({
  *   runtimeActions?: Parameters<typeof createRuntimeApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
- *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
+ *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, statusReader?: ReturnType<typeof createRuntimeStatusReader>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
 export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, runtimeActions: runtimeActionOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
@@ -88,13 +88,20 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		runner: runtimeOptions.runner,
 		contextWindow: runtimeOptions.contextWindow,
 	});
+	const runtimeStatusReader = runtimeOptions.statusReader ?? queryOptions.runtimeStatusReader ?? createRuntimeStatusReader({
+		main: runtimeOptions.main,
+		context: runtimeOptions.context,
+		windows: runtimeOptions.windows,
+		wakes: runtimeOptions.wakes,
+		model: runtimeOptions.model,
+	});
 	const runtimeViewReader = runtimeOptions.viewReader ?? queryOptions.runtimeViewReader ?? createRuntimeViewReader({
 		engine: runtimeOptions.engine,
 		windows: runtimeOptions.windows,
 		wakes: runtimeOptions.wakes,
 		preview: runtimeOptions.preview,
 	});
-	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeViewReader });
+	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeStatusReader, runtimeViewReader });
 	const capabilityRegistry = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,
