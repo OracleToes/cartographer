@@ -121,3 +121,100 @@ export function ledgerView({ file, ledger, lines, error, presentation } = {}) {
 	if (items.length === 0) items.push(note("  The ledger is empty: no goal yet. Say what you want to achieve."));
 	return { header: [], items };
 }
+
+/**
+ * Render the Plan projection as foldable collection rows.
+ * @param {{
+ *   file?: string,
+ *   yolo?: boolean,
+ *   plan?: { items?: object[], moves?: object[] },
+ *   lines?: Record<string, number | undefined>,
+ *   error?: string,
+ *   presentation: {
+ *     when: (value: number | string | undefined) => string | undefined,
+ *     itemLine: (item: object) => string,
+ *     movesOf: (plan: object, id: string) => object[],
+ *     waiting: (plan: object) => object[],
+ *     authorizationLine: (plan: object, options: { yolo?: boolean }) => string,
+ *     isDone: (item: object) => boolean,
+ *     moveState: (move: object) => { done: boolean, reported: boolean, blocked: boolean, icon: string, style: string },
+ *   },
+ * }} input
+ */
+export function planView({ file, yolo = false, plan, lines, error, presentation } = {}) {
+	if (presentation === undefined || typeof presentation.when !== "function" || typeof presentation.itemLine !== "function" || typeof presentation.movesOf !== "function" || typeof presentation.waiting !== "function" || typeof presentation.authorizationLine !== "function" || typeof presentation.isDone !== "function" || typeof presentation.moveState !== "function") throw new TypeError("Plan needs its Workspace presentation adapter.");
+	const path = file ?? "the Plan file";
+	if (plan === undefined) {
+		if (error !== undefined) return { header: [[[`! The plan cannot be read: ${error}`, "warn"]]], items: [{ key: "file", head: [[path, ""]], target: file === undefined ? undefined : { file } }] };
+		return { header: [[["Plan is loading…", "muted"]]], items: [] };
+	}
+	if ((plan.items ?? []).length === 0) return { header: [], items: [note("  There is no plan. The agent writes an envelope when a goal needs changes.")] };
+	const items = [];
+	for (const envelope of plan.items ?? []) {
+		const done = presentation.isDone(envelope);
+		const muted = done || envelope.archived === true;
+		items.push({
+			key: `envelope:${envelope.id}`,
+			archived: envelope.archived === true,
+			head: [
+				[done ? "✓ " : "○ ", done ? "ok" : "warn"],
+				[`${envelope.id} `, "tool"],
+				[`[envelope · ${envelope.mode}${envelope.network ? ", network" : ""}] `, "muted"],
+				[envelope.text, muted ? "muted" : ""],
+				[done && envelope.outcome ? `  → ${envelope.outcome}` : "", "muted"],
+				[envelope.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
+			],
+			body: [
+				envelope.text,
+				`intent envelope · ${done ? `done${presentation.when(envelope.closed) ? ` ${presentation.when(envelope.closed)}` : ""}` : "open; it cannot run itself"}`,
+				envelope.doneWhen ? `envelope complete when: ${envelope.doneWhen}` : "legacy envelope: add a done-when line and declared moves",
+				done && envelope.outcome ? `outcome: ${envelope.outcome}` : undefined,
+				envelope.undone ? "undone by you: accepted moves may need review" : undefined,
+			]
+				.filter((line) => line !== undefined)
+				.join("\n"),
+			copy: presentation.itemLine(envelope),
+			target: file === undefined ? undefined : { file, line: lines?.[envelope.id] },
+		});
+		for (const move of presentation.movesOf(plan, envelope.id)) {
+			const state = presentation.moveState(move);
+			const mutedMove = state.done || move.archived === true;
+			const budget = move.budget ?? { replies: move.turns, fileOps: undefined, commandStarts: undefined };
+			items.push({
+				key: `move:${move.id}`,
+				archived: move.archived === true,
+				head: [
+					[`  ${state.icon} `, state.style],
+					[`${move.id} `, "tool"],
+					[`[move · ${move.status} · r${move.revision}] `, "muted"],
+					[move.action ?? move.text, mutedMove ? "muted" : ""],
+					[move.archived === true ? "  · archived" : "", "warn"],
+				],
+				body: [
+					`parent: ${move.parent} revision ${move.parentRevision}`,
+					`action: ${move.action ?? move.text}`,
+					`targets: ${(move.targets ?? []).join(", ") || "none"}`,
+					`done when: ${move.doneWhen}`,
+					`required proof: ${move.proof ?? "none"}`,
+					`capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}`,
+					`budget: ${budget.replies} replies${budget.fileOps === undefined ? "" : `; ${budget.fileOps} file operations`}${budget.commandStarts === undefined ? "" : `; ${budget.commandStarts} command starts`}`,
+					state.reported ? `reported: ${move.reported?.id ?? "no report id"}; inspect the report and checkpoints, then press t and write why its proof witnesses this move's done-when` : undefined,
+					state.reported && move.reported?.checkpoints ? `checkpoints: ${move.reported.checkpoints.before} → ${move.reported.checkpoints.after}` : undefined,
+					state.reported && Array.isArray(move.reported?.changes) ? `changed paths: ${move.reported.changes.map((change) => change.path).join(", ") || "none"}` : undefined,
+					state.reported && move.reported?.proof ? `reported proof: ${move.reported.proof}` : undefined,
+					state.reported && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
+					state.blocked ? `blocked: ${move.blocked ?? "no reason recorded"}` : undefined,
+					state.blocked && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
+					state.done ? `accepted${presentation.when(move.closed) ? ` ${presentation.when(move.closed)}` : ""}${move.outcome ? `: ${move.outcome}` : ""}` : undefined,
+					state.done && move.acceptedReview ? `acceptance review: ${move.acceptedReview}` : undefined,
+				]
+					.filter((line) => line !== undefined)
+					.join("\n"),
+				copy: presentation.itemLine(move),
+				target: file === undefined ? undefined : { file, line: lines?.[move.id] },
+			});
+		}
+	}
+	const waits = !yolo && presentation.waiting(plan).length > 0;
+	return { header: [[[presentation.authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to snapshot the current move revisions." : "", "warn"]]], items };
+}

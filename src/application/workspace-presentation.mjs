@@ -5,6 +5,7 @@
 import { atlasSummary, renderAttention } from "../atlas.mjs";
 import { POLICY } from "../config.mjs";
 import { entryLine } from "../ledger.mjs";
+import { authorizationLine, itemLine, movesOf, waiting } from "../plan.mjs";
 import { stamp } from "../time.mjs";
 
 const when = (value) => {
@@ -17,6 +18,19 @@ const ledgerGroups = Object.freeze([
 	Object.freeze({ title: "Questions for you", matches: (item) => item.kind === POLICY.enums.ledgerKind.question }),
 	Object.freeze({ title: "Notes", matches: (item) => item.kind === POLICY.enums.ledgerKind.note }),
 ]);
+
+const planMoveState = (move) => {
+	const done = move.status === "done";
+	const reported = move.status === "reported";
+	const blocked = move.status === "blocked";
+	return {
+		done,
+		reported,
+		blocked,
+		icon: done ? "✓" : reported ? "!" : move.status === "running" ? "▶" : blocked ? "×" : move.approvedRevision === move.revision ? "●" : "○",
+		style: done ? "ok" : reported || blocked ? "warn" : "tool",
+	};
+};
 
 /** The presentation vocabulary migrated Workspace renderers need. Other views join this adapter as they migrate. */
 export function createWorkspacePresentation() {
@@ -34,6 +48,15 @@ export function createWorkspacePresentation() {
 			isDone: (item) => item.status === POLICY.enums.entryStatus.done,
 			isGoal: (item) => item.kind === POLICY.enums.ledgerKind.goal,
 			isNote: (item) => item.kind === POLICY.enums.ledgerKind.note,
+		}),
+		plan: Object.freeze({
+			when,
+			itemLine,
+			movesOf,
+			waiting,
+			authorizationLine,
+			isDone: (item) => item.status === POLICY.enums.entryStatus.done,
+			moveState: planMoveState,
 		}),
 	});
 }

@@ -2652,7 +2652,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	const root = makeProject("cut-audit");
 	const brainDir = join(root, ".brain");
 	mkdirSync(brainDir, { recursive: true });
-	const [{ planView, requestsView, shellsView }, { atlasView, ledgerView }, { createWorkspacePresentation }] = await Promise.all([
+	const [{ requestsView, shellsView }, { atlasView, ledgerView, planView }, { createWorkspacePresentation }] = await Promise.all([
 		import("../src/screen/views.mjs"),
 		import("../src/screen/workspace.mjs"),
 		import("../src/application/workspace-presentation.mjs"),
@@ -2691,7 +2691,7 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	saveLedger(brainDir, { version: 1, next: 2, items: [] });
 	savePlan(brainDir, { version: 2, next: 2, nextMove: 1, items: [{ id: "p1", mode: "look", text: PLAN_LONG, status: "open", revision: 1 }], moves: [] });
 	const plan = await projection(queries.plan());
-	expectReachable("plan envelope", planView({ brainDir, yolo: false, plan: plan.plan, lines: plan.lines }), PLAN_LONG);
+	expectReachable("plan envelope", planView({ file: plan.file, yolo: false, plan: plan.plan, lines: plan.lines, presentation: workspacePresentation.plan }), PLAN_LONG);
 	saveAtlas(brainDir, { version: 1, next: 0, view: { anchor: ".", depth: 2 }, nodes: [{ name: "dice_roll", gist: LONG.slice(0, 200), detail: LONG, files: [], links: [], seen: {}, written: 1, by: "main" }] });
 	const atlas = await projection(queries.atlas());
 	expectReachable("atlas gist", atlasView({ file: atlas.file, atlas: atlas.atlas, attention: atlas.attention, lines: atlas.lines, presentation: workspacePresentation.atlas }), LONG.slice(0, 200));

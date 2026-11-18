@@ -15,7 +15,7 @@ import { POLICY } from "../config.mjs";
 import { join } from "node:path";
 import { changeSummary } from "../checkpoints.mjs";
 import { estimate, isFront, recordLine, sameShelfItem, shelfLabel, composedRows, splitReadTail } from "../context.mjs";
-import { authorizationLine, itemLine, movesOf, planPath, waiting } from "../plan.mjs";
+import { planPath } from "../plan.mjs";
 import { flat } from "../rows.mjs";
 import { ago, stamp, took } from "../time.mjs";
 import { short, width } from "./text.mjs";
@@ -36,82 +36,6 @@ const when = (value) => {
 };
 
 // ─── Carto ──────────────────────────────────────────────────────────────────
-
-/** The plan: authorization envelopes, then their declared executable moves. */
-export function planView({ brainDir, yolo, plan, lines, error } = {}) {
-	const file = planPath(brainDir);
-	if (plan === undefined) {
-		if (error !== undefined) return { header: [[[`! The plan cannot be read: ${error}`, "warn"]]], items: [{ key: "file", head: [[file, ""]], target: { file } }] };
-		return { header: [[["Plan is loading…", "muted"]]], items: [] };
-	}
-	if (plan.items.length === 0) return { header: [], items: [note("  There is no plan. The agent writes an envelope when a goal needs changes.")] };
-	const items = [];
-	for (const envelope of plan.items) {
-		items.push({
-			key: `envelope:${envelope.id}`,
-			archived: envelope.archived === true,
-			head: [
-				[envelope.status === POLICY.enums.entryStatus.done ? "✓ " : "○ ", envelope.status === POLICY.enums.entryStatus.done ? "ok" : "warn"],
-				[`${envelope.id} `, "tool"],
-				[`[envelope · ${envelope.mode}${envelope.network ? ", network" : ""}] `, "muted"],
-				[envelope.text, envelope.status === POLICY.enums.entryStatus.done || envelope.archived === true ? "muted" : ""],
-				[envelope.status === POLICY.enums.entryStatus.done && envelope.outcome ? `  → ${envelope.outcome}` : "", "muted"],
-				[envelope.archived === true ? "  · archived: the agent does not read it (v brings it back)" : "", "warn"],
-			],
-			body: [
-				envelope.text,
-				`intent envelope · ${envelope.status === POLICY.enums.entryStatus.done ? `done${when(envelope.closed) ? ` ${when(envelope.closed)}` : ""}` : "open; it cannot run itself"}`,
-				envelope.doneWhen ? `envelope complete when: ${envelope.doneWhen}` : "legacy envelope: add a done-when line and declared moves",
-				envelope.status === POLICY.enums.entryStatus.done && envelope.outcome ? `outcome: ${envelope.outcome}` : undefined,
-				envelope.undone ? "undone by you: accepted moves may need review" : undefined,
-			]
-				.filter((line) => line !== undefined)
-				.join("\n"),
-			copy: itemLine(envelope),
-			target: { file, line: lines?.[envelope.id] },
-		});
-		for (const move of movesOf(plan, envelope.id)) {
-			const state = move.status === "done" ? "✓" : move.status === "reported" ? "!" : move.status === "running" ? "▶" : move.status === "blocked" ? "×" : move.approvedRevision === move.revision ? "●" : "○";
-			const muted = move.status === "done" || move.archived === true;
-			const budget = move.budget ?? { replies: move.turns, fileOps: undefined, commandStarts: undefined };
-			items.push({
-				key: `move:${move.id}`,
-				archived: move.archived === true,
-				head: [
-					[`  ${state} `, move.status === "done" ? "ok" : move.status === "reported" || move.status === "blocked" ? "warn" : "tool"],
-					[`${move.id} `, "tool"],
-					[`[move · ${move.status} · r${move.revision}] `, "muted"],
-					[move.action ?? move.text, muted ? "muted" : ""],
-					[move.archived === true ? "  · archived" : "", "warn"],
-				],
-				body: [
-					`parent: ${move.parent} revision ${move.parentRevision}`,
-					`action: ${move.action ?? move.text}`,
-					`targets: ${(move.targets ?? []).join(", ") || "none"}`,
-					`done when: ${move.doneWhen}`,
-					`required proof: ${move.proof ?? "none"}`,
-					`capabilities: files ${move.capabilities?.files ? "yes" : "no"}; commands ${move.capabilities?.commands ? "yes" : "no"}; network ${move.capabilities?.network ? "yes" : "no"}`,
-					`budget: ${budget.replies} replies${budget.fileOps === undefined ? "" : `; ${budget.fileOps} file operations`}${budget.commandStarts === undefined ? "" : `; ${budget.commandStarts} command starts`}`,
-					move.status === "reported" ? `reported: ${move.reported?.id ?? "no report id"}; inspect the report and checkpoints, then press t and write why its proof witnesses this move's done-when` : undefined,
-					move.status === "reported" && move.reported?.checkpoints ? `checkpoints: ${move.reported.checkpoints.before} → ${move.reported.checkpoints.after}` : undefined,
-					move.status === "reported" && Array.isArray(move.reported?.changes) ? `changed paths: ${move.reported.changes.map((change) => change.path).join(", ") || "none"}` : undefined,
-					move.status === "reported" && move.reported?.proof ? `reported proof: ${move.reported.proof}` : undefined,
-					move.status === "reported" && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
-					move.status === "blocked" ? `blocked: ${move.blocked ?? "no reason recorded"}` : undefined,
-					move.status === "blocked" && move.reported?.closureGap ? `closure gap: ${move.reported.closureGap}` : undefined,
-					move.status === "done" ? `accepted${when(move.closed) ? ` ${when(move.closed)}` : ""}${move.outcome ? `: ${move.outcome}` : ""}` : undefined,
-					move.status === "done" && move.acceptedReview ? `acceptance review: ${move.acceptedReview}` : undefined,
-				]
-					.filter((line) => line !== undefined)
-					.join("\n"),
-				copy: itemLine(move),
-				target: { file, line: lines?.[move.id] },
-			});
-		}
-	}
-	const waits = !yolo && waiting(plan).length > 0;
-	return { header: [[[authorizationLine(plan, { yolo }), waits ? "warn" : "muted"], [waits ? "  Type /approve to snapshot the current move revisions." : "", "warn"]]], items };
-}
 
 /** What waits for the user: change moves and questions of taste. */
 export function requestsView({ brainDir, requests: provided, error } = {}) {
