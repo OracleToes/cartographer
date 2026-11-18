@@ -2560,6 +2560,7 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 		{ RUNTIME_ACTION },
 		{ TALK_ACTION },
 		{ WORKSPACE_ACTION },
+		{ SETTINGS_ACTION },
 	] = await Promise.all([
 		import("../src/screen/app.mjs"),
 		import("../src/application/context.mjs"),
@@ -2568,6 +2569,7 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 		import("../src/application/runtime-actions.mjs"),
 		import("../src/application/talk.mjs"),
 		import("../src/application/workspace.mjs"),
+		import("../src/application/settings-actions.mjs"),
 	]);
 	assert.match(KEYS_HELP, /1 to 6\s+go to a tab/, "the help sheet names the six-tab dispatcher");
 	assert.match(KEYS_HELP, /Ctrl-C\s+clear what you have typed/, "the help sheet keeps Ctrl-C as clear-line/quit, not stop");
@@ -2583,8 +2585,8 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 	assert.match(commands.get("consult")?.description ?? "", /consultation conference audits/, "the full-screen composer completes the terminal's consultation audit path");
 	assert.deepEqual(commands.get("consult")?.words, ["probe"], "the composer completes the native-grammar diagnostic subcommand");
 	assert.equal(commands.get("exit")?.description, "leave; the same as /quit", "the full-screen composer retains the terminal exit alias");
-	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION].flatMap((actions) => Object.values(actions));
-	assert.equal(registered.length, 30, "the complete application action registry has the expected phase-six surface");
+	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
+	assert.equal(registered.length, 32, "the application registry has the phase-six actions plus the authorized Settings edit/reset surface");
 	const unavailable = { enabled: false, reason: "Unavailable in this fixture." };
 	const entries = registered.map((action) => ({
 		action,

@@ -11,7 +11,8 @@ import { listConferences } from "../conference.mjs";
 import { composedRows, contextPath, loadContext, loadReport, shelfText } from "../context.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
-import { POLICY } from "../config.mjs";
+import { CONFIGURATION_SCHEMA, ConfigError, POLICY } from "../config.mjs";
+import { ConfigurationRepositoryError } from "../configuration/repository.mjs";
 import { loadTop, sinceTop } from "../top.mjs";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -119,6 +120,61 @@ const missing = (message, meta) => uiFailure(uiError({
 	retryable: false,
 }), { meta });
 
+const configurationValue = (value) => value === undefined || typeof value === "string" || typeof value === "boolean" || Number.isFinite(value)
+	? value
+	: Array.isArray(value) && value.every((entry) => typeof entry === "string") ? [...value] : undefined;
+const SOURCE_LAYERS = new Set(["default", "install", "project", "environment", "command-line"]);
+const sourceFact = (value, { includeValue = false } = {}) => {
+	if (!isRecord(value) || !SOURCE_LAYERS.has(value.layer)) return undefined;
+	const result = {
+		layer: value.layer,
+		...(nonEmpty(value.path) === undefined ? {} : { path: nonEmpty(value.path) }),
+		writable: value.writable === true,
+		...(nonEmpty(value.revision) === undefined ? {} : { revision: nonEmpty(value.revision) }),
+		...(SOURCE_LAYERS.has(value.overriddenBy) ? { overriddenBy: value.overriddenBy } : {}),
+	};
+	const saved = configurationValue(value.value);
+	return includeValue && (saved !== undefined || Object.hasOwn(value, "value")) ? { ...result, value: saved } : result;
+};
+/** Known configuration rows remain typed even when a custom Settings reader supplies other session facts. */
+const settingsProvenance = (configured) => {
+	if (!Array.isArray(configured?.rows)) return undefined;
+	const rawRows = new Map(configured.rows.filter(isRecord).map((row) => [row.key, row]));
+	const rows = CONFIGURATION_SCHEMA.keys.flatMap((key) => {
+		const raw = rawRows.get(key);
+		const value = configurationValue(raw?.effectiveValue);
+		const source = sourceFact(raw?.source);
+		if (raw === undefined || source === undefined || value === undefined && !Object.hasOwn(raw, "effectiveValue")) return [];
+		const detail = CONFIGURATION_SCHEMA.detail(key);
+		return [{
+			...detail,
+			effectiveValue: value,
+			displayValue: nonEmpty(raw.displayValue) ?? (value === undefined ? "not configured" : Array.isArray(value) ? value.join(", ") : String(value)),
+			source,
+			contributors: (Array.isArray(raw.contributors) ? raw.contributors : []).flatMap((entry) => {
+				const fact = sourceFact(entry, { includeValue: true });
+				return fact === undefined ? [] : [fact];
+			}),
+		}];
+	});
+	const layers = (Array.isArray(configured.layers) ? configured.layers : []).flatMap((entry) => {
+		const fact = sourceFact(entry);
+		return fact === undefined ? [] : [fact];
+	});
+	const revisions = isRecord(configured.revisions)
+		? Object.fromEntries(["install", "project"].flatMap((scope) => {
+			const revision = nonEmpty(configured.revisions[scope]);
+			return revision === undefined ? [] : [[scope, revision]];
+		}))
+		: {};
+	return {
+		rows,
+		layers,
+		revisions,
+		...(nonEmpty(configured.revision) === undefined ? {} : { revision: nonEmpty(configured.revision) }),
+	};
+};
+
 /** Keep the Settings projection deliberately narrow even when an integration supplies its own reader. */
 const settingsSnapshot = (snapshot) => {
 	if (!isRecord(snapshot)) return undefined;
@@ -127,6 +183,7 @@ const settingsSnapshot = (snapshot) => {
 	const pickText = (value, key) => nonEmpty(value?.[key]);
 	const pickBoolean = (value, key) => typeof value?.[key] === "boolean" ? value[key] : undefined;
 	const configured = source(snapshot.configuration);
+	const provenance = settingsProvenance(configured);
 	const configuration = {
 		provider: {
 			...(pickText(configured.provider, "server") === undefined ? {} : { server: pickText(configured.provider, "server") }),
@@ -149,6 +206,7 @@ const settingsSnapshot = (snapshot) => {
 			const value = pickText(configured.appearance, key);
 			return value === undefined ? [] : [[key, value]];
 		})),
+		...(provenance === undefined ? {} : provenance),
 	};
 	const policies = source(snapshot.policy);
 	const sandbox = source(policies.sandbox);
@@ -687,6 +745,18 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			if (projected === undefined) return unavailable("Settings & Safety status", "the running session did not provide a settings snapshot", ready.meta);
 			return uiSuccess(projected, { meta: ready.meta });
 		} catch (error) {
+			if (error instanceof ConfigurationRepositoryError && (error.code === "invalid-json" || error.code === "read-failed")) return uiFailure(uiError({
+				code: UI_ERROR_CODE.actionRefused,
+				kind: UI_ERROR_KIND.unavailable,
+				message: "The saved configuration cannot be read. Fix its JSON or file access, then refresh Settings.",
+				retryable: true,
+			}), { meta: ready.meta });
+			if (error instanceof ConfigError) return uiFailure(uiError({
+				code: UI_ERROR_CODE.invalidInput,
+				kind: UI_ERROR_KIND.validation,
+				message: error.message,
+				retryable: false,
+			}), { meta: ready.meta });
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,

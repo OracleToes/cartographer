@@ -1,6 +1,8 @@
 // The shared application facade consumed by both terminal adapters. Feature services remain deliberately narrow so
 // their domain seams stay reviewable, while this composition point gives capabilities, events, queries, and action
 // dispatch one stable home.
+import { CORE_DIR } from "../config.mjs";
+import { createConfigurationRepository } from "../configuration/repository.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplication } from "./context.mjs";
 import { createApplicationEvents } from "./events.mjs";
@@ -8,6 +10,7 @@ import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
 import { createRuntimeActivityReader, createRuntimeContextReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "./runtime.mjs";
 import { createSettingsReader } from "./settings.mjs";
+import { SETTINGS_ACTION, SETTINGS_CAPABILITY_DEFINITIONS, createSettingsApplication } from "./settings-actions.mjs";
 import { RUNTIME_ACTION, RUNTIME_CAPABILITY_DEFINITIONS, createRuntimeApplication } from "./runtime-actions.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
 import { REVIEW_ACTION, REVIEW_CAPABILITY_DEFINITIONS, createReviewApplication } from "./review.mjs";
@@ -47,6 +50,8 @@ const ACTION_SCOPES = Object.freeze({
 	[WORKSPACE_ACTION.add]: ["workspace", "context", "requests"],
 	[WORKSPACE_ACTION.addMove]: ["workspace", "requests"],
 	[WORKSPACE_ACTION.edit]: ["workspace", "context", "requests"],
+	[SETTINGS_ACTION.edit]: ["settings", "configuration"],
+	[SETTINGS_ACTION.reset]: ["settings", "configuration"],
 });
 
 const metadata = (options, now) => ({
@@ -59,6 +64,7 @@ const metadata = (options, now) => ({
  *   brainDir: string,
  *   root: string,
  *   config?: object,
+ *   configuration?: { coreDir?: string, env?: object, flags?: object, repository?: { read?: Function, update?: Function, paths?: object } },
  *   now?: () => number,
  *   events?: ReturnType<typeof createApplicationEvents>,
  *   jobs?: ReturnType<typeof createJobManager>,
@@ -72,9 +78,19 @@ const metadata = (options, now) => ({
  *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, asks?: any, activeTask?: () => unknown, work?: any, model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, models?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, gate?: { yolo?: boolean }, initiation?: { on?: boolean }, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, statusReader?: ReturnType<typeof createRuntimeStatusReader>, activityReader?: ReturnType<typeof createRuntimeActivityReader>, modelReader?: ReturnType<typeof createRuntimeModelsReader>, settingsReader?: ReturnType<typeof createSettingsReader>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
-export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, runtimeActions: runtimeActionOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
+export function createApplication({ brainDir, root, config = {}, configuration: configurationOptions = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, runtimeActions: runtimeActionOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
 	const eventStream = events;
 	const jobManager = jobs ?? createJobManager({ events: eventStream, now });
+	const configurationRepository = configurationOptions.repository ?? createConfigurationRepository({
+		coreDir: configurationOptions.coreDir ?? CORE_DIR,
+		brainDir,
+		env: configurationOptions.env ?? process.env,
+	});
+	const configurationContext = Object.freeze({
+		repository: configurationRepository,
+		env: configurationOptions.env ?? process.env,
+		flags: configurationOptions.flags ?? {},
+	});
 	const workspace = createWorkspaceApplication({ ...workspaceOptions, brainDir, root, config, now });
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
@@ -111,7 +127,9 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		gate: runtimeOptions.gate,
 		initiation: runtimeOptions.initiation,
 		modelReader: runtimeModelReader,
+		...configurationContext,
 	});
+	const settings = createSettingsApplication({ ...configurationContext, now });
 	const runtimeViewReader = runtimeOptions.viewReader ?? queryOptions.runtimeViewReader ?? createRuntimeViewReader({
 		engine: runtimeOptions.engine,
 		windows: runtimeOptions.windows,
@@ -126,6 +144,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		...REVIEW_CAPABILITY_DEFINITIONS,
 		...RUNTIME_CAPABILITY_DEFINITIONS,
 		...TALK_CAPABILITY_DEFINITIONS,
+		...SETTINGS_CAPABILITY_DEFINITIONS,
 	]);
 	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes, work: runtimeActionContext.work, models: runtimeActionContext.models });
 	const capabilities = Object.freeze({
@@ -140,6 +159,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 		...Object.values(REVIEW_ACTION).map((id) => [id, review]),
 		...Object.values(RUNTIME_ACTION).map((id) => [id, runtimeActions]),
 		...Object.values(TALK_ACTION).map((id) => [id, talk]),
+		...Object.values(SETTINGS_ACTION).map((id) => [id, settings]),
 	]);
 
 	const execute = async (action, input = {}, options = {}) => {
@@ -156,6 +176,14 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 			ok: result.ok,
 			...(result.meta.requestId === undefined ? {} : { requestId: result.meta.requestId }),
 		});
+		if (result.ok && (action === SETTINGS_ACTION.edit || action === SETTINGS_ACTION.reset) && result.data.changed === true) {
+			eventStream.publish("configuration.changed", {
+				action,
+				key: result.data.key,
+				scope: result.data.scope,
+				revision: result.data.revision,
+			});
+		}
 		if (result.ok) eventStream.publish("projection.invalidated", { action, scopes: ACTION_SCOPES[action] ?? [] });
 		return result;
 	};

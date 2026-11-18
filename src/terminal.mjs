@@ -119,6 +119,7 @@ export async function runTerminal(session, options) {
 		brainDir: options.brainDir,
 		root: options.root,
 		config,
+		configuration: options.configuration,
 		runtime: {
 			main,
 			context,

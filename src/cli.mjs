@@ -175,6 +175,7 @@ export async function main(argv) {
 			interactive,
 			contextWindow: config.contextWindow,
 			config,
+			configuration: { coreDir: CORE_DIR, env: process.env, flags },
 			root: project.root,
 			brainDir,
 			runner,
