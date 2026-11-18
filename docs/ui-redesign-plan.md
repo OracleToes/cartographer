@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration in progress — Chat is complete; Workspace is next.
+**Status:** Phase 5 view migration in progress — Chat and Workspace are complete; Review is next.
 
 **Date:** 2026-11-16
 
@@ -436,6 +436,8 @@ Migrate capability groups in this order:
 5. Settings & Safety: configuration, assessments, policy, and grammar diagnostics.
 
 **Chat completion record (2026-11-16).** Chat now receives activity labels, context-collapse recognition, and roster data through an application presentation adapter. Consult records enter only through the composition-owned settled projection lifecycle; line rendering starts no audit read or state transition. Conversation and Work remain free of conference material, while Consult names loading, empty, error, and cached-stale states. The existing kept-talk removal path remains confirmation-gated.
+
+**Workspace completion record (2026-11-16).** Atlas, Ledger, Plan, Requests, Tree, and Current shared brain now render settled application projections through the Workspace presentation adapter. Query projections carry file or project-location data, while the adapter supplies target formatting; no Workspace renderer imports a domain book or builds a durable path. The shared async boundary owns first-load, failure, and cached-stale state, while feature renderers retain their successful empty states. Existing typed workspace actions and their destructive confirmation route remain unchanged.
 
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 

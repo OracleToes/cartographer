@@ -1,4 +1,5 @@
-// What tabs 2 to 5 of the full screen hold: the brain, the changes, the shell windows, and the context.
+// The legacy Review and Runtime views of the full screen: changes, shell windows, and context.
+// Workspace's migrated renderers live in workspace.mjs.
 //
 // Each function here turns one already-read brain or session projection into what a list shows
 // (src/screen/list.mjs): a few lines for the top, and items that fold. Rendering has no legacy readers: deferred
@@ -33,8 +34,6 @@ const when = (value) => {
 	const ms = typeof value === "number" ? value : Date.parse(value ?? "");
 	return Number.isFinite(ms) ? stamp(ms) : undefined;
 };
-
-// ─── Carto ──────────────────────────────────────────────────────────────────
 
 // ─── Diff ───────────────────────────────────────────────────────────────────
 
