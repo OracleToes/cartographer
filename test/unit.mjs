@@ -474,6 +474,50 @@ test("application: review queries defer checkpoint and Git projections", async (
 	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
 });
 
+test("application: assessment projection defers its runtime summary", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const reads = { assessment: 0, atlas: 0, top: 0, since: 0 };
+	const assessment = { text: "The project has a bounded assessment.", written: Date.parse(NOW) };
+	const atlas = { nodes: [] };
+	const top = { at: NOW, reason: "the initial summary" };
+	const changes = { assessment: false, written: ["docs"], removed: [] };
+	const queries = createWorkspaceQueries({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		runtimeReaders: {
+			loadAssessment: () => { reads.assessment++; return assessment; },
+			loadAtlas: () => { reads.atlas++; return { atlas }; },
+			loadTop: () => { reads.top++; return top; },
+			sinceTop: (dir, current, text) => {
+				reads.since++;
+				assert.equal(dir, brainDir);
+				assert.equal(current, atlas);
+				assert.equal(text, assessment.text);
+				return changes;
+			},
+		},
+	});
+	const pending = queries.runtime.assessment({ requestId: "assessment-query" });
+	assert.deepEqual(reads, { assessment: 0, atlas: 0, top: 0, since: 0 }, "assessment and top readers leave the command/render stack before inspecting disk");
+	const result = await pending;
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.data.assessment, assessment);
+	assert.equal(result.data.atlas, atlas);
+	assert.equal(result.data.top, top);
+	assert.equal(result.data.changes, changes);
+	assert.equal(result.meta.requestId, "assessment-query");
+	assert.deepEqual(reads, { assessment: 1, atlas: 1, top: 1, since: 1 });
+	const controller = new AbortController();
+	controller.abort();
+	const cancelled = await queries.runtime.assessment({ signal: controller.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled assessment projection must not inspect durable runtime state");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual(reads, { assessment: 1, atlas: 1, top: 1, since: 1 });
+});
+
 test("application: consult projection defers its isolated audit list", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let reads = 0;

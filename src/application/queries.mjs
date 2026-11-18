@@ -3,7 +3,7 @@
 // The durable books still use their established synchronous readers internally. This facade is the only place a
 // presentation adapter asks for them: reads are deferred from render/key stacks, cancellation is explicit, and
 // malformed local state becomes a typed unavailable outcome rather than display-text parsing.
-import { assessmentPath } from "../assessment.mjs";
+import { assessmentPath, loadAssessment } from "../assessment.mjs";
 import { activeMoveOverlays, atlasPath, attentionSnapshot, fileMarks, loadAtlas } from "../atlas.mjs";
 import { changeSince, lastChange, uncommitted } from "../checkpoints.mjs";
 import { listConferences } from "../conference.mjs";
@@ -11,6 +11,7 @@ import { composedRows, contextPath, loadContext, loadReport, shelfText } from ".
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
 import { POLICY } from "../config.mjs";
+import { loadTop, sinceTop } from "../top.mjs";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { projectFiles } from "../tools/look.mjs";
@@ -36,6 +37,10 @@ export const REVIEW_QUERY = Object.freeze({
 
 export const CONSULT_QUERY = Object.freeze({
 	list: "consult.list",
+});
+
+export const RUNTIME_QUERY = Object.freeze({
+	assessment: "runtime.assessment",
 });
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -84,6 +89,7 @@ const afterCurrentTurn = () => new Promise((resolve) => queueMicrotask(resolve))
 const DEFAULT_READERS = Object.freeze({ loadAtlas, loadLedger, loadPlan, loadContext });
 const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommitted });
 const DEFAULT_CONSULT_READERS = Object.freeze({ listConferences });
+const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtlas, sinceTop });
 
 /**
  * @param {{
@@ -92,10 +98,11 @@ const DEFAULT_CONSULT_READERS = Object.freeze({ listConferences });
  *   readers?: typeof DEFAULT_READERS,
  *   reviewReaders?: typeof DEFAULT_REVIEW_READERS,
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
+ *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -348,6 +355,27 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 	};
 	const consult = Object.freeze({ list: consultList });
 
+	const runtimeAssessment = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			const assessment = runtimeReaders.loadAssessment(brainDir);
+			const atlasResult = runtimeReaders.loadAtlas(brainDir);
+			const atlas = atlasResult?.atlas;
+			const top = runtimeReaders.loadTop(brainDir);
+			const changes = atlas === undefined || top === undefined ? undefined : runtimeReaders.sinceTop(brainDir, atlas, assessment.text);
+			return uiSuccess({ assessment, atlas, top, changes, atlasError: atlasResult?.error }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read the runtime assessment.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const runtime = Object.freeze({ assessment: runtimeAssessment });
+
 	const entry = async (input, options = {}) => {
 		const ready = await prepare(options);
 		if (ready.result !== undefined) return ready.result;
@@ -387,5 +415,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, review, consult, entry });
+	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, review, consult, runtime, entry });
 }

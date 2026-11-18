@@ -20,7 +20,7 @@ import { modelContextWindow, POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
-import { assessmentPath, loadAssessment } from "./assessment.mjs";
+import { loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasSummary, attentionSnapshot, attentionSummary, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
@@ -37,7 +37,7 @@ import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableM
 import { approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
-import { loadTop, sinceTop, splitTop } from "./top.mjs";
+import { splitTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
 import { eventLine, isNote, isNoChat, startNote, wakeNote, withoutQuietWakes } from "./wake.mjs";
 import { questionText, spanOf } from "./tools/ask.mjs";
@@ -1483,14 +1483,15 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "assessment": {
-				const assessment = loadAssessment(options.brainDir);
-				line(assessment.text === "" ? "  No assessment yet. The agent writes one when it knows the project." : assessment.text);
-				const top = loadTop(options.brainDir);
-				const { atlas } = loadAtlas(options.brainDir);
-				const behind = atlas !== undefined && top !== undefined ? sinceTop(options.brainDir, atlas, assessment.text) : undefined;
-				const lag = behind !== undefined && (behind.assessment || behind.written.length > 0 || behind.removed.length > 0);
-				if (top !== undefined) line(dim(`  The copy at the top of the agent's context is from ${stamp(Date.parse(top.at))} (${top.reason})${lag ? "; the assessment or the graph changed since. It is rewritten when a goal closes, on /new, or with /pin" : " and is current"}.`));
-				line(dim(`  ${assessmentPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
+				const result = await queries.runtime.assessment();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else {
+					const { assessment, top, changes } = result.data;
+					line(assessment.text === "" ? "  No assessment yet. The agent writes one when it knows the project." : assessment.text);
+					const lag = changes !== undefined && (changes.assessment || changes.written.length > 0 || changes.removed.length > 0);
+					if (top !== undefined) line(dim(`  The copy at the top of the agent's context is from ${stamp(Date.parse(top.at))} (${top.reason})${lag ? "; the assessment or the graph changed since. It is rewritten when a goal closes, on /new, or with /pin" : " and is current"}.`));
+				}
+				line(dim(`  ${queries.paths.assessment} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "pin": {
