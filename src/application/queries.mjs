@@ -47,6 +47,7 @@ export const RUNTIME_QUERY = Object.freeze({
 	context: "runtime.context",
 	shells: "runtime.shells",
 	shellOutput: "runtime.shell-output",
+	wakes: "runtime.wakes",
 	sent: "runtime.sent",
 	preview: "runtime.preview",
 });
@@ -105,7 +106,7 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
- *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
+ *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
@@ -462,6 +463,26 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
+	/** Wake schedules are another mutable runtime manager; the strip consumes this snapshot instead of reading it while it paints. */
+	const runtimeWakes = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			const snapshot = typeof runtimeViewReader?.wakes === "function"
+				? await runtimeViewReader.wakes({ signal: options.signal })
+				: undefined;
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			const wakes = Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.wakes) ? snapshot.wakes : [];
+			return uiSuccess({ wakes }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read the wake schedule.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
 	/** The selected shell's kept output is a separate projection, so rendering does not ask a live process manager. */
 	const runtimeShellOutput = async ({ name, ...options } = {}) => {
 		const ready = await prepare(options);
@@ -528,6 +549,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		context: runtimeContext,
 		shells: runtimeShells,
 		shellOutput: runtimeShellOutput,
+		wakes: runtimeWakes,
 		sent: runtimeSent,
 		preview: runtimePreview,
 	});

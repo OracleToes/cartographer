@@ -107,6 +107,7 @@ export async function runTerminal(session, options) {
 			context,
 			engine,
 			windows,
+			wakes,
 			preview: session.preview,
 			runner: options.runner,
 			contextWindow: () => options.contextWindow,

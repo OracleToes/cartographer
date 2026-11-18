@@ -527,7 +527,7 @@ export async function runScreen(session, options, runTerminal) {
 			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
 			second.push([` · ${windows.length === 1 ? "1 window" : `${windows.length} windows`}${running > 0 ? `, ${running} busy` : ""}`, running > 0 ? "" : "muted"]);
 		}
-		const wakes = session.wakes?.list() ?? [];
+		const wakes = projectionFor?.("runtime.wakes").data?.wakes ?? [];
 		if (wakes.length > 0) second.push([` · ${wakes.length === 1 ? "1 wake" : `${wakes.length} wakes`}`, "muted"]);
 		if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 		if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
@@ -582,6 +582,7 @@ export async function runScreen(session, options, runTerminal) {
 			context: session.context,
 			engine: session.engine,
 			windows: session.windows,
+			wakes: session.wakes,
 			preview: session.preview,
 			runner: options.runner,
 			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
@@ -610,6 +611,7 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.git": ({ signal }) => queries.review.git({ signal }),
 		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
 		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
+		"runtime.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
 		"context.window": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
 		"context.main": ({ signal }) => queries.runtime.sent({ scope: "main", signal }),
 		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
@@ -628,6 +630,7 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.git": "Git changes",
 		"shells.list": "Shell windows",
 		"shells.out": "Shell output",
+		"runtime.wakes": "Wake schedule",
 		"context.window": "Latest sent provider request",
 		"context.main": "Main sent provider request",
 		"context.raw": "Raw provider payload",
@@ -663,6 +666,13 @@ export async function runScreen(session, options, runTerminal) {
 		return query === undefined ? false : projections.refresh(id, query, { force });
 	};
 	const cancelProjection = (id) => projections.cancel(id);
+	let wakesProjectionAt = 0;
+	/** The strip owns one timed Runtime snapshot rather than asking the live wake manager while it renders. */
+	const refreshWakeProjection = (force = false) => {
+		if (!force && Date.now() - wakesProjectionAt < EVERY.shells) return false;
+		wakesProjectionAt = Date.now();
+		return refreshProjection("runtime.wakes", force);
+	};
 	const invalidateProjections = () => projections.invalidate();
 	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
 	const stopApplicationEvents = application.events.subscribe((event) => {
@@ -707,7 +717,7 @@ export async function runScreen(session, options, runTerminal) {
 	settleProjection = (id) => {
 		if (state.closed) return;
 		rebuild(id);
-		if (viewId() === id) draw();
+		if (viewId() === id || id === "runtime.wakes") draw();
 	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
@@ -1722,6 +1732,7 @@ export async function runScreen(session, options, runTerminal) {
 		// The window of the conversation has another height than the one it was last drawn for (the screen was
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
+		refreshWakeProjection();
 		const busy = core.busy();
 		if (Date.now() - lastFrame >= (busy ? SPIN_MS : POLICY.timing.screen.idleFrameMs)) {
 			lastFrame = Date.now();
@@ -1752,6 +1763,7 @@ export async function runScreen(session, options, runTerminal) {
 	process.once("exit", onExit);
 	process.stdin.on("data", watchInput);
 	tui.start();
+	refreshWakeProjection(true);
 	terminal.setTitle(`carto · ${basename(root)}`);
 	tui.setFocus(prompt);
 	askColors();

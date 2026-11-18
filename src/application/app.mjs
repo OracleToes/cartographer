@@ -55,7 +55,7 @@ const metadata = (options, now) => ({
  *   requests?: Parameters<typeof createRequestApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
- *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
+ *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
 export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
@@ -78,6 +78,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 	const runtimeViewReader = runtimeOptions.viewReader ?? queryOptions.runtimeViewReader ?? createRuntimeViewReader({
 		engine: runtimeOptions.engine,
 		windows: runtimeOptions.windows,
+		wakes: runtimeOptions.wakes,
 		preview: runtimeOptions.preview,
 	});
 	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeViewReader });

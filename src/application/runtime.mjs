@@ -45,10 +45,11 @@ export function createRuntimeContextReader({ main, context, engine, brainDir, ro
  * @param {{
  *   engine?: { window?: (scope?: "main" | "newest") => any },
  *   windows?: { list?: (tail?: number) => any[], linesFrom?: (name: string, from: number, options?: { partial?: boolean }) => string[] },
+ *   wakes?: { list?: () => any[] },
  *   preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any,
  * }} options
  */
-export function createRuntimeViewReader({ engine, windows, preview } = {}) {
+export function createRuntimeViewReader({ engine, windows, wakes, preview } = {}) {
 	const list = (tail) => {
 		const listed = typeof windows?.list === "function" ? windows.list(tail) : [];
 		return Array.isArray(listed) ? listed : [];
@@ -67,6 +68,10 @@ export function createRuntimeViewReader({ engine, windows, preview } = {}) {
 				? windows.linesFrom(window.name, 0, { partial: true }).slice(-tail)
 				: [];
 			return { ...(window === undefined ? {} : { window }), lines };
+		},
+		wakes() {
+			const listed = typeof wakes?.list === "function" ? wakes.list() : [];
+			return { wakes: Array.isArray(listed) ? listed : [] };
 		},
 		async preview({ signal } = {}) {
 			if (signal?.aborted === true || typeof preview !== "function") return undefined;

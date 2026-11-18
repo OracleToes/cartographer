@@ -14,6 +14,7 @@ import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
+import { createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
@@ -646,9 +647,9 @@ test("application: active-context accounting is a deferred typed runtime project
 	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
 });
 
-test("application: runtime view projections defer shell, engine, and preview snapshots", async (t) => {
+test("application: runtime view projections defer shell, wake, engine, and preview snapshots", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, preview: 0 };
+	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, preview: 0 };
 	const sent = {
 		task: false,
 		requestId: "main:1",
@@ -659,6 +660,8 @@ test("application: runtime view projections defer shell, engine, and preview sna
 		collapsedSince: false,
 	};
 	const window = { name: "main", state: "busy", command: "npm test", running: 1_200, cwd: ".", network: false, sandbox: true, asks: false, tail: ["TAP version 13"] };
+	const wake = { id: "w1", kind: "time", at: Date.parse(NOW) + 1_000 };
+	const wakeReader = createRuntimeViewReader({ wakes: { list: () => { reads.wakes++; return [wake]; } } });
 	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
 	const queries = createWorkspaceQueries({
 		brainDir,
@@ -668,6 +671,7 @@ test("application: runtime view projections defer shell, engine, and preview sna
 			sent: (scope) => { reads.sent++; return scope === "main" ? sent : { ...sent, requestId: "newest:1" }; },
 			shells: ({ tail }) => { reads.shells++; assert.equal(tail, POLICY.limits.screen.windowsListed); return { windows: [window] }; },
 			shellOutput: ({ name, tail }) => { reads.output++; assert.equal(name, "main"); assert.equal(tail, POLICY.limits.screen.shellViewLines); return { window, lines: ["TAP version 13"] }; },
+			wakes: wakeReader.wakes,
 			preview: async () => { reads.preview++; return preview; },
 		},
 	});
@@ -687,11 +691,23 @@ test("application: runtime view projections defer shell, engine, and preview sna
 	if (!output.ok) throw new Error(output.error.message);
 	assert.equal(output.data.window, window);
 	assert.deepEqual(output.data.lines, ["TAP version 13"]);
+	const wakes = await queries.runtime.wakes();
+	assert.equal(wakes.ok, true);
+	if (!wakes.ok) throw new Error(wakes.error.message);
+	assert.deepEqual(wakes.data.wakes, [wake]);
 	const planned = await queries.runtime.preview();
 	assert.equal(planned.ok, true);
 	if (!planned.ok) throw new Error(planned.error.message);
 	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, preview: 1 });
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, preview: 1 });
+	const stoppedWakes = new AbortController();
+	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
+	stoppedWakes.abort();
+	const cancelledWakes = await cancelledWakesPending;
+	assert.equal(cancelledWakes.ok, false);
+	if (cancelledWakes.ok) throw new Error("a cancelled wake projection must not reach its live reader");
+	assert.equal(cancelledWakes.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(reads.wakes, 1);
 	const stopped = new AbortController();
 	const cancelledPending = queries.runtime.preview({ signal: stopped.signal });
 	stopped.abort();
@@ -700,6 +716,17 @@ test("application: runtime view projections defer shell, engine, and preview sna
 	if (cancelled.ok) throw new Error("a cancelled Runtime view projection must not reach its live reader");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
 	assert.equal(reads.preview, 1);
+	const brokenWakes = createWorkspaceQueries({
+		brainDir,
+		root,
+		runtimeViewReader: { wakes: () => { throw new Error("wake manager failed"); } },
+	});
+	const wakeFailure = await brokenWakes.runtime.wakes();
+	assert.equal(wakeFailure.ok, false);
+	if (wakeFailure.ok) throw new Error("a failed runtime reader must remain a typed outcome");
+	assert.equal(wakeFailure.error.kind, UI_ERROR_KIND.internal);
+	assert.equal(wakeFailure.error.retryable, true);
+	assert.match(wakeFailure.error.message, /wake schedule/i);
 	const { contextView, previewView, rawPayloadView, shellsOutView, shellsView } = await import("../src/screen/views.mjs");
 	assert.match(shellsView(shells.data).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
 	assert.match(shellsOutView(output.data).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
