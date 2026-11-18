@@ -2,7 +2,7 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.brain/`, which holds the agent's memory of that project.
 
-Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, and Model. Model includes the current route's native-GBNF readiness as well as provider-request inspection. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, Model, and Settings. Model includes the current route's native-GBNF readiness and provider-request inspection; Settings shows configuration, session policy, provider diagnostics, and assessment without authorizing anything. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
@@ -44,7 +44,7 @@ Enter or `y` sets up the brain and starts a session. Anything else leaves the fo
 On a terminal `carto` takes the whole screen. `carto --plain` gives the line-by-line terminal described further down instead, and so does `"screen": false` in the settings; with `-p` or piped input it is always the plain one.
 
 ```
- Cartographer   1 Chat  2 Carto  3 Diff  4 Shells  5 Model
+ Cartographer   1 Chat  2 Carto  3 Diff  4 Shells  5 Model  6 Settings
  Conversation · Work · Consult
 
 ▎› add a seed option to the roller
@@ -73,8 +73,10 @@ The screen is deliberately static: the filled top tab is the primary location, t
 | **3 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
 | **4 Shells** | The shell windows, live, plus **Wakes**. Open a window for its newest lines or its terminal-emulator output; Wakes lists the main agent's scheduled time, file, and window triggers. |
 | **5 Model** | **Routes**, **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. Routes shows discovered model names, the active route's native-GBNF readiness, and an explicit connect/select control; the other views separate frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
+| **6 Settings · Safety** | The configured provider and limits, the live approval, initiation, and sandbox policy, plus separate route-listing and native llama.cpp GBNF diagnostics. It reports the backend-owned state; it does not authorize agent work. |
+| **6 Settings · Assessment** | The current durable assessment and whether its top-of-context copy is current, stale, or missing. A current assessment can be opened in the editor; the top copy changes only through its safe refresh path. |
 
-Carto through Model are lists of items that fold. Chat's Conversation and Work use the ordinary local event feed; Consult reads only its private conference audit and live child activity. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it. Carto is read again while it shows; Diff, Shells, and Model refresh more often.
+Carto through Settings are lists of items that fold. Chat's Conversation and Work use the ordinary local event feed; Consult reads only its private conference audit and live child activity. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it.
 
 **Two modes.** As in vi, and **Esc** goes from one to the other. The place to type, at the bottom, shows which you are in.
 
@@ -85,12 +87,12 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 
 | In commands mode | |
 |---|---|
-| `1` to `5` | Go to a tab. |
-| `[` and `]` | Previous and next view inside Chat, Carto, Diff, Shells, and Model (`H` and `L` do the same). |
+| `1` to `6` | Go to a tab: Chat, Carto, Diff, Shells, Model, or Settings. |
+| `[` and `]` | Previous and next view inside the tab that shows (`H` and `L` do the same). |
 | `j`, `k` | Move down and up. `g` and `G` go to the first and last row. |
 | Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Chat Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Consult, it opens an attributed audit block or folds a conference. In Shells, Enter opens a window's output and goes back from it; in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another listed route. |
 | `+` and `-` | Open everything or fold everything (`zR` and `zM` do the same). |
-| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. |
+| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. In Settings → Assessment, it opens the current durable assessment; Safety rows are descriptive and read-only. |
 | `d` | In Chat Conversation, press twice to **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. Work and Consult are private and cannot be removed from future kept talk. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. In Shells → Wakes, it opens confirmation before removing the selected wake. |
 | `u` | In Diff, confirm **Undo last checkpoint change**. Active shell changes are checkpointed first, so the dialog may name a shell window. Recovery restores that checkpoint's changed files; a move's revision returns to unapproved review. A cut-off task warns that recovery returns the project to its earlier checkpoint. |
 | `f`, `v`, `x`, `t`, `n` | On the relevant Carto row: fold a report, archive a brain record out of what the agent reads, unshelve a file, settle a record, or create a new entry. `a` shelves from Current shared brain or approves in Requests. |
@@ -104,14 +106,19 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 |---|---|
 | Tab, Shift-Tab | Next and previous tab. While typing, Tab completes once there is text. |
 | PgUp, PgDn, wheel | Scroll. Ctrl-Home and Ctrl-End go to the top and end. |
-| Ctrl-T | Show or hide private reasoning and notes in Work and Consult. Nothing is added to the conversation. |
-| Ctrl-C | Copy selected mouse text. With nothing selected: stop the agent; with the agent at rest, leave. |
+| Ctrl-Shift-F | Search the tab that shows. Where the terminal cannot send it, use Esc then `/`. |
+| Ctrl-T | Show or hide the agent's private reasoning and notes. Nothing is added to the conversation. |
+| Ctrl-C | Clear what you typed. With the line empty, press it again soon after to leave, as `/quit` does. |
+| Ctrl-X | Stop the agent. |
+| Ctrl-V | Pause the agent in its stream; it starts nothing on its own until you unpause or write a line or command. |
+| Ctrl-K | Open the command palette for navigation and registered actions. |
 | Ctrl-L | Draw the screen again. |
-| F1 | Show the keys. |
+| Ctrl-O | Open the selected source or template in `$EDITOR`. |
+| `?`, F1 | Show the keys. |
 
 **The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. A quieter third row keeps the relevant key reminder beside the input.
 
-#### Chat, Work, Consult, and Model
+#### Chat, Work, Consult, Model, and Settings
 
 Conversation is the steering wheel: it deliberately excludes reasoning, ordinary assistant text, tool work, and harness notices. Work is the private trace of ordinary agent/focus activity. Consult is a distinct, read-only projection of only the local `co<N>` conference audit plus its live child state: each contribution is visibly attributed to a consult member, while host debate-routing and final-report decisions, reasoning, chat/prose, calls, and results have separate blocks. It remains advisory—neither parent history nor project authority—and is never rendered in ordinary Work. A collapse or the screen's item limit can remove ordinary local rows from view without erasing the Durable transcript; a conference's durable audit remains consult-local.
 
@@ -128,6 +135,8 @@ Model has six distinct views:
 - **Current accounting** is fresh context accounting, not a sent payload and not a promise of a next request.
 
 A sent request is the payload Cartographer passed to the provider, not proof of a server's hidden chat-template prompt. A sent row has no edit or delete action. Current ledger, shelf, report, and context-store records remain in Carto's **Current shared brain**; they are never unfolded as though they were part of an old frozen request.
+
+Settings keeps configuration and policy state descriptive. A route-listing result never establishes readiness: only a successful native llama.cpp GBNF proof does. Blocked and disconnected diagnostics stay visible, and Cartographer does not fall back to ordinary tool calls or prompt-only decisions. The live approval, initiation, and sandbox state says what the backend will enforce; selecting or copying a Settings row cannot change it. Assessment distinguishes the durable text from its byte-stable top-of-context copy, which becomes current only through the existing safe refresh path.
 
 **Copying.** Drag over text to select it, and it is copied when you let go. `/copy` copies the last delivered agent speech, `/copy session` exports the local session projection, `/copy report` exports the last task report, and `/copy tab` exports the tab that shows. In Consult, copying a conference exports only that private conference timeline; copying a member block exports its persona-attributed block. The files go under `.brain/export/`.
 
