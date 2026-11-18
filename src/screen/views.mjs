@@ -16,7 +16,7 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, fileMarks, loadAtlas, renderAttention } from "../atlas.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
-import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, splitReadTail } from "../context.mjs";
+import { estimate, isFront, loadContext, loadReport, recordLine, sameShelfItem, shelfLabel, shelfText, composedRows, splitReadTail } from "../context.mjs";
 import { entryLine, loadLedger } from "../ledger.mjs";
 import { authorizationLine, itemLine, loadPlan, movesOf, planPath, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
@@ -757,7 +757,7 @@ export function textView(text) {
 	return { header: [], items: String(text ?? "").replace(/\n+$/, "").split("\n").map((line, index) => ({ key: `line:${index}`, plain: true, head: [[line, /^\s*!/.test(line) ? "warn" : ""]] })) };
 }
 
-/** Current `/context` accounting, deliberately not a historical request inspector or a preview. */
+/** Current active-context accounting, deliberately not a historical request inspector or a preview. */
 export function accountingView(text) {
 	const view = textView(text);
 	return {
@@ -767,6 +767,52 @@ export function accountingView(text) {
 			[["Calculated now from the active conversation and brain. It is neither a sent provider payload nor a promise of the next request.", "muted"]],
 		],
 	};
+}
+
+/**
+ * Render the typed Runtime accounting projection. This deliberately formats data from the application facade rather
+ * than capturing and parsing the terminal's `/context` words, so a screen refresh cannot turn a presentation adapter
+ * into its data source.
+ */
+export function accountingProjectionView({ messages = [], sizes = {}, contextWindow } = {}, { config = {} } = {}) {
+	const tokens = (value) => Number.isFinite(value) ? short(value) : "?";
+	const plural = (value, word) => `${value} ${word}${value === 1 ? "" : "s"}`;
+	const rows = [];
+	const row = (name, value, what) => rows.push(`    ${name.padEnd(8)}${tokens(value).padStart(7)}   ${what}`);
+	const window = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : undefined;
+	const known = [sizes.fixed, sizes.top, sizes.front?.total, sizes.work, sizes.state].reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+	if (sizes.fixed === undefined) rows.push(`  The agent's context: of ${tokens(window)} tokens, not measured yet (nothing has been sent in this run of carto yet; the parts below are estimates, without the prompt and the tools)`);
+	else rows.push(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(window)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (measured, as the server counted it; the parts below are estimates)"}`);
+	row("fixed", sizes.fixed, "the prompt and the tools; never changes");
+	row("top", sizes.top, "the assessment and the graph, as copied at the last collapse");
+	if (sizes.front === undefined) row("kept", 0, "nothing yet: the context has not been collapsed");
+	else {
+		const kept = sizes.front.tokens ?? {};
+		row("record", kept.record, `${plural(sizes.front.kept?.tasks ?? 0, "finished task")}, one line each`);
+		row("shelf", kept.shelf, (sizes.front.shelf ?? []).length === 0 ? "empty" : (sizes.front.shelf ?? []).map((item) => `${shelfLabel(item)} [${item.id}]`).join(", "));
+		row("talk", kept.talk, `${plural(sizes.front.kept?.talk ?? 0, "message")} between you and the agent${Number.isFinite(config.chatWindow) ? `, of at most ${tokens(config.chatWindow)} tokens` : ""}`);
+	}
+	const since = messages.filter((message) => !isFront(message)).length;
+	const from = sizes.front === undefined ? "the start" : "the last collapse";
+	row("work", sizes.work, since === 0 ? `nothing since ${from}` : `${plural(since, "message")} since ${from}; a collapse frees about ${tokens(sizes.frees)}`);
+	row("state", sizes.state, "the state block, written anew for every request");
+	const store = sizes.store ?? { shelf: [], rows: [] };
+	const shelf = Array.isArray(store.shelf) ? store.shelf : [];
+	const keptShelf = sizes.front?.shelf ?? [];
+	const waiting = shelf.filter((item) => !keptShelf.some((entry) => sameShelfItem(entry, item)));
+	const leaving = keptShelf.filter((entry) => !shelf.some((item) => sameShelfItem(entry, item)));
+	if (waiting.length > 0) rows.push(`  new shelf snapshots, in view now and carried into the next collapse: ${waiting.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}`);
+	if (leaving.length > 0) rows.push(`  taken off the shelf, gone at the next collapse: ${leaving.map((item) => `${shelfLabel(item)} [${item.id}]`).join(", ")}`);
+	const records = composedRows(store);
+	if (records.length > 0) {
+		rows.push(`  kept reports: ${records.length} (${records[0].id} to ${records.at(-1).id}); the newest:`);
+		for (const record of records.slice(-POLICY.limits.terminal.recentReports)) rows.push(`    ${recordLine(record)}`);
+	}
+	if (store.last !== undefined) rows.push(`  last collapse: ${stamp(store.last.at)} (${store.last.reason ?? "unknown reason"})${store.last.before !== undefined && store.last.after !== undefined ? `, about ${tokens(store.last.before)} → ${tokens(store.last.after)} tokens` : ""}`);
+	const next = Number.isFinite(config.collapseTokens) ? `once ${tokens(config.collapseTokens)} tokens would go` : "at the configured threshold";
+	const away = Number.isFinite(config.collapseMinutes) && config.collapseMinutes > 0 ? ` or you have been away ${took(config.collapseMinutes * 60_000)}` : "";
+	rows.push(`  next: while the agent rests, ${next}${away}; when a goal closes; while it works, at ${tokens(sizes.full)} tokens. /collapse does it now.`);
+	return accountingView(rows.join("\n"));
 }
 
 /**

@@ -587,6 +587,55 @@ test("application: review queries defer checkpoint and Git projections", async (
 	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
 });
 
+test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let reads = 0;
+	const store = loadContext(brainDir);
+	const queries = createWorkspaceQueries({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		runtimeContextReader: async () => {
+			reads++;
+			return {
+				messages: [{ role: "user", content: "Current words" }],
+				sizes: {
+					fixed: 120,
+					top: 24,
+					work: 8,
+					frees: 4,
+					state: 12,
+					full: 900,
+					store,
+				},
+				contextWindow: 1_000,
+			};
+		},
+	});
+	const pending = queries.runtime.context({ requestId: "runtime-context" });
+	assert.equal(reads, 0, "live conversation accounting leaves the current render/key stack before it reaches the session reader");
+	const result = await pending;
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.meta.requestId, "runtime-context");
+	assert.equal(result.data.contextWindow, 1_000);
+	assert.equal(result.data.sizes.fixed, 120);
+	assert.equal(reads, 1);
+	const controller = new AbortController();
+	const cancelledPending = queries.runtime.context({ signal: controller.signal });
+	controller.abort();
+	const cancelled = await cancelledPending;
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled runtime projection must not ask the session for accounting");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(reads, 1);
+	const { accountingProjectionView } = await import("../src/screen/views.mjs");
+	const view = accountingProjectionView(result.data, { config: { chatWindow: 200, collapseTokens: 400, collapseMinutes: 0 } });
+	const shown = [...view.header, ...view.items.map((item) => item.head)].flat().flat().map((part) => Array.isArray(part) ? part[0] : part).join("\n");
+	assert.match(shown, /Current active-context accounting/);
+	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
+});
+
 test("application: assessment projection defers its runtime summary", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const reads = { assessment: 0, atlas: 0, top: 0, since: 0 };

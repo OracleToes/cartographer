@@ -35,7 +35,7 @@ import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { approvalWords } from "./requests.mjs";
-import { stateBlock, splitState, windowLines } from "./state.mjs";
+import { splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { splitTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
@@ -210,7 +210,18 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
-	const application = options.application ?? createApplication({ brainDir: options.brainDir, root: options.root, config });
+	const application = options.application ?? createApplication({
+		brainDir: options.brainDir,
+		root: options.root,
+		config,
+		runtime: {
+			main,
+			context,
+			engine,
+			runner: options.runner,
+			contextWindow: () => options.contextWindow,
+		},
+	});
 	const queries = application.queries;
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
@@ -1387,13 +1398,17 @@ export async function runTerminal(session, options) {
 			}
 			case "context": {
 				if (engine === undefined) return true;
-				const view = await main.context(context);
-				const block = stateBlock(options.brainDir, options.runner, { root: options.root, config });
-				const sizes = engine.sizes(view.messages, block);
+				const projection = await queries.runtime.context();
+				if (!projection.ok) {
+					line(`! ${projection.error.message}`);
+					return true;
+				}
+				const { messages, sizes } = projection.data;
+				const contextWindow = projection.data.contextWindow ?? options.contextWindow;
 				const row = (name, n, what) => line(`    ${name.padEnd(8)}${tokens(n).padStart(7)}   ${what}`);
 				const known = [sizes.fixed, sizes.top, sizes.front?.total, sizes.work, sizes.state].reduce((sum, n) => sum + (n ?? 0), 0);
-				if (sizes.fixed === undefined) line(`  The agent's context: of ${tokens(options.contextWindow)} tokens, not measured yet (nothing has been sent in this run of carto yet; the parts below are estimates, without the prompt and the tools)`);
-				else line(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(options.contextWindow)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (measured, as the server counted it; the parts below are estimates)"}`);
+				if (sizes.fixed === undefined) line(`  The agent's context: of ${tokens(contextWindow)} tokens, not measured yet (nothing has been sent in this run of carto yet; the parts below are estimates, without the prompt and the tools)`);
+				else line(`  The agent's context: about ${tokens(sizes.used ?? known)} of ${tokens(contextWindow)} tokens${sizes.used === undefined ? " (estimated; the server has not counted it yet)" : " (measured, as the server counted it; the parts below are estimates)"}`);
 				row("fixed", sizes.fixed, "the prompt and the tools; never changes");
 				row("top", sizes.top, "the assessment and the graph, as copied at the last collapse");
 				if (sizes.front === undefined) row("kept", 0, "nothing yet: the context has not been collapsed");
@@ -1403,7 +1418,7 @@ export async function runTerminal(session, options) {
 					row("shelf", t.shelf, (sizes.front.shelf ?? []).length === 0 ? "empty" : (sizes.front.shelf ?? []).map((item) => `${shelfLabel(item)} [${item.id}]`).join(", "));
 					row("talk", t.talk, `${plural(sizes.front.kept?.talk ?? 0, "message")} between you and the agent, of at most ${tokens(config.chatWindow)} tokens`);
 				}
-				const since = view.messages.filter((message) => !isFront(message)).length;
+				const since = messages.filter((message) => !isFront(message)).length;
 				const from = sizes.front === undefined ? "the start" : "the last collapse";
 				row("work", sizes.work, since === 0 ? `nothing since ${from}` : `${plural(since, "message")} since ${from}; a collapse frees about ${tokens(sizes.frees)}`);
 				row("state", sizes.state, "the state block, written anew for every request");
@@ -2145,18 +2160,6 @@ export async function runTerminal(session, options) {
 		// What the server counted for the newest reply, also in the middle of a turn.
 		contextSize: () => engine?.usedBy(main.id) ?? contextSize,
 		lastReport: () => lastReport,
-		/** What a command prints, as text, without printing it: the tabs are filled from this. */
-		capture: (text) =>
-			enqueue(async () => {
-				capture = [];
-				try {
-					await command(text);
-					endLine();
-					return capture.join("");
-				} finally {
-					capture = undefined;
-				}
-			}),
 	});
 	for (const listener of out.listeners?.("resize") ?? []) {
 		if (resizeBefore.has(listener)) continue;

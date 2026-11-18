@@ -42,6 +42,7 @@ export const CONSULT_QUERY = Object.freeze({
 
 export const RUNTIME_QUERY = Object.freeze({
 	assessment: "runtime.assessment",
+	context: "runtime.context",
 });
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -97,10 +98,11 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   reviewReaders?: typeof DEFAULT_REVIEW_READERS,
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
+ *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -372,7 +374,28 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
-	const runtime = Object.freeze({ assessment: runtimeAssessment });
+	/** The active conversation's accounting is volatile session state, supplied by composition rather than read by a view. */
+	const runtimeContext = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (typeof runtimeContextReader !== "function") return unavailable("active-context accounting", "the running session does not expose context accounting", ready.meta);
+		try {
+			const projection = await runtimeContextReader({ signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			if (projection === undefined || projection === null || typeof projection !== "object" || !Array.isArray(projection.messages) || projection.sizes === null || typeof projection.sizes !== "object") {
+				return unavailable("active-context accounting", "the running session did not provide a complete accounting projection", ready.meta);
+			}
+			return uiSuccess(projection, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read active-context accounting.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const runtime = Object.freeze({ assessment: runtimeAssessment, context: runtimeContext });
 
 	const entry = async (input, options = {}) => {
 		const ready = await prepare(options);

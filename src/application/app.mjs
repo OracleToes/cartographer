@@ -6,6 +6,7 @@ import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplicatio
 import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
+import { createRuntimeContextReader } from "./runtime.mjs";
 import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplication } from "./requests.mjs";
 import { TALK_ACTION, TALK_CAPABILITY_DEFINITIONS, createTalkApplication } from "./talk.mjs";
 import { WORKSPACE_ACTION, WORKSPACE_CAPABILITY_DEFINITIONS, createWorkspaceApplication } from "./workspace.mjs";
@@ -54,16 +55,27 @@ const metadata = (options, now) => ({
  *   requests?: Parameters<typeof createRequestApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
+ *   runtime?: { main?: any, context?: any, engine?: any, runner?: any, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined> },
  * }} options
  */
-export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, talk: talkOptions = {}, queries: queryOptions = {} }) {
+export function createApplication({ brainDir, root, config = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
 	const eventStream = events;
 	const jobManager = jobs ?? createJobManager({ events: eventStream, now });
 	const workspace = createWorkspaceApplication({ ...workspaceOptions, brainDir, root, config, now });
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });
-	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now });
+	const runtimeContextReader = runtimeOptions.reader ?? queryOptions.runtimeContextReader ?? createRuntimeContextReader({
+		main: runtimeOptions.main,
+		context: runtimeOptions.context,
+		engine: runtimeOptions.engine,
+		brainDir,
+		root,
+		config,
+		runner: runtimeOptions.runner,
+		contextWindow: runtimeOptions.contextWindow,
+	});
+	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader });
 	const capabilities = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,

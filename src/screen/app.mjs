@@ -43,7 +43,7 @@ import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
+import { accountingProjectionView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
 
 const TOOL_SOURCE_DIR = fileURLToPath(new URL("../tools", import.meta.url));
@@ -225,7 +225,7 @@ export async function runScreen(session, options, runTerminal) {
 	const { root, brainDir, config = {} } = options;
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`). */
-	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined, capture: async () => "" };
+	let core = { busy: () => false, paused: () => false, thinking: () => true, contextSize: () => undefined };
 	// The file-completion helper is resolved before the terminal starts, never by a render or key handler.
 	const fileSearch = await findExecutable(["fd", "fdfind"]);
 
@@ -568,7 +568,18 @@ export async function runScreen(session, options, runTerminal) {
 	const env = { root, brainDir, session, started };
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
-	const application = options.application ?? createApplication({ brainDir, root, config });
+	const application = options.application ?? createApplication({
+		brainDir,
+		root,
+		config,
+		runtime: {
+			main: session.main,
+			context: session.context,
+			engine: session.engine,
+			runner: options.runner,
+			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
+		},
+	});
 	const queries = application.queries;
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
 	const talk = Object.freeze({ execute: application.execute });
@@ -590,6 +601,7 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.last": ({ signal }) => queries.review.last({ signal }),
 		"diff.session": ({ signal }) => queries.review.session({ started, signal }),
 		"diff.git": ({ signal }) => queries.review.git({ signal }),
+		"context.parts": ({ signal }) => queries.runtime.context({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
 		"carto.atlas": "Atlas",
@@ -601,6 +613,7 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.last": "Last checkpoint change",
 		"diff.session": "Session changes",
 		"diff.git": "Git changes",
+		"context.parts": "Current active-context accounting",
 	});
 	let settleProjection = () => {};
 	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
@@ -660,7 +673,7 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		if (id === "context.raw") return rawPayloadView(session.engine?.window("newest"));
 		if (id === "context.preview") return previewView(pageOf(id).preview);
-		if (id === "context.parts") return accountingView(pageOf(id).text ?? "  …");
+		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView(data, { config }));
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -704,18 +717,6 @@ export async function runScreen(session, options, runTerminal) {
 					rebuild(id);
 					draw();
 				});
-		}
-		if (id === "context.parts") {
-			Promise.resolve(core.capture("/context"))
-				.then((text) => {
-					const next = String(text ?? "").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
-					if (next !== page.text) {
-						page.text = next;
-						rebuild(id);
-						draw();
-					}
-				})
-				.catch(() => {});
 		}
 		const before = page.list.version;
 		rebuild(id);
