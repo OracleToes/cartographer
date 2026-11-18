@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
+import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
@@ -364,6 +365,39 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	const focusCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.focusAtlas);
 	assert.deepEqual(focusCapability?.availability, { enabled: true });
 	assert.equal(focusCapability?.intent, "mutate");
+});
+
+test("application: context top refresh has typed validation, persistence, and unavailable outcomes", async (t) => {
+	const { brainDir } = fresh(t);
+	const app = createContextApplication({ brainDir, now: () => Date.parse(NOW) });
+	const invalid = await app.execute(CONTEXT_ACTION.pinTop, { reason: "   " }, { requestId: "blank-pin" });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("a top refresh needs a reason before it writes context state");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(invalid.error.field, "reason");
+	assert.equal(invalid.meta.requestId, "blank-pin");
+	const pinned = await app.execute(CONTEXT_ACTION.pinTop, { reason: "Refresh the project copy." });
+	assert.equal(pinned.ok, true);
+	if (!pinned.ok) throw new Error(pinned.error.message);
+	assert.equal(pinned.data.changed, true);
+	assert.equal(existsSync(topPath(brainDir)), true, "the typed action persists the stable top-of-context copy");
+	const current = await app.execute(CONTEXT_ACTION.pinTop, { reason: "Check the unchanged copy." });
+	assert.equal(current.ok, true);
+	if (!current.ok) throw new Error(current.error.message);
+	assert.equal(current.data.changed, false, "an unchanged top does not rewrite what the provider already knows");
+	const capability = app.capabilities.list().find((entry) => entry.id === CONTEXT_ACTION.pinTop);
+	assert.deepEqual(capability?.availability, { enabled: true });
+	assert.equal(capability?.intent, "mutate");
+
+	const unavailable = createContextApplication({ brainDir: join(brainDir, "bad"), now: () => Date.parse(NOW) });
+	mkdirSync(join(brainDir, "bad"), { recursive: true });
+	writeFileSync(join(brainDir, "bad", "carto-atlas.json"), "not json");
+	const refused = await unavailable.execute(CONTEXT_ACTION.pinTop, { reason: "Try a broken graph." });
+	assert.equal(refused.ok, false);
+	if (refused.ok) throw new Error("an unreadable graph must not replace the current top copy");
+	assert.equal(refused.error.code, UI_ERROR_CODE.actionRefused);
+	assert.equal(refused.error.kind, UI_ERROR_KIND.unavailable);
+	assert.equal(refused.error.retryable, true);
 });
 
 test("application: kept-talk actions preserve the durable transcript boundary and require confirmation to forget", async (t) => {

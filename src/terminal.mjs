@@ -24,6 +24,7 @@ import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, clearFront, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
+import { CONTEXT_ACTION, createContextApplication } from "./application/context.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
 import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
@@ -34,7 +35,7 @@ import { authorize, awaitsApproval, loadPlan, planPath, planSummary, planWaits, 
 import { listRequests, approveRequests, denyRequest, answerQuestion, approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
-import { loadTop, pin, sinceTop, splitTop } from "./top.mjs";
+import { loadTop, sinceTop, splitTop } from "./top.mjs";
 import { treeSection } from "./tree.mjs";
 import { eventLine, isNote, isNoChat, startNote, wakeNote, withoutQuietWakes } from "./wake.mjs";
 import { questionText, spanOf } from "./tools/ask.mjs";
@@ -207,6 +208,7 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
+	const contextApplication = createContextApplication({ brainDir: options.brainDir });
 	const workspace = createWorkspaceApplication({ brainDir: options.brainDir, root: options.root, config });
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
@@ -258,6 +260,7 @@ export async function runTerminal(session, options) {
 		const result = await workspace.execute(action, input, actionOptions);
 		return result.ok ? result.data.line : `! ${result.error.message}`;
 	};
+	const contextAction = (action, input, actionOptions = {}) => contextApplication.execute(action, input, actionOptions);
 	/** Run durable row mutations in order: each operation reads and writes the same book. */
 	const workspaceLines = async (action, ids, actionOptions = () => ({})) => {
 		const lines = [];
@@ -1481,9 +1484,9 @@ export async function runTerminal(session, options) {
 					line("  The agent is working. /stop first, then /pin.");
 					return true;
 				}
-				const result = pin(options.brainDir, { reason: `${USER_NAME} asked for it` });
-				if (result.error !== undefined) line(`! The graph cannot be read, so the copy stays as it is: ${result.error}`);
-				else if (result.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
+				const result = await contextAction(CONTEXT_ACTION.pinTop, { reason: `${USER_NAME} asked for it` });
+				if (!result.ok) line(`! ${result.error.message}`);
+				else if (result.data.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
 				else line("  The copy at the top of the context is already current.");
 				return true;
 			}
@@ -1834,7 +1837,8 @@ export async function runTerminal(session, options) {
 				// Nothing is carried over: not the talk, not the record of tasks, not the shelf. Reports stay on disk.
 				clearFront(options.brainDir);
 				// Everything is read again anyway: the moment to bring the top of the context up to date.
-				pin(options.brainDir, { reason: "a fresh context" });
+				const refreshed = await contextAction(CONTEXT_ACTION.pinTop, { reason: "a fresh context" });
+				if (!refreshed.ok) line(`! ${refreshed.error.message}`);
 				line(dim("  fresh context; earlier messages are no longer in view, and nothing was kept of them (/collapse keeps the talk, the task records and the shelf)"));
 				return true;
 			case "status": {
