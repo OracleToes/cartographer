@@ -1267,6 +1267,34 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	assert.equal(results.length, 1);
 	assert.equal(launcher.state().state, "idle");
 
+	const directSpec = createActionSpecRegistry([{ id: "review.undo", launch: "existing-control", target: { kind: "none" }, fields: [] }]);
+	const directPlacement = createActionPlacementRegistry([{ id: "review.undo", route: { tab: "diff", view: "last" }, targetSource: "none" }]);
+	const directRoute = { tab: "diff", view: "last" };
+	const confirmations = [];
+	const directCalls = [];
+	const direct = new ActionLauncher({
+		capabilities: { get: (id) => id === "review.undo" ? { id, label: "Undo checkpoint", availability: { enabled: true } } : undefined },
+		specs: directSpec,
+		placements: directPlacement,
+		currentRoute: () => directRoute,
+		execute: async (action, input, options) => {
+			directCalls.push({ action, input, options });
+			if (options.confirmation === undefined) return { ok: false, confirmation: { actionId: action, target: "m1", summary: "Undo m1.", strength: "acknowledge" }, meta: { requestId: options.requestId } };
+			return { ok: true, data: { line: "m1 restored." }, meta: { requestId: options.requestId }, notices: [] };
+		},
+		openExistingControl: ({ dispatch }) => { void dispatch(); return true; },
+		openConfirmation: (given) => { confirmations.push(given); return { opened: true }; },
+		present: (result) => results.push(result),
+		requestId: (() => { let count = 0; return () => `undo-${++count}`; })(),
+	});
+	assert.equal(await direct.begin("review.undo", { waitForResume: true }), true);
+	assert.equal(await direct.resume(), true, "a no-target action resumes after the palette without waiting for an unrelated projection settlement");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(confirmations.length, 1, "an existing Screen control still routes backend confirmation through the generic launcher dialog");
+	assert.equal(await confirmations[0].confirm(), true);
+	assert.equal(directCalls.length, 2);
+	assert.notEqual(directCalls[0].options.requestId, directCalls[1].options.requestId, "confirmation retries get a fresh completed-request identity rather than a duplicate rejection");
+
 	let release;
 	const gate = new ActionRequestGate({ execute: () => new Promise((resolve) => { release = resolve; }), requestId: () => "dedupe-1" });
 	const first = gate.run("workspace.archive", { id: "a1" });

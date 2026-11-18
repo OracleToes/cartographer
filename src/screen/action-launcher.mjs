@@ -237,6 +237,9 @@ export class ActionLauncher {
 		// A selection that was already visible may be used directly. After navigation, require a fresh explicit pick
 		// rather than applying an action to whatever row that destination happened to retain from an earlier visit.
 		this.pending = { actionId, capability, spec, placement, phase: "routing", close: undefined, requestId: undefined, requireTargetChoice: routeChanged, waitForResume: waitForResume === true };
+		// A no-target action has no settled projection dependency. It can run as soon as the palette gives the shared
+		// overlay owner back, even when its route did not change and no projection will emit another settlement.
+		if (!routeChanged && spec.target.kind === ACTION_TARGET_KIND.none) this.pending.phase = "ready";
 		if (routeChanged) {
 			let moved;
 			try { moved = this.navigate(placement.route); }
@@ -352,14 +355,16 @@ export class ActionLauncher {
 		if (plan.state === "existing-control") {
 			pending.phase = "existing-control";
 			let openedControl;
-			try { openedControl = this.openExistingControl({ plan, placement: pending.placement }); }
+			try { openedControl = this.openExistingControl({ plan, placement: pending.placement, dispatch: () => this.dispatch(pending, plan.actionId, plan.input, { fromDialog: false }) }); }
 			catch (error) {
 				this.clear();
 				this.flash(`Could not open that action: ${error?.message ?? error}`);
 				return false;
 			}
 			if (promise(openedControl)) openedControl = await openedControl;
-			this.clear();
+			// A legacy control may synchronously start dispatch through the callback above. Keep its pending state
+			// until that dispatch can present or open its generic confirmation; otherwise it observes a cleared launch.
+			if (this.pending === pending && pending.phase === "existing-control") this.clear();
 			return opened(openedControl);
 		}
 		if (plan.state === "dialog") {
@@ -386,8 +391,10 @@ export class ActionLauncher {
 		pending.phase = "executing";
 		let result;
 		try {
+			// The request gate owns an in-flight action's identity. Reusing a completed request id would make a
+			// confirmation retry look like a duplicate, so only the first leg may take the generated id.
 			result = await this.gate.run(actionId, input, {
-				...(pending.requestId === undefined ? {} : { requestId: pending.requestId }),
+				...(confirmation === undefined && pending.requestId !== undefined ? { requestId: pending.requestId } : {}),
 				...(confirmation === undefined ? {} : { confirmation }),
 			});
 		} catch (error) {

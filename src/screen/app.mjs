@@ -2092,6 +2092,11 @@ export async function runScreen(session, options, runTerminal) {
 		if (pending.actionId.startsWith("settings.")) return presentSettingsResult(result, id);
 		if (pending.actionId.startsWith("runtime.")) return presentRuntimeResult(result, id);
 		if (pending.actionId.startsWith("review.")) return presentReviewResult(result, id);
+		if (pending.actionId.startsWith("request.") || pending.actionId.startsWith("context.") || pending.actionId.startsWith("workspace.")) {
+			flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+			draw();
+			return result.ok;
+		}
 		if (pending.actionId.startsWith("talk.")) {
 			flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
 			draw();
@@ -2099,10 +2104,10 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		return presentWorkspaceResult(result, id);
 	};
-	const openExistingActionControl = ({ plan, placement }) => {
+	const openExistingActionControl = ({ plan, placement, dispatch }) => {
 		const input = plan.input ?? {};
 		if (plan.actionId === REVIEW_ACTION.undo) {
-			requestReviewUndo();
+			void dispatch();
 			return true;
 		}
 		if (plan.actionId === SETTINGS_ACTION.edit) {
