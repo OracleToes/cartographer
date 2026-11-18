@@ -4,7 +4,7 @@
 // synchronous storage internally, so this adapter intentionally contains that transitional seam. Presentation
 // code consumes the structured result below rather than inferring success from those lines; later async storage
 // work stays behind this facade instead of changing every caller again.
-import { ShelfError, foldReports, recallReport } from "../context.mjs";
+import { ShelfError, foldReports, recallReport, shelveForUser } from "../context.mjs";
 import { ADD_BOOKS, addMove, addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
@@ -18,6 +18,7 @@ export const WORKSPACE_ACTION = Object.freeze({
 	recall: "workspace.recall",
 	toggleFold: "workspace.toggle-fold",
 	settle: "workspace.settle",
+	shelve: "workspace.shelve",
 	unshelve: "workspace.unshelve",
 	add: "workspace.add",
 	addMove: "workspace.add-move",
@@ -32,6 +33,7 @@ export const WORKSPACE_CAPABILITY_DEFINITIONS = Object.freeze([
 	{ id: WORKSPACE_ACTION.recall, label: "Recall report", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.toggleFold, label: "Toggle report fold", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.settle, label: "Settle", category: "workspace", intent: UI_ACTION_INTENT.mutate },
+	{ id: WORKSPACE_ACTION.shelve, label: "Shelve", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.unshelve, label: "Unshelve", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.add, label: "Add", category: "workspace", intent: UI_ACTION_INTENT.mutate },
 	{ id: WORKSPACE_ACTION.addMove, label: "Add plan move", category: "workspace", intent: UI_ACTION_INTENT.mutate },
@@ -50,6 +52,7 @@ const DEFAULT_OPERATIONS = Object.freeze({
 	foldReports,
 	foldRow,
 	recallReport,
+	shelveForUser,
 	settleRow,
 	unarchiveRow,
 	unshelveRow,
@@ -74,6 +77,14 @@ const idInput = (input, meta) => {
 	const id = nonEmpty(input.id);
 	if (id === undefined) return { result: invalidInput("Choose an item before running this action.", meta, "id") };
 	return { value: { id } };
+};
+
+const shelfInput = (input, meta) => {
+	if (!isRecord(input)) return { result: invalidInput("Shelving needs an input object.", meta) };
+	const path = nonEmpty(input.path);
+	if (path === undefined) return { result: invalidInput("Choose a file or reference before shelving it.", meta, "path") };
+	if (input.lines !== undefined && typeof input.lines !== "string") return { result: invalidInput("A shelf line range must be text.", meta, "lines") };
+	return { value: { path, ...(typeof input.lines === "string" ? { lines: input.lines } : {}) } };
 };
 
 const addMoveInput = (input, meta) => {
@@ -107,6 +118,7 @@ const checkedInput = (action, input, meta) => {
 		if (input.review !== undefined && typeof input.review !== "string") return { result: invalidInput("An acceptance review must be text.", meta, "review") };
 		return { value: { ...checked.value, ...(typeof input.review === "string" ? { review: input.review } : {}) } };
 	}
+	if (action === WORKSPACE_ACTION.shelve) return shelfInput(input, meta);
 	if (action === WORKSPACE_ACTION.add) {
 		if (!isRecord(input)) return { result: invalidInput("Adding a row needs an input object.", meta) };
 		const book = nonEmpty(input.book);
@@ -185,11 +197,12 @@ export function workspaceOutcome(action, target, line, meta) {
  * @param {{
  *   brainDir: string,
  *   root: string,
+ *   config?: object,
  *   operations?: typeof DEFAULT_OPERATIONS,
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceApplication({ brainDir, root, operations = DEFAULT_OPERATIONS, now = () => Date.now() }) {
+export function createWorkspaceApplication({ brainDir, root, config = {}, operations = DEFAULT_OPERATIONS, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("A workspace application needs a brain directory.");
 	if (nonEmpty(root) === undefined) throw new TypeError("A workspace application needs a project root.");
 
@@ -231,6 +244,7 @@ export function createWorkspaceApplication({ brainDir, root, operations = DEFAUL
 				case WORKSPACE_ACTION.recall: line = operations.recallReport(brainDir, checked.value.id) ?? `There is no report ${checked.value.id}. /context lists the kept ones.`; break;
 				case WORKSPACE_ACTION.toggleFold: line = operations.foldRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.settle: line = operations.settleRow(brainDir, checked.value.id, root, checked.value.review); break;
+				case WORKSPACE_ACTION.shelve: line = operations.shelveForUser(root, brainDir, config, checked.value.path, checked.value.lines); break;
 				case WORKSPACE_ACTION.unshelve: line = operations.unshelveRow(brainDir, checked.value.id); break;
 				case WORKSPACE_ACTION.add: line = operations.applyAdd(brainDir, checked.value.book, checked.value.text, root); break;
 				case WORKSPACE_ACTION.addMove: line = operations.addMove(brainDir, checked.value); break;
@@ -242,7 +256,7 @@ export function createWorkspaceApplication({ brainDir, root, operations = DEFAUL
 					retryable: false,
 				}), { meta });
 			}
-			const target = checked.value.id ?? checked.value.book ?? checked.value.parent;
+			const target = checked.value.id ?? checked.value.book ?? checked.value.parent ?? checked.value.path;
 			return workspaceOutcome(action, target, line, meta);
 		} catch (error) {
 			if (error instanceof ShelfError) return uiFailure(uiErrorFrom(error, {

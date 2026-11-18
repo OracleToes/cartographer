@@ -282,6 +282,20 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	if (!moved.ok) throw new Error(moved.error.message);
 	assert.equal(moved.data.action, WORKSPACE_ACTION.addMove);
 	assert.equal(loadPlan(brainDir).plan.moves[0]?.parent, "p1", "a typed plan-move action uses the durable plan operation");
+	const missingShelfPath = await app.execute(WORKSPACE_ACTION.shelve, { path: "   " });
+	assert.equal(missingShelfPath.ok, false);
+	if (missingShelfPath.ok) throw new Error("a shelf action without a target must be refused before the context mutation");
+	assert.equal(missingShelfPath.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(missingShelfPath.error.field, "path");
+	writeFileSync(join(root, "shelf.txt"), "first\nsecond\n");
+	const shelved = await app.execute(WORKSPACE_ACTION.shelve, { path: "shelf.txt", lines: "1-1" });
+	assert.equal(shelved.ok, true);
+	if (!shelved.ok) throw new Error(shelved.error.message);
+	assert.equal(shelved.data.action, WORKSPACE_ACTION.shelve);
+	assert.equal(loadContext(brainDir).shelf[0]?.path, "shelf.txt", "the typed shelf action owns the context placement");
+	const unshelved = await app.execute(WORKSPACE_ACTION.unshelve, { id: "s1" });
+	assert.equal(unshelved.ok, true);
+	assert.equal(loadContext(brainDir).shelf.length, 0, "the existing unshelve action clears the placement through the same facade");
 	const entry = loadLedger(brainDir).ledger.items[0];
 	assert.ok(entry, "the successful result comes from the same durable row operation the terminal already uses");
 	const cannotFold = await app.execute(WORKSPACE_ACTION.toggleFold, { id: entry.id });
@@ -324,6 +338,9 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	const deleteCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.delete);
 	assert.deepEqual(deleteCapability?.availability, { enabled: true });
 	assert.equal(deleteCapability?.confirmation, "acknowledge");
+	const shelfCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.shelve);
+	assert.deepEqual(shelfCapability?.availability, { enabled: true });
+	assert.equal(shelfCapability?.intent, "mutate");
 });
 
 test("application: kept-talk actions preserve the durable transcript boundary and require confirmation to forget", async (t) => {

@@ -28,7 +28,7 @@ import { EventEmitter } from "node:events";
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { contextPath, loadContext, shelveForUser } from "../context.mjs";
+import { contextPath, loadContext } from "../context.mjs";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { TALK_ACTION, createTalkApplication } from "../application/talk.mjs";
@@ -552,7 +552,7 @@ export async function runScreen(session, options, runTerminal) {
 	const env = { root, brainDir, session, started };
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
-	const workspace = createWorkspaceApplication({ brainDir, root });
+	const workspace = createWorkspaceApplication({ brainDir, root, config });
 	const talk = createTalkApplication({ brainDir });
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();

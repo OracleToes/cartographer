@@ -23,7 +23,7 @@ import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, applyAtlasOp, AtlasError, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, findNode, loadAtlas, renderAttention, renderOutline, saveAtlas } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
-import { bindTalkSource, clearFront, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, shelveForUser, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
+import { bindTalkSource, clearFront, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, applyContextRowAction, ContextRowError, sameShelfItem, splitReadTail } from "./context.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "./application/workspace.mjs";
 import { conferenceStatusLine, findConferenceByChild, listConferences, loadConference, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
@@ -207,7 +207,7 @@ export async function runTerminal(session, options) {
 	// harnesses that bring their own session may not — there the pause is simply an interrupt.
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
-	const workspace = createWorkspaceApplication({ brainDir: options.brainDir, root: options.root });
+	const workspace = createWorkspaceApplication({ brainDir: options.brainDir, root: options.root, config });
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -1963,11 +1963,7 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				if (name === "unshelve") line(`  ${await workspaceLine(WORKSPACE_ACTION.unshelve, { id: argument })}`);
-				else try {
-					line(`  ${shelveForUser(options.root, options.brainDir, config, argument, tail)}`);
-				} catch (error) {
-					line(`! ${error.message}`);
-				}
+				else line(`  ${await workspaceLine(WORKSPACE_ACTION.shelve, { path: argument, lines: tail })}`);
 				return true;
 			}
 			case "archive":
