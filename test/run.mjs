@@ -2572,6 +2572,8 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 	assert.match(KEYS_HELP, /Ctrl-X\s+stop the agent/, "the help sheet names the canonical stop control");
 	assert.match(KEYS_HELP, /Ctrl-V pauses it/, "the help sheet names the stream pause control");
 	assert.match(KEYS_HELP, /Ctrl-K\s+search navigation and registered actions/, "the help sheet names the registry-backed palette");
+	assert.match(KEYS_HELP, /on a row of Atlas, Ledger or Plan/, "the help sheet names the live Carto editors rather than an obsolete surface");
+	assert.doesNotMatch(KEYS_HELP, /\bBooks\b/, "the help sheet does not advertise the retired Books surface");
 	const commands = new Map(COMMANDS.map(([name, description, words]) => [name, { description, words }]));
 	assert.equal(commands.size, COMMANDS.length, "the composer exposes each named terminal command only once");
 	assert.match(commands.get("consult")?.description ?? "", /consultation conference audits/, "the full-screen composer completes the terminal's consultation audit path");
