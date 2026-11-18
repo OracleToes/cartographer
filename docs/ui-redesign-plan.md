@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration complete — Chat, Workspace, Review, Runtime, and Settings & Safety render through settled application projections.
+**Status:** Phase 6 polish and verification complete — the six-tab Screen, settled application projections, typed capability actions, and terminal compatibility paths are reconciled.
 
 **Date:** 2026-11-16
 
@@ -39,10 +39,10 @@ Full-screen TUI adapter and plain-terminal adapter
 
 ### Boundary rules
 
-1. Screen modules do not directly import domain mutation modules, synchronous filesystem APIs, Git/process helpers, editor launchers, clipboard code, or terminal-rendered text.
-2. The full-screen interface and plain-terminal interface invoke the same semantic query/action API.
-3. Rendering consumes typed projections, never parses formatted output such as `/context` text.
-4. Potentially slow filesystem, Git, process, transport, editor, and clipboard work crosses an asynchronous infrastructure boundary.
+1. Screen feature renderers do not import domain mutation modules or invoke live domain managers. Durable row, request, review, talk, shell, wake, and model actions cross `application.execute`.
+2. The full-screen interface and plain-terminal interface share the semantic query/action API where an application action exists. Terminal-owned lifecycle and session-input controls remain with the terminal core.
+3. Rendering consumes settled typed projections, never parses formatted output such as `/context` text.
+4. Potentially slow filesystem, Git, process, transport, editor, and clipboard work stays outside rendering and key dispatch. The Screen retains narrow asynchronous infrastructure handoffs for `$EDITOR`, scratch files, and explicit copy/export.
 5. The application boundary provides safe projections and controlled operations; it does not relax domain policies or expose raw unsafe internals.
 6. The source remains JavaScript ESM. JSDoc contracts provide type discipline without combining this redesign with a TypeScript conversion.
 
@@ -154,10 +154,10 @@ Existing flat domain modules remain in place initially. They are treated as doma
 | Current area | Target responsibility |
 | --- | --- |
 | `src/screen/app.mjs` | Thin composition, route, focus, overlay, and input coordination |
-| `src/screen/{chat,workspace,review,runtime}.mjs` | Focused consumption-only feature renderers over settled application projections |
-| `src/screen/views.mjs` | Shared non-feature screen helpers during the transition |
+| `src/screen/{chat,workspace,review,runtime,settings}.mjs` | Focused consumption-only feature renderers over settled application projections |
+| `src/screen/views.mjs` | The narrow `$EDITOR` command helper; scratch/editor handoff remains in Screen composition |
 | `src/screen/theme.mjs`, `parts.mjs`, `list.mjs` | Transitional basis for centralized design tokens and components |
-| `src/terminal.mjs` | Presentation adapter over shared application capabilities |
+| `src/terminal.mjs` | Plain-terminal adapter over shared application capabilities, plus the established session/lifecycle controls |
 | `src/ops.mjs` | Basis for application action services |
 | Synchronous filesystem/Git/editor/clipboard work | Promise-based infrastructure adapters |
 
@@ -170,14 +170,14 @@ Existing flat domain modules remain in place initially. They are treated as doma
 Both interface styles consume a single application object:
 
 ```js
-application.queries.chat.getProjection(...)
-application.queries.workspace.getAtlas(...)
-application.actions.execute("ledger.archive", input, options)
+application.queries.atlas(...)
+application.queries.runtime.models(...)
+application.execute("workspace.archive", input, options)
 application.events.subscribe(listener)
 application.capabilities.list(context)
 ```
 
-The screen must not directly call `ledger`, `plan`, `context`, `engine`, `windows`, filesystem, or subprocess APIs.
+Feature rendering does not call `ledger`, `plan`, `context`, `engine`, `windows`, or other domain managers directly. Screen composition supplies session ports to `createApplication`, while the Screen's terminal-reader/key handoff and its explicit asynchronous editor, scratch-file, and copy/export adapters remain intentionally narrow.
 
 ### Standard result contract
 
@@ -219,38 +219,52 @@ An empty collection is successful data with zero items, not an error. Cancellati
 
 ### Capability registry
 
-Every UI-accessible operation is registered once with:
+Each implemented capability is registered once with:
 
 ```text
-id, label, category, route, input/form metadata, availability,
-disabled reason, confirmation policy, keyboard alias,
-terminal alias, and execution handler
+id, label, category, intent, availability/disabled reason, confirmation policy
 ```
 
-The registry powers the command palette, contextual menus, keyboard dispatch, footer key hints, terminal commands, help text, documentation, and capability-coverage tests. It prevents drift among the current slash-command, key-routing, footer, and README surfaces.
+`createApplication` owns the registered action dispatcher and projection-invalidation scope. Target selection, form fields, page destinations, keyboard bindings, and terminal aliases remain at their narrow interface seams because they need current row/input or terminal-lifecycle state; they are not duplicated capability definitions.
+
+The command palette receives `application.capabilities.list()` plus its six navigation destinations, so every registered action remains discoverable with its availability reason. It navigates to the narrowest existing Screen seam rather than guessing an action target. Route-local footer hints name capability IDs and hide unavailable actions from the same presentation snapshot. The terminal invokes `application.execute` for the durable Workspace, Context, Request, Review, and Runtime paths; its lifecycle controls remain terminal-owned.
+
+### Implemented registry and interface paths
+
+| Capability group | Registered IDs | Focused Screen / terminal path |
+| --- | --- | --- |
+| Kept context | `context.pin-top`, `context.clear-kept` | Model → Current accounting directs to the context seam; `/pin` and `/new` retain the terminal lifecycle path |
+| Requests | `request.approve`, `request.deny`, `request.answer` | Carto → Requests and `/approve`, `/deny`, `/answer` |
+| Review | `review.undo`, `review.record-windows` | Diff's confirmed `u` recovery and `/undo`; recording active shell changes is the shared recovery prelude |
+| Runtime | `runtime.shell.*`, `runtime.wake.remove`, `runtime.task.message`, `runtime.model.*` | Shells, Model → Routes, task steering, and `/send`, `/kill`, `/wakes remove`, `/model` |
+| Kept talk | `talk.revise-source`, `talk.forget-source` | Chat → Conversation's editor and confirmed `d`; sent requests and the Durable transcript remain unchanged |
+| Workspace | `workspace.archive`, `unarchive`, `delete`, `fold`, `recall`, `toggle-fold`, `settle`, `focus-atlas`, `unfocus-atlas`, `shelve`, `unshelve`, `add`, `add-move`, `edit` | Carto row controls/forms and their terminal commands |
+
+The wildcarded Runtime IDs are `runtime.shell.send`, `runtime.shell.close`, `runtime.shell.close-all`, `runtime.wake.remove`, `runtime.task.message`, `runtime.model.ensure`, and `runtime.model.select`; the Workspace IDs in the table retain their `workspace.` prefix.
 
 ---
 
 ## 3. Information architecture
 
-The persistent shell includes application/runtime status, primary navigation, breadcrumb/page header, scoped actions, main content, an optional inspector, a status/notice strip, and a contextual footer generated from valid capabilities.
+The persistent shell includes runtime status, primary navigation, tab/subview headers, main content, a status/notice strip, and a route-local contextual footer filtered by settled capability availability.
 
-| Primary section | Subviews and responsibilities |
+| Screen tab | Subviews and responsibilities |
 | --- | --- |
-| **Chat** | Conversation, Work, Consult, composer, and live agent activity |
-| **Workspace** | Atlas, Ledger, Plan, Requests, Tree, and Current shared brain |
-| **Review** | Last step, This session, Git HEAD, checkpoints, undo/recovery |
-| **Runtime** | Agent activity, context lifecycle/accounting, Shells, Wakes, Models, transport diagnostics |
-| **Settings & Safety** | Configuration, assessment, provider setup, sandbox/Bubblewrap/initiate/yolo policy status, native grammar validation/probe |
+| **1 Chat** | Conversation, Work, Consult, composer, and live agent activity |
+| **2 Carto** | Atlas, Ledger, Plan, Requests, Tree, and Current shared brain |
+| **3 Diff** | Last step, This session, Git HEAD, checkpoints, undo/recovery |
+| **4 Shells** | Shell list, selected output, and Wakes |
+| **5 Model** | Routes, Latest sent, Main sent, Raw payload, Next preview, and Current accounting |
+| **6 Settings** | Safety and Assessment: configuration, session policy, provider diagnostics, durable assessment, and top-copy freshness |
 
 ### Placement decisions
 
 - Consultation remains only under **Chat → Consult** and uses an isolated `ConsultProjection`.
 - Conversation and Work projections cannot contain consultation records or rendering data.
 - Model history, unsent preview, and context accounting are distinct named views rather than one overloaded Model surface.
-- Context controls—accounting, collapse, pin, and new—become visible in Runtime with state and confirmations.
-- Checkpoints and undo move from command-only behavior into Review.
-- Every supported capability is reachable from its relevant page or the global command palette. Disabled actions remain discoverable and explain why they cannot run.
+- Current accounting belongs in **Model**; collapse, pin, and fresh-context lifecycle commands remain terminal-owned and are discoverable through the palette's Context destination.
+- Checkpoints and undo are available in **Diff** as well as `/undo`.
+- Every registered capability is discoverable in the global command palette. A palette item routes to its narrowest existing Screen seam; actions that need terminal-only lifecycle input retain their documented terminal command. Disabled items stay visible with their reason.
 
 ---
 
@@ -304,33 +318,32 @@ Global semantics are fixed. A page may disable an action, but it cannot redefine
 
 | Scope | Key | Meaning |
 | --- | --- | --- |
-| Shell | `1`–`6` | Jump to Chat, Carto, Diff, Shells, Model, Settings |
-| Shell | `[` / `]` | Previous/next primary section |
-| Focus | `Tab` / `Shift+Tab` | Next/previous focusable region or control |
-| Collections | `j` / `k`, `↑` / `↓` | Move active item |
-| Collections | `Home` / `End`, `PgUp` / `PgDn` | Fast navigation |
-| Collections | `Enter` | Inspect, open, or select focused item |
-| Trees | `h` / `l`, `←` / `→` | Collapse/expand or move hierarchy level |
-| Global | `Ctrl+K` | Open the global command palette |
-| Global | `?` | Open contextual help and complete key map |
-| Global | `r` | Refresh visible projection |
-| Actions | `a` | Create/add current resource when available |
-| Actions | `e` | Edit focused resource when available |
-| Actions | `d` | Request destructive action; always opens confirmation |
-| Actions | `y` | Copy selected/focused safe text asynchronously |
-| Input/forms | `Ctrl+Enter` | Submit/execute |
-| Input/forms | `Esc` | Cancel overlay, field edit, filter, or pending form |
-| Shell | `q` | Request exit; confirm only for active work or unsaved state |
-| Safety | `Ctrl+X` | Canonical immediate stop for active agent work |
-| Compatibility | `Ctrl+C` | Non-text-input alias for the same stop action while a run is active; never silently quit |
+| Shell | `1`–`6` | Jump to Chat, Carto, Diff, Shells, Model, or Settings |
+| Shell | `Tab` / `Shift+Tab` | Next/previous tab; typing-mode Tab completes once the composer has text |
+| Views | `[` / `]`, `H` / `L` | Previous/next subview within the current tab |
+| Collections | `j` / `k`, `↑` / `↓` | Move the selected row |
+| Collections | `g` / `G`, `Home` / `End` | First/last row; `PgUp` / `PgDn` and the wheel scroll |
+| Collections | `Enter`, Space, `o` | Open/fold the selected row or perform the view's explicit open control |
+| Trees/lists | `h` / `l`, `←` / `→` | Fold/open the selected row |
+| Global | `Ctrl+K` | Open the command palette: six destinations, refresh, and every registered capability |
+| Global | `?` / `F1` | Open the complete `KEYS_HELP` sheet |
+| Commands | `r` | Refresh the visible deferred projection |
+| Actions | `e` / `E` | Open the contextual form/editor or the `$EDITOR` source/template door |
+| Actions | `d`, `u` | Request a scoped confirmation for destructive deletion/forget/removal or Diff recovery |
+| Actions | `y` / `Y` | Copy the selected row / whole tab asynchronously |
+| Input/forms | `Ctrl+Enter` | Save a multiline form field; Enter saves a one-line field |
+| Input/forms | `Esc` | Leave typing for commands, or let the focused overlay/form/search handle its own close/cancel behavior |
+| Safety | `Ctrl+X` | Stop active agent work through the terminal core |
+| Stream | `Ctrl+V` | Pause/resume the active stream; a line or command ends a held stream |
+| Exit | `Ctrl+C` | Clear the typed line; with it empty, a second press soon after leaves like `/quit` |
 
 Additional rules:
 
 - Printable keys belong to the focused text editor or composer; global navigation does not steal typed text.
-- `Esc` follows a single hierarchy: dismiss popover → dismiss dialog → cancel edit/filter → return focus to page.
-- `d` cannot delete, archive, or revoke immediately. Keyboard, palette, and terminal paths enter the same confirmation flow.
-- The footer advertises only currently available actions and is generated by the same registry that dispatches them.
-- `Ctrl+X` is the documented canonical stop key. `Ctrl+C` is a documented compatibility alias until the compatibility window is formally retired.
+- Screen route transitions own selection reset, projection cancellation, replacement reads, and redraw. Rendering and footer composition start no live manager read.
+- `d` cannot delete, forget, or remove immediately: its focused Screen path asks for the application's scoped confirmation. Named terminal commands provide their explicit acknowledgement at the same action boundary.
+- Route-local footer hints are composed from the route's key map plus the settled capability availability snapshot; `Ctrl-K palette` and `? all keys` remain global.
+- `Ctrl+X` is the canonical stop control. `Ctrl+C` is deliberately not a stop alias: it keeps its clear-line/quit behavior in both the full Screen and plain terminal.
 
 ---
 
@@ -458,6 +471,10 @@ Each migrated view removes direct domain imports and gains loading, empty, error
 - Reconcile README and design documentation with the final registry/key map.
 - Retire compatibility aliases only through an explicit, documented decision.
 - Preserve the aggregate test watchdog unchanged.
+
+**Phase 6 completion record (2026-11-16).** The audit found no remaining direct Screen mutation of a durable workspace, request, review, kept-talk, shell, wake, or model manager: those paths use `application.execute`. It deliberately retains composition-only session ports passed into `createApplication`, terminal `reader`/`keys` handoff, and the asynchronous `$EDITOR`, scratch-file, source lookup, and copy/export adapters. The Settings projection reads `gate`, `initiation`, and `runner` descriptively; the Screen does not mutate them. Removing those seams would not improve action parity and would bypass established terminal lifecycle safeguards.
+
+The six tabs, `1`–`6` dispatcher, Settings footer/help text, palette destination, and README now agree. The palette lists all registered capabilities with availability reasons and navigates to the narrowest current Screen seam; contextual action execution still requires the selected target and input. `/stop` and `/pause` remain supported terminal commands for line-oriented and scripted use, while Ctrl-X and Ctrl-V are their full-Screen controls. Ctrl-C is explicitly retained as clear-line/quit behavior, not a stop alias. The 10-second aggregate watchdog remains unchanged.
 
 Each coherent implementation slice is committed and pushed on the current branch before its verification run.
 
