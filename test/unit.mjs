@@ -32,7 +32,7 @@ import { startStandIn } from "./stand-in.mjs";
 import { observeFile, loadCatalog, saveCatalog } from "../src/catalog.mjs";
 import { loadPrepend } from "../src/prepend.mjs";
 import { shelfItem, updateContext, loadContext, taskState, noteChat, writeFront, chatLine, addRecord, bindTalkSource, dressMain, KEPT_AS, recordSoftForgetPending, removeTalkSource, reviseTalkSource } from "../src/context.mjs";
-import { approveRequests, approvalWords } from "../src/requests.mjs";
+import { approveRequests, approvalWords, listRequests } from "../src/requests.mjs";
 import { awaitsApproval, authorizationLine, planSummary } from "../src/plan.mjs";
 import { bookTool } from "../src/tools/book.mjs";
 import { readTool } from "../src/tools/read.mjs";
@@ -426,6 +426,38 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(status.ok, true, "status retains readable ledger information while naming a separate plan issue");
 	if (!status.ok) throw new Error(status.error.message);
 	assert.deepEqual(status.data.issues, [{ source: "plan", message: "carto-plan.json is not valid JSON" }]);
+});
+
+test("application: nonempty request projections retain the established terminal summaries", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const { plan } = loadPlan(brainDir);
+	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten the request projection.", done_when: "The pending request is visible.", network: true }, NOW);
+	applyPlanOp(plan, {
+		action: "addMove",
+		parent: "p1",
+		text: "Edit src/requests.mjs",
+		done_when: "The terminal shows the move summary.",
+		targets: ["src/requests.mjs"],
+		proof: "The request projection is tested.",
+		capabilities: { network: true },
+		budget: { replies: 2, fileOps: 1, commandStarts: 0 },
+	}, NOW);
+	savePlan(brainDir, plan);
+	const { ledger } = loadLedger(brainDir);
+	applyOp(ledger, { action: "add", kind: "question", text: "Should the request remain compact?" }, NOW);
+	saveLedger(brainDir, ledger);
+	const expected = listRequests(brainDir);
+	const result = await createWorkspaceQueries({ brainDir, root, now: () => Date.parse(NOW) }).requests();
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error(result.error.message);
+	assert.deepEqual(result.data.items.map(({ id, kind, text }) => ({ id, kind, text })), expected, "the query preserves every nonempty legacy terminal row verbatim");
+	const approval = result.data.items.find((item) => item.kind === "approval");
+	assert.match(approval?.text ?? "", /src\/requests\.mjs/);
+	assert.match(approval?.text ?? "", /2 replies · 1 file ops · 0 commands · network/);
+	assert.equal(Object.hasOwn(approval ?? {}, "detail"), false, "the established request schema has no separate detail rows; itemLine carries the complete compact move contract");
+	assert.ok(Number.isFinite(approval?.line), "the query preserves the source position for an actionable request");
+	const question = result.data.items.find((item) => item.kind === POLICY.enums.ledgerKind.question);
+	assert.equal(question?.text, "q1  Should the request remain compact?");
 });
 
 test("application: review queries defer checkpoint and Git projections", async (t) => {
