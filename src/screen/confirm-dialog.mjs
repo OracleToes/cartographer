@@ -29,6 +29,7 @@ export class ConfirmDialog {
 	 *   flash: (text: string) => void,
 	 *   redraw?: () => void,
 	 *   phrase?: string,
+	 *   cancel?: () => void,
 	 * }} given
 	 */
 	constructor(given) {
@@ -37,6 +38,7 @@ export class ConfirmDialog {
 		this.pending = false;
 		this.typed = "";
 		this.expected = String(given.phrase ?? given.confirmation.target ?? "");
+		this.cancel = typeof given.cancel === "function" ? given.cancel : () => {};
 	}
 	get typedRequired() {
 		return this.given.confirmation.strength === "typed";
@@ -75,7 +77,10 @@ export class ConfirmDialog {
 	handleInput(data) {
 		const key = this.given.keyOf(data);
 		if (this.pending) return void this.given.flash(key === "escape" ? "confirmation is still finishing" : "confirming…");
-		if (key === "escape" || (!this.typedRequired && key === "n")) return void this.given.close();
+		if (key === "escape" || (!this.typedRequired && key === "n")) {
+			this.cancel();
+			return void this.given.close();
+		}
 		if (this.typedRequired) {
 			if (key === "backspace" || key === "delete") {
 				this.typed = withoutLast(this.typed);

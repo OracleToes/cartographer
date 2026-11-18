@@ -150,8 +150,17 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 	const actionSpecs = createActionSpecRegistry(ACTION_SPECS);
 	assertActionSpecParity(capabilityRegistry, actionSpecs);
 	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes, work: runtimeActionContext.work, models: runtimeActionContext.models });
+	// `get` deliberately exposes the same availability snapshot that `list` gives the palette. ActionLauncher uses
+	// identity lookup after a palette has closed, so it must not accidentally treat a raw capability definition with
+	// an `available` callback as enabled merely because that callback has not been projected yet.
+	const capabilityFor = (id, context = {}) => {
+		const capability = capabilityRegistry.get(id);
+		if (capability === undefined) return undefined;
+		const { available, ...publicCapability } = capability;
+		return Object.freeze({ ...publicCapability, availability: capabilityRegistry.availability(id, { ...capabilityContext, ...context }) });
+	};
 	const capabilities = Object.freeze({
-		get: (id) => capabilityRegistry.get(id),
+		get: capabilityFor,
 		availability: (id, context = {}) => capabilityRegistry.availability(id, { ...capabilityContext, ...context }),
 		list: (context = {}) => capabilityRegistry.list({ ...capabilityContext, ...context }),
 	});

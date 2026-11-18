@@ -1221,6 +1221,16 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	assert.equal(requestPlan.title, "Answer request");
 	assert.deepEqual(actionInputFromDrafts(requestPlan.fields, new Map([["text", "ready"]])), { ok: true, input: { text: "ready" } });
 	assert.equal(actionInputFromDrafts(requestPlan.fields, new Map([["text", ""]])).ok, false);
+	const blockedFlashes = [];
+	const blockedLauncher = new ActionLauncher({
+		capabilities: { get: (id) => id === "request.answer" ? { id, label: "Answer request", availability: { enabled: false, reason: "Requests are paused." } } : undefined },
+		specs: requestSpec,
+		placements: requestPlacement,
+		execute: async () => { throw new Error("an unavailable action must not dispatch"); },
+		flash: (message) => blockedFlashes.push(message),
+	});
+	assert.equal(await blockedLauncher.begin("request.answer"), false, "a launcher rechecks capability availability instead of trusting a stale palette row");
+	assert.equal(blockedFlashes.at(-1), "Requests are paused.");
 
 	const route = { tab: "chat", view: "conversation" };
 	const opened = {};
@@ -1267,6 +1277,39 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	assert.equal(results.length, 1);
 	assert.equal(launcher.state().state, "idle");
 
+	const cancelledDialog = {};
+	const cancellable = new ActionLauncher({
+		capabilities: requestCapabilities,
+		specs: requestSpec,
+		placements: requestPlacement,
+		currentRoute: () => ({ tab: "carto", view: "requests" }),
+		targetsFor: () => ({ state: "ready", targets: [target], selected: target.key }),
+		execute: async () => { throw new Error("a cancelled draft must not dispatch"); },
+		openDialog: (given) => { cancelledDialog.given = given; return { opened: true }; },
+	});
+	assert.equal(await cancellable.launch("request.answer"), true);
+	assert.equal(cancellable.state().state, "dialog");
+	assert.equal(cancelledDialog.given.cancel(), true, "an explicit picker or form cancellation releases its pending launcher state");
+	assert.equal(cancellable.state().state, "idle");
+	assert.equal(await cancellable.launch("request.answer"), true, "a cancelled launch never blocks the next palette action");
+	assert.equal(cancelledDialog.given.cancel(), true);
+
+	const routedAway = { tab: "chat", view: "conversation" };
+	const routeCancellation = new ActionLauncher({
+		capabilities: requestCapabilities,
+		specs: requestSpec,
+		placements: requestPlacement,
+		currentRoute: () => routedAway,
+		navigate: (next) => { Object.assign(routedAway, next); return true; },
+		targetsFor: () => ({ state: "loading" }),
+		execute: async () => { throw new Error("a route-abandoned launch must not dispatch"); },
+	});
+	assert.equal(await routeCancellation.begin("request.answer"), true);
+	assert.equal(routeCancellation.state().state, "waiting-for-route");
+	Object.assign(routedAway, { tab: "chat", view: "conversation" });
+	assert.equal(routeCancellation.onRouteChanged(routedAway), true, "leaving a loading target route abandons its invisible pending launcher");
+	assert.equal(routeCancellation.state().state, "idle");
+
 	const directSpec = createActionSpecRegistry([{ id: "review.undo", launch: "existing-control", target: { kind: "none" }, fields: [] }]);
 	const directPlacement = createActionPlacementRegistry([{ id: "review.undo", route: { tab: "diff", view: "last" }, targetSource: "none" }]);
 	const directRoute = { tab: "diff", view: "last" };
@@ -1295,6 +1338,23 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	assert.equal(directCalls.length, 2);
 	assert.notEqual(directCalls[0].options.requestId, directCalls[1].options.requestId, "confirmation retries get a fresh completed-request identity rather than a duplicate rejection");
 
+	let releaseExisting;
+	const pendingExisting = new ActionLauncher({
+		capabilities: { get: (id) => id === "review.undo" ? { id, label: "Undo checkpoint", availability: { enabled: true } } : undefined },
+		specs: directSpec,
+		placements: directPlacement,
+		currentRoute: () => directRoute,
+		execute: async () => { throw new Error("this control only opens a form"); },
+		openExistingControl: () => new Promise((resolve) => { releaseExisting = resolve; }),
+	});
+	const openingExisting = pendingExisting.launch("review.undo");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pendingExisting.state().state, "existing-control");
+	assert.equal(await pendingExisting.begin("review.undo"), false, "an asynchronous existing control stays gated until its form/query handoff has settled");
+	releaseExisting(true);
+	assert.equal(await openingExisting, true);
+	assert.equal(pendingExisting.state().state, "idle");
+
 	let release;
 	const gate = new ActionRequestGate({ execute: () => new Promise((resolve) => { release = resolve; }), requestId: () => "dedupe-1" });
 	const first = gate.run("workspace.archive", { id: "a1" });
@@ -1321,6 +1381,19 @@ test("action launcher: settled targets, schema dialogs, confirmations, and reque
 	dialog.handleInput("enter");
 	assert.deepEqual(submitted, { count: 12 }, "ActionDialog turns its schema draft into typed action input");
 	assert.equal(closes.length, 1);
+	let formCancelled = 0;
+	let formClosed = 0;
+	const cancelledForm = new ActionDialog({
+		actionId: "example",
+		fields: [{ id: "text", label: "Text", kind: "text", required: true, multiline: false, limit: 20 }],
+		keyOf: (key) => key,
+		close: () => { formClosed++; },
+		flash: (message) => flashes.push(message),
+		submit: () => { throw new Error("a cancelled form cannot submit"); },
+		cancel: () => { formCancelled++; },
+	});
+	cancelledForm.handleInput("escape");
+	assert.deepEqual([formCancelled, formClosed], [1, 1], "Escape abandons a schema action dialog instead of leaving its launcher pending");
 });
 
 test("screen: target picker keeps unavailable settled rows visible and gates an asynchronous choice", async () => {
@@ -1353,6 +1426,19 @@ test("screen: target picker keeps unavailable settled rows visible and gates an 
 	await Promise.resolve();
 	await Promise.resolve();
 	assert.equal(closes, 1);
+	let pickerCancelled = 0;
+	let pickerClosed = 0;
+	const cancelledPicker = new TargetPicker({
+		title: "Choose request",
+		targets: [{ key: "q2", value: "q2", label: "q2" }],
+		keyOf: (key) => key,
+		choose: () => { throw new Error("a cancelled picker cannot choose"); },
+		close: () => { pickerClosed++; },
+		flash: (message) => flashes.push(message),
+		cancel: () => { pickerCancelled++; },
+	});
+	cancelledPicker.handleInput("escape");
+	assert.deepEqual([pickerCancelled, pickerClosed], [1, 1], "Escape abandons a target picker instead of pinning its action launch");
 });
 
 test("screen: shared forms keep local required, field-validation, help, disabled, and focus behavior without bypassing action saves", () => {
@@ -1497,6 +1583,7 @@ test("screen: one modal owner restores focus, and confirmation dialogs gate ackn
 	const flashes = [];
 	let closes = 0;
 	let confirms = 0;
+	let cancellations = 0;
 	const acknowledgement = new ConfirmDialog({
 		title: "Delete permanently?",
 		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "acknowledge" },
@@ -1504,10 +1591,12 @@ test("screen: one modal owner restores focus, and confirmation dialogs gate ackn
 		close: () => { closes++; },
 		confirm: () => { confirms++; return true; },
 		flash: (text) => flashes.push(text),
+		cancel: () => { cancellations++; },
 	});
 	assert.match(acknowledgement.render(48).join("\n"), /Delete permanently\?/);
 	acknowledgement.handleInput("n");
 	assert.equal(closes, 1, "n cancels an acknowledgement dialog");
+	assert.equal(cancellations, 1, "an explicit confirmation cancellation can release ActionLauncher without treating it as a successful confirmation");
 	acknowledgement.handleInput("enter");
 	assert.equal(confirms, 1, "Enter confirms an acknowledgement dialog");
 	assert.equal(closes, 2, "a successful action closes the dialog");
@@ -2964,6 +3053,7 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.sendShell)?.label, "Send shell input");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.routeTaskMessage)?.label, "Message active task");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.selectModel)?.label, "Select model route");
+	assert.deepEqual(app.capabilities.get(RUNTIME_ACTION.sendShell)?.availability, { enabled: true }, "identity lookup keeps the availability snapshot ActionLauncher needs after the palette has closed");
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });

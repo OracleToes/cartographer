@@ -19,6 +19,7 @@ export class TargetPicker {
 	 *   close: () => void,
 	 *   flash: (text: string) => void,
 	 *   redraw?: () => void,
+	 *   cancel?: () => void,
 	 * }} given
 	 */
 	constructor(given) {
@@ -32,6 +33,7 @@ export class TargetPicker {
 		this.targets = normalizeActionTargets(given.targets);
 		this.index = 0;
 		this.pending = false;
+		this.cancel = typeof given.cancel === "function" ? given.cancel : () => {};
 	}
 	invalidate() {}
 	selected() {
@@ -73,7 +75,10 @@ export class TargetPicker {
 	handleInput(data) {
 		const key = this.given.keyOf(data);
 		if (this.pending) return void this.given.flash(key === "escape" ? "that action is still finishing" : "opening…");
-		if (key === "escape") return void this.given.close();
+		if (key === "escape") {
+			this.cancel();
+			return void this.given.close();
+		}
 		if (key === "enter") return void this.choose();
 		if (key === "up" || key === "k" || key === "ctrl+p") return void this.move(-1);
 		if (key === "down" || key === "j" || key === "ctrl+n") return void this.move(1);
