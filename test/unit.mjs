@@ -292,8 +292,10 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	assert.equal(shelved.ok, true);
 	if (!shelved.ok) throw new Error(shelved.error.message);
 	assert.equal(shelved.data.action, WORKSPACE_ACTION.shelve);
-	assert.equal(loadContext(brainDir).shelf[0]?.path, "shelf.txt", "the typed shelf action owns the context placement");
-	const unshelved = await app.execute(WORKSPACE_ACTION.unshelve, { id: "s1" });
+	const shelf = loadContext(brainDir).shelf[0];
+	assert.equal(shelf?.path, "shelf.txt", "the typed shelf action owns the context placement");
+	assert.ok(shelf?.id, "the typed shelf action allocates a durable placement id");
+	const unshelved = await app.execute(WORKSPACE_ACTION.unshelve, { id: shelf.id });
 	assert.equal(unshelved.ok, true);
 	assert.equal(loadContext(brainDir).shelf.length, 0, "the existing unshelve action clears the placement through the same facade");
 	const entry = loadLedger(brainDir).ledger.items[0];
