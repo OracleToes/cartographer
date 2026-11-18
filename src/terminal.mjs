@@ -36,7 +36,7 @@ import { conferenceStatusLine, findConferenceByChild, loadConference, renderConf
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
-import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
+import { open, openCounts, renderLedger } from "./ledger.mjs";
 import { awaitsApproval, planSummary, planWaits, renderPlan, runnableMoves, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
 import { approvalWordTargets, isApprovalWords } from "./requests.mjs";
 import { splitState, windowLines } from "./state.mjs";
@@ -1039,12 +1039,13 @@ export async function runTerminal(session, options) {
 	};
 
 	/** One line on the ledger; a file that cannot be read is said loudly, because the agent cannot use it either. */
-	const ledgerLine = () => {
-		const { ledger, error } = loadLedger(options.brainDir);
-		if (ledger === undefined) return line(`! The ledger cannot be read: ${error}. Repair the file; until then the agent works without it.`);
+	const renderLedgerLine = (projection) => {
+		if (!projection.ok) return line(`! ${projection.error.message}. Repair the file; until then the agent works without it.`);
+		const { ledger } = projection.data;
 		if (open(ledger, POLICY.enums.ledgerKind.goal).length === 0) line(dim(`ledger: ${openCounts(ledger)} · no goal yet: say what you want to achieve`));
 		else line(dim(`ledger: ${openCounts(ledger)} · /ledger shows them`));
 	};
+	const ledgerLine = async () => renderLedgerLine(await queries.ledger());
 
 	/** One line on the plan, when there is one. */
 	const planLine = async () => {
@@ -1075,7 +1076,8 @@ export async function runTerminal(session, options) {
 	const submit = async (content) => {
 		// A new turn: what the last one held back is no longer the newest thinking.
 		if (!busy) held = "";
-		if (loadLedger(options.brainDir).ledger === undefined) ledgerLine();
+		const ledgerProjection = await queries.ledger();
+		if (!ledgerProjection.ok) renderLedgerLine(ledgerProjection);
 		// This runs after the terminal has opened. A cold llama-swap route may now load, but an absent server leaves
 		// the local Cartographer session open and the user's message is not admitted into an unserviceable run.
 		if (!(await ensureModelReady())) return undefined;
@@ -2004,7 +2006,7 @@ export async function runTerminal(session, options) {
 	};
 
 	// ─── Start ──────────────────────────────────────────────────────────────
-	ledgerLine();
+	await ledgerLine();
 	await planLine();
 	await atlasLine();
 	const shellSnapshot = await queries.runtime.shells();
