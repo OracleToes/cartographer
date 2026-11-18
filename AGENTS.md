@@ -13,7 +13,7 @@ starting anything; it outranks your defaults.
   options, and say which default you started on.
 - Attention is the product. Never spend theirs: no recapping what they said, no narration of what you are
   about to do, no "great question". Result first, then the one or two facts that matter; leave out the rest.
-- Show proof, not confidence. Run the tests and say the numbers. Verify on a real terminal when the change is
+- Show proof, not confidence. Run the tests (after pushing) and say the numbers. Verify on a real terminal when the change is
   visible there. If something is not verified, say "unverified" in exactly those terms.
 - They test the pushed branch, not the workspace: anything unpushed does not exist for them. Push in small,
   atomic units as you go (see Git below), and never report unpushed work as done.
@@ -33,7 +33,8 @@ starting anything; it outranks your defaults.
 ## Tests
 
 `npm test` runs the whole suite through `test/all.mjs`, which holds a hard wall-clock budget: if everything
-together takes longer than **10 seconds**, the suite fails. It runs:
+together takes longer than **10 seconds**, the suite fails. This is not a frivolous limit. Do not run your
+own tests to avoid this limit. It runs:
 
 - `test/unit.mjs` — fast unit tests: temp brain directories and direct calls to the operations. No model server,
   no terminal, no sandbox.
@@ -46,10 +47,10 @@ together takes longer than **10 seconds**, the suite fails. It runs:
 Rules for running it:
 
 - Do not run the test suite while working a task, to check whether something works mid-step. It is for the end of a
-  piece of work, before committing.
-- Keep it under the budget. New tests must be deterministic and free of the real model server; a terminal (pty) or
-  bubblewrap dependency is acceptable only if the test skips cleanly without them, and only if the whole suite still
-  finishes inside 10 seconds.
+  piece of work, AFTER committing and pushing.
+- Keep it under the budget. New tests must be deterministic and free of the real model server; a terminal (pty)
+ dependency is acceptable only if the test skips cleanly without them, and only if the whole suite still
+  finishes inside 10 seconds. Install or build bubblewrap from source.
 - `test/all.mjs` enforces the budget mechanically; do not raise it to make a slow change pass. Make the slow test
   fast, or drop it with a note — do not enlarge the number.
 - Every case must assert the specification the code is being held to now — read the code, then write the assertion.
@@ -65,9 +66,11 @@ same audit and the same 10-second budget.
 - **Push proactively and atomically.** A commit is one coherent, named unit of work, and it is pushed the moment it
   exists — never left sitting in the local repository. The workspace can reset at any moment; only pushed work
   survives it. When in doubt, commit and push a small unit rather than carry changes in the working tree.
+  the workspace has a bad habit of resetting mid-work. pushing often mitigates the consequences of this.
 - **Push before testing.** Push each unit as soon as it is coherent, not after the suite has passed. Test after
   pushing; if a test then shows a problem, fix it and push the fix as another commit. Never leave the only copy of
-  a change in the working tree while tests run or while a turn ends.
+  a change in the working tree while tests run or while a turn ends. The workspace might reset and then you lose all
+  that work.
 - **If the workshop resets, restore from the most recent commit.** Fetch, put the working tree back on the pushed
   state of `origin/<current branch>`, and carry on from there. Do not attempt to reconstruct lost uncommitted work.
 - **Always push.** The user verifies and tests the work from the pushed branch, not from this workspace: a change
