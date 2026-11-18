@@ -1261,10 +1261,12 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	assert.deepEqual(ways, ["the terminal (OSC 52)", "wl-copy"]);
 	assert.equal(writes.length, 1, "OSC 52 remains immediate terminal feedback while helper work is asynchronous");
 	assert.deepEqual(calls, [{ command: "wl-copy", args: [], input: "copied words", timeoutMs: POLICY.limits.screen.copyTimeoutMs }]);
+	// Export names follow the machine's local clock; choose an unambiguous local midnight rather than UTC NOW.
+	const exportAt = new Date(2026, 10, 15, 0, 0, 0).getTime();
 	const exported = await copyOut("exported words", {
 		brainDir,
 		name: "session",
-		now: Date.parse(NOW),
+		now: exportAt,
 		env: {},
 		write: () => {},
 	});
