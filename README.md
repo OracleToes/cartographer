@@ -211,6 +211,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 |---|---|
 | `/thinking`, `/thinking on`, `/thinking off`, Ctrl-T | Hide or show the agent's own text. Switching it on prints what the newest turn held back |
 | `/report`, `/report t12` | The last task's report in full, or the kept report with that id |
+| `/consult`, `/consult co1`, `/consult probe [PATH]` | List consultation conference audits, inspect one immutable conference packet, or write an inspectable no-project native-grammar diagnostic |
 | `/context` | What the agent's context holds, part by part with sizes; the kept reports; when it was last collapsed and when it will be next |
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
 | `/fold ID …` | What the agent does with `fold`: take a kept report out of view, leaving its one line |
@@ -239,11 +240,12 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/shells` | The shell windows: what runs in each, for how long, and its newest lines |
 | `/kill NAME`, `/kill all` | Close a shell window, or all of them, and end what runs there |
 | `/send NAME line` | Type a line into a shell window, as you; `/shells` lists the windows |
+| `/wait [SECONDS]` | With piped input, wait for shell commands and scheduled wakes, letting the agent react; an interactive terminal already does this itself |
 | `/stop`, Ctrl-X in the full Screen | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
 | `/pause`, Ctrl-V in the full Screen | Hold the agent in its stream mid-reply; use it again to continue, while any line or command ends the held stream |
 | `/new` | Start a fresh context: the current assessment and graph, and nothing else in view. The record of finished tasks, the shelf and the talk start empty; the reports stay in `.brain/reports/` |
 | `/status` | Messages in view, context size, which model is on, working or idle, how many shell windows are open, how many wakes are set, whether approval is off |
-| `/quit`, Ctrl-C when idle | Leave |
+| `/quit`, `/exit`, Ctrl-C when idle | Leave |
 
 Compatibility decision: the plain terminal retains command aliases such as `/stop` and `/pause` for scripts and line-oriented use. The full Screen exposes the matching Ctrl-X and Ctrl-V controls, and Ctrl-C remains its clear-line/quit control rather than a stop alias.
 
