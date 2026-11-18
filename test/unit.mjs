@@ -70,10 +70,12 @@ import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
+import { createList } from "../src/screen/list.mjs";
 import { createNoticeStore, NOTICE_LEVEL, noticeSpans } from "../src/screen/notices.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
+import { createSelection } from "../src/screen/selection.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
@@ -539,6 +541,33 @@ test("screen: shared forms keep local required, field-validation, help, disabled
 	assert.equal(saves[0].get("title"), "Refresh the durable view");
 	assert.equal(closed, 1, "the form retains the established close-on-success contract");
 	assert.throws(() => new Form({ fields: [] }), /needs one or more fields/);
+});
+
+test("screen: shared selection retains identity across projection rebuilds and falls back only when the target disappears", () => {
+	const selection = createSelection({ keyOf: (item) => item?.id });
+	const first = [{ id: "atlas" }, { id: "ledger" }, { id: undefined }];
+	assert.equal(selection.reconcile(first), "atlas", "the first actionable identity is selected on an empty collection state");
+	assert.equal(selection.select(first, "ledger"), true);
+	const rebuilt = [{ id: "atlas", fresh: true }, { id: "ledger", fresh: true }];
+	assert.equal(selection.reconcile(rebuilt), "ledger", "a rebuilt projection keeps the stable selected identity rather than an old object reference");
+	assert.equal(selection.selected(rebuilt)?.fresh, true);
+	assert.equal(selection.move(rebuilt, 99), true);
+	assert.equal(selection.key(), "ledger", "movement clamps at a collection boundary");
+	assert.equal(selection.move(rebuilt, -99), true);
+	assert.equal(selection.key(), "atlas");
+	assert.equal(selection.reconcile([{ id: "plan" }]), "plan", "a removed selection falls back to the first current row");
+	assert.equal(selection.select([{ id: "plan" }], "missing"), false);
+	assert.equal(selection.clear(), true);
+	assert.equal(selection.clear(), false);
+	assert.throws(() => createSelection({ keyOf: "id" }), /identity reader/);
+
+	const list = createList();
+	list.set({ items: [{ key: "heading", plain: true, head: [["Heading", ""]] }, { key: "a", head: [["A", ""]] }, { key: "b", head: [["B", ""]] }] });
+	list.select("b");
+	list.set({ items: [{ key: "b", head: [["B refreshed", ""]] }, { key: "a", head: [["A refreshed", ""]] }] });
+	assert.equal(list.selected()?.key, "b", "the list consumes the same stable selection model across a projection rebuild");
+	list.set({ items: [{ key: "a", head: [["A only", ""]] }] });
+	assert.equal(list.selected()?.key, "a");
 });
 
 test("screen: one modal owner restores focus, and confirmation dialogs gate acknowledgement without duplicate actions", async () => {
