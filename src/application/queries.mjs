@@ -4,6 +4,7 @@
 // presentation adapter asks for them: reads are deferred from render/key stacks, cancellation is explicit, and
 // malformed local state becomes a typed unavailable outcome rather than display-text parsing.
 import { assessmentPath, loadAssessment } from "../assessment.mjs";
+import { createHash } from "node:crypto";
 import { activeMoveOverlays, atlasPath, attentionSnapshot, fileMarks, loadAtlas } from "../atlas.mjs";
 import { changeSince, lastChange, uncommitted } from "../checkpoints.mjs";
 import { listConferences } from "../conference.mjs";
@@ -41,6 +42,7 @@ export const REVIEW_QUERY = Object.freeze({
 export const CONSULT_QUERY = Object.freeze({
 	list: "consult.list",
 	get: "consult.get",
+	routing: "consult.routing",
 });
 
 export const RUNTIME_QUERY = Object.freeze({
@@ -56,6 +58,35 @@ export const RUNTIME_QUERY = Object.freeze({
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
 const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+/** Opaque message identity for the lifecycle-only Consult route; its source text never enters ordinary Work state. */
+export const consultMessageFingerprint = (text) => createHash("sha256").update(String(text ?? "")).digest("hex");
+/** The terminal needs only a child identity, state, and attributed message keys. Full conference material stays in Consult. */
+const consultRoute = (record) => {
+	const conference = nonEmpty(record?.id);
+	const childConversationId = nonEmpty(record?.childConversationId);
+	if (conference === undefined || childConversationId === undefined) return undefined;
+	const activity = (Array.isArray(record.activities) ? record.activities : []).flatMap((entry) => {
+		const participant = nonEmpty(entry?.participant);
+		if (participant === undefined) return [];
+		const callIds = (Array.isArray(entry.calls) ? entry.calls : []).map((call) => nonEmpty(call?.id)).filter((id) => id !== undefined);
+		const proseHash = typeof entry?.prose === "string" ? consultMessageFingerprint(entry.prose) : undefined;
+		return callIds.length === 0 && proseHash === undefined ? [] : [{ participant, ...(callIds.length === 0 ? {} : { callIds }), ...(proseHash === undefined ? {} : { proseHash }) }];
+	});
+	const turns = (Array.isArray(record.turns) ? record.turns : []).flatMap((turn) => {
+		const participant = nonEmpty(turn?.participant);
+		if (participant === undefined || typeof turn?.text !== "string") return [];
+		return [{ participant, textHash: consultMessageFingerprint(turn.text) }];
+	});
+	return {
+		conference,
+		childConversationId,
+		...(nonEmpty(record.status) === undefined ? {} : { status: nonEmpty(record.status) }),
+		...(nonEmpty(record.active?.participant) === undefined ? {} : { activeParticipant: nonEmpty(record.active.participant) }),
+		...(nonEmpty(record.final?.participant) === undefined ? {} : { finalParticipant: nonEmpty(record.final.participant) }),
+		...(activity.length === 0 ? {} : { activity }),
+		...(turns.length === 0 ? {} : { turns }),
+	};
+};
 const metadata = (options, now) => ({
 	...(typeof options?.requestId === "string" && options.requestId !== "" ? { requestId: options.requestId } : {}),
 	at: new Date(now()).toISOString(),
@@ -406,7 +437,25 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
-	const consult = Object.freeze({ list: consultList, get: consultGet });
+	/** A non-Consult lifecycle route deliberately contains no question, source, audit prose, or result material. */
+	const consultRouting = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		try {
+			const routes = consultReaders.listConferences(brainDir)
+				.flatMap((entry) => entry?.conference === undefined ? [] : [consultRoute(entry.conference)])
+				.filter((route) => route !== undefined);
+			return uiSuccess({ routes }, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read consultation routing.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
+	const consult = Object.freeze({ list: consultList, get: consultGet, routing: consultRouting });
 
 	const runtimeAssessment = async (options = {}) => {
 		const ready = await prepare(options);

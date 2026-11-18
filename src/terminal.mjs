@@ -24,6 +24,7 @@ import { atlasSummary, attentionSummary, renderAttention, renderOutline } from "
 import { changeRecord, changeSummary } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
+import { consultMessageFingerprint } from "./application/queries.mjs";
 import { describeCall, describeResult } from "./application/activity.mjs";
 export { describeCall, describeResult } from "./application/activity.mjs";
 import { CONTEXT_ACTION } from "./application/context.mjs";
@@ -31,7 +32,7 @@ import { WORKSPACE_ACTION } from "./application/workspace.mjs";
 import { REQUEST_ACTION } from "./application/requests.mjs";
 import { REVIEW_ACTION } from "./application/review.mjs";
 import { RUNTIME_ACTION } from "./application/runtime-actions.mjs";
-import { conferenceStatusLine, findConferenceByChild, loadConference, renderConference } from "./conference.mjs";
+import { conferenceStatusLine, renderConference } from "./conference.mjs";
 import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "./consult-probe.mjs";
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
@@ -292,10 +293,9 @@ export async function runTerminal(session, options) {
 	const pendingCalls = new Map(); // call id -> { depth, text } waiting for its result
 	const attached = new Set();
 	const watches = [];
-	// Conference child ids never change ownership. Cache that one narrow association so ordinary task live frames
-	// do not repeatedly scan consult records merely to prove that they are not a conference.
-	const conferenceChildren = new Map();
-	const ordinaryConversations = new Set();
+	// Conference child ids are supplied by a deliberately narrow, deferred Consult routing projection. It carries
+	// identity, state, and opaque message keys only; full conference material stays in the isolated Consult surface.
+	const conferenceRoutes = new Map();
 
 	// The call for which Cartographer last said that it ended a turn, per depth: several results of one reply carry it.
 	const saidLoop = [];
@@ -746,38 +746,40 @@ export async function runTerminal(session, options) {
 		}
 	};
 
+	/** Refresh the narrow routing cache before a child replay or live frame is classified. A failed refresh leaves the
+	 * last safe route in place; it never falls back to opening a full conference record in ordinary Work lifecycle code. */
+	const refreshConsultRouting = async () => {
+		const projection = await queries.consult.routing();
+		if (!projection.ok) return false;
+		conferenceRoutes.clear();
+		for (const route of projection.data.routes) {
+			if (typeof route?.childConversationId === "string" && route.childConversationId !== "") conferenceRoutes.set(route.childConversationId, route);
+		}
+		return true;
+	};
 	/**
 	 * Conference children are ordinary Durable conversations for scheduling, but not ordinary parent/focus work for
-	 * presentation. Carry only their co<N> identity and the best known active speaker to the screen; the screen
-	 * reads its own consult-local audit rather than receiving any child material in the parent conversation.
+	 * presentation. The cached route carries only its co<N> identity, state, and opaque attribution keys; Consult
+	 * itself owns the full audit record.
 	 */
 	const consultScope = (id, message, { activeFallback = true } = {}) => {
-		const conversationId = String(id ?? "");
-		let record;
-		try {
-			const known = conferenceChildren.get(conversationId);
-			if (known !== undefined) record = loadConference(options.brainDir, known).conference;
-			else if (!ordinaryConversations.has(conversationId)) {
-				record = findConferenceByChild(options.brainDir, conversationId);
-				if (record === undefined) ordinaryConversations.add(conversationId);
-				else conferenceChildren.set(conversationId, record.id);
-			}
-		} catch { record = undefined; }
-		if (record === undefined) return undefined;
+		const route = conferenceRoutes.get(String(id ?? ""));
+		if (route === undefined) return undefined;
 		let participant;
 		if (message?.role === "assistant") {
 			const calls = callsOf(message);
 			const callIds = new Set(calls.map((call) => call.id).filter((callId) => typeof callId === "string"));
-			const activity = record.activities?.findLast?.((entry) => entry?.participant && (
-				(callIds.size > 0 && Array.isArray(entry.calls) && entry.calls.some((call) => callIds.has(call.id))) ||
-				(callIds.size === 0 && entry.prose === textOf(message))
+			const messageHash = callIds.size === 0 ? consultMessageFingerprint(textOf(message)) : undefined;
+			const activity = route.activity?.findLast?.((entry) => entry?.participant && (
+				(callIds.size > 0 && Array.isArray(entry.callIds) && entry.callIds.some((callId) => callIds.has(callId))) ||
+				(callIds.size === 0 && entry.proseHash === messageHash)
 			));
 			participant = activity?.participant;
-			if (participant === undefined && calls.some((call) => call.name === "consult_return")) participant = record.final?.participant;
-			if (participant === undefined && calls.length === 0) participant = record.turns?.findLast?.((turn) => turn.text === textOf(message))?.participant;
+			if (participant === undefined && calls.some((call) => call.name === "consult_return")) participant = route.finalParticipant;
+			if (participant === undefined && calls.length === 0) participant = route.turns?.findLast?.((turn) => turn.textHash === messageHash)?.participant;
 		}
-		if (activeFallback) participant ??= record.active?.participant ?? record.final?.participant;
-		return { conference: record.id, ...(participant === undefined ? {} : { participant }), status: record.status };
+		if (activeFallback) participant ??= route.activeParticipant ?? route.finalParticipant;
+		return { conference: route.conference, ...(participant === undefined ? {} : { participant }), ...(route.status === undefined ? {} : { status: route.status }) };
 	};
 
 	const follow = async (id, depth) => {
@@ -785,6 +787,8 @@ export async function runTerminal(session, options) {
 		if (conversation === undefined) return;
 		const watch = await conversation.watch(context);
 		watches.push(watch);
+		// A conference child is classified from the deferred minimal route before its synchronous replay renderer runs.
+		if (depth > 0) await refreshConsultRouting();
 		// Awaited: entries that come in while the replay is built are handed in after it, in order.
 		const replayConsult = consultScope(id);
 		await replayHistory(conversation, id, depth, watch.value.entries ?? [], replayConsult === undefined ? undefined : { conference: replayConsult.conference, status: replayConsult.status });
@@ -797,6 +801,9 @@ export async function runTerminal(session, options) {
 		}
 		const handle = async (value) => {
 			if (stopped) return;
+			// Participant state can advance independently of the Durable child entry. Refresh its opaque routing keys
+			// before the synchronous renderer assigns this frame to Consult.
+			if (depth > 0) await refreshConsultRouting();
 			for (const entry of value.entries) if (entry.id > newest) {
 				const message = (entry.model ?? []).find((candidate) => candidate.role === "assistant") ?? (entry.model ?? [])[0];
 				showEntry(depth, entry, consultScope(id, message));
@@ -2031,11 +2038,11 @@ export async function runTerminal(session, options) {
 	}
 	await follow(main.id, 0);
 	// A restarted outer tool normally names its child in a live slot, but a settled/recovered watch can arrive
-	// without that transient slot. Follow any still-running co<N> child directly so Consult continues to show its
-	// live participant stream; this does not attach it to parent context or grant it parent authority.
-	const consultsAtStart = await queries.consult.list();
-	for (const { conference } of consultsAtStart.ok ? consultsAtStart.data.conferences : []) {
-		const child = conference?.status === "running" ? conference.childConversationId : undefined;
+	// without that transient slot. Follow any still-running co<N> child directly from the minimal routing projection
+	// so Consult continues to show its live participant stream without loading audit material into Work lifecycle code.
+	await refreshConsultRouting();
+	for (const route of conferenceRoutes.values()) {
+		const child = route.status === "running" ? route.childConversationId : undefined;
 		if (typeof child !== "string" || child === "" || attached.has(child)) continue;
 		attached.add(child);
 		await follow(child, 1);

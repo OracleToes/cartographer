@@ -16,7 +16,7 @@ import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
-import { createWorkspaceQueries } from "../src/application/queries.mjs";
+import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
@@ -1114,6 +1114,60 @@ test("application: consult projection defers its isolated audit list", async (t)
 	chat.refreshConsult();
 	assert.match(chatText("consult"), /Consultation co1/);
 	assert.doesNotMatch(chatText("work"), /Does the cache stay private/, "a cached conference remains exclusive to Consult");
+});
+
+test("application: consult routing projection defers opaque child identity and speaker state", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let reads = 0;
+	const privateProse = "The private consultation evidence stays in its audit.";
+	const privateTurn = "The participant's private reasoning stays in Consult.";
+	const conference = {
+		id: "co1",
+		childConversationId: "child-7",
+		status: "running",
+		question: "Must this material stay private?",
+		sources: [{ id: "s1", text: "A captured private source." }],
+		active: { participant: "atlas" },
+		final: { participant: "cartographer" },
+		activities: [
+			{ participant: "atlas", prose: privateProse },
+			{ participant: "cartographer", calls: [{ id: "call-7", arguments: { advisory: "private" } }] },
+		],
+		turns: [{ participant: "atlas", text: privateTurn }],
+	};
+	const queries = createWorkspaceQueries({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		consultReaders: { listConferences: () => { reads++; return [{ id: "co1", conference }, { id: "co2", error: "unreadable" }]; } },
+	});
+	const pending = queries.consult.routing({ requestId: "consult-routing" });
+	assert.equal(reads, 0, "ordinary lifecycle routing leaves the render/key stack before opening a Consult audit");
+	const routed = await pending;
+	assert.equal(routed.ok, true);
+	if (!routed.ok) throw new Error(routed.error.message);
+	assert.equal(routed.meta.requestId, "consult-routing");
+	assert.deepEqual(routed.data.routes, [{
+		conference: "co1",
+		childConversationId: "child-7",
+		status: "running",
+		activeParticipant: "atlas",
+		finalParticipant: "cartographer",
+		activity: [
+			{ participant: "atlas", proseHash: consultMessageFingerprint(privateProse) },
+			{ participant: "cartographer", callIds: ["call-7"] },
+		],
+		turns: [{ participant: "atlas", textHash: consultMessageFingerprint(privateTurn) }],
+	}]);
+	const serialized = JSON.stringify(routed.data.routes);
+	assert.doesNotMatch(serialized, /Must this material stay private|captured private source|private consultation evidence|private reasoning|advisory/, "the lifecycle route exposes neither conference material nor tool arguments");
+	const controller = new AbortController();
+	controller.abort();
+	const cancelled = await queries.consult.routing({ signal: controller.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled Consult route must not inspect private audit records");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(reads, 1);
 });
 
 test("application: durable action adapters leave the render and key stack before legacy mutations", async (t) => {
