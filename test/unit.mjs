@@ -663,6 +663,72 @@ test("application: review undo defers checkpoint recovery and returns its plan r
 	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
 });
 
+test("application: review records shell-window checkpoints through its typed boundary", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const calls = [];
+	const step = { names: ["main"], text: "npm test", changes: [{ path: "src/main.mjs", status: "changed" }] };
+	const app = createReviewApplication({
+		root,
+		brainDir,
+		windows: { takeActive: () => { calls.push("active"); return ["main"]; } },
+		now: () => Date.parse(NOW),
+		operations: {
+			windowStep: (receivedRoot, receivedBrain, names) => {
+				calls.push({ action: "window-step", root: receivedRoot, brainDir: receivedBrain, names });
+				return step;
+			},
+		},
+	});
+	const pending = app.execute(REVIEW_ACTION.recordWindows, {}, { requestId: "windows-1" });
+	assert.deepEqual(calls, [], "window checkpointing leaves terminal/render work before consuming live window activity");
+	const recorded = await pending;
+	assert.equal(recorded.ok, true);
+	if (!recorded.ok) throw new Error(recorded.error.message);
+	assert.equal(recorded.meta.requestId, "windows-1");
+	assert.equal(recorded.data.step, step);
+	assert.deepEqual(calls, [
+		"active",
+		{ action: "window-step", root, brainDir, names: ["main"] },
+	]);
+	assert.deepEqual(app.capabilities.list({ windows: { takeActive() {} } }).find((capability) => capability.id === REVIEW_ACTION.recordWindows)?.availability, { enabled: true });
+
+	const none = createReviewApplication({
+		root,
+		brainDir,
+		windows: { takeActive: () => [] },
+		operations: { windowStep: () => undefined },
+	});
+	const empty = await none.execute(REVIEW_ACTION.recordWindows);
+	assert.equal(empty.ok, true);
+	if (!empty.ok) throw new Error(empty.error.message);
+	assert.equal(empty.data.step, undefined, "no active window changes are an honest empty success");
+	const unavailable = createReviewApplication({
+		root,
+		brainDir,
+		windows: { takeActive: () => ["main"] },
+		operations: { windowStep: () => { throw new CheckpointError("git is not installed"); } },
+	});
+	const failed = await unavailable.execute(REVIEW_ACTION.recordWindows);
+	assert.equal(failed.ok, false);
+	if (failed.ok) throw new Error("checkpoint trouble must remain a typed unavailable result");
+	assert.equal(failed.error.kind, UI_ERROR_KIND.unavailable);
+	const cancelledCalls = [];
+	const cancelledApp = createReviewApplication({
+		root,
+		brainDir,
+		windows: { takeActive: () => { cancelledCalls.push("active"); return ["main"]; } },
+		operations: { windowStep: () => { cancelledCalls.push("window-step"); } },
+	});
+	const controller = new AbortController();
+	const cancelledPending = cancelledApp.execute(REVIEW_ACTION.recordWindows, {}, { signal: controller.signal });
+	controller.abort();
+	const cancelled = await cancelledPending;
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled window checkpoint must not consume live window activity");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual(cancelledCalls, []);
+});
+
 test("application: runtime controls defer shell and wake mutations behind typed outcomes", async () => {
 	const calls = [];
 	const windows = {

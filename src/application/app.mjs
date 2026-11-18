@@ -22,6 +22,7 @@ const ACTION_SCOPES = Object.freeze({
 	[REQUEST_ACTION.deny]: ["requests", "workspace"],
 	[REQUEST_ACTION.answer]: ["requests", "workspace"],
 	[REVIEW_ACTION.undo]: ["review", "workspace", "context", "requests"],
+	[REVIEW_ACTION.recordWindows]: ["review", "runtime"],
 	[RUNTIME_ACTION.sendShell]: ["runtime"],
 	[RUNTIME_ACTION.closeShell]: ["runtime"],
 	[RUNTIME_ACTION.closeAllShells]: ["runtime"],
@@ -73,7 +74,7 @@ export function createApplication({ brainDir, root, config = {}, now = () => Dat
 	const workspace = createWorkspaceApplication({ ...workspaceOptions, brainDir, root, config, now });
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
-	const review = createReviewApplication({ ...reviewOptions, brainDir, root, now });
+	const review = createReviewApplication({ windows: runtimeOptions.windows, ...reviewOptions, brainDir, root, now });
 	const runtimeActionContext = { windows: runtimeOptions.windows, wakes: runtimeOptions.wakes, ...runtimeActionOptions, now };
 	const runtimeActions = createRuntimeApplication(runtimeActionContext);
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });

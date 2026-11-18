@@ -22,7 +22,7 @@ import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { loadAssessment } from "./assessment.mjs";
 import { activeMoveOverlays, atlasSummary, attentionSnapshot, attentionSummary, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
-import { changeRecord, changeSummary, CheckpointError, windowStep } from "./checkpoints.mjs";
+import { changeRecord, changeSummary } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
 import { describeCall, describeResult } from "./application/activity.mjs";
@@ -1101,17 +1101,16 @@ export async function runTerminal(session, options) {
 	 * Record what the windows changed since the last checkpoint as a step of its own. Only while no task runs: during
 	 * a change task the changes are the task's.
 	 */
-	const recordWindows = () => {
+	const recordWindows = async () => {
 		if (windows === undefined || busy) return undefined;
-		try {
-			const step = windowStep(options.root, options.brainDir, windows.takeActive());
-			if (step !== undefined) windowStepLine(step);
-			return step;
-		} catch (error) {
-			if (!(error instanceof CheckpointError)) throw error;
-			line(`! ${error.message}`);
+		const outcome = await application.execute(REVIEW_ACTION.recordWindows);
+		if (!outcome.ok) {
+			line(`! ${outcome.error.message}`);
 			return undefined;
 		}
+		const step = outcome.data.step;
+		if (step !== undefined) windowStepLine(step);
+		return step;
 	};
 
 	// A wake the agent set has fired while it works: it finds the firing in the state block of its next request. If
@@ -1152,7 +1151,7 @@ export async function runTerminal(session, options) {
 		}
 		const events = [...(windows?.takeNews() ?? []), ...(wakes?.takeNews() ?? [])];
 		for (const event of events) line(`${bold("◆")} ${eventLine(event)}`);
-		const step = recordWindows();
+		const step = await recordWindows();
 		if (step !== undefined) events.push({ type: "changed", names: step.names, summary: changeSummary(step.changes) });
 		if (credit === WAKE_BURST) creditAt = Date.now();
 		credit--;
@@ -1579,7 +1578,7 @@ export async function runTerminal(session, options) {
 			}
 			case "diff": {
 				try {
-					recordWindows();
+					await recordWindows();
 					const projection = await queries.review.last();
 					if (!projection.ok) {
 						line(`! ${projection.error.message}`);
@@ -1603,8 +1602,7 @@ export async function runTerminal(session, options) {
 					}
 					if (rows.length < patch.length) line(dim(`  ${patch.length - rows.length} more lines; /diff all shows everything`));
 				} catch (error) {
-					if (!(error instanceof CheckpointError)) throw error;
-					line(`! ${error.message}`);
+					line(`! ${error?.message ?? error}`);
 				}
 				return true;
 			}
@@ -1614,7 +1612,7 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				try {
-					recordWindows();
+					await recordWindows();
 					const outcome = await application.execute(REVIEW_ACTION.undo);
 					if (!outcome.ok) {
 						line(`! ${outcome.error.message}`);
@@ -1635,8 +1633,7 @@ export async function runTerminal(session, options) {
 					if (result.windows !== undefined) line(dim("  The plan is as it was, and the window may still be running: /shells shows it. Tell the agent what you took back."));
 					line(dim("  /undo again takes back the change task before this one."));
 				} catch (error) {
-					if (!(error instanceof CheckpointError)) throw error;
-					line(`! ${error.message}`);
+					line(`! ${error?.message ?? error}`);
 				}
 				return true;
 			}
@@ -1972,7 +1969,7 @@ export async function runTerminal(session, options) {
 		}
 		const were = projection.data.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (were.length === 0) return true;
-		recordWindows();
+		await recordWindows();
 		const outcome = await acknowledgedRuntimeAction(RUNTIME_ACTION.closeAllShells, "all", {
 			reason: `${USER_NAME} switched the sandbox ${to}, which closes every window`,
 		});
@@ -2072,7 +2069,7 @@ export async function runTerminal(session, options) {
 			// The agent rests until the next line: the moment to collapse its context when that is due.
 			await rest({ final: piped.length === 0 });
 		}
-		recordWindows();
+		await recordWindows();
 		await stop();
 		return failed ? 1 : 0;
 	}
@@ -2166,7 +2163,7 @@ export async function runTerminal(session, options) {
 			reader.close();
 			unlisten?.();
 			if (busy) line(dim("Leaving. Unfinished work continues the next time carto starts here."));
-			else recordWindows();
+			else await recordWindows();
 			const running = (windows?.list(0) ?? []).filter((win) => win.state === POLICY.enums.windowStates.busy);
 			if (running.length > 0) line(dim(`Leaving. ${running.length === 1 ? `Window ${running[0].name} ends` : `Windows ${running.map((win) => win.name).join(", ")} end`} now, with what runs there.`));
 			await stop();
