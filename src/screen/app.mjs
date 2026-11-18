@@ -1066,12 +1066,21 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const requestSettingsEdit = (requested) => {
 		const selected = settingsTarget(requested);
-		if (selected === undefined) return flash("Choose a settled configuration setting before editing.");
-		const { row, settings, target } = selected;
-		if (target.writable !== true) return flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
-		if (target.expectedRevision === undefined) return flash("Refresh Settings before editing so the selected source revision is known.");
+		if (selected === undefined) {
+			flash("Choose a settled configuration setting before editing.");
+			return false;
+		}
+		const { row, target } = selected;
+		if (target.writable !== true) {
+			flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
+			return false;
+		}
+		if (target.expectedRevision === undefined) {
+			flash("Refresh Settings before editing so the selected source revision is known.");
+			return false;
+		}
 		const field = settingsEditorField(row, target);
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: `Edit ${row.label} · ${target.scope}`,
 			fields: [field],
 			keyOf,
@@ -1236,6 +1245,9 @@ export async function runScreen(session, options, runTerminal) {
 		if (changed) {
 			cancelProjection(previous.id);
 			if (previous.id === "chat.consult") cancelConsultProjection();
+			// A route change before target settlement is an explicit abandonment, not permission to keep a hidden
+			// picker pending behind a different view. Overlay-backed/executing launches retain their own safeguards.
+			actionLauncher?.onRouteChanged(current);
 		}
 		tui.resetTextSelection();
 		refresh(current.id, true);
@@ -1507,11 +1519,17 @@ export async function runScreen(session, options, runTerminal) {
 	// Snapshot of what the box opens with, so a save knows which fields were edited.
 	const openFieldBox = async (viewId_, rowKey) => {
 		const found = await editFieldsFor(viewId_, rowKey);
-		if (viewId() !== viewId_) return;
-		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
-		if (found.error !== undefined) return flash(found.error);
+		if (viewId() !== viewId_) return false;
+		if (found === undefined) {
+			flash("that is not an entry of its book, or the book cannot be read");
+			return false;
+		}
+		if (found.error !== undefined) {
+			flash(found.error);
+			return false;
+		}
 		const { id, fields } = found;
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: id,
 			fields,
 			keyOf,
@@ -1589,10 +1607,13 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const openAddBox = (book) => {
 		const template = ADD_FIELDS[book];
-		if (template === undefined) return flash("this view has no add");
+		if (template === undefined) {
+			flash("this view has no add");
+			return false;
+		}
 		const id = viewId();
 		const fields = template();
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: `new ${book}`,
 			fields,
 			keyOf,
@@ -1606,10 +1627,16 @@ export async function runScreen(session, options, runTerminal) {
 	/** `n` on an envelope declares a child move through the typed workspace action. */
 	const openMoveBox = async (parentId) => {
 		const found = await queries.entry({ book: "plan", id: parentId });
-		if (viewId() !== "carto.plan") return;
-		if (!found.ok || found.data.item.parent !== undefined) return flash(found.ok ? "that envelope is no longer in the plan" : found.error.message);
+		if (viewId() !== "carto.plan") return false;
+		if (!found.ok || found.data.item.parent !== undefined) {
+			flash(found.ok ? "that envelope is no longer in the plan" : found.error.message);
+			return false;
+		}
 		const parent = found.data.item;
-		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) return flash(`${parent.id} is not an open envelope`);
+		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) {
+			flash(`${parent.id} is not an open envelope`);
+			return false;
+		}
 		const changing = parent.mode === POLICY.enums.planMode.change;
 		const fields = [
 			{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: "" },
@@ -1625,7 +1652,7 @@ export async function runScreen(session, options, runTerminal) {
 				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
 			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
 		];
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: `new move under ${parent.id}`,
 			fields,
 			keyOf,
@@ -2078,7 +2105,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (opened === undefined) flash("finish or cancel the open dialog first");
 		return opened;
 	};
-	const openConfirmation = (confirmation, confirm, { title } = {}) => openModal(({ close }) => new ConfirmDialog({
+	const openConfirmation = (confirmation, confirm, { title, cancel } = {}) => openModal(({ close }) => new ConfirmDialog({
 		title,
 		confirmation,
 		keyOf,
@@ -2086,14 +2113,17 @@ export async function runScreen(session, options, runTerminal) {
 		confirm,
 		flash,
 		redraw: draw,
+		...(typeof cancel === "function" ? { cancel } : {}),
 	}), { width: Math.max(20, Math.min(76, terminal.columns - 4)), anchor: "center" });
 	const presentLaunchedResult = (result, pending) => {
 		const id = `${pending.placement.route.tab}.${pending.placement.route.view}`;
 		if (pending.actionId.startsWith("settings.")) return presentSettingsResult(result, id);
 		if (pending.actionId.startsWith("runtime.")) return presentRuntimeResult(result, id);
 		if (pending.actionId.startsWith("review.")) return presentReviewResult(result, id);
-		if (pending.actionId.startsWith("request.") || pending.actionId.startsWith("context.") || pending.actionId.startsWith("workspace.")) {
+		if (pending.actionId.startsWith("workspace.")) return presentWorkspaceResult(result, id);
+		if (pending.actionId.startsWith("request.") || pending.actionId.startsWith("context.")) {
 			flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+			if (!result.ok) refresh(id, true);
 			draw();
 			return result.ok;
 		}
@@ -2107,31 +2137,36 @@ export async function runScreen(session, options, runTerminal) {
 	const openExistingActionControl = ({ plan, placement, dispatch }) => {
 		const input = plan.input ?? {};
 		if (plan.actionId === REVIEW_ACTION.undo) {
-			void dispatch();
-			return true;
+			return (async () => {
+				if (core.busy()) {
+					flash("The agent is working. Stop it first, then undo its checkpoint change.");
+					return false;
+				}
+				// Preserve the established recovery bridge: active shell changes become their own checkpoint before undo
+				// names a recovery target. Both legs remain application actions; only the launcher owns confirmation.
+				if (application.capabilities.availability(REVIEW_ACTION.recordWindows)?.enabled === true) {
+					const recorded = await application.execute(REVIEW_ACTION.recordWindows);
+					if (!recorded.ok) return presentReviewResult(recorded, `${placement.route.tab}.${placement.route.view}`);
+				}
+				return dispatch();
+			})();
 		}
-		if (plan.actionId === SETTINGS_ACTION.edit) {
-			requestSettingsEdit(input);
-			return true;
-		}
-		if (plan.actionId === WORKSPACE_ACTION.add) {
-			openAddBox(BOOK_VIEWS[viewId()] ?? "ledger");
-			return true;
-		}
+		if (plan.actionId === SETTINGS_ACTION.edit) return requestSettingsEdit(input);
+		if (plan.actionId === WORKSPACE_ACTION.add) return openAddBox(BOOK_VIEWS[viewId()] ?? "ledger");
 		if (plan.actionId === WORKSPACE_ACTION.addMove) {
 			if (typeof input.parent !== "string" || input.parent === "") return false;
-			void openMoveBox(input.parent);
-			return true;
+			return openMoveBox(input.parent);
 		}
 		if (plan.actionId === WORKSPACE_ACTION.edit) {
 			if (typeof input.rowKey !== "string" || input.rowKey === "") return false;
-			void openFieldBox(viewId(), input.rowKey);
-			return true;
+			return openFieldBox(viewId(), input.rowKey);
 		}
 		if (plan.actionId === WORKSPACE_ACTION.settle) {
-			if (typeof input.id !== "string" || typeof input.rowKey !== "string") return false;
-			void settleWorkspaceRow(input.rowKey, input.id);
-			return true;
+			if (typeof input.id !== "string" || input.id === "") return false;
+			// Palette candidates are settled Ledger rows at this placement. Dispatching retains the application's durable
+			// validation without re-querying a row from the key/overlay path; Plan's reported-move review bridge remains
+			// the contextual `t` control on its own settled view.
+			return dispatch();
 		}
 		return false;
 	};
@@ -2145,7 +2180,7 @@ export async function runScreen(session, options, runTerminal) {
 		currentRoute: () => routes.current(),
 		navigate: (route) => setRoute(route),
 		targetsFor: actionTargetsFor,
-		openDialog: ({ plan, submit }) => openModal(({ close }) => new ActionDialog({
+		openDialog: ({ plan, submit, cancel }) => openModal(({ close }) => new ActionDialog({
 			actionId: plan.actionId,
 			title: plan.title,
 			fields: plan.fields,
@@ -2155,8 +2190,9 @@ export async function runScreen(session, options, runTerminal) {
 			flash,
 			redraw: draw,
 			submit,
+			cancel,
 		}), { width: boxWidth(plan.fields, terminal.columns), anchor: "center" }),
-		openTargetPicker: ({ title, targets, choose }) => openModal(({ close }) => new TargetPicker({
+		openTargetPicker: ({ title, targets, choose, cancel }) => openModal(({ close }) => new TargetPicker({
 			title,
 			targets,
 			keyOf,
@@ -2164,9 +2200,11 @@ export async function runScreen(session, options, runTerminal) {
 			flash,
 			redraw: draw,
 			choose,
+			cancel,
 		}), { width: Math.max(28, Math.min(82, terminal.columns - 4)), anchor: "center" }),
-		openConfirmation: ({ confirmation, confirm }) => openConfirmation(confirmation, confirm, {
+		openConfirmation: ({ confirmation, confirm, cancel }) => openConfirmation(confirmation, confirm, {
 			title: `${application.capabilities.get(confirmation.actionId)?.label ?? "Confirm action"}?`,
+			cancel,
 		}),
 		openExistingControl: openExistingActionControl,
 		present: presentLaunchedResult,

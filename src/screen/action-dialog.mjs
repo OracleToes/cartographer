@@ -30,6 +30,7 @@ export class ActionDialog extends Form {
 	 *   flash: (text: string) => void,
 	 *   redraw?: () => void,
 	 *   submit: (input: object) => boolean | Promise<boolean>,
+	 *   cancel?: () => void,
 	 * }} given
 	 */
 	constructor(given) {
@@ -62,5 +63,15 @@ export class ActionDialog extends Form {
 			},
 		});
 		this.actionId = actionId;
+		this.cancel = typeof given.cancel === "function" ? given.cancel : () => {};
+	}
+	handleInput(data) {
+		// Form closes for both a successful save and Escape. Only the explicit Escape path abandons the launch; a
+		// successful save remains available for ActionLauncher to present or to replace with confirmation.
+		if (!this.saving && this.given.keyOf(data) === "escape") {
+			this.cancel();
+			return void this.given.close();
+		}
+		return super.handleInput(data);
 	}
 }

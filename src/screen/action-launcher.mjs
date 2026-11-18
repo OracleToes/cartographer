@@ -177,10 +177,10 @@ export class ActionLauncher {
 	 *   currentRoute?: () => { tab: string, view: string } | undefined,
 	 *   navigate?: (route: { tab: string, view: string }) => boolean | Promise<boolean>,
 	 *   targetsFor?: (placement: object, pending: object) => object[] | { state?: string, targets?: object[], selected?: object, reason?: string } | undefined,
-	 *   openDialog?: (given: { plan: object, submit: (input: object) => Promise<boolean> }) => boolean | { opened?: boolean, close?: () => void },
-	 *   openTargetPicker?: (given: { title: string, targets: object[], choose: (target: object) => boolean | Promise<boolean> }) => boolean | { opened?: boolean, close?: () => void },
-	 *   openConfirmation?: (given: { confirmation: object, confirm: () => Promise<boolean> }) => boolean | { opened?: boolean, close?: () => void },
-	 *   openExistingControl?: (given: { plan: object, placement: object }) => boolean | Promise<boolean>,
+	 *   openDialog?: (given: { plan: object, submit: (input: object) => Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, close?: () => void },
+	 *   openTargetPicker?: (given: { title: string, targets: object[], choose: (target: object) => boolean | Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, close?: () => void },
+	 *   openConfirmation?: (given: { confirmation: object, confirm: () => Promise<boolean>, cancel: () => boolean }) => boolean | { opened?: boolean, close?: () => void },
+	 *   openExistingControl?: (given: { plan: object, placement: object, dispatch: () => Promise<boolean> }) => boolean | { opened?: boolean, close?: () => void } | Promise<boolean | { opened?: boolean, close?: () => void }>,
 	 *   present?: (result: object, pending: object) => void,
 	 *   flash?: (message: string) => void,
 	 *   defer?: (work: () => void) => void,
@@ -214,6 +214,12 @@ export class ActionLauncher {
 		const pending = this.pending;
 		this.pending = undefined;
 		return pending;
+	}
+	/** Discard a launch after the caller-owned picker, form, or confirmation has explicitly been cancelled. */
+	cancel(pending = this.pending) {
+		if (pending === undefined || this.pending !== pending) return false;
+		this.clear();
+		return true;
 	}
 	/** Start an action but optionally hold resolution until a caller has closed its own overlay (usually the palette). */
 	async begin(actionId, { waitForResume = false } = {}) {
@@ -262,6 +268,19 @@ export class ActionLauncher {
 	async launch(actionId) {
 		if (!await this.begin(actionId)) return false;
 		return this.resume();
+	}
+	/**
+	 * Let Screen composition abandon a target lookup when the person leaves its declared route before any dialog or
+	 * durable dispatch begins. Without this, a loading destination could leave an invisible pending action that blocks
+	 * the next palette launch forever. Executing work stays owned by its request gate and is allowed to settle.
+	 */
+	onRouteChanged(route = this.currentRoute()) {
+		const pending = this.pending;
+		if (pending === undefined || sameRoute(pending.placement.route, route)) return false;
+		if (["executing", "dialog", "picker", "confirmation"].includes(pending.phase)) return false;
+		this.clear();
+		this.flash("Cancelled the action launch because its target view changed.");
+		return true;
 	}
 	/** Let Screen composition signal that a deferred route projection has settled. */
 	onRouteSettled(route = this.currentRoute()) {
@@ -342,6 +361,7 @@ export class ActionLauncher {
 				title: `Choose target · ${titleFor(pending.capability, pending.placement)}`,
 				targets: plan.targets,
 				choose: (target) => this.choose(target),
+				cancel: () => this.cancel(pending),
 			});
 			if (promise(openedPicker)) {
 				const openedAsync = await openedPicker;
@@ -374,6 +394,7 @@ export class ActionLauncher {
 				// Dialog implementations may hand us only their field drafts or may already include plan.input. Merge at
 				// this boundary either way, so a selected settled target cannot be lost between picker and execution.
 				submit: (input) => this.dispatch(pending, plan.actionId, { ...plan.input, ...(input ?? {}) }, { fromDialog: true }),
+				cancel: () => this.cancel(pending),
 			});
 			if (promise(openedDialog)) {
 				const openedAsync = await openedDialog;
@@ -391,8 +412,8 @@ export class ActionLauncher {
 		pending.phase = "executing";
 		let result;
 		try {
-			// The request gate owns an in-flight action's identity. Reusing a completed request id would make a
-			// confirmation retry look like a duplicate, so only the first leg may take the generated id.
+			// The request gate owns an in-flight action's identity. Reusing a completed request id would make an
+			// acknowledged confirmation retry look like a duplicate, so only the first leg receives the generated id.
 			result = await this.gate.run(actionId, input, {
 				...(confirmation === undefined && pending.requestId !== undefined ? { requestId: pending.requestId } : {}),
 				...(confirmation === undefined ? {} : { confirmation }),
@@ -424,6 +445,7 @@ export class ActionLauncher {
 						confirmation: { ...result.confirmation, acknowledged: true },
 						fromDialog: false,
 					}),
+					cancel: () => this.cancel(pending),
 				});
 				if (!opened(confirmationOpened)) {
 					this.clear();
