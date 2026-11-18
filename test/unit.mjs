@@ -83,7 +83,7 @@ import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
-import { atlasView, ledgerView, planView, requestsView } from "../src/screen/workspace.mjs";
+import { atlasView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -570,6 +570,38 @@ test("screen: Requests render settled workspace projections through its applicat
 	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above request rows");
 });
 
+test("screen: Project tree renders settled workspace projections through its application presentation adapter", () => {
+	const presentation = createWorkspacePresentation().tree;
+	const emptyData = { root: "/project", files: [], marks: {} };
+	const data = {
+		root: emptyData.root,
+		files: [{ path: "src/main.mjs", bytes: 1_536 }],
+		marks: { "src/main.mjs": ["entry"] },
+	};
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return treeView({ tree: projection, presentation }, () => false);
+	};
+	assert.throws(() => treeView({ tree: data }), /presentation adapter/, "Project tree cannot fall back to direct path or size formatting");
+	const loading = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Project tree is not asked to invent data while its projection is loading");
+	assert.match(loading.header[0][0][0], /Project tree is loading/, "the shared boundary names Project tree loading");
+	const failed = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { error: { message: "The project tree is unavailable." } }, render });
+	assert.equal(rendered, 0, "a Project tree query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Project tree could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data: emptyData }, render });
+	assert.equal(rendered, 1, "a settled empty projection reaches Project tree");
+	assert.match(empty.items[0].head[0][0], /project folder is empty/i, "Project tree owns its successful empty state");
+	const settled = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data }, render });
+	assert.equal(rendered, 2, "a settled Project tree projection uses its adapter for targets and sizes");
+	assert.equal(settled.items.find((item) => item.key === "file:src/main.mjs")?.target?.file, "/project/src/main.mjs");
+	assert.match(settled.items.find((item) => item.key === "file:src/main.mjs")?.head[1][0] ?? "", /1\.5 KB/);
+	const stale = renderAsyncBoundary({ id: "carto.tree", name: "Project tree", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached Project tree data remains renderable while its replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above Project tree rows");
+});
+
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
 	let clock = 0;
 	const notices = createNoticeStore({ now: () => clock, limit: 2, ttlMs: 10 });
@@ -1017,6 +1049,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	const listed = await queries.tree({ requestId: "tree-query" });
 	assert.equal(listed.ok, true);
 	if (!listed.ok) throw new Error(listed.error.message);
+	assert.equal(listed.data.root, root, "the settled tree projection owns the target root");
 	assert.deepEqual(listed.data.files.find((file) => file.path === "tree.txt"), { path: "tree.txt", bytes: 3 });
 	assert.equal(listed.meta.requestId, "tree-query");
 	const current = queries.context({ requestId: "context-query" });
@@ -1039,10 +1072,10 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(missingReport.ok, false);
 	if (missingReport.ok) throw new Error("a missing report must stay an explicit typed outcome");
 	assert.equal(missingReport.error.code, UI_ERROR_CODE.notFound);
-	const { handsView, treeView } = await import("../src/screen/views.mjs");
+	const { handsView } = await import("../src/screen/views.mjs");
 	const sharedView = handsView({ root, context: shared.data });
 	assert.equal(sharedView.items.find((item) => item.key === "report:t1")?.body, "The report body.");
-	const treeViewProjection = treeView({ root, tree: listed.data }, () => false);
+	const treeViewProjection = treeView({ tree: listed.data, presentation: createWorkspacePresentation().tree }, () => false);
 	assert.match(treeViewProjection.items.find((item) => item.key === "file:tree.txt")?.head[1][0] ?? "", /3 B/);
 	const absent = await queries.entry({ book: "ledger", id: "g1" });
 	assert.equal(absent.ok, false);

@@ -263,3 +263,59 @@ export function requestsView({ requests: provided, error, presentation } = {}) {
 		items,
 	};
 }
+
+/**
+ * Render the project tree with query-owned root and mark projection.
+ * @param {{
+ *   tree?: { root?: string, files?: ({ path: string, bytes?: number } | string)[], marks?: Record<string, string[]> },
+ *   presentation: { size: (bytes: number) => string, target: (root: string, path: string, folder?: boolean) => object },
+ * }} input
+ * @param {(key: string) => boolean} isOpen
+ */
+export function treeView({ tree: provided, presentation } = {}, isOpen = () => false) {
+	if (presentation === undefined || typeof presentation.size !== "function" || typeof presentation.target !== "function") throw new TypeError("Project tree needs its Workspace presentation adapter.");
+	if (provided === undefined) return { header: [[["Project tree is loading…", "muted"]]], items: [] };
+	const root = typeof provided.root === "string" ? provided.root : undefined;
+	const files = (provided.files ?? []).map((entry) => (typeof entry === "string" ? { path: entry } : entry));
+	const marks = new Map(Object.entries(provided.marks ?? {}));
+	/** @type {{ dirs: Map<string, any>, files: Array<{ name: string, bytes?: number }>, count: number }} */
+	const top = { dirs: new Map(), files: [], count: 0 };
+	for (const file of files) {
+		const parts = file.path.split("/");
+		let dir = top;
+		dir.count++;
+		for (const part of parts.slice(0, -1)) {
+			if (!dir.dirs.has(part)) dir.dirs.set(part, { dirs: new Map(), files: [], count: 0 });
+			dir = dir.dirs.get(part);
+			dir.count++;
+		}
+		dir.files.push({ name: parts.at(-1), ...(Number.isFinite(file.bytes) ? { bytes: file.bytes } : {}) });
+	}
+	const items = [];
+	const target = (path, folder = false) => (root === undefined ? undefined : presentation.target(root, path, folder));
+	const walk = (dir, prefix, depth) => {
+		for (const name of [...dir.dirs.keys()].sort()) {
+			const path = `${prefix}${name}`;
+			const child = dir.dirs.get(name);
+			const nodes = marks.get(path);
+			items.push({
+				key: `dir:${path}`,
+				folder: true,
+				depth,
+				head: [[`${name}/`, "bold"], [`  ${child.count === 1 ? "1 file" : `${child.count} files`}`, "muted"], [nodes ? `  ← ${nodes.join(", ")}` : "", "tool"]],
+				copy: path,
+				target: target(path, true),
+			});
+			if (isOpen(`dir:${path}`)) walk(child, `${path}/`, depth + 1);
+		}
+		for (const file of [...dir.files].sort((a, b) => a.name.localeCompare(b.name))) {
+			const path = `${prefix}${file.name}`;
+			const nodes = marks.get(path);
+			const size = file.bytes === undefined ? "gone" : presentation.size(file.bytes);
+			items.push({ key: `file:${path}`, depth, head: [[file.name, ""], [`  ${size}`, "muted"], [nodes ? `  ← ${nodes.join(", ")}` : "", "tool"]], copy: path, target: target(path) });
+		}
+	};
+	walk(top, "", 0);
+	if (items.length === 0) items.push(note("  The project folder is empty."));
+	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root ?? "the project"}`, "bold"], ["  (without what git ignores and the brain folder; ← names the graph's nodes about a file)", "muted"]]], items };
+}

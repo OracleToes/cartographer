@@ -221,6 +221,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 				catch { return { path }; }
 			});
 			return uiSuccess({
+				root,
 				files,
 				marks: loadedAtlas.atlas === undefined ? {} : Object.fromEntries(fileMarks(loadedAtlas.atlas)),
 				issues,

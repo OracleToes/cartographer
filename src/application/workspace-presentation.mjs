@@ -4,6 +4,7 @@
 // this narrow vocabulary, so they never import a domain book merely to describe a Workspace snapshot.
 import { atlasSummary, renderAttention } from "../atlas.mjs";
 import { POLICY } from "../config.mjs";
+import { join } from "node:path";
 import { entryLine } from "../ledger.mjs";
 import { authorizationLine, itemLine, movesOf, waiting } from "../plan.mjs";
 import { flat } from "../rows.mjs";
@@ -32,6 +33,9 @@ const planMoveState = (move) => {
 		style: done ? "ok" : reported || blocked ? "warn" : "tool",
 	};
 };
+
+const treeSize = (bytes) => bytes < POLICY.limits.format.kibibyte ? `${bytes} B` : bytes < POLICY.limits.format.mebibyte ? `${(bytes / POLICY.limits.format.kibibyte).toFixed(1)} KB` : `${(bytes / POLICY.limits.format.mebibyte).toFixed(1)} MB`;
+const treeTarget = (root, path, folder = false) => ({ file: join(root, path), ...(folder ? { folder: true } : {}) });
 
 /** The presentation vocabulary migrated Workspace renderers need. Other views join this adapter as they migrate. */
 export function createWorkspacePresentation() {
@@ -63,6 +67,10 @@ export function createWorkspacePresentation() {
 			flat,
 			isApproval: (request) => request.kind === "approval",
 			isQuestion: (request) => request.kind === POLICY.enums.ledgerKind.question,
+		}),
+		tree: Object.freeze({
+			size: treeSize,
+			target: treeTarget,
 		}),
 	});
 }
