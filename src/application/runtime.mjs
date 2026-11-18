@@ -71,6 +71,25 @@ export function createRuntimeStatusReader({ main, context, windows, wakes, model
 }
 
 /**
+ * Build the tiny live activity snapshot the screen needs while it paints its strip and composer. Question text and
+ * task internals remain with the terminal lifecycle; rendering needs only that an answer is pending, when it began,
+ * and whether private task work currently owns input.
+ * @param {{ asks?: { pending?: () => { since?: number } | undefined }, activeTask?: () => unknown }} options
+ */
+export function createRuntimeActivityReader({ asks, activeTask } = {}) {
+	return async ({ signal } = {}) => {
+		if (signal?.aborted === true) return undefined;
+		const pending = typeof asks?.pending === "function" ? asks.pending() : undefined;
+		const task = typeof activeTask === "function" ? activeTask() : undefined;
+		if (signal?.aborted === true) return undefined;
+		return {
+			...(pending === undefined ? {} : { question: { ...(finite(pending?.since) === undefined ? {} : { since: pending.since }) } }),
+			taskActive: task !== undefined,
+		};
+	};
+}
+
+/**
  * Deferred session snapshots for Runtime views. The engine's request-window reader currently calculates collapse
  * state from durable context, and shell managers expose mutable process state, so neither may be called from a
  * screen render/key stack. Composition supplies both as narrow live dependencies; this adapter owns only their

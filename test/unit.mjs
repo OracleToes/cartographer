@@ -17,7 +17,7 @@ import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
-import { createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
+import { createRuntimeActivityReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
@@ -911,9 +911,9 @@ test("application: active-context accounting is a deferred typed runtime project
 	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
 });
 
-test("application: runtime view and status projections defer shell, wake, engine, model, and preview snapshots", async (t) => {
+test("application: runtime view, status, and activity projections defer shell, wake, engine, model, question, task, and preview snapshots", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusWindows: 0, statusWakes: 0, statusModel: 0 };
+	const reads = { sent: 0, shells: 0, output: 0, wakes: 0, wakeLines: 0, preview: 0, statusContext: 0, statusWindows: 0, statusWakes: 0, statusModel: 0, activityQuestion: 0, activityTask: 0 };
 	const sent = {
 		task: false,
 		requestId: "main:1",
@@ -936,12 +936,17 @@ test("application: runtime view and status projections defer shell, wake, engine
 		wakes: { list: () => { reads.statusWakes++; return [wake]; }, nextDue: () => 3_000 },
 		model: async () => { reads.statusModel++; return { modelId: "status-model" }; },
 	});
+	const activityReader = createRuntimeActivityReader({
+		asks: { pending: () => { reads.activityQuestion++; return { since: Date.parse(NOW), text: "Private prompt text is not a status projection." }; } },
+		activeTask: () => { reads.activityTask++; return "task-7"; },
+	});
 	const preview = { at: Date.parse(NOW), plan: { parts: [] } };
 	const queries = createWorkspaceQueries({
 		brainDir,
 		root,
 		now: () => Date.parse(NOW),
 		runtimeStatusReader: statusReader,
+		runtimeActivityReader: activityReader,
 		runtimeViewReader: {
 			sent: (scope) => { reads.sent++; return scope === "main" ? sent : { ...sent, requestId: "newest:1" }; },
 			shells: ({ tail }) => { reads.shells++; assert.equal(tail, POLICY.limits.screen.windowsListed); return { windows: [window] }; },
@@ -968,6 +973,14 @@ test("application: runtime view and status projections defer shell, wake, engine
 	assert.deepEqual(status.data.windows, [window]);
 	assert.deepEqual(status.data.wakes, [wake]);
 	assert.deepEqual([reads.statusContext, reads.statusWindows, reads.statusWakes, reads.statusModel], [1, 1, 1, 1]);
+	const pendingActivity = queries.runtime.activity({ requestId: "activity-query" });
+	assert.deepEqual([reads.activityQuestion, reads.activityTask], [0, 0], "question and task ownership leave the screen render stack before their live session readers run");
+	const activity = await pendingActivity;
+	assert.equal(activity.ok, true);
+	if (!activity.ok) throw new Error(activity.error.message);
+	assert.equal(activity.meta.requestId, "activity-query");
+	assert.deepEqual(activity.data, { question: { since: Date.parse(NOW) }, taskActive: true });
+	assert.deepEqual([reads.activityQuestion, reads.activityTask], [1, 1]);
 	const shells = await queries.runtime.shells();
 	assert.equal(shells.ok, true);
 	if (!shells.ok) throw new Error(shells.error.message);
@@ -986,7 +999,7 @@ test("application: runtime view and status projections defer shell, wake, engine
 	assert.equal(planned.ok, true);
 	if (!planned.ok) throw new Error(planned.error.message);
 	assert.equal(planned.data.preview, preview);
-	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusWindows: 1, statusWakes: 1, statusModel: 1 });
+	assert.deepEqual(reads, { sent: 1, shells: 1, output: 1, wakes: 1, wakeLines: 1, preview: 1, statusContext: 1, statusWindows: 1, statusWakes: 1, statusModel: 1, activityQuestion: 1, activityTask: 1 });
 	const stoppedWakes = new AbortController();
 	const cancelledWakesPending = queries.runtime.wakes({ signal: stoppedWakes.signal });
 	stoppedWakes.abort();
@@ -1020,6 +1033,13 @@ test("application: runtime view and status projections defer shell, wake, engine
 	assert.match(contextView(current.data.sent, { windowSize: 1_000, cols: 80 }).header[0][0][0], /Sent provider request/, "the sent-request renderer consumes its typed engine snapshot");
 	assert.match(rawPayloadView(current.data.sent).header[0][0][0], /Raw provider payload/, "the raw audit renderer reuses that same projection");
 	assert.match(previewView(planned.data.preview).header[0][0][0], /Next request preview/, "the preview renderer receives prepared runtime data");
+	const stoppedActivity = new AbortController();
+	stoppedActivity.abort();
+	const cancelledActivity = await queries.runtime.activity({ signal: stoppedActivity.signal });
+	assert.equal(cancelledActivity.ok, false);
+	if (cancelledActivity.ok) throw new Error("a cancelled activity projection must not inspect live question or task state");
+	assert.equal(cancelledActivity.error.code, UI_ERROR_CODE.cancelled);
+	assert.deepEqual([reads.activityQuestion, reads.activityTask], [1, 1]);
 });
 
 test("application: assessment projection defers its runtime summary", async (t) => {

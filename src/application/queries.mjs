@@ -49,6 +49,7 @@ export const RUNTIME_QUERY = Object.freeze({
 	assessment: "runtime.assessment",
 	context: "runtime.context",
 	status: "runtime.status",
+	activity: "runtime.activity",
 	shells: "runtime.shells",
 	shellOutput: "runtime.shell-output",
 	wakes: "runtime.wakes",
@@ -140,11 +141,12 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
  *   runtimeStatusReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages?: readonly any[], windows?: any[], wakes?: any[], modelId?: string, nextWakeDue?: number } | undefined>,
+ *   runtimeActivityReader?: (options?: { signal?: AbortSignal }) => Promise<{ question?: { since?: number }, taskActive?: boolean } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeViewReader, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeViewReader, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -522,6 +524,29 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
+	/** The screen's status and composer consume this cached activity fact instead of touching asks or task routing while they render. */
+	const runtimeActivity = async (options = {}) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready.result;
+		if (typeof runtimeActivityReader !== "function") return unavailable("runtime activity", "the running session does not expose its activity snapshot", ready.meta);
+		try {
+			const snapshot = await runtimeActivityReader({ signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			if (snapshot === undefined || snapshot === null || typeof snapshot !== "object") return unavailable("runtime activity", "the running session did not provide an activity snapshot", ready.meta);
+			const since = Number.isFinite(snapshot.question?.since) ? snapshot.question.since : undefined;
+			return uiSuccess({
+				...(snapshot.question === undefined ? {} : { question: { ...(since === undefined ? {} : { since }) } }),
+				taskActive: snapshot.taskActive === true,
+			}, { meta: ready.meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: "Cartographer could not read runtime activity.",
+				retryable: true,
+			}), { meta: ready.meta });
+		}
+	};
 	/** A shell snapshot is always safe to show as an empty collection when this session has no shell manager. */
 	const runtimeShells = async (options = {}) => {
 		const ready = await prepare(options);
@@ -628,6 +653,7 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		assessment: runtimeAssessment,
 		context: runtimeContext,
 		status: runtimeStatus,
+		activity: runtimeActivity,
 		shells: runtimeShells,
 		shellOutput: runtimeShellOutput,
 		wakes: runtimeWakes,

@@ -478,6 +478,8 @@ export async function runScreen(session, options, runTerminal) {
 		brain = { at: 0, loading: false, request: brain.request + 1 };
 		refreshBrain(true);
 	};
+	/** The strip and composer read one deferred activity snapshot rather than probing asks/task state while they render. */
+	const currentRuntimeActivity = () => runtimeActivityProjection().data ?? {};
 	/** The activity, shared-state, and key-reminder rows of the strip, as spans. */
 	const status = () => {
 		const busy = core.busy();
@@ -490,13 +492,14 @@ export async function runScreen(session, options, runTerminal) {
 			state.restSince = Date.now();
 			state.prefill = undefined;
 		}
-		const question = session.asks?.pending();
+		const activity = currentRuntimeActivity();
+		const question = activity.question;
 		const first = [];
-		if (question !== undefined) first.push([`? waiting for your answer since ${stamp(question.since).split(", ").at(-1)}`, "warn bold"], [" · type it below", "muted"]);
+		if (question !== undefined) first.push([Number.isFinite(question.since) ? `? waiting for your answer since ${stamp(question.since).split(", ").at(-1)}` : "? waiting for your answer", "warn bold"], [" · type it below", "muted"]);
 		else if (busy) {
 			const doing = chat.doing();
 			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
-			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
+			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (activity.taskActive ? "task" : "working"), "bold"]);
 			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
 			if (reading) {
 				const { fresh, done, ms } = state.prefill;
@@ -583,6 +586,8 @@ export async function runScreen(session, options, runTerminal) {
 			engine: session.engine,
 			windows: session.windows,
 			wakes: session.wakes,
+			asks: session.asks,
+			activeTask: session.activeTask,
 			model: session.model,
 			preview: session.preview,
 			runner: options.runner,
@@ -641,6 +646,15 @@ export async function runScreen(session, options, runTerminal) {
 	let settleProjection = () => {};
 	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
 	const projectionFor = (id) => projections.get(id);
+	const RUNTIME_ACTIVITY_PROJECTION = "runtime.activity";
+	const runtimeActivityProjection = () => projectionFor(RUNTIME_ACTIVITY_PROJECTION);
+	let runtimeActivityAt = 0;
+	/** Questions and task ownership are live lifecycle state, so the screen refreshes a small deferred snapshot instead of reading them while it paints. */
+	const refreshRuntimeActivity = (force = false) => {
+		if (!force && Date.now() - runtimeActivityAt < EVERY.chat) return false;
+		runtimeActivityAt = Date.now();
+		return projections.refresh(RUNTIME_ACTIVITY_PROJECTION, ({ signal }) => queries.runtime.activity({ signal }), { force });
+	};
 	const projectionMessage = (projection) => projection?.error?.message ?? "Cartographer could not refresh this view.";
 	const projectionView = (id, render) => {
 		const projection = projectionFor(id);
@@ -717,6 +731,7 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	settleProjection = (id) => {
 		if (state.closed) return;
+		if (id === RUNTIME_ACTIVITY_PROJECTION) return void draw();
 		rebuild(id);
 		if (viewId() === id || id === "runtime.wakes") draw();
 	};
@@ -1575,7 +1590,7 @@ export async function runScreen(session, options, runTerminal) {
 		},
 		/** The line the place to type shows in the commands mode. */
 		commandLine() {
-			const question = session.asks?.pending();
+			const question = currentRuntimeActivity().question;
 			const typed = prompt.getText();
 			const draft = typed === "" ? "" : `   (typed so far: ${cut(typed.replace(/\n/g, " ⏎ "), POLICY.limits.screen.typedDraftChars)})`;
 			let hint = "Esc or i to write";
@@ -1584,19 +1599,19 @@ export async function runScreen(session, options, runTerminal) {
 			return [[" COMMAND MODE ", "chip"], [`  ${hint}`, question !== undefined ? "warn" : "muted"], [draft, "faint"]];
 		},
 		prompt() {
-			const question = session.asks?.pending();
-			if (question !== undefined) return { text: "Answer › ", style: "warn bold" };
+			const activity = currentRuntimeActivity();
+			if (activity.question !== undefined) return { text: "Answer › ", style: "warn bold" };
 			// Keep the terminal core's safety marks at the place someone acts, but give the words a stable human role
 			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
 			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
-			const task = session.activeTask?.() !== undefined && core.busy();
+			const task = activity.taskActive && core.busy();
 			const role = task ? "Task" : "You";
 			if (marks !== "") return { text: `${marks} ${role} › `, style: "warn bold" };
 			if (task) return { text: "Task › ", style: "tool bold" };
 			return { text: "You › ", style: "user bold" };
 		},
 		placeholder: () => {
-			if (session.asks?.pending() !== undefined) return "Write the answer";
+			if (currentRuntimeActivity().question !== undefined) return "Write the answer";
 			if (core.busy()) return "Message the agent while it works · Esc for commands";
 			return "Message Cartographer, or /help · Esc for commands";
 		},
@@ -1734,6 +1749,7 @@ export async function runScreen(session, options, runTerminal) {
 		// resized, or what is typed grew): it is drawn again.
 		else if (chatBody.rows !== chatScroll.viewportHeight) draw();
 		refreshWakeProjection();
+		refreshRuntimeActivity();
 		const busy = core.busy();
 		if (Date.now() - lastFrame >= (busy ? SPIN_MS : POLICY.timing.screen.idleFrameMs)) {
 			lastFrame = Date.now();
@@ -1765,6 +1781,7 @@ export async function runScreen(session, options, runTerminal) {
 	process.stdin.on("data", watchInput);
 	tui.start();
 	refreshWakeProjection(true);
+	refreshRuntimeActivity(true);
 	terminal.setTitle(`carto · ${basename(root)}`);
 	tui.setFocus(prompt);
 	askColors();
