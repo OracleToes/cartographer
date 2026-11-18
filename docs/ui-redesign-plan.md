@@ -476,6 +476,8 @@ Each migrated view removes direct domain imports and gains loading, empty, error
 
 The six tabs, `1`–`6` dispatcher, Settings footer/help text, palette destination, and README now agree. The palette lists all registered capabilities with availability reasons and navigates to the narrowest current Screen seam; contextual action execution still requires the selected target and input. `/stop` and `/pause` remain supported terminal commands for line-oriented and scripted use, while Ctrl-X and Ctrl-V are their full-Screen controls. Ctrl-C is explicitly retained as clear-line/quit behavior, not a stop alias. The 10-second aggregate watchdog remains unchanged.
 
+**Compatibility-alias decision (2026-11-16).** The internal `Box` export is retired in favor of `Form`: every production form constructor and its coverage now use `Form`, and `src/screen/parts.mjs` is not a package entry point. The visual behavior, focus capture, validation, disabled-field handling, and asynchronous-save behavior are unchanged. Semantic style aliases remain deliberately retained because migrated feature renderers still consume them; they are not removed speculatively.
+
 Each coherent implementation slice is committed and pushed on the current branch before its verification run.
 
 ---

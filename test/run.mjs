@@ -2724,8 +2724,8 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }], presentation: runtimePresentation.shells }), LONG);
 });
 
-test("screen: the small box caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {
-	const { Box } = await import("../src/screen/parts.mjs");
+test("screen: the shared form caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {
+	const { Form } = await import("../src/screen/parts.mjs");
 	const caps = [];
 	const flashes = [];
 	const saved = [];
@@ -2734,7 +2734,7 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 		{ id: "text", label: "Text", limit: 5, value: "abc" },
 		{ id: "detail", label: "Detail", limit: 12, multiline: true, value: "" },
 	];
-	const box = new Box({
+	const box = new Form({
 		title: "x",
 		fields,
 		keyOf: (data) => data,
@@ -2764,7 +2764,7 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 	assert.equal(saved[0].get("detail"), "\n");
 	assert.equal(closed, 1);
 	// A paste is cut to what fits, and says so.
-	const box2 = new Box({
+	const box2 = new Form({
 		title: "y",
 		fields: [{ id: "text", label: "Text", limit: 6, value: "" }],
 		keyOf: (data) => data,
@@ -2781,7 +2781,7 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 	// A typed action result is asynchronous: the draft stays visible and cannot be submitted twice while it settles.
 	let resolveSave;
 	let redraws = 0;
-	const pending = new Box({
+	const pending = new Form({
 		title: "pending",
 		fields: [{ id: "text", label: "Text", limit: 6, value: "draft" }],
 		keyOf: (data) => data,

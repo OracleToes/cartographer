@@ -533,7 +533,7 @@ export class Sheet {
 }
 
 /**
- * The small box a field of a book or of the graph is edited in: the field's label, how much of it is used — live,
+ * The shared form a field of a book or of the graph is edited in: the field's label, how much of it is used — live,
  * `n / limit` — and the most it may hold. Nothing past the limit goes in, typed or pasted. `Enter` saves a one-line
  * field; a field that holds a long text lets `Enter` end a line and `Ctrl-Enter` save. `Tab` moves through the fields
  * of the row and the drafts ride along until `Esc`. The screen is one more client of the same operations the
@@ -543,7 +543,7 @@ export class Sheet {
  * `required`, `disabled`, `help`, and a synchronous field `validate(value, drafts)` are optional shared field
  * metadata. They improve local correction only; the application action remains the authority for every durable rule.
  */
-export class Box {
+export class Form {
 	static VISIBLE = 6;
 	/**
 	 * @param {{ title: string, fields: { id: string, label: string, limit: number, multiline?: boolean, value?: string, required?: boolean, disabled?: boolean, help?: string, validate?: (value: string, drafts: Map<string, string>) => string | { message?: string } | boolean | undefined }[],
@@ -680,7 +680,7 @@ export class Box {
 		const rows = rowsOf(this.text, this.inner - 2);
 		const at = this.cursorRow(rows);
 		if (at < this.scrolls[this.index]) this.scrolls[this.index] = at;
-		else if (at >= this.scrolls[this.index] + Box.VISIBLE) this.scrolls[this.index] = at - Box.VISIBLE + 1;
+		else if (at >= this.scrolls[this.index] + Form.VISIBLE) this.scrolls[this.index] = at - Form.VISIBLE + 1;
 	}
 	moveByLine(delta) {
 		if (!this.field.multiline) return;
@@ -752,7 +752,7 @@ export class Box {
 	handleMouse(event) {
 		if (event.type === "wheel" && this.field.multiline) {
 			const rows = rowsOf(this.text, this.inner - 2);
-			const most = Math.max(0, rows.length - Box.VISIBLE);
+			const most = Math.max(0, rows.length - Form.VISIBLE);
 			this.scrolls[this.index] = Math.max(0, Math.min(most, this.scrolls[this.index] + (event.wheelDelta ?? 0)));
 		}
 		return { handled: true };
@@ -815,9 +815,9 @@ export class Box {
 			} else {
 				const rows = rowsOf(this.text, this.inner - 2);
 				const at = this.cursorRow(rows);
-				const scroll = Math.min(this.scrolls[this.index], Math.max(0, rows.length - Box.VISIBLE));
+				const scroll = Math.min(this.scrolls[this.index], Math.max(0, rows.length - Form.VISIBLE));
 				this.scrolls[this.index] = scroll;
-				for (let i = scroll; i < scroll + Box.VISIBLE; i++) {
+				for (let i = scroll; i < scroll + Form.VISIBLE; i++) {
 					const range = rows[i];
 					if (range === undefined) lines.push(row([["▎", TOKEN.activity.user], ["", TOKEN.text.primary]]));
 					else lines.push(row(this.rowSpans(this.text.slice(range.start, range.end), i === at ? this.cursor - range.start : -1)));
@@ -832,12 +832,6 @@ export class Box {
 		});
 	}
 }
-
-/**
- * The shared form name for new component call sites. `Box` remains as a compatibility alias while existing feature
- * forms migrate one at a time; both share focus capture, local validation, disabled fields, and pending-save rules.
- */
-export class Form extends Box {}
 
 /** What is left on the terminal when carto leaves: the conversation as it stood, without the screen around it. */
 export class Farewell {
