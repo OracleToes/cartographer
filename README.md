@@ -151,7 +151,7 @@ With `--plain` the screen looks like this (an illustration of the layout, not a 
 ```
 Cartographer · /home/momo/some/project
 new brain /home/momo/some/project/.brain · ByteShape at http://127.0.0.1:8888/v1
-Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl-T hides and shows its thinking.
+Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent. Ctrl-V pauses its stream. Ctrl-T hides and shows its thinking.
 › where is the config loaded?
 ┊ The user wants the place where configuration is read. I have no node for it yet, so I start an inspect focus (no move, only reading).
 ▸ task  Find where configuration is loaded. Report the file, the function and the line numbers…
@@ -223,12 +223,12 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, its authorization envelopes and move revisions, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
+| `/focus NODE_OR_PATH reason`, `/unfocus` | Set or clear the explicit Atlas focus; a running move remains a temporary overlay |
 | `/assessment` | The agent's summary of the project, and where the file is |
 | `/requests` | What waits for you: move revisions to approve and questions of taste to answer |
 | `/approve ID …` | Approve exact move revisions. `/approve p2` snapshots p2's current waiting children; bare `/approve` snapshots every current waiting move |
 | `/deny ID [why]` | Turn one request down: a move revision is superseded, an envelope selection denies its current waiting children, a question closes |
 | `/answer ID words` | Answer a question of taste; the agent uses the answer and carries on |
-| `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
 | `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. The settings can hold the default (`yolo`); a switch while running is never remembered. See [Without approval](#without-approval-yolo) |
 | `/initiate`, `/initiate on`, `/initiate off` | Whether the agent starts working on its own when carto starts (it looks around, tends the map and works what is approved, or sleeps when there is nothing to do). The settings can hold the default (`initiate`); a switch while running is never remembered |
@@ -239,10 +239,13 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/shells` | The shell windows: what runs in each, for how long, and its newest lines |
 | `/kill NAME`, `/kill all` | Close a shell window, or all of them, and end what runs there |
 | `/send NAME line` | Type a line into a shell window, as you; `/shells` lists the windows |
-| `/stop`, Ctrl-C | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
+| `/stop`, Ctrl-X in the full Screen | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
+| `/pause`, Ctrl-V in the full Screen | Hold the agent in its stream mid-reply; use it again to continue, while any line or command ends the held stream |
 | `/new` | Start a fresh context: the current assessment and graph, and nothing else in view. The record of finished tasks, the shelf and the talk start empty; the reports stay in `.brain/reports/` |
 | `/status` | Messages in view, context size, which model is on, working or idle, how many shell windows are open, how many wakes are set, whether approval is off |
 | `/quit`, Ctrl-C when idle | Leave |
+
+Compatibility decision: the plain terminal retains command aliases such as `/stop` and `/pause` for scripts and line-oriented use. The full Screen exposes the matching Ctrl-X and Ctrl-V controls, and Ctrl-C remains its clear-line/quit control rather than a stop alias.
 
 ### How the agent talks to you
 
@@ -453,7 +456,7 @@ With piped input (`echo … | carto`) nobody is there to wait, and `carto` leave
 
 **Who may do what.** Starting a command or sending a line of input is for the task carrying the live declared move that owns the window. Reading, waiting, stopping and closing are open to the main agent and to every task, because none of them starts anything: the main agent can wait for a build itself, and stop or close what it no longer needs. The main agent may also run a command itself, but such a command runs in a read-only window: the project, the brain and `.git` are mounted read-only and the window has no network, so it is for the tests, the lints, git status and other checks that change nothing — like any other read. With the sandbox off the command still runs in a read-only window when bubblewrap works — the off switch now governs only how change tasks run their commands; when bubblewrap does not work, nothing holds the window to read-only and the main agent runs none. A command that must write or reach the network needs a declared change move.
 
-**You and the windows.** `/shells` lists them with their newest lines. `/kill NAME` closes one and ends what runs there, `/kill all` every one; the agent finds a line in its windows block saying that you closed it. `/stop` and Ctrl-C stop the agent and interrupt the command it was waiting for at that moment; commands in other windows keep running, and a line names them. Windows do not outlive `carto`: they end when you leave and when it is killed, and at the next start the agent is told which windows were running something and are gone.
+**You and the windows.** `/shells` lists them with their newest lines. `/kill NAME` closes one and ends what runs there, `/kill all` every one; the agent finds a line in its windows block saying that you closed it. `/stop` (or Ctrl-X in the full Screen) stops the agent and interrupts the command it was waiting for at that moment; commands in other windows keep running, and a line names them. Windows do not outlive `carto`: they end when you leave and when it is killed, and at the next start the agent is told which windows were running something and are gone.
 
 **A window after its task.** A window that is still running when its task ends can go on changing files. Those changes belong to no task, so Cartographer records them as a step of their own, named after the window, when the command ends, before the next change task starts, and when you leave. `/diff` shows such a step and `/undo` takes it back like a task's, without touching the plan. Only windows that were running something count: what you edit yourself while every window stands free is never recorded as a window's doing. What you edit while a window is at work does land in that window's step, since Cartographer cannot tell who wrote a file. A process that a command left in the background of a free window (`… &`) is not noticed this way; its changes go unrecorded until the next task's checkpoint takes them as given.
 
@@ -1009,8 +1012,9 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/screen/parts.mjs` | The parts of the screen as pi-tui components: the row of tabs, the bodies of the tabs, the strip, the place to type, the sheet of keys |
 | `src/screen/keys.mjs` | Keys by name for the commands mode; text that was pasted without being marked as pasted |
 | `src/screen/chat.mjs` | Chat Conversation and Work plus the isolated Consult audit: folded calls, live response material, local speech/work projections, and persona-attributed conference activity |
-| `src/screen/list.mjs` | A list of items that fold, with one selected: what Carto, Diff, Shells, and Model use |
-| `src/screen/views.mjs` | What those tabs hold: the brain's files as items with their place in the file, the changes by file, the shell windows, and the request the agent was sent, part by part |
+| `src/screen/list.mjs` | A list of items that fold, with one selected: what Carto, Diff, Shells, Model, and Settings use |
+| `src/screen/{workspace,review,runtime,settings}.mjs` | Settled feature views for the shared brain, checkpoint review, runtime/model inspection, and Settings & Safety |
+| `src/screen/views.mjs` | The command that opens a selected source or template in the configured editor |
 | `src/screen/text.mjs` | Text in cells: width, wrapping, styled lines; and telling a repeating reply from ordinary text |
 | `src/screen/theme.mjs` | The palette: levels of text, one hue for each kind of block, backgrounds made for the terminal's own |
 | `src/screen/copy.mjs` | Copying to the clipboard and to `.brain/export/` |
