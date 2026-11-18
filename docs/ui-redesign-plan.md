@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 4 shell and component foundation complete — Phase 5 view migration is next.
+**Status:** Phase 5 view migration in progress — Chat is complete; Workspace is next.
 
 **Date:** 2026-11-16
 
@@ -434,6 +434,8 @@ Migrate capability groups in this order:
 3. Review: Diff, checkpoints, recovery/undo.
 4. Runtime: Context, Shells, Wakes, Model/transport.
 5. Settings & Safety: configuration, assessments, policy, and grammar diagnostics.
+
+**Chat completion record (2026-11-16).** Chat now receives activity labels, context-collapse recognition, and roster data through an application presentation adapter. Consult records enter only through the composition-owned settled projection lifecycle; line rendering starts no audit read or state transition. Conversation and Work remain free of conference material, while Consult names loading, empty, error, and cached-stale states. The existing kept-talk removal path remains confirmation-gated.
 
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 
