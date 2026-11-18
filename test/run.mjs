@@ -2538,7 +2538,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }, { id: "consult", name: "Consult" }], "Chat gives isolated consultation activity its own adjacent subtab, rather than hiding it in parent Work");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
 	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
-	assert.deepEqual(VIEWS.settings, [{ id: "overview", name: "Safety" }, { id: "assessment", name: "Assessment" }], "Settings gives settled configuration and assessment projections their own safety tab");
+	assert.deepEqual(VIEWS.settings, [{ id: "configuration", name: "Configuration" }, { id: "safety", name: "Safety" }, { id: "assessment", name: "Assessment" }], "Settings gives editable configuration, session safety, and assessment their own settled subviews");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
 	const brainDir = join(scratch, "empty-current-brain");
 	mkdirSync(brainDir, { recursive: true });

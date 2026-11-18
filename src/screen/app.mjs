@@ -41,6 +41,7 @@ import { REVIEW_ACTION } from "../application/review.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
 import { RUNTIME_ACTION } from "../application/runtime-actions.mjs";
+import { SETTINGS_ACTION } from "../application/settings-actions.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
@@ -66,7 +67,8 @@ import { TOKEN } from "./tokens.mjs";
 import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
-import { settingsAssessmentView, settingsOverviewView } from "./settings.mjs";
+import { settingsAssessmentView, settingsSafetyView } from "./settings.mjs";
+import { nextWritableSettingsScope, settingsConfigurationView, settingsEditorField, settingsWriteTarget } from "./settings-editor.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -117,12 +119,13 @@ export const VIEWS = {
 		{ id: "parts", name: "Current accounting" },
 	],
 	settings: [
-		{ id: "overview", name: "Safety" },
+		{ id: "configuration", name: "Configuration" },
+		{ id: "safety", name: "Safety" },
 		{ id: "assessment", name: "Assessment" },
 	],
 };
 /** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts", "settings.overview", "settings.assessment"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts", "settings.configuration", "settings.safety", "settings.assessment"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -142,7 +145,7 @@ export const paletteDestinationFor = (id) => {
 	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
 	if (id.startsWith("runtime.model.")) return { tab: "context", view: "routes", name: "Model · Routes", hint: "Choose a route, then connect or select it through the Runtime action boundary." };
 	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
-	if (id.startsWith("settings.")) return { tab: "settings", view: "overview", name: "Settings · Safety", hint: "Inspect the settled saved-source provenance before choosing a persisted setting action." };
+	if (id.startsWith("settings.")) return { tab: "settings", view: "configuration", name: "Settings · Configuration", hint: "Inspect the settled saved-source provenance before choosing a persisted setting action." };
 	return undefined;
 };
 
@@ -232,11 +235,12 @@ export const KEYS_HELP = [
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	"  e                on a row of Atlas, Ledger or Plan: the small box on its fields — a live counter shows how full a field is and the row's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: on an Atlas, Ledger or Plan row, the entry's own JSON; with no such row, a template for a new one. On another editable source it opens that source. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model or Settings), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, node of the graph — or brings it back; d opens a confirmation before it deletes for good, in Requests before it forgets without a word to the agent, and in Shells → Wakes before it removes the selected wake; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  e                on a row of Atlas, Ledger or Plan: the small box on its fields — a live counter shows how full a field is and the row's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels. In Settings → Configuration, it opens the selected schema-derived saved-setting form.",
+	`  E                the $EDITOR door on the same row: on an Atlas, Ledger or Plan row, the entry's own JSON; with no such row, a template for a new one. On another editable source it opens that source. Ctrl-O is the same door, in every tab and mode, including while you type; Settings → Configuration keeps e for its saved-setting form, while its $EDITOR door names no raw configuration-file editor. In Conversation e rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, node of the graph — or brings it back; d opens a confirmation before it deletes for good, in Requests before it forgets without a word to the agent, and in Shells → Wakes before it removes the selected wake; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain), or in Settings → Configuration resets the selected saved-source override. In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  u                in Diff, asks before taking the latest checkpoint change back and reopening its move for approval when it has one",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, or Atlas node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
+	"  s                in Settings → Configuration, choose the writable project or install source that an edit/reset affects; environment and command-line overrides stay read-only",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
 	"  r                read the tab again",
@@ -324,10 +328,11 @@ export async function runScreen(session, options, runTerminal) {
 	// A palette for the terminal's own background. It starts from what the settings and the environment say, and
 	// is made again when the terminal answers what its colours are, and whenever it says they have changed.
 	const colors = { mode: colorMode(config.colors), background: undefined, foreground: undefined };
+	let configuredTheme = config.theme;
 	let mdTheme;
 	let themeVersion = 0;
 	const retheme = () => {
-		const theme = makeTheme({ mode: colors.mode, ...(config.theme === "dark" || config.theme === "light" ? { scheme: config.theme } : { background: colors.background, foreground: colors.foreground, scheme: schemeFromEnv() }) });
+		const theme = makeTheme({ mode: colors.mode, ...(configuredTheme === "dark" || configuredTheme === "light" ? { scheme: configuredTheme } : { background: colors.background, foreground: colors.foreground, scheme: schemeFromEnv() }) });
 		applyTheme(theme.styles);
 		mdTheme = markdownTheme(theme.styles);
 		themeVersion++;
@@ -357,7 +362,7 @@ export async function runScreen(session, options, runTerminal) {
 	});
 	chat.setConsultProjection(consultProjection());
 	const askColors = () => {
-		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
+		if (configuredTheme === "dark" || configuredTheme === "light" || colors.mode === "none") return;
 		const take = (told) => {
 			const rgb = (color) => (color === undefined ? undefined : [color.r, color.g, color.b]);
 			const [background, foreground] = [rgb(told.background), rgb(told.foreground)];
@@ -375,6 +380,7 @@ export async function runScreen(session, options, runTerminal) {
 	const state = {
 		tab: "chat",
 		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "routes" },
+		settingsScope: "project", // the explicit persisted source Configuration edits; never an environment or CLI override
 		shell: undefined, // the shell window whose output the Output view shows
 		mode: "type",
 		selected: undefined, // a stop of the Conversation, Work, or Consult projection
@@ -640,7 +646,14 @@ export async function runScreen(session, options, runTerminal) {
 			"context.raw": ["Enter open", "y copy"],
 			"context.preview": ["Enter open", "y copy"],
 			"context.parts": ["Enter open", "+ all", "y copy"],
-			"settings.overview": ["j k move", "Enter open", "y copy"],
+			"settings.configuration": [
+				"j k move",
+				{ text: "Enter/e edit", capability: SETTINGS_ACTION.edit },
+				{ text: "x reset", capability: SETTINGS_ACTION.reset },
+				"s source",
+				"y copy",
+			],
+			"settings.safety": ["j k move", "Enter open", "y copy"],
 			"settings.assessment": ["j k move", "Enter open", "e edit", "y copy"],
 		},
 	});
@@ -720,7 +733,8 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
 		"context.preview": ({ signal }) => queries.runtime.preview({ signal }),
 		"context.parts": ({ signal }) => queries.runtime.context({ signal }),
-		"settings.overview": ({ signal }) => queries.settings.status({ signal }),
+		"settings.configuration": ({ signal }) => queries.settings.status({ signal }),
+		"settings.safety": ({ signal }) => queries.settings.status({ signal }),
 		"settings.assessment": ({ signal }) => queries.runtime.assessment({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
@@ -743,7 +757,8 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": "Raw provider payload",
 		"context.preview": "Next request preview",
 		"context.parts": "Current active-context accounting",
-		"settings.overview": "Settings and Safety",
+		"settings.configuration": "Configuration",
+		"settings.safety": "Safety",
 		"settings.assessment": "Assessment",
 	});
 	let settleProjection = () => {};
@@ -804,7 +819,8 @@ export async function runScreen(session, options, runTerminal) {
 		const scopes = event.payload.scopes ?? [];
 		const brainChanged = scopes.some((scope) => ["workspace", "context", "requests"].includes(scope));
 		const runtimeChanged = scopes.includes("runtime");
-		const projectionChanged = brainChanged || runtimeChanged || scopes.includes("review");
+		const settingsChanged = scopes.some((scope) => ["settings", "configuration"].includes(scope));
+		const projectionChanged = brainChanged || runtimeChanged || settingsChanged || scopes.includes("review");
 		if (!projectionChanged) return;
 		if (brainChanged) invalidateBrain();
 		invalidateProjections();
@@ -836,7 +852,8 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView({ sent: data.sent, presentation: runtimePresentation.sent }));
 		if (id === "context.preview") return projectionView(id, (data) => previewView({ preview: data.preview, presentation: runtimePresentation.preview }));
 		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView({ accounting: data, config, presentation: runtimePresentation.accounting }));
-		if (id === "settings.overview") return projectionView(id, (data) => settingsOverviewView({ settings: data, presentation: settingsPresentation.overview }));
+		if (id === "settings.configuration") return projectionView(id, (data) => settingsConfigurationView({ settings: data, scope: state.settingsScope }));
+		if (id === "settings.safety") return projectionView(id, (data) => settingsSafetyView({ settings: data, presentation: settingsPresentation.overview }));
 		if (id === "settings.assessment") return projectionView(id, (data) => settingsAssessmentView({ assessment: data, presentation: settingsPresentation.assessment }));
 		return { header: [], items: [] };
 	};
@@ -887,6 +904,101 @@ export async function runScreen(session, options, runTerminal) {
 		if (!result.ok) refresh(id, true);
 		draw();
 		return result.ok;
+	};
+	/** A live appearance setting changes this Screen only when the saved write became the effective value. */
+	const applyLiveScreenSetting = (row) => {
+		if (row?.apply !== "live-screen") return;
+		if (row.key === "colors" && typeof row.effectiveValue === "string") colors.mode = colorMode(row.effectiveValue);
+		if (row.key === "theme" && typeof row.effectiveValue === "string") configuredTheme = row.effectiveValue;
+		if (row.key !== "colors" && row.key !== "theme") return;
+		retheme();
+		chat.restyle();
+		askColors();
+		tui.invalidate();
+	};
+	/** Settings actions preserve the form on an ordinary failure, and refresh the settled provenance after a conflict. */
+	const presentSettingsResult = (result, id = viewId()) => {
+		const line = result.ok ? result.data.line : result.error.message;
+		flash(String(line).replace(/\n+/g, " "), result.ok ? (result.data.changed === false ? NOTICE_LEVEL.info : NOTICE_LEVEL.success) : NOTICE_LEVEL.error);
+		if (result.ok) applyLiveScreenSetting(result.data.row);
+		else refresh(id, true);
+		draw();
+		return result.ok;
+	};
+	const selectedSetting = () => {
+		const item = pageOf("settings.configuration")?.list.selected();
+		return item?.setting?.row;
+	};
+	const cachedSettings = () => projectionFor("settings.configuration").data ?? projectionFor("settings.safety").data;
+	/** Configuration sources are explicit: a read-only project never silently becomes an install write. */
+	const settingsTarget = () => {
+		const row = selectedSetting();
+		const settings = cachedSettings();
+		if (row === undefined || settings === undefined) return undefined;
+		try { return { row, settings, target: settingsWriteTarget(settings, row, state.settingsScope) }; }
+		catch { return undefined; }
+	};
+	const chooseSettingsSource = () => {
+		const settings = cachedSettings();
+		if (settings === undefined) return flash("Configuration is still loading; refresh Settings before choosing a source.");
+		const next = nextWritableSettingsScope(settings, state.settingsScope);
+		if (next === undefined) return flash("Neither saved configuration source is writable in this session.");
+		state.settingsScope = next;
+		rebuild("settings.configuration");
+		flash(`save target: ${next} configuration`, NOTICE_LEVEL.info);
+		draw();
+	};
+	const requestSettingsEdit = () => {
+		const selected = settingsTarget();
+		if (selected === undefined) return flash("Choose a settled configuration setting before editing.");
+		const { row, settings, target } = selected;
+		if (target.writable !== true) return flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
+		if (target.expectedRevision === undefined) return flash("Refresh Settings before editing so the selected source revision is known.");
+		const field = settingsEditorField(row, target);
+		openModal(({ close }) => new Form({
+			title: `Edit ${row.label} · ${target.scope}`,
+			fields: [field],
+			keyOf,
+			flash,
+			close,
+			save: (drafts) => application.execute(SETTINGS_ACTION.edit, {
+				key: row.key,
+				value: drafts.get("value"),
+				scope: target.scope,
+				expectedRevision: target.expectedRevision,
+			}).then((asked) => {
+				if (asked.confirmation === undefined) return presentSettingsResult(asked, "settings.configuration");
+				// The form owns its draft until it reaches the application's confirmation boundary. Once the backend asks
+				// for acknowledgement, that exact request replaces the form; a cancelled confirmation makes no write.
+				close();
+				setTimeout(() => {
+					if (!state.closed) openConfirmation(asked.confirmation, () => application.execute(SETTINGS_ACTION.edit, {
+						key: row.key,
+						value: drafts.get("value"),
+						scope: target.scope,
+						expectedRevision: target.expectedRevision,
+					}, {
+						confirmation: { ...asked.confirmation, acknowledged: true },
+					}).then((result) => presentSettingsResult(result, "settings.configuration")), { title: `Save ${row.label}?` });
+				}, 0);
+				return true;
+			}),
+			redraw: draw,
+		}), { width: boxWidth([field], terminal.columns), anchor: "center" });
+	};
+	const requestSettingsReset = () => {
+		const selected = settingsTarget();
+		if (selected === undefined) return flash("Choose a settled configuration setting before resetting it.");
+		const { row, target } = selected;
+		if (target.writable !== true) return flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
+		if (target.expectedRevision === undefined) return flash("Refresh Settings before resetting so the selected source revision is known.");
+		void application.execute(SETTINGS_ACTION.reset, {
+			key: row.key,
+			scope: target.scope,
+			expectedRevision: target.expectedRevision,
+		})
+			.then((result) => presentSettingsResult(result, "settings.configuration"))
+			.catch((error) => flash(`could not reset that setting: ${error?.message ?? error}`));
 	};
 	/** Choose or validate a settled route row through the typed Runtime model boundary; there is no provider call in this key handler. */
 	const requestModelRoute = (target) => {
@@ -1557,6 +1669,11 @@ export async function runScreen(session, options, runTerminal) {
 		// They stand on a report or shelved file in Current shared brain, a graph node, a ledger entry, a plan envelope
 		// or move, or a request. Model rows are frozen or prospective and have no mutable-record action.
 		if (!inChat) {
+			if (viewId() === "settings.configuration") {
+				if (key === "enter" || key === "e") return void requestSettingsEdit();
+				if (key === "x") return void requestSettingsReset();
+				if (key === "s") return void chooseSettingsSource();
+			}
 			if (key === "u" && viewId().startsWith("diff.")) return void requestReviewUndo();
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
@@ -1857,7 +1974,7 @@ export async function runScreen(session, options, runTerminal) {
 		{ id: "navigate.review", label: "Go to Diff and review", category: "navigation", description: "Last-step, session, and git change inspection.", destination: { tab: "diff", view: "last", name: "Diff · Last step" } },
 		{ id: "navigate.shells", label: "Go to Shells", category: "navigation", description: "Open shell windows and their captured output.", destination: { tab: "shells", view: "list", name: "Shells · List" } },
 		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Model-route readiness, sent requests, preview, and current context accounting.", destination: { tab: "context", view: "routes", name: "Model · Routes" } },
-		{ id: "navigate.settings", label: "Go to Settings and Safety", category: "navigation", description: "Configuration, session policy, provider diagnostics, and assessment.", destination: { tab: "settings", view: "overview", name: "Settings · Safety" } },
+		{ id: "navigate.settings", label: "Go to Settings", category: "navigation", description: "Configuration, session policy, provider diagnostics, and assessment.", destination: { tab: "settings", view: "configuration", name: "Settings · Configuration" } },
 		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
 		...paletteCapabilities.map(paletteItemForCapability),
 	];
