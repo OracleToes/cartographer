@@ -2368,6 +2368,11 @@ test("screen: Configuration renders settled provenance and produces only revisio
 	const view = settingsConfigurationView({ settings, scope: "project" });
 	assert.equal(view.items.length, 30, "Configuration keeps one selectable row for every known persisted setting");
 	assert.match(JSON.stringify(view.header), /save target: project configuration/);
+	assert.doesNotMatch(JSON.stringify(view.header), /Selected setting/, "compact Configuration leaves the inspector in the opened row");
+	const wide = settingsConfigurationView({ settings, scope: "project", selected: "setting:server", wide: true });
+	assert.match(JSON.stringify(wide.header), /Selected setting/);
+	assert.match(JSON.stringify(wide.header), /Provider endpoint.*command line/, "wide Configuration keeps the selected identity, effective source, target, and timing together above the collection");
+	assert.match(JSON.stringify(wide.header), /Save target: project configuration.*after the provider reconnects/);
 	const serverItem = view.items.find((item) => item.key === "setting:server");
 	assert.match(serverItem.body, /Current source: command line/);
 	assert.match(serverItem.body, /A project configuration override is saved \(http:\/\/saved-project\.test\/v1\), but command line currently overrides it/);

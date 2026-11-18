@@ -852,7 +852,12 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView({ sent: data.sent, presentation: runtimePresentation.sent }));
 		if (id === "context.preview") return projectionView(id, (data) => previewView({ preview: data.preview, presentation: runtimePresentation.preview }));
 		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView({ accounting: data, config, presentation: runtimePresentation.accounting }));
-		if (id === "settings.configuration") return projectionView(id, (data) => settingsConfigurationView({ settings: data, scope: state.settingsScope }));
+		if (id === "settings.configuration") return projectionView(id, (data) => settingsConfigurationView({
+			settings: data,
+			scope: state.settingsScope,
+			selected: pageOf(id)?.list.selected()?.key,
+			wide: cols >= 100,
+		}));
 		if (id === "settings.safety") return projectionView(id, (data) => settingsSafetyView({ settings: data, presentation: settingsPresentation.overview }));
 		if (id === "settings.assessment") return projectionView(id, (data) => settingsAssessmentView({ assessment: data, presentation: settingsPresentation.assessment }));
 		return { header: [], items: [] };
@@ -1773,14 +1778,17 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "j" || key === "down") {
 			// A tab with nothing to select is scrolled instead.
 			if (!anchor() && !list.move(1)) page.scroll.scrollBy(1);
+			if (viewId() === "settings.configuration") rebuild();
 			return void show();
 		}
 		if (key === "k" || key === "up") {
 			if (!anchor() && !list.move(-1)) page.scroll.scrollBy(-1);
+			if (viewId() === "settings.configuration") rebuild();
 			return void show();
 		}
 		if (key === "g" || key === "home") {
 			list.first();
+			if (viewId() === "settings.configuration") rebuild();
 			return void page.scroll.scrollToStart();
 		}
 		if (key === "G" || key === "end") {
