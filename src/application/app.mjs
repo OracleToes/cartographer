@@ -4,6 +4,7 @@
 import { CORE_DIR } from "../config.mjs";
 import { createConfigurationRepository } from "../configuration/repository.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
+import { ACTION_SPECS, assertActionSpecParity, createActionSpecRegistry } from "./action-specs.mjs";
 import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplication } from "./context.mjs";
 import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
@@ -146,6 +147,8 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		...TALK_CAPABILITY_DEFINITIONS,
 		...SETTINGS_CAPABILITY_DEFINITIONS,
 	]);
+	const actionSpecs = createActionSpecRegistry(ACTION_SPECS);
+	assertActionSpecParity(capabilityRegistry, actionSpecs);
 	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes, work: runtimeActionContext.work, models: runtimeActionContext.models });
 	const capabilities = Object.freeze({
 		get: (id) => capabilityRegistry.get(id),
@@ -190,6 +193,8 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 
 	return Object.freeze({
 		capabilities,
+		/** Pure presentation metadata paired by id with every registered capability. */
+		actionSpecs,
 		events: eventStream,
 		jobs: jobManager,
 		queries,
