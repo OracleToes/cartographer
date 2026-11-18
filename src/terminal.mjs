@@ -16,7 +16,7 @@
 // It is also where the user authorizes the plan (/approve) and takes a change task
 // back (/undo): the two things only the user can do. And it is what wakes the agent
 // when something happens in a shell window while the agent is not working.
-import { POLICY } from "./config.mjs";
+import { modelContextWindow, POLICY } from "./config.mjs";
 import { createRefDescriber } from "./refs.mjs";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
@@ -1771,7 +1771,7 @@ export async function runTerminal(session, options) {
 			case "model": {
 				// The list comes from the server each time: llama-swap serves what is loaded now.
 				let served = session.servedModels ?? [config.model];
-				// The entries as listed: meta.n_ctx is total server capacity; Cartographer reserves reply room from it on a switch.
+				// The listing's context_length/context_window (or legacy meta.n_ctx) is total server capacity; Cartographer reserves reply room from it on a switch.
 				let entries = [];
 				try {
 					const response = await fetch(`${config.server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
@@ -1786,8 +1786,8 @@ export async function runTerminal(session, options) {
 				if (argument === undefined) {
 					line(`  ${bold("Models")}  on ${current}  ·  the server serves:`);
 					served.forEach((id, index) => {
-						const ctx = entries.find((entry) => entry.id === id)?.meta?.n_ctx;
-						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${Number.isInteger(ctx) && ctx > 0 ? dim(`  · server capacity ${count(ctx)} tokens`) : ""}`);
+						const ctx = modelContextWindow(entries.find((entry) => entry.id === id));
+						line(`    ${index + 1}  ${id}${id === current ? "  ← on" : ""}${ctx === undefined ? "" : dim(`  · server capacity ${count(ctx)} tokens`)}`);
 					});
 					line(dim("  /model NAME, or /model 3 with a number from this list, switches to it. A task forked after runs on it too; Cartographer leaves room for replies below each reported server capacity."));
 					return true;
@@ -1802,11 +1802,11 @@ export async function runTerminal(session, options) {
 					line(`  Already on ${wanted}.`);
 					return true;
 				}
-				const reported = entries.find((entry) => entry.id === wanted)?.meta?.n_ctx;
+				const reported = modelContextWindow(entries.find((entry) => entry.id === wanted));
 				let effective;
 				try {
 					// `setModel` owns the required native-grammar gate so every programmatic and terminal switch shares it.
-					effective = await session.setModel(wanted, undefined, Number.isInteger(reported) && reported > 0 ? { contextWindow: reported } : {});
+					effective = await session.setModel(wanted, undefined, reported === undefined ? {} : { contextWindow: reported });
 				} catch (error) {
 					line(`  ${wanted} was not selected: ${error.message ?? error}`);
 					return true;

@@ -1,7 +1,7 @@
 // `carto`, run from a project folder.
 import { readFileSync, realpathSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { ConfigError, contextWindowLimits, CORE_DIR, loadConfig, POLICY } from "./config.mjs";
+import { ConfigError, contextWindowLimits, CORE_DIR, loadConfig, modelContextWindow, POLICY } from "./config.mjs";
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 import { forkCatalogNamespace } from "./catalog.mjs";
@@ -79,10 +79,10 @@ async function checkServer(config) {
 	if (listed.length > 0 && match === undefined && lone === undefined) {
 		throw new ConfigError(`The model server has no model named "${config.model}". It has: ${listed.map((entry) => entry.id).join(", ")}.`);
 	}
-	const size = (match ?? lone)?.meta?.n_ctx;
+	const context = modelContextWindow(match ?? lone);
 	// Every model the server serves, for /model and for resuming a session whose stored model is another one.
 	const models = listed.map((entry) => entry.id);
-	return { context: Number.isInteger(size) && size > 0 ? size : undefined, models: models.length > 0 ? models : undefined };
+	return { context, models: models.length > 0 ? models : undefined };
 }
 
 /** Ask one question on the terminal. Ctrl-C and Ctrl-D count as "no". */
@@ -134,7 +134,7 @@ export async function main(argv) {
 		const config = loadConfig({ brainDir: brainPath, flags });
 		// What the settings asked for; /model re-applies this cap and reserves its reply room for the new model.
 		const configuredContextWindow = config.contextWindow;
-		const served = await checkServer(config);
+		let served = await checkServer(config);
 		try {
 			// Native GBNF is a Cartographer platform requirement, not a best-effort consult feature. Prove the
 			// exact configured route before creating a brain or opening any model work.
@@ -142,6 +142,10 @@ export async function main(argv) {
 		} catch (error) {
 			throw new ConfigError(`The selected model route cannot run Cartographer: ${error.message ?? error}`);
 		}
+		// llama-swap can discover context_length only once this first model request has warmed the selected model.
+		// Refresh the listing after the required proof so its lazy capability metadata can lower our initial budget.
+		// The route was just proven above, so a transient second listing failure must not erase the first listing.
+		try { served = (await checkServer(config)) ?? served; } catch { /* Retain the validated pre-proof listing. */ }
 		const contextLimits = contextWindowLimits(configuredContextWindow, config.maxTokens, served?.context);
 		let contextNote = "";
 		if (contextLimits.usableContextWindow !== configuredContextWindow) {

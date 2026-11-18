@@ -243,13 +243,38 @@ test("launch: a lone llama-server leaves the configured reply reserve below a re
 	}
 });
 
+test("launch: llama-swap's context_length is refreshed after the proof warms a model", async () => {
+	const root = makeProject("lazy-llama-swap-context", { git: false });
+	const server = await startStandIn({
+		// llama-swap can omit capability data until the first routed model request has started it. The native
+		// grammar proof is that request, so Cartographer must read /models once more before sizing the session.
+		models: ({ nativeRequests }) => [{
+			id: "stand-in",
+			object: "model",
+			...(nativeRequests.length === 0 ? {} : { context_length: 64_000, context_window: 64_000 }),
+		}],
+	});
+	try {
+		const result = await run(CARTO, ["--url", server.url, "--model", "stand-in", "-p", "say: hi || sleep"], { cwd: root });
+		ok(result, "a lazily described llama-swap model");
+		has(result.stdout, "usable context 32000 tokens (server capacity 64000; 32000 reserved for replies; settings cap 100000)", "the warmed top-level context_length lowers the default 100k cap");
+		has(result.stdout, "of 32k tokens", "the usable input budget is shown after the refresh");
+		assert.equal(server.requests[0].max_tokens, 32768, "the provider still knows the total server capacity for reply sizing");
+	} finally {
+		await server.close();
+	}
+});
+
 test("model: a 75k switch keeps reply room in the provider while every displayed context budget becomes usable", async () => {
 	const root = makeProject("model-context-window", { git: false });
 	configure(root, { initiate: false });
-	const server = await startStandIn({ models: [
-		{ id: "stand-in", object: "model", meta: { n_ctx: 200_000 } },
-		{ id: "Qwen3.8", object: "model", meta: { n_ctx: 75_000 } },
-	] });
+	const server = await startStandIn({
+		models: ({ nativeRequests }) => [
+			{ id: "stand-in", object: "model", context_length: 200_000, context_window: 200_000 },
+			// This model's capacity appears only after the switch's required proof starts it.
+			{ id: "Qwen3.8", object: "model", ...(nativeRequests.some((request) => request.model === "Qwen3.8") ? { context_length: 75_000, context_window: 75_000 } : {}) },
+		],
+	});
 	try {
 		const result = await carto(root, server, [], { input: "/model Qwen3.8\nsay: after the switch || sleep\n/quit\n" });
 		ok(result, "switching to the reported model");

@@ -1,6 +1,6 @@
 // Opens one project's session: the Durable harness over `.brain/session.sqlite`,
 // the model provider, and the tools with the rule of who may call what.
-import { contextWindowLimits, POLICY } from "./config.mjs";
+import { contextWindowLimits, modelContextWindow, POLICY } from "./config.mjs";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
@@ -44,6 +44,27 @@ import { requireNativeGrammarCapability } from "./native-grammar.mjs";
 
 const PROVIDER = "local";
 const CHANGE = new Set(["write", "edit", "rm"]);
+
+/**
+ * Read a just-loaded model's advertised request capacity without making a model request of our own. llama-swap
+ * fills context_length lazily after its first routed request, so callers use this after the native capability proof.
+ * A listing outage is non-fatal here: the proof already established that the selected route itself is usable.
+ */
+async function listedContextWindow(server, modelId) {
+	try {
+		const response = await fetch(`${server}/models`, { signal: AbortSignal.timeout(POLICY.timing.modelCheckMs) });
+		if (!response.ok) return undefined;
+		const body = await response.json();
+		const listed = Array.isArray(body?.data) ? body.data.filter((entry) => typeof entry?.id === "string") : [];
+		const exact = listed.find((entry) => entry.id === modelId);
+		// A bare llama-server reports its filename but accepts the configured route name.
+		const lone = listed.length === 1 && listed[0].owned_by === "llamacpp" ? listed[0] : undefined;
+		return modelContextWindow(exact ?? lone);
+	} catch {
+		return undefined;
+	}
+}
+
 /** Typing into a shell window: a command, or a line of input for the program that runs there. */
 const types = (call) => call.name === "shell" && (call.arguments?.action === undefined || call.arguments?.action === POLICY.enums.shellAction.run || call.arguments?.action === POLICY.enums.shellAction.send);
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
@@ -112,7 +133,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	// What the settings asked for, whatever the server said at the start. /model re-applies this cap and the same
 	// output reserve per model. `config.contextWindow` is the usable input budget all Cartographer features share.
 	const windowCeiling = Number.isInteger(configuredContextWindow) && configuredContextWindow > 0 ? configuredContextWindow : config.contextWindow;
-	const initialLimits = contextWindowLimits(windowCeiling, config.maxTokens, servedContextWindow);
+	// Direct callers of openSession do not go through cli.mjs's post-proof refresh. Re-read this model here too,
+	// so a lazy llama-swap context_length cannot leave an integration at the 100k default.
+	const refreshedInitialContextWindow = await listedContextWindow(config.server, config.model);
+	const initialLimits = contextWindowLimits(windowCeiling, config.maxTokens, refreshedInitialContextWindow ?? servedContextWindow);
 	config.contextWindow = initialLimits.usableContextWindow;
 	const model = {
 		id: config.model,
@@ -581,7 +605,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		/**
 		 * Switch the model of the main conversation, and so of every task forked after.
 		 * @param {object} [limits]  what the server said about the new model, from the same /models fetch that listed it
-		 * @param {number} [limits.contextWindow]  its meta.n_ctx, when it says one
+		 * @param {number} [limits.contextWindow]  its advertised total request capacity, when the listing already has one
 		 * @returns {false | ReturnType<typeof contextWindowLimits>} false when the name is not served; otherwise the
 		 *   model's usable input window and reported capacity. The usable window is what the engine, state block,
 		 *   shelf's soft cap (half of it), and display use; pi-ai keeps the total server capacity for reply sizing.
@@ -589,7 +613,10 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		setModel: async (modelId, ctx = context, limits = {}) => {
 			if (!known.includes(modelId)) return false;
 			await requireNativeGrammarCapability({ server: config.server, modelId });
-			const effective = contextWindowLimits(windowCeiling, config.maxTokens, limits?.contextWindow);
+			// The proof may be what caused llama-swap to start this model and publish its real context_length.
+			// Prefer that fresh value over the listing read before the switch, which can be absent or stale.
+			const refreshedContextWindow = await listedContextWindow(config.server, modelId);
+			const effective = contextWindowLimits(windowCeiling, config.maxTokens, refreshedContextWindow ?? limits?.contextWindow);
 			await main.configure({ model: { provider: PROVIDER, modelId } }, ctx);
 			config.contextWindow = effective.usableContextWindow;
 			const target = providerModels.find((entry) => entry.id === modelId);

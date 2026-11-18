@@ -288,10 +288,21 @@ export const POLICY = freezeTree({
 });
 
 /**
+ * Read the actual total request capacity from an OpenAI-style model listing. llama-swap now publishes its
+ * discovered value at the top level as `context_length` (and mirrors it as `context_window`); older llama.cpp
+ * listings expose the same runtime value as `meta.n_ctx`. Do not use `n_ctx_train`: that is the model's training
+ * limit, not necessarily the window its running server accepts.
+ */
+export function modelContextWindow(entry) {
+	const values = [entry?.context_length, entry?.context_window, entry?.meta?.n_ctx];
+	return values.find((value) => Number.isInteger(value) && value > 0);
+}
+
+/**
  * Divide a model server's total context capacity between Cartographer's input and one reply.
- * `meta.n_ctx` covers both. The configured window is an input cap only: server metadata can
- * lower it, never raise it. A reply reserves its configured ceiling, unless that would take
- * more than half of a small server; the existing half-context rule leaves a useful input side.
+ * A listing's `context_length`/`context_window` or legacy `meta.n_ctx` covers both. The configured window is an
+ * input cap only: server metadata can lower it, never raise it. A reply reserves its configured ceiling, unless
+ * that would take more than half of a small server; the existing half-context rule leaves a useful input side.
  * Without usable server metadata, the configured cap remains all Cartographer knows.
  */
 export function contextWindowLimits(configuredContextWindow, maxTokens, serverContextWindow) {

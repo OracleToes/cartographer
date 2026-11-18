@@ -341,13 +341,14 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 }
 
 /**
- * @param {{ tokenDelayMs?: number, models?: (string | object)[], holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, ignoreNativeGrammar?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
+ * @param {{ tokenDelayMs?: number, models?: (string | object)[] | ((state: { requests: any[], nativeRequests: any[] }) => (string | object)[]), holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, ignoreNativeGrammar?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   releaseAfterMs: a held reply lets itself go after this many milliseconds, without anyone calling `release()`.
  *   progress: { total, cache, steps, stepMs }: before each reply, say in `steps` steps how far the prompt is read.
  *   refuseSchema: answer 400 to a request that names the shape of its answer, as llama.cpp does with some chat templates.
  *   refuseAsides: answer Cartographer's own requests with an error, as a server would that cannot take them.
- *   models: what GET /models lists; a name, or a whole entry as the server would give it.
+ *   models: what GET /models lists; a name, a whole entry as the server would give it, or a callback that can
+ *     vary the listing after a native request has caused lazy llama-swap capability discovery.
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   closureGap: when set, a focused task's automatic return reports this exact durable closure gap.
  *   focusSteps: a fixed sequence of focused-task directives, used instead of what a capsule's brief says.
@@ -365,8 +366,10 @@ export async function startStandIn(options = {}) {
 	let counter = 0;
 	const server = createServer(async (request, response) => {
 		if (request.method === "GET" && request.url?.endsWith("/models")) {
+			const source = typeof options.models === "function" ? options.models({ requests, nativeRequests }) : options.models;
+			const models = source ?? ["stand-in"];
 			response.writeHead(200, { "content-type": "application/json" });
-			response.end(JSON.stringify({ object: "list", data: (options.models ?? ["stand-in"]).map((entry) => (typeof entry === "string" ? { id: entry, object: "model" } : entry)) }));
+			response.end(JSON.stringify({ object: "list", data: models.map((entry) => (typeof entry === "string" ? { id: entry, object: "model" } : entry)) }));
 			return;
 		}
 		if (request.method !== "POST" || !request.url?.endsWith("/chat/completions")) {

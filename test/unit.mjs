@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { contextWindowLimits, loadConfig, POLICY } from "../src/config.mjs";
+import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
@@ -240,6 +240,13 @@ test("context window: a reported capacity reserves configured reply room without
 		configuredContextWindow: 100_000,
 		usableContextWindow: 100_000,
 	}, "without server metadata, the configured cap remains in force");
+});
+
+test("model listing: llama-swap context_length wins over legacy metadata", () => {
+	assert.equal(modelContextWindow({ context_length: 64_000, context_window: 64_000, meta: { n_ctx: 100_000 } }), 64_000);
+	assert.equal(modelContextWindow({ context_window: 65_536 }), 65_536, "the OpenAI-gateway mirror is accepted when context_length is absent");
+	assert.equal(modelContextWindow({ meta: { n_ctx: 32_768, n_ctx_train: 131_072 } }), 32_768, "legacy llama.cpp n_ctx is runtime capacity, unlike n_ctx_train");
+	assert.equal(modelContextWindow({ context_length: 0, meta: { n_ctx: "64k" } }), undefined, "only a positive integer is trustworthy server capacity");
 });
 
 // ─── The wake notes ──────────────────────────────────────────────────────────
