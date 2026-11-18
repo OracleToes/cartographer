@@ -39,6 +39,7 @@ import { createRefDescriber } from "../refs.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
 import { createList } from "./list.mjs";
+import { createProjectionScheduler } from "./projections.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
@@ -273,15 +274,18 @@ export async function runScreen(session, options, runTerminal) {
 	const describeRef = createRefDescriber({ brainDir });
 	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
 	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
-	let consultProjection = { at: 0, generation: 0, loading: false, conferences: [] };
-	const readConferenceRaw = (id) => consultProjection.conferences.find((entry) => entry.id === id)?.conference;
-	const listConferenceRaw = () => consultProjection.conferences;
+	const CONSULT_PROJECTION = "chat.consult";
+	let settleConsultProjection = () => {};
+	const consultProjections = createProjectionScheduler({ onSettled: (id, projection) => settleConsultProjection(id, projection) });
+	const consultProjection = () => consultProjections.get(CONSULT_PROJECTION);
+	const readConferenceRaw = (id) => (consultProjection().data?.conferences ?? []).find((entry) => entry.id === id)?.conference;
+	const listConferenceRaw = () => consultProjection().data?.conferences ?? [];
 	const chat = createChat({
 		markdown,
 		describeRef,
 		readConference: readConferenceRaw,
 		listConferences: listConferenceRaw,
-		consultStatus: () => ({ loading: consultProjection.loading, error: consultProjection.error }),
+		consultStatus: () => ({ loading: consultProjection().loading, error: consultProjection().error }),
 	});
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
@@ -320,6 +324,11 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const draw = () => {
 		if (!state.closed) tui.requestRender();
+	};
+	settleConsultProjection = (id) => {
+		if (id !== CONSULT_PROJECTION) return;
+		chat.refreshConsult();
+		if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
 	};
 	/** The cells between the margins, as the parts count them. */
 	const innerCols = () => Math.max(8, terminal.columns - 2 * marginOf(terminal.columns));
@@ -565,33 +574,11 @@ export async function runScreen(session, options, runTerminal) {
 	const talk = Object.freeze({ execute: application.execute });
 	/** Consult records are loaded only through the application facade and stay in Chat · Consult's private cache. */
 	const refreshConsultProjection = (force = false) => {
-		if (consultProjection.loading && !force) return;
-		if (!force && Date.now() - consultProjection.at < (EVERY.chat ?? POLICY.timing.screenRefreshMs.fallback)) return;
-		consultProjection.controller?.abort();
-		const generation = consultProjection.generation + 1;
-		const controller = new AbortController();
-		consultProjection = { ...consultProjection, at: Date.now(), generation, loading: true, error: undefined, controller };
-		void queries.consult.list({ signal: controller.signal })
-			.then((result) => {
-				if (consultProjection.generation !== generation) return;
-				if (result.ok) consultProjection = { ...consultProjection, loading: false, controller: undefined, conferences: result.data.conferences };
-				else if (result.error.kind === "cancelled") consultProjection = { ...consultProjection, loading: false, controller: undefined };
-				else consultProjection = { ...consultProjection, loading: false, controller: undefined, error: result.error };
-				chat.refreshConsult();
-				if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
-			})
-			.catch((error) => {
-				if (consultProjection.generation !== generation) return;
-				consultProjection = { ...consultProjection, loading: false, controller: undefined, error: { message: error?.message ?? String(error) } };
-				chat.refreshConsult();
-				if (!state.closed && state.tab === "chat" && state.view.chat === "consult") draw();
-			});
+		const prior = consultProjection();
+		if (!force && Date.now() - (prior.requestedAt ?? 0) < (EVERY.chat ?? POLICY.timing.screenRefreshMs.fallback)) return false;
+		return consultProjections.refresh(CONSULT_PROJECTION, ({ signal }) => queries.consult.list({ signal }), { force });
 	};
-	const cancelConsultProjection = () => {
-		if (consultProjection.loading !== true) return;
-		consultProjection.controller?.abort();
-		consultProjection = { ...consultProjection, generation: consultProjection.generation + 1, loading: false, controller: undefined };
-	};
+	const cancelConsultProjection = () => consultProjections.cancel(CONSULT_PROJECTION);
 	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
 	const DEFERRED_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
@@ -615,8 +602,9 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.session": "Session changes",
 		"diff.git": "Git changes",
 	});
-	const projections = new Map();
-	const projectionFor = (id) => projections.get(id) ?? { generation: 0, loading: false };
+	let settleProjection = () => {};
+	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
+	const projectionFor = (id) => projections.get(id);
 	const projectionMessage = (projection) => projection?.error?.message ?? "Cartographer could not refresh this view.";
 	const projectionView = (id, render) => {
 		const projection = projectionFor(id);
@@ -640,47 +628,10 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const refreshProjection = (id, force = false) => {
 		const query = DEFERRED_PROJECTION[id];
-		if (query === undefined) return;
-		const prior = projectionFor(id);
-		if (prior.loading && !force) return;
-		prior.controller?.abort();
-		const generation = prior.generation + 1;
-		const controller = new AbortController();
-		projections.set(id, { ...prior, generation, loading: true, error: undefined, controller });
-		void query({ signal: controller.signal })
-			.then((result) => {
-				const current = projections.get(id);
-				if (current?.generation !== generation) return;
-				if (result.ok) projections.set(id, { generation, loading: false, data: result.data, updatedAt: Date.now() });
-				else if (result.error.kind === "cancelled") projections.set(id, { ...current, loading: false, controller: undefined });
-				else projections.set(id, { ...current, loading: false, controller: undefined, error: result.error });
-				if (!state.closed) {
-					rebuild(id);
-					if (viewId() === id) draw();
-				}
-			})
-			.catch((error) => {
-				const current = projections.get(id);
-				if (current?.generation !== generation) return;
-				projections.set(id, { ...current, loading: false, controller: undefined, error: { message: error?.message ?? String(error) } });
-				if (!state.closed) {
-					rebuild(id);
-					if (viewId() === id) draw();
-				}
-			});
+		return query === undefined ? false : projections.refresh(id, query, { force });
 	};
-	const cancelProjection = (id) => {
-		const projection = projections.get(id);
-		if (projection?.loading !== true) return;
-		projection.controller?.abort();
-		projections.set(id, { ...projection, generation: projection.generation + 1, loading: false, controller: undefined });
-	};
-	const invalidateProjections = () => {
-		for (const [id, projection] of projections) {
-			projection.controller?.abort();
-			projections.set(id, { ...projection, generation: projection.generation + 1, loading: false, controller: undefined, error: undefined });
-		}
-	};
+	const cancelProjection = (id) => projections.cancel(id);
+	const invalidateProjections = () => projections.invalidate();
 	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
 	const stopApplicationEvents = application.events.subscribe((event) => {
 		if (event.type !== "projection.invalidated") return;
@@ -720,6 +671,11 @@ export async function runScreen(session, options, runTerminal) {
 		} catch (error) {
 			page.list.set({ header: [[[`! ${error?.message ?? error}`, "warn"]]], items: [] });
 		}
+	};
+	settleProjection = (id) => {
+		if (state.closed) return;
+		rebuild(id);
+		if (viewId() === id) draw();
 	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {

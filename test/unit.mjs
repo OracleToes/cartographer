@@ -60,6 +60,7 @@ import { RECORD } from "../src/voice.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { createChat } from "../src/screen/chat.mjs";
+import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 import { llamaCppSelectorProbePayload, runLlamaCppSelectorProbe, selectorProbeLogPath, writeSelectorProbeLog } from "../src/consult-probe.mjs";
 
@@ -301,6 +302,86 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	assert.equal(jobs.get(cancelled.id)?.state, "cancelled");
 	assert.equal(cancelled.cancel(), false, "settled jobs cannot be cancelled again");
 	off();
+});
+
+test("screen: deferred projection scheduling keeps cached data through stale, cancelled, failed, and invalidated reads", async () => {
+	let clock = 0;
+	const settled = [];
+	const scheduler = createProjectionScheduler({
+		now: () => ++clock,
+		onSettled: (id, state) => settled.push({ id, state: { ...state } }),
+	});
+	const deferred = () => {
+		let resolve;
+		let reject;
+		const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+		return { promise, resolve, reject };
+	};
+	const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+	const first = deferred();
+	let firstSignal;
+	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { firstSignal = signal; return first.promise; }), true);
+	assert.equal(scheduler.get("carto.atlas").loading, true, "the cache enters loading before its deferred request starts");
+	assert.equal(scheduler.refresh("carto.atlas", () => Promise.resolve({ ok: true, data: { impossible: true } })), false, "an ordinary refresh never races an active request");
+	await flush();
+	const second = deferred();
+	let secondSignal;
+	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { secondSignal = signal; return second.promise; }, { force: true }), true);
+	await flush();
+	assert.equal(firstSignal.aborted, true, "a forced refresh cancels the prior reader");
+	second.resolve({ ok: true, data: { version: "fresh" } });
+	await flush();
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "fresh" });
+	first.resolve({ ok: true, data: { version: "stale" } });
+	await flush();
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "fresh" }, "a stale settlement cannot overwrite a newer projection");
+	assert.equal(secondSignal.aborted, false);
+
+	const failed = deferred();
+	assert.equal(scheduler.refresh("carto.atlas", () => failed.promise), true);
+	await flush();
+	failed.resolve({ ok: false, error: { kind: "unavailable", message: "The atlas file is malformed." } });
+	await flush();
+	assert.equal(scheduler.get("carto.atlas").loading, false);
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "fresh" }, "a failed refresh leaves cached data visible");
+	assert.equal(scheduler.get("carto.atlas").error.message, "The atlas file is malformed.");
+	const retry = deferred();
+	assert.equal(scheduler.refresh("carto.atlas", () => retry.promise), true);
+	assert.equal(scheduler.get("carto.atlas").error, undefined, "a retry clears an old cached error while it is loading");
+	retry.resolve({ ok: true, data: { version: "retried" } });
+	await flush();
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
+
+	const typedCancellation = deferred();
+	assert.equal(scheduler.refresh("carto.atlas", () => typedCancellation.promise), true);
+	await flush();
+	typedCancellation.resolve({ ok: false, error: { kind: "cancelled", message: "No longer visible." } });
+	await flush();
+	assert.equal(scheduler.get("carto.atlas").error, undefined, "a typed cancellation is not rendered as an error");
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
+
+	const stopped = deferred();
+	let stoppedSignal;
+	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { stoppedSignal = signal; return stopped.promise; }), true);
+	await flush();
+	assert.equal(scheduler.cancel("carto.atlas"), true);
+	assert.equal(stoppedSignal.aborted, true);
+	stopped.resolve({ ok: true, data: { version: "cancelled-too-late" } });
+	await flush();
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" }, "an explicitly cancelled request also settles stale");
+
+	const invalidated = deferred();
+	let invalidatedSignal;
+	assert.equal(scheduler.refresh("carto.atlas", ({ signal }) => { invalidatedSignal = signal; return invalidated.promise; }), true);
+	await flush();
+	scheduler.invalidate();
+	assert.equal(invalidatedSignal.aborted, true, "an action invalidation cancels in-flight durable reads");
+	assert.equal(scheduler.get("carto.atlas").loading, false);
+	invalidated.resolve({ ok: true, data: { version: "invalidated-too-late" } });
+	await flush();
+	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
+	assert.equal(settled.length, 4, "only current success, failure, retry, and typed cancellation notify a render; stale settlements do not");
 });
 
 test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
