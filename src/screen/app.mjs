@@ -557,14 +557,17 @@ export async function runScreen(session, options, runTerminal) {
 	const queries = application.queries;
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
 	const talk = Object.freeze({ execute: application.execute });
-	/** Cached deferred Carto projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
-	const CARTO_PROJECTION = Object.freeze({
+	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
+	const DEFERRED_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
 		"carto.ledger": ({ signal }) => queries.ledger({ signal }),
 		"carto.plan": ({ signal }) => queries.plan({ signal }),
 		"carto.requests": ({ signal }) => queries.requests({ yolo: options.gate?.yolo === true, signal }),
 		"carto.tree": ({ signal }) => queries.tree({ signal }),
 		"carto.hands": ({ signal }) => queries.context({ signal }),
+		"diff.last": ({ signal }) => queries.review.last({ signal }),
+		"diff.session": ({ signal }) => queries.review.session({ started, signal }),
+		"diff.git": ({ signal }) => queries.review.git({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
 		"carto.atlas": "Atlas",
@@ -573,6 +576,9 @@ export async function runScreen(session, options, runTerminal) {
 		"carto.requests": "Requests",
 		"carto.tree": "Project tree",
 		"carto.hands": "Current shared brain",
+		"diff.last": "Last checkpoint change",
+		"diff.session": "Session changes",
+		"diff.git": "Git changes",
 	});
 	const projections = new Map();
 	const projectionFor = (id) => projections.get(id) ?? { generation: 0, loading: false };
@@ -598,7 +604,7 @@ export async function runScreen(session, options, runTerminal) {
 		return notices.length === 0 ? view : { ...view, header: [...notices, ...view.header] };
 	};
 	const refreshProjection = (id, force = false) => {
-		const query = CARTO_PROJECTION[id];
+		const query = DEFERRED_PROJECTION[id];
 		if (query === undefined) return;
 		const prior = projectionFor(id);
 		if (prior.loading && !force) return;
@@ -659,7 +665,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ brainDir, yolo: options.gate?.yolo === true, requests: data.items, deferred: true }));
 		if (id === "carto.tree") return projectionView(id, (data) => treeView({ ...env, tree: data, deferred: true }, isOpen));
 		if (id === "carto.hands") return projectionView(id, (data) => handsView({ root, brainDir, context: data, deferred: true }));
-		if (id.startsWith("diff.")) return diffView(env, id.slice(5));
+		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ ...env, review: data, deferred: true }, id.slice(5)));
 		if (id === "shells.list") return shellsView(env);
 		if (id === "shells.out") return shellsOutView(env, state.shell);
 		if (id === "context.window" || id === "context.main") {

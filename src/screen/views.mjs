@@ -351,20 +351,21 @@ function changeItems(root, changes, patch) {
 	});
 }
 
-export function diffView({ root, brainDir, started }, which) {
+export function diffView({ root, brainDir, started, review: provided, deferred = false }, which) {
+	if (provided === undefined && deferred) return { header: [[["Review is loading…", "muted"]]], items: [] };
 	if (which === "last") {
-		const last = lastChange(root, brainDir);
+		const last = provided === undefined ? lastChange(root, brainDir) : provided.last;
 		if (last === undefined) return { header: [], items: [note("  No change task has run that is still in effect.")] };
 		const what = last.item ?? (last.windows ? `window ${last.windows.join(", ")}` : "change task");
 		const header = [[[`${what} · ${last.text}`, "bold"], [`  ${changeSummary(last.changes)}${last.finished ? "" : " · cut off before it finished; compared with the files as they are now"}`, "muted"]]];
 		return { header, items: last.changes.length === 0 ? [note("  It changed no file.")] : changeItems(root, last.changes, last.patch) };
 	}
 	if (which === "session") {
-		const change = changeSince(root, brainDir, started);
+		const change = provided === undefined ? changeSince(root, brainDir, started) : provided.change;
 		if (change === undefined) return { header: [], items: [note("  No change task has run since carto started here.")] };
 		return { header: [[[`Since carto started: ${change.steps === 1 ? "1 step" : `${change.steps} steps`}`, "bold"], [`  ${changeSummary(change.changes)}`, "muted"]]], items: change.changes.length === 0 ? [note("  The files are as they were.")] : changeItems(root, change.changes, change.patch) };
 	}
-	const own = uncommitted(root);
+	const own = provided === undefined ? uncommitted(root) : provided.own;
 	if (own === undefined) return { header: [], items: [note("  This project is not a git repository, so there is no HEAD to compare with."), note("  The other two views do not need one: they come from Cartographer's own checkpoints.")] };
 	if (own.status.trim() === "") return { header: [], items: [note("  Nothing uncommitted: the project is as its git HEAD has it.")] };
 	const byFile = patchByFile(own.patch);

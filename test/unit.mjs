@@ -428,6 +428,52 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.deepEqual(status.data.issues, [{ source: "plan", message: "carto-plan.json is not valid JSON" }]);
 });
 
+test("application: review queries defer checkpoint and Git projections", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const reads = { last: 0, session: 0, git: 0 };
+	const lastChange = { item: "m1", text: "write the report", finished: true, changes: [], patch: "" };
+	const queries = createWorkspaceQueries({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		reviewReaders: {
+			lastChange: () => { reads.last++; return lastChange; },
+			changeSince: () => { reads.session++; return { steps: 2, changes: [], patch: "" }; },
+			uncommitted: () => { reads.git++; return undefined; },
+		},
+	});
+	const pending = queries.review.last({ requestId: "review-last" });
+	assert.equal(reads.last, 0, "checkpoint inspection leaves the render/key stack before its synchronous legacy reader runs");
+	const last = await pending;
+	assert.equal(last.ok, true);
+	if (!last.ok) throw new Error(last.error.message);
+	assert.equal(last.data.last, lastChange);
+	assert.equal(last.meta.requestId, "review-last");
+	const session = await queries.review.session({ started: Date.parse(NOW) });
+	assert.equal(session.ok, true);
+	if (!session.ok) throw new Error(session.error.message);
+	assert.equal(reads.session, 1);
+	const git = await queries.review.git();
+	assert.equal(git.ok, true);
+	if (!git.ok) throw new Error(git.error.message);
+	assert.equal(git.data.own, undefined, "no project Git repository is an empty successful projection");
+	assert.equal(reads.git, 1);
+	const invalid = await queries.review.session({ started: "not a timestamp" });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("a review session needs its start time");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	const controller = new AbortController();
+	controller.abort();
+	const cancelled = await queries.review.git({ signal: controller.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled review query must not inspect Git");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(reads.git, 1);
+	const { diffView } = await import("../src/screen/views.mjs");
+	const view = diffView({ root, brainDir, review: last.data, deferred: true }, "last");
+	assert.match(view.header[0][0][0], /m1 · write the report/, "the Review renderer consumes the prepared projection instead of re-reading checkpoints");
+});
+
 test("application: composed facade dispatches actions and publishes cache-invalidating facts", async (t) => {
 	const { brainDir, root } = fresh(t);
 	const events = [];

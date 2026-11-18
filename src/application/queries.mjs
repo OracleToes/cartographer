@@ -5,6 +5,7 @@
 // malformed local state becomes a typed unavailable outcome rather than display-text parsing.
 import { assessmentPath } from "../assessment.mjs";
 import { activeMoveOverlays, atlasPath, attentionSnapshot, fileMarks, loadAtlas } from "../atlas.mjs";
+import { changeSince, lastChange, uncommitted } from "../checkpoints.mjs";
 import { composedRows, contextPath, loadContext, loadReport, shelfText } from "../context.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
 import { isAuthorized, itemLine, loadPlan, planPath, waiting } from "../plan.mjs";
@@ -24,6 +25,12 @@ export const WORKSPACE_QUERY = Object.freeze({
 	entry: "workspace.entry",
 	context: "workspace.context",
 	tree: "workspace.tree",
+});
+
+export const REVIEW_QUERY = Object.freeze({
+	last: "review.last",
+	session: "review.session",
+	git: "review.git",
 });
 
 const nonEmpty = (value) => (typeof value === "string" && value.trim() !== "" ? value.trim() : undefined);
@@ -70,16 +77,18 @@ const jsonLines = (file, field, values) => {
 const afterCurrentTurn = () => new Promise((resolve) => queueMicrotask(resolve));
 
 const DEFAULT_READERS = Object.freeze({ loadAtlas, loadLedger, loadPlan, loadContext });
+const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommitted });
 
 /**
  * @param {{
  *   brainDir: string,
  *   root?: string,
  *   readers?: typeof DEFAULT_READERS,
+ *   reviewReaders?: typeof DEFAULT_REVIEW_READERS,
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
@@ -278,6 +287,42 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
+	const prepareReview = async (options) => {
+		const ready = await prepare(options);
+		if (ready.result !== undefined) return ready;
+		if (nonEmpty(root) === undefined) return { ...ready, result: invalid("A project root is needed before reading review data.", "root", ready.meta) };
+		return ready;
+	};
+	const reviewResult = (name, key, loader, meta) => {
+		try {
+			return uiSuccess({ [key]: loader() }, { meta });
+		} catch (error) {
+			return uiFailure(uiErrorFrom(error, {
+				code: UI_ERROR_CODE.internal,
+				kind: UI_ERROR_KIND.internal,
+				message: `Cartographer could not read ${name}.`,
+				retryable: true,
+			}), { meta });
+		}
+	};
+	const reviewLast = async (options = {}) => {
+		const ready = await prepareReview(options);
+		if (ready.result !== undefined) return ready.result;
+		return reviewResult("the last checkpoint change", "last", () => reviewReaders.lastChange(root, brainDir), ready.meta);
+	};
+	const reviewSession = async ({ started, ...options } = {}) => {
+		const ready = await prepareReview(options);
+		if (ready.result !== undefined) return ready.result;
+		if (!Number.isFinite(started)) return invalid("A session start time is needed before reading session changes.", "started", ready.meta);
+		return reviewResult("the session changes", "change", () => reviewReaders.changeSince(root, brainDir, started), ready.meta);
+	};
+	const reviewGit = async (options = {}) => {
+		const ready = await prepareReview(options);
+		if (ready.result !== undefined) return ready.result;
+		return reviewResult("the project's Git changes", "own", () => reviewReaders.uncommitted(root), ready.meta);
+	};
+	const review = Object.freeze({ last: reviewLast, session: reviewSession, git: reviewGit });
+
 	const entry = async (input, options = {}) => {
 		const ready = await prepare(options);
 		if (ready.result !== undefined) return ready.result;
@@ -317,5 +362,5 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		}
 	};
 
-	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, entry });
+	return Object.freeze({ paths, atlas, tree, ledger, plan, requests, status, context, review, entry });
 }
