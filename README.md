@@ -62,12 +62,12 @@ Task ›  Message the agent while it works · Esc for commands
 
 (An illustration of the layout, not a recorded run.)
 
-The screen is deliberately static: the filled top tab is the primary location, the quieter second row names its current subview, and selected rows remain the strongest content surface. Chat keeps the existing material in two projections: Conversation for user-directed exchange and Work for private focus or case activity. Message and work blocks use a one-cell role rail plus a faint fill rather than a bright card per line. The activity strip steps down from immediate work to shared state to its key reminder, and the input names who is speaking (**You**, **Task**, **Case**, or **Answer**) rather than relying on a bare prompt glyph. On narrower terminals labels compact as whole words and margins shrink before content does. These are hierarchy and alignment cues, not animations; labels and glyphs still carry the meaning when colour is unavailable.
+The screen is deliberately static: the filled top tab is the primary location, the quieter second row names its current subview, and selected rows remain the strongest content surface. Chat keeps the existing material in two projections: Conversation for user-directed exchange and Work for private focus activity. Message and work blocks use a one-cell role rail plus a faint fill rather than a bright card per line. The activity strip steps down from immediate work to shared state to its key reminder, and the input names who is speaking (**You**, **Task**, or **Answer**) rather than relying on a bare prompt glyph. On narrower terminals labels compact as whole words and margins shrink before content does. These are hierarchy and alignment cues, not animations; labels and glyphs still carry the meaning when colour is unavailable.
 
 | Tab | What it shows |
 |---|---|
 | **1 Chat · Conversation** | Two-party speech only: your submitted messages, delivered `chat` speech, and genuine questions and answers. Agent speech says whether it is sending, delivered, or failed. A failed delivery is not presented as something the agent said. |
-| **1 Chat · Work** | Private reasoning, ordinary agent notes, calls, results, task activity, evidence-case phases, and Cartographer notices. Runs still fold; Ctrl-T hides private reasoning and notes without putting them into Conversation. |
+| **1 Chat · Work** | Private reasoning, ordinary agent notes, calls, results, task activity, conference audits, and Cartographer notices. Runs still fold; Ctrl-T hides private reasoning and notes without putting them into Conversation. |
 | **2 Carto** | The live shared brain: Atlas, Ledger, Plan, Requests, Tree, and **Current shared brain**. Shelf and report material lives here, not in Model. |
 | **3 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
 | **4 Shells** | The shell windows, live. Open a window for its newest lines or its terminal-emulator output. |
@@ -111,7 +111,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 
 #### Chat, Work, and Model
 
-Conversation is the steering wheel: it deliberately excludes reasoning, ordinary assistant text, tool work, and harness notices. Work is the private trace of those things, including focused tasks and evidence-case phases. Conversation and Work are local Chat projections; a collapse or the screen's item limit can remove rows from view without erasing the Durable transcript.
+Conversation is the steering wheel: it deliberately excludes reasoning, ordinary assistant text, tool work, and harness notices. Work is the private trace of those things, including focused tasks and private conference audits. Conversation and Work are local Chat projections; a collapse or the screen's item limit can remove rows from view without erasing the Durable transcript.
 
 A Conversation row is changed only after Cartographer has an admitted Durable source for it. Equal visible words are never used to choose a row. **Reword future kept talk** and **Remove from future kept talk** affect the mutable source that a later collapse may copy. They do not rewrite the append-only transcript, the active request already being built, or frozen sent payloads. If a row has not acquired a stable source yet, the screen leaves it unchanged.
 
@@ -128,7 +128,7 @@ A sent request is the payload Cartographer passed to the provider, not proof of 
 
 **Copying.** Drag over text to select it, and it is copied when you let go. `/copy` copies the last delivered agent speech, `/copy session` exports the local session projection, `/copy report` exports the last task report, and `/copy tab` exports the tab that shows. The files go under `.brain/export/`.
 
-**What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. If an evidence case is actively working, the line is visibly kept in Conversation and durably recorded in that case: before its main-owned witness boundary it is delivered with the active phase's next result, or queued while the coordinator changes phase. Once the main context has recorded an isolated witness docket, later participant prose is held outside that witness and retained for the main case-level report. When a durable case is paused at its main-owned boundary, the main context—not an invisible phase—receives your next line. `/case c1` shows the exact route and delivery provenance. Otherwise the main agent reads it after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
+**What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. A consultation conference is isolated and does not receive interactive user input; its caller receives only its bounded final receipt. Otherwise the main agent reads your line after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
 
 What the full screen does not do yet: it does not retain an unbounded request audit or prove a provider's hidden prompt. Enable `CARTO_TRACE` for an optional wire observation.
 
@@ -155,7 +155,6 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | You see | Meaning |
 |---|---|
 | `▸ task …` | The main agent handed a piece of work to a task; the text is the start of its brief. `▸ move m2 …` carries out declared move m2 |
-| `case c1 · falsify-blind` or `case c1 · witness` | A bounded evidence case is in a controlled subphase. Its durable state—including blind/cross boundary, main-owned witness docket and budget, and eventual case-level report—stays available through `/case`. Participant prose is retained but stays outside an isolated witness. |
 | `│ …` | One step of the task: what it looked at or wrote, and what came back |
 | `│ $ …` then `│   → exit 0 · 0.4 s · …` | A command a task types into a shell window: shown when it starts, then how it ended, how long it took and the last line it printed. `(window server)` after the command names a window other than `main` |
 | `│   → still running after 30 s · …` | The call returned and the command goes on in its window |
@@ -200,7 +199,6 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 |---|---|
 | `/thinking`, `/thinking on`, `/thinking off`, Ctrl-T | Hide or show the agent's own text. Switching it on prints what the newest turn held back |
 | `/report`, `/report t12` | The last task's report in full, or the kept report with that id |
-| `/case`, `/case c1`, `/case stop c1` | List bounded evidence cases, inspect one capsule, phase artifact, and participant route, or stop one. Stopping an active case interrupts its current phase and preserves the stopped record. |
 | `/context` | What the agent's context holds, part by part with sizes; the kept reports; when it was last collapsed and when it will be next |
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
 | `/fold ID …` | What the agent does with `fold`: take a kept report out of view, leaving its one line |
@@ -256,7 +254,7 @@ When the agent sends the same call, with the same arguments, three times and it 
 
 A reply that repeats one character or one line without end is not caught yet; that needs the live stream and comes with the interface work.
 
-You can type while the agent works. A task receives the line with its next result; an actively working evidence case records and routes it to its active or next phase until its main-owned isolated witness begins, after which it holds the line for the main report rather than exposing it to that witness; a case paused at its main-owned boundary leaves the next line with the main agent; otherwise the main agent receives it after its current step.
+You can type while the agent works. A task receives the line with its next result, and the main agent is told about it with the task's report; otherwise the main agent receives it after its current step.
 
 If you leave, or the program is killed, while the agent is working, the work is not lost: the next `carto` in that project continues it.
 
@@ -272,50 +270,13 @@ carto --url URL --model NAME             # another server or model for this run
 
 The model a session is on comes from the settings at every start, so a model changed in `config.json` takes hold the next time carto starts here, whatever model the stored session began with. `/model` switches while it runs, picking from the list the server serves (llama-swap's), and every model the server serves is known to the session, so a stored session never stops over a model that has moved on. A server's `meta.n_ctx` is its total capacity for the prompt and reply together, not a prompt budget. When it reports one, Cartographer reserves `maxTokens` for the reply and uses the smaller of the settings' `contextWindow` cap and what remains; on a smaller server it reserves no more than half, so an input budget remains. The collapse threshold, shelf's soft cap (half of it), state block and display use that usable context. The provider keeps the total server capacity too, so each request's reply is sized inside it. `/model` lists reported server capacities and, after a switch, states the usable context, reply reserve and settings cap. It warns when `chatWindow` is more than half of the usable window and never raises that window above the settings' `contextWindow`. Every other setting (`chatWindow`, `maxTokens`, `collapseFull`, the file and entry limits) is global, not per model, and is not reloaded on a switch.
 
-### Evidence cases
+### Same-model consultation conferences
 
-An **evidence case** is a bounded same-model inspection for one narrow question that can be supported, refuted, or left unresolved. It is not a panel of agents and it does not count agreement as corroboration. The main agent starts it with `case`, which writes a version-2 record under `.brain/cases/c<N>.json`; historical version-1 records remain readable as they were. A v2 capsule freezes the question and claim, resolution criteria, constraints and non-goals, and selected main-shelf snapshots as primary sources with origin, locator, SHA-256 digest, capture time, and freshness. It also freezes an initial evidence ledger, so later source inspection cannot silently rewrite the starting hand.
+`consult` opens one bounded, isolated conference on the caller's **current resolved model**. It takes a concrete question, optional supplied context, optional captured project files, and a required consult-local opening persona. It does not switch models and has no external consultation model setting.
 
-A new v2 case has a controlled information flow:
+A host-owned, grammar-constrained selector routes a limited set of independent participant turns. Participants receive immutable captured inputs and have no project, shell, network, shared-brain, plan, approval, user-decision, or nested-task authority. The conference result is advisory: the agent must verify factual and technical claims against current sources, tests, or proof before relying on them.
 
-1. **Construction** gives the narrowest account the frozen capsule supports, keeping observation, assumption, and claim separate.
-2. **Blind falsification** receives the capsule but no construction prose, digest, summary, or citations. It searches for a counterexample, missing condition, or another explanation.
-3. **Controlled cross-examination** runs in that same falsifier context only after the blind artifact is durably sealed. The harness appends a recorded constructor packet; the resulting artifact must classify every material constructor claim as a confirmed flaw, failed challenge, or exact unresolved point with citations. It is not a constructor rebuttal loop or a vote.
-4. The case then records `awaiting-witness-specification`. The **main context** records exactly one main-owned docket: either a bounded witness specification, a source-only direct observation over already frozen sources or retained receipts, or a documented closure gap. A specification names its target claims, method, exact allowed inputs, expected discriminator, unresolved condition, and source-call budget. It alone may start the isolated `witness` phase. A closure gap or source-only observation moves directly to the main report boundary; neither grants fresh project authority.
-5. An isolated **witness** sees the frozen capsule, sealed earlier structured artifacts, retained cited receipts, and its docket—not the parent conversation or participant messages. It may use only an exact docketed `read`, `search`, or `list` input; the harness charges the persisted budget before the tool reads project bytes. An unlisted or exhausted source call is refused. Its structured artifact includes one `witness_assessment` for every docket target claim. It cannot write project files, access shell windows, alter the shared brain or shelf, hand a shelf item onward, start another focus, talk to you, ask a question, call `consult`, or synthesize an outcome.
-
-Construction, blind falsification, and controlled cross-examination may inspect project sources with `read`, `search`, and `list` under their existing read-only boundary. In every v2 case their durable handoff is a schema-validated artifact: candidate, observations, assumptions, citations, falsifiers, proposed witness, closure gaps, and uncertainty; controlled cross-examination additionally has required `cross_examination` classifications, and an isolated witness has required `witness_assessment`. The case stores structured data, a deterministic readable rendering, and a digest; it does not treat free-form return prose as evidence. A direct observation must cite a frozen primary/derived source or an immutable receipt from that phase's `read`, `search`, or `list` result. Claim sources and earlier phase artifacts may be cited only as claims under review. A retained receipt preserves its bounded tool input and output, their SHA-256 digests, and a receipt digest; cited receipt output is shown to the main context. Receipts append to the case ledger without changing the frozen capsule. The fixed bounds are three model replies and two minutes per isolated pass, plus bounded capsule, source, ledger, receipt, artifact, cross-packet, witness, participant-message, and report storage. A timeout or `/case stop c<N>` records a stopped case and prevents later phases from starting.
-
-The **main context** alone records the final durable case-level report. `supported` or `refuted` requires the named witness to settle every material constructor claim; `unresolved` records residual uncertainty, a closure gap, or an exhausted budget; `needs_user_input` records one exact blocking question and a linked successor-capsule boundary. Phase count or agreement never produces a truth outcome. C3 has no scratch or candidate patch and no case path can change the live project; `/case` says so rather than implying an experiment applied anything. While a case is active, ordinary messages remain in its provenance; after a witness docket is recorded they are held outside the isolated witness for the main report. `/case` lists durable cases, `/case c<N>` shows source roles/freshness, subphase, blind boundary, witness docket and budget, closure gaps, retained artifacts, final witness IDs, and exact participant delivery route, and `/case stop c<N>` stops one.
-
-An evidence case does not replace `consult`. `consult` opens a supplied-context, long-form consultation with a separate model. Its response can widen the agent's analysis, but it is advice to inspect and verify — never independent evidence or authority by itself.
-
-### The consultation model (Mythos-nano)
-
-Cartographer can open one bounded, self-contained consultation with [Mythos-nano](https://huggingface.co/squ11z1/Mythos-nano), a 3B long-reasoning model on the same endpoint llama-swap already serves. It is useful for technical investigation, debugging, alternative designs or plans, critique, derivation, explanation, and synthesis — not only kernels, invariants, or proofs. The consultation model is not a second mind in the project: it cannot see the project, use tools, or act in it, and it has no state beyond the facts and transcript Cartographer supplies. Its response is advisory. The agent verifies factual or technical claims against sources, tests, or proof before acting; it treats uncheckable tradeoffs as advice and leaves choices of taste to you.
-
-**What it costs you.** llama-swap serves one model at a time, so a consult puts the consultation model in place of the agent's own model. The agent is unloaded while the consultation runs (deliberate on a card that holds one at a time) and reloads with the agent's next request. A call can take minutes, not seconds, so each one should carry one material crux, the supplied facts it needs, and a concrete requested deliverable — not a vague request or the whole project.
-
-**What comes back.** The complete consultation transcript — context, question, answer, and every later round — is kept in the brain under a short `thread` marker the receipt prints (`st1`, `st2`, …; markers minted before 2026-11-16 keep their `st-YYYYMMDD-HHMMSS-xxxx` form and stay valid), and is shelved for whoever asked: main agent or focus. The agent never sees a path, only the thread. Over the shelf's view budget the transcript stays in the brain and the state block says so. Asking on with the same `thread` lets the consultation model see the original question and every earlier round, so the agent can refine a diagnosis, compare alternatives, challenge an assumption, or request a tighter deliverable. It stops when the extra pass no longer resolves a material uncertainty. The model was not trained on tool-calling or agent work and is abliterated (no refusals), so nothing rides on its confidence.
-
-**To see the conversation.** While the consultation writes, the call stands in Work like any other private work, folded into the run of calls — and the row grows with the tail of the draft as it is written, the way a reply grows. Open the run (Enter), then open the consult call: the full consultation stands there, round by round — the context that was sent (shown up to half of `chatDetailChars`, the question in full), what came back (read from the durable transcript in the brain, never from the session), and the thread it stands under — never a path. A failed round remains in the transcript where it broke; a failed call says why it failed instead of showing an answer that never came. `y` on the call copies the complete consultation — context, question and answer, round by round; `+` and `-` open and fold every run at once.
-
-**To set it up**, add a section to your llama-swap config next to ByteShape's (names match `consultModel`):
-
-```yaml
-  Mythos-nano:
-    cmd: >
-      /home/momo/git/llama.cpp/build/bin/llama-server
-      --port ${PORT}
-      -m /home/momo/AI/t2t_models/Mythos/mythos-nano-Q8_0.gguf
-      -c 65536 -fa on -ngl 99 --cache-type-k q8_0 --cache-type-v q4_0
-      --jinja --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --no-mmproj
-      --context-shift --keep 2048 --cache-reuse 6000
-```
-
-`-c 65536` covers the 40960-token answer ceiling plus ~24k of question and context — the length the model was trained at (its base trained at 64K; the advertised 128K is beyond that and unverified). The model for the `consult` call comes from `consultModel`; `""` switches the tool off. `consultTimeoutSeconds` bounds the wait; at 40960 tokens, generation alone can take a long while, so it defaults to 1800 seconds.
-
-`consult` is offered to the main agent and to foci alike. Nothing about the change gate, the checkpoints, the confinement or the sandbox changes: the answer is text, the agent applies it through the ordinary paths. The context you hand it leaves nowhere — it goes to your own local endpoint, same as every other request.
+A completed conference has an immutable private audit record. The Work view reveals that audit only when deliberately expanded or copied; it is not a continuing conversation. The former `thread` follow-up field is removed and is explicitly refused. On a brain that contains retired material, C5 preserves original storyteller and Case bytes under `.brain/legacy/raw/`, writes readable static exports under `.brain/legacy/exports/`, and converts old storyteller shelf placements to immutable snapshots. An active, resumable, unreadable, or malformed legacy Case blocks startup: use the pre-C5 release to explicitly stop unfinished work, then rerun C5 to archive it. C5 never loads or resumes archived material.
 
 ### Which folder is the project
 
@@ -336,7 +297,6 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | Tool | Who | What |
 |---|---|---|
 | `task` | orchestrating context | Enter one bounded focus context. A change focus names exactly one declared move revision and runs only when that revision is live |
-| `case` | orchestrating context | Start or resume one bounded same-model evidence case, or record the main context's supported, refuted, or unresolved synthesis |
 | `book` | orchestrating and ordinary focused contexts | One `target` + `action` call against one flat declaration; the per-action grammar is enforced locally with actionable errors. It tends reports, ledger, plan, atlas, assessment, Durable conversations/messages/tool calls/results, prompts, tools, exact local schemas, and authorized project-file changes; plan edits remain orchestrator-only |
 | `read` | orchestrating and focused contexts | Inspect one project file by path or file ID. Successful calls from one reply are one transient batch; a later successful batch replaces it |
 | `shelf` | orchestrating and ordinary focused contexts | Add, remove or list explicit working-memory placements that survive later read batches and collapse |
@@ -348,13 +308,13 @@ The focus is temporary, not a second mind: when it returns, the orchestrating co
 | `sleep` | orchestrating context | End the turn and rest until something wakes Cartographer |
 | `chat` | orchestrating and ordinary focused contexts | Say something to you. Does not wait |
 | `ask` | orchestrating and ordinary focused contexts | Put a question to you, with optional choices, and wait for the answer |
-| `return` | focused context | End an ordinary focus with its report and optional shelf handoff, or end a case phase with its artifact only |
+| `return` | focused context | End an ordinary focus with its report and optional shelf handoff |
 
 Project-file references are confined to the project root; symlinks, `.brain/`, and `.git/` are refused. Explicit references and shelf adds are not hidden by `.cartoignore`; ambient discovery still follows its existing filters. `book` file create/edit dispatches only from a focus carrying a live declared move revision and retains its targets, capability, budget, approval, sandbox, network, and root protections; `file remove` deletes a project file the same way (a checkpoint records the deletion, so `/undo` brings it back). A file edit takes the file's ID alone and always edits the live version; an exact SHA-256 version may be pinned as a precondition, never as a required bookkeeping step. A move preserves identity only through an explicit, version-checked `file rebind`. `book target=message action=edit` soft-forgets one stable active message: later active-context construction omits it, while the raw Durable transcript and earlier sent requests remain unchanged. Top-level `read` is model-callable; the `write`, `rm`, and `edit` executors behind authorized `book` file operations are internal primitives.
 
 **References.** New `book` calls pass `{ id, namespace?, kind?, version? }` — the ID alone is enough; the namespace and kind are inferred and the live version is used unless one is pinned. Paths are locators, not identities. File versions are SHA-256 digests and exact bytes are kept under `.brain/catalog/versions/`; retained non-file versions are under `.brain/catalog/entities/`. Durable-owned transcript/task IDs remain their native IDs. App-managed catalog file IDs and shelf placement IDs count up within the brain — `f1`, `f2`, … and `sh1`, `sh2`, … — because they only ever need to be unique per project directory; ids written before 2026-11-15 (`f-`/`sh-<uuid>`) stay valid. An explicit `carto --fork-brain` rotates the namespace, transactionally rebinds saved internal references, and records its source namespace; backups/restores keep their namespace. Tool schemas are static and flat in every request; there is no provider-side schema expansion to verify.
 
-The same tool declarations are registered in every request, for the orchestrating context and each focus, so a fork keeps the provider prompt prefix stable. The authority hook still distinguishes them: a case phase permits only project inspection and its final `return`, blocking shared-book and shelf operations as well as every write or command path. Project-file mutations run only in an ordinary focus carrying one live declared change move; when already in that focus, the checked operation runs inline. Brain-scoped book operations run directly there, but only the orchestrating context changes plans or controls session wakes/sleep. `shell` starts commands only from an ordinary focus carrying a live declared change move. An ordinary focus return records whether shared atlas, ledger, or assessment updates occurred; this is not a user-approval bypass.
+The same tool declarations are registered in every request, for the orchestrating context and each focus, so a fork keeps the provider prompt prefix stable. The authority hook still distinguishes them: project-file mutations run only in an ordinary focus carrying one live declared change move; when already in that focus, the checked operation runs inline. Brain-scoped book operations run directly there, but only the orchestrating context changes plans or controls session wakes/sleep. `shell` starts commands only from an ordinary focus carrying a live declared change move. An ordinary focus return records whether shared atlas, ledger, or assessment updates occurred; this is not a user-approval bypass.
 
 ### How a task goes
 
@@ -824,7 +784,7 @@ A collapse that would free next to nothing is not made, however full the context
 
 One `read` call inspects one project file. Up to eight `read` calls made by the same agent reply are admitted as one transient batch and divide about 8,192 output tokens before they run. Their successful raw-line results stand together at the very end of the next request; a failed read stays inline and does not displace the preceding successful batch. A later successful batch removes the prior batch from active view. This is not a context collapse and writes nothing to the brain: the Durable transcript still holds every tool result, while the request simply carries the current batch at its tail. The agent reads every file it needs to compare in the same reply. Before that happens, it deliberately preserves source material it needs afterward on `shelf` or records lasting conclusions in the ledger, atlas or assessment.
 
-`shelf` is the explicit durable working set. `shelf` with `action:"add"` takes a project `path` or `id` (and optional `range:"1-80"`), a report, consultation thread, pinned record, or an existing placement to refresh; `action:"remove"` takes it off, and `action:"list"` shows placements. An add returns a one-line receipt and the snapshot appears immediately in the state block, then survives collapse. A focus has its own shelf; `handOn: true` passes a placement to the main shelf when that focus returns. There is no shelf question or automatic promotion from `read`.
+`shelf` is the explicit durable working set. `shelf` with `action:"add"` takes a project `path` or `id` (and optional `range:"1-80"`), a report, pinned record, or an existing placement to refresh; `action:"remove"` takes it off, and `action:"list"` shows placements. An add returns a one-line receipt and the snapshot appears immediately in the state block, then survives collapse. A focus has its own shelf; `handOn: true` passes a placement to the main shelf when that focus returns. There is no shelf question or automatic promotion from `read`. Migrated legacy consultation snapshots may be removed but cannot be refreshed or resumed.
 
 The shelf holds whatever the agent or you add; nothing refuses. Half the window (the shelf's soft cap) is its intended share, and as it fills the state block says so, in the agent's own words and as a share of shelf space, so the agent makes room itself (fold or unshelve) before it has to. When a shelved file changes, the state block names it with a line delta; read it or re-add its placement to refresh the snapshot. `/context` shows what is on the shelf, what is currently rendered, and what was taken off.
 
@@ -923,10 +883,6 @@ An earlier version kept the ledger in `ledger.json`. On the first start after th
 | `user` | the OS user who started carto | Which name the agent calls you by, in its prompts, notes and messages. One name on one line, 80 characters at most. `CARTO_USER` overrides both settings files |
 | `contextWindow` | 100000 | Cap on Cartographer's usable input/context budget. A reported server capacity may lower it to leave reply room, never raise it |
 | `maxTokens` | 32768 | Longest single reply, thinking included; this much is reserved from a reported server capacity where it fits |
-| `consultModel` | `"Mythos-nano"` | Model name as llama-swap serves the consult model (the optional long-form consultation model; see [The consultation model](#the-consultation-model-mythos-nano)). `""` switches it off. `CARTO_CONSULT_MODEL` overrides both settings files |
-| `consultMaxTokens` | 40960 | Longest answer a `consult` call may write — the model card's ceiling for a long-form consultation |
-| `consultTemperature` | 0.6 | Sampling temperature for `consult` calls — the model card's recommendation for long-form reasoning |
-| `consultTimeoutSeconds` | 1800 | How long a `consult` call may wait before giving up. Generation at the ceiling can alone take that long |
 | `mainTurns` | 40 | Replies the main agent may make in one turn, notes included, before the turn is ended. Planning and accepting one move take several orchestration replies |
 | `taskTurns` | 6 | Fallback reply ceiling for a focus without a stored move contract; new declared moves carry their own hard 1–8 reply budget (6 by default) |
 | `askMinutes` | 0 | Minutes an `ask` waits for your answer before the agent is told there was none. 0: without limit |
@@ -1013,14 +969,13 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/assessment.mjs` | The assessment and its file |
 | `src/top.mjs` | The copy of the assessment and the graph at the front of the context, and when it is replaced |
 | `src/context.mjs` | What a collapse keeps and how it is written: the task lines, the salient-notes section, the talk, the shelf, the block; a task's steps and their marks |
-| `src/case.mjs` | Bounded evidence-case files: frozen capsules, phase artifacts, participant provenance, stopping, and synthesis |
+| `src/legacy-cutover.mjs` | One-way C5 archival migration: exact legacy bytes, digests, readable static exports, shelf snapshots, and stopped-Case safety checks |
 | `src/engine.mjs` | When the context is collapsed, the question before it, the read-ahead after it |
 | `src/time.mjs` | How times, durations and ages are written |
 | `src/request.mjs` | What is added to a request as it is sent: the copy at the front, the times, the state block, the windows block |
 | `src/state.mjs` | The state block added to the end of each request — the main agent's and a task's — and the windows block added after it and to each task request |
 | `src/tools/book.mjs` | The flat `book` interface: ledger, plan, atlas, assessment, reports, context actions and authorized file changes |
 | `src/tools/task.mjs` | The `task` tool: fork, brief, checkpoints, report |
-| `src/tools/case.mjs` | The `case` tool: controlled read-only phase forks and main-context synthesis handoff |
 | `src/tools/read.mjs` | One-file transient `read`, including the per-batch output ceiling |
 | `src/tools/shelf.mjs` | Explicit durable shelf placements |
 | `src/tools/look.mjs` | `search`, `list` and the confinement to the project |

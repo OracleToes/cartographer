@@ -32,8 +32,6 @@ import { consultTool } from "./tools/consult.mjs";
 import { createConferenceExtension } from "./conference-extension.mjs";
 import { endConference, findConferenceByCaller } from "./conference.mjs";
 import { taskTool } from "./tools/task.mjs";
-import { caseTool } from "./tools/case.mjs";
-import { admitWitnessSourceTool, appendCaseReceipt, noteCaseMessage } from "./case.mjs";
 import { sleepTool, wakeTool } from "./tools/wake.mjs";
 import { createWakes } from "./wakes.mjs";
 import { createWindows } from "./windows.mjs";
@@ -50,7 +48,7 @@ const types = (call) => call.name === "shell" && (call.arguments?.action === und
 /** Tools that belong to the main agent alone, and what a task is told when it calls one. */
 // The book tool guards its own books inside the tool (a task may use its context operations);
 // the rest of the main agent's tools are wrapped here.
-const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, case: REFUSALS.taskStartsCase, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
+const MAIN_ONLY_TEXT = { task: REFUSALS.taskStartsTask, wake: REFUSALS.taskWakes, sleep: REFUSALS.taskSleeps };
 const MAIN_ONLY = MAIN_ONLY_TEXT;
 
 /**
@@ -69,8 +67,6 @@ export function runFromBrief(stored) {
 		...(Number.isInteger(stored.revision) ? { revision: stored.revision } : {}),
 		...(Array.isArray(stored.targets) ? { targets: stored.targets } : {}),
 		...(Number.isInteger(stored.turns) ? { turns: stored.turns } : {}),
-		...(typeof stored.caseId === "string" ? { caseId: stored.caseId } : {}),
-		...(typeof stored.phase === "string" ? { phase: stored.phase } : {}),
 	};
 }
 
@@ -78,7 +74,7 @@ export function runFromBrief(stored) {
  * What kind of task a conversation is: look or change, and for a change task whether its commands reach the
  * network. The brief entry at the start of the conversation says it (src/tools/task.mjs); `runs` remembers the
  * answer for this run of the program.
- * @returns {Promise<{ mode: "look" | "change", network?: boolean, move?: string, revision?: number, targets?: string[], turns?: number, caseId?: string, phase?: string }>}
+ * @returns {Promise<{ mode: "look" | "change", network?: boolean, move?: string, revision?: number, targets?: string[], turns?: number }>}
  */
 async function runOf(runs, api, context) {
 	const known = runs.get(api.conversationId);
@@ -90,7 +86,7 @@ async function runOf(runs, api, context) {
 		for (const entry of result.items) {
 			// Newest first: the task's own entries, then the main conversation's, which hold no brief.
 			if (entry.conversationId !== api.conversationId) break search;
-			if (entry.kind === "carto.brief" || entry.kind === "carto.case-phase" || entry.kind === "carto.case-cross-exam") {
+			if (entry.kind === "carto.brief") {
 				run = runFromBrief(entry.data);
 				break search;
 			}
@@ -228,14 +224,12 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const returning = new Set();
 	// What ended a conversation's stretch from here and not by its own doing: { why: "limit" | "same-note", ... }.
 	const ends = new Map();
-	// The focused work that runs now, and what the user typed while it runs. A task holds one local report;
-	// a case holds a durable participation queue across several local phases. `said` reaches the current focus at
-	// its next result, `heard` is the task's report trail, and a case's `deliver` marks its own provenance file.
-	const active = { id: undefined, said: [], heard: [], kind: undefined, caseId: undefined, phase: undefined, deliver: undefined };
+	// The focused task that runs now, and what the user typed while it runs. `said` reaches its next result and
+	// `heard` becomes part of its returned report trail.
+	const active = { id: undefined, said: [], heard: [], kind: undefined };
 	const takeSaid = () => {
 		const entries = active.said.splice(0);
 		if (entries.length === 0) return undefined;
-		try { active.deliver?.(entries); } catch { /* A case file that was hand-broken must not make a task tool result fail. */ }
 		const lines = entries.map((entry) => `[${USER_NAME} · ${stamp(entry.at)}] ${entry.text}`);
 		return [`${USER_HEAD} wrote this while I was working. I take it into account, and put into my report what I could not act on.`, ...lines].join("\n");
 	};
@@ -249,45 +243,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		if (call.name === "task" && Array.isArray(details.changes) && details.changes.length > 0) return [{ kind: "checkpoint", paths: details.changes.map((change) => change?.path).filter((path) => typeof path === "string") }];
 		return [];
 	};
-	// A v2 case phase may use read/search/list. Their successful bounded outputs become immutable,
-	// phase-local receipts in the case ledger so a direct observation can name actual evidence.
-	const CASE_SOURCE_TOOLS = new Set(["read", "search", "list"]);
-	const caseReceiptText = (result) => (result?.output ?? []).flatMap((part) => part?.type === "text" ? [String(part.text ?? "")] : []).join("\n");
-	const recordCaseReceipt = (run, call, result, at) => {
-		if (typeof run?.caseId !== "string" || typeof run?.phase !== "string" || result?.isError === true || !CASE_SOURCE_TOOLS.has(call.name)) return undefined;
-		try {
-			return appendCaseReceipt(brainDir, run.caseId, run.phase, { tool: call.name, arguments: call.arguments ?? {}, output: caseReceiptText(result), at });
-		} catch {
-			// A malformed or manually edited case must not turn an already completed source read into a failed tool call.
-			return undefined;
-		}
-	};
-	const withCaseReceipt = (result, receipt) => {
-		if (receipt === undefined) return result;
-		const note = receipt.kind === "receipt"
-			? `Case evidence receipt ${receipt.id} is durable for this phase (sha256 ${receipt.digest}). Cite ${receipt.id} as kind receipt for a direct observation.`
-			: `Case evidence ledger ${receipt.id} records a source gap: ${receipt.text}`;
-		return { ...result, output: [...(result.output ?? []), { type: "text", text: note }], details: { ...(result.details ?? {}), ...(receipt.kind === "receipt" ? { caseReceipt: receipt.id } : { caseLedger: receipt.id }) } };
-	};
-	// Receipt capture belongs inside the source tool result, before Durable persists it and the read-tail
-	// projection moves file content. An after-tool hook is too late for that projection.
-	const caseSourceTool = (tool) => ({
-		...tool,
-		execute: async (args, api, callContext) => {
-			const run = loadContext(brainDir).tasks[api.conversationId];
-			if (typeof run?.caseId === "string" && typeof run?.phase === "string") {
-				try {
-					const admitted = admitWitnessSourceTool(brainDir, run.caseId, run.phase, tool.name, args, { at: api.now() });
-					if (admitted.applicable && !admitted.allowed) return { isError: true, output: [{ type: "text", text: `Witness source call refused: ${admitted.reason}` }] };
-				} catch (error) {
-					return { isError: true, output: [{ type: "text", text: `Witness source call refused: ${String(error?.message ?? error)}` }] };
-				}
-			}
-			const result = await tool.execute(args, api, callContext);
-			const receipt = recordCaseReceipt(run, { name: tool.name, arguments: args }, result, api.now());
-			return withCaseReceipt(result, receipt);
-		},
-	});
 	const atlasFactsInRound = new Map();
 	const publishAtlasFacts = (call, result, api) => {
 		const facts = atlasFacts(call, result);
@@ -367,15 +322,14 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 		chatTool({ brainDir }),
 		askTool({ brainDir, asks }),
 		forMain(taskTool({ root, brainDir, config, runner, windows, gate, loops, ends, active })),
-		forMain(caseTool({ root, brainDir, config, active })),
 		returnTool({ root, brainDir, config }),
-		caseSourceTool(readTool({ root, brainDir })),
+		readTool({ root, brainDir }),
 		shelfTool({ root, brainDir, config }),
 		bookTool({ root, brainDir, config, engine, gate }),
-		...lookTools(root).map(caseSourceTool),
+		...lookTools(root),
 		...changeTools({ root, brainDir, gate }),
 		shellTool({ root, config, brainDir, gate, runner, windows, runOf: (conversationId) => runs.get(conversationId) }),
-		consultTool({ root, brainDir, config, conferenceExtension }),
+		consultTool({ root, brainDir, conferenceExtension }),
 		forMain(wakeTool({ wakes, config })),
 		forMain(sleepTool({ wakes })),
 		// For the main agent and for a task, each about its own part of the context.
@@ -416,24 +370,6 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					// A task that reaches for a tool of the main agent is told so and goes on. It ends with `return`.
 					if (MAIN_ONLY[call.name] !== undefined) return { block: `${MAIN_ONLY[call.name]} ${STILL_TASK}` };
 					const run = await runOf(runs, api, hookContext);
-					// A case phase is a bounded same-model evidence context, not another user-facing agent and not a route
-					// to the external consultation model. Participation arrives through the durable case queue instead of ask.
-					if (run.caseId !== undefined && ["chat", "ask", "consult"].includes(call.name)) {
-						return { block: "A bounded evidence phase stays inside its frozen same-model case: it does not chat, ask, or consult. The user can write into the case queue, and I return one private artifact to the main context." };
-					}
-					// Separate phase contexts must not use the shared books or shelf as a side channel into a later phase.
-					// Their only durable handoff is the recorded case artifact; `return` may not promote a shelf item.
-					if (run.caseId !== undefined && ["book", "shelf"].includes(call.name)) {
-						return { block: "A bounded evidence phase keeps its work in its case artifact: it does not edit the shared brain or shelf. Read project sources directly and return the observation to the main context." };
-					}
-					// Even a shell-window read would expose another context's ambient output, while wait, stop, and close
-					// would control it. Case evidence is deliberately limited to project read/search/list results.
-					if (run.caseId !== undefined && call.name === "shell") {
-						return { block: "A bounded evidence phase does not use shell windows. Its evidence tools are read, search, and list; return the resulting observation as its case artifact." };
-					}
-					if (run.caseId !== undefined && call.name === "return" && String(call.arguments?.shelf ?? "").trim() !== "") {
-						return { block: "A bounded evidence phase cannot hand a shelf item onward. Put the source, observation, and uncertainty in this case artifact; the main context decides what to keep." };
-					}
 					// Writing is for a task that carries out a live approved change move revision, and for no one else.
 					// So is running a command. The answer is kept in `runs`, where the shell tool finds it.
 					if (CHANGE.has(call.name) || types(call)) {
@@ -446,7 +382,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 					afterTool: async (call, result, api) => {
 						if (call.parent !== undefined) return undefined;
 						// The harness can end a running tool without returning through its execute() catch. Preserve the
-						// conference lifecycle in that case rather than leaving an apparently-live private child after /stop.
+						// conference lifecycle in that situation rather than leaving an apparently-live private child after /stop.
 						if (call.name === "consult") {
 							const diagnostic = (result.diagnostics ?? []).find((entry) => ["aborted", "interrupted", "restart_limit", "abandoned"].includes(entry.code));
 							if (diagnostic !== undefined) {
@@ -463,10 +399,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 						}
 						const looped = loopCheck(call, result, api);
 					const out = looped ?? result;
-					// Keep this synchronous with loopCheck: sibling calls in one reply share one mapping epoch. A case
-					// phase may observe project files, but never changes the shared atlas as a side effect of observing them.
-					const casePhase = api.conversationId !== ROOT_CONVERSATION_ID && typeof loadContext(brainDir).tasks[api.conversationId]?.caseId === "string";
-					if (!casePhase) publishAtlasFacts(call, out, api);
+					// Keep this synchronous with loopCheck: sibling calls in one reply share one mapping epoch.
+					publishAtlasFacts(call, out, api);
 					engine.returned(api.conversationId, call, out);
 					if (api.conversationId !== ROOT_CONVERSATION_ID) {
 						const id = api.conversationId;
@@ -511,21 +445,9 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 				// assessment and the graph in front, the times, and for the main agent the state block at the end.
 				beforeRequest: async ({ messages }, api) => {
 					const main = api.conversationId === ROOT_CONVERSATION_ID;
-					// Cache the durable move contract before its first reply: a focus that writes only notes
-					// still receives its move-specific reply ceiling. C2 deliberately reuses the blind falsifier
-					// conversation for cross-examination, so its separate phase budget must not inherit blind replies.
-					if (!main) {
-						const live = loadContext(brainDir).tasks[api.conversationId];
-						if (live?.caseId !== undefined && live.phase === "falsify-cross-exam" && runs.get(api.conversationId)?.phase !== "falsify-cross-exam") {
-							runs.delete(api.conversationId);
-							steps.delete(api.conversationId);
-							failures.delete(api.conversationId);
-							lastNote.delete(api.conversationId);
-							returning.delete(api.conversationId);
-							ends?.delete(api.conversationId);
-						}
-						await runOf(runs, api, context);
-					}
+					// Cache the durable move contract before its first reply so a focus that writes only notes
+					// still receives its move-specific reply ceiling.
+					if (!main) await runOf(runs, api, context);
 					rounds.set(api.conversationId, (rounds.get(api.conversationId) ?? 0) + 1);
 					const turn = turnOf(messages);
 					// One more reply in this stretch: a turn of the main agent (a collapse in the middle of it does not
@@ -620,7 +542,7 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 	const registry = createRegistry();
 	registry.install(core);
 	// Conference children select this isolated profile explicitly. Installing it does not add its prompt or tools
-	// to the root (which stays on Cartographer and retains the legacy Case surface until C5).
+	// to the root, which stays on the ordinary Cartographer surface.
 	registry.install(conferenceExtension);
 	// The copy of the assessment and the graph that stands at the top of the context (src/top.mjs).
 	if (loadTop(brainDir) === undefined) pin(brainDir, { reason: "the first start" });
@@ -703,10 +625,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			listeners.add(listener);
 			return () => listeners.delete(listener);
 		},
-		/** The conversation of the ordinary task that runs now, or undefined. A case phase is deliberately separate. */
+		/** The conversation of the ordinary task that runs now, or undefined. */
 		activeTask: () => active.kind === "task" ? active.id : undefined,
-		/** The active bounded evidence case, including a phase only while one owns a local focus. */
-		activeCase: () => active.kind === "case" && typeof active.caseId === "string" ? { id: active.caseId, phase: active.phase } : undefined,
 		/**
 		 * What the user typed while a task runs: the task reads it with its next result, and it is kept as talk.
 		 * @returns {boolean} whether a task was there to tell
@@ -720,32 +640,8 @@ export async function openSession({ root, brainDir, config, runner, gate = { yol
 			noteChat(brainDir, "user", entry.at, entry.text, { seen: false });
 			return true;
 		},
-		/** A participant message for an active case. It reaches the active phase's next result, or queues for the
-		 * next phase while the coordinator is between contexts; both routes are recorded in the case itself. */
-		tellCase(text) {
-			if (active.kind !== "case" || typeof active.caseId !== "string") return false;
-			const at = Date.now();
-			const said = String(text).trim();
-			if (said === "") return false;
-			let recorded;
-			try {
-				recorded = noteCaseMessage(brainDir, active.caseId, said, { at, phase: active.phase });
-			} catch (error) {
-				return { kind: "case", id: active.caseId, accepted: false, reason: error.message };
-			}
-			if (recorded.accepted !== true) return { kind: "case", id: active.caseId, accepted: false, reason: recorded.reason };
-			const entry = { text: said, at, caseMessageId: recorded.entry.id };
-			if (recorded.entry.route === "active") {
-				active.said.push(entry);
-				active.heard.push(entry);
-			}
-			noteChat(brainDir, "user", at, said, { seen: false });
-			return { kind: "case", id: active.caseId, phase: recorded.entry.phase, queued: recorded.entry.route === "queued", accepted: true };
-		},
-		/** The terminal has one routing door while private work runs. */
+		/** The terminal has one routing door while a private task runs. */
 		tellWork(text) {
-			const caseResult = this.tellCase(text);
-			if (caseResult !== false) return caseResult;
 			return this.tellTask(text) ? { kind: "task" } : false;
 		},
 

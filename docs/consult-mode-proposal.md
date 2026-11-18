@@ -1,13 +1,18 @@
 # Proposal: same-model consultation conference
 
-**Status:** approved target contract; runtime implementation has not begun. `docs/plan.md` owns delivery sequence and migration gates, while the README continues to describe the currently shipped legacy behavior until cutover.
+**Status:** delivered C1–C5 contract. `docs/plan.md` records the completed cutover, and the README describes the shipped behavior and migration boundary.
 **Date:** 2026-11-16
+
+> **Implementation note.** This document began as the design contract and remains the
+> detailed rationale for the delivered conference. References to the retired external
+> consult, storyteller transcripts, and Case product describe migration inputs only;
+> C5 removed their live runtime surfaces.
 
 ## Decision summary
 
-`consult` should become a bounded, isolated **same-model consultation conference**,
-not a one-shot request to a separately configured model and not a fixed sequence of
-analytical lenses.
+`consult` is a bounded, isolated **same-model consultation conference**, not a
+one-shot request to a separately configured model and not a fixed sequence of analytical
+lenses.
 
 A call creates one independent Durable conference using the exact model of the
 conversation that launched it. It starts with a caller-supplied temporary
@@ -37,26 +42,20 @@ ambition. The completed Case C1–C3 implementation is evidence about existing d
 migration work, not a reason to preserve that machinery. C4 and E1 are dropped rather
 than carried forward as unfinished obligations.
 
-## Findings about current `consult`
+## Retired predecessor (migration input only)
 
-The reported current behavior is implemented behavior, not a model failure:
+Before C5, `consult` used a separately configured external model and persisted
+follow-up transcripts under `.brain/storyteller/`. The former `thread` field could
+replay those transcripts through a different parent call. The former Case product had
+its own records and lifecycle. Those formats are **not** conference records and are not
+reinterpreted by the current runtime.
 
-- `src/tools/consult.mjs` directly sends one `POST /chat/completions` request with
-  `model: config.consultModel`; `src/config.mjs` defaults it to `"Mythos-nano"`.
-- It builds plain `user`/`assistant` messages itself. It sends no system prompt, tool
-  declarations, or Durable child conversation.
-- Its `thread` is a persisted transcript under `.brain/storyteller/`. A later,
-  separate *parent* call can replay that transcript, but the external model cannot
-  choose to continue its own conversation.
-- It has no project access, tools, `return` call, source snapshots, or scratch space.
-  Its only supplied material is clipped inline `context` text.
+C5 inventories that material only to preserve it: exact bytes and digests live under
+`.brain/legacy/raw/`, readable exports live under `.brain/legacy/exports/`, and old
+storyteller shelf pointers become immutable text snapshots. No current source imports a
+story or Case parser to read, continue, render, or send that material to a model.
 
-One successful completion is therefore necessarily the end of one current invocation.
-The current README, prompt wording, story format, screen handling, and settings
-intentionally describe a separate external-advisory lane. This proposal does not
-reinterpret existing `st<N>` records as conference records.
-
-## Target call contract
+## Current call contract
 
 ```js
 consult({
@@ -77,14 +76,15 @@ consult({
 | `files` | Optional bounded project-relative paths or catalog file references, with optional line ranges. They are captured before the conference starts. |
 | `myPersona` | Required bounded, consult-local identity for the opening Cartographer participant. It describes the caller's project-local perspective and concerns for this conference only; it grants no authority and is not retained as a parent-session prompt. |
 
-There is no `thread` in the target v1 interface. A conference has one explicit
-lifecycle and one return boundary. A later question starts a fresh conference with a
-selected prior result as supplied material rather than reviving a half-finished role
-conversation.
+There is no live `thread` follow-up interface. The schema recognizes a supplied legacy
+field only to refuse it directly with a C5 migration error; it never reads or resumes a
+transcript. A conference has one explicit lifecycle and one return boundary. A later
+question starts a fresh conference with selected prior material rather than reviving a
+half-finished role conversation.
 
 The call can originate in the main conversation or ordinary focus and returns only to
 that caller. A conference participant cannot invoke `consult`, so conferences never
-nest. There is no separate Case phase/witness caller after the consolidation.
+nest. There is no Case phase, witness, or other retired-product caller.
 
 ## Conference model
 
@@ -300,16 +300,17 @@ At conference creation, read the launching conversation's resolved model through
 record. Both participant turns and selector decisions use that captured model through
 the normal provider path.
 
-This intentionally uses neither `config.model` nor `config.consultModel`:
+The captured model comes from the launching agent rather than from `config.model` as a
+second lookup, and there is no `config.consultModel` setting:
 
 - it honors a model selected by `/model`;
 - it honors a focused caller that retained a different agent model;
 - later model changes do not rewrite an active conference; and
-- it removes the automatic Mythos-nano switch.
+- it removed the automatic external-model switch.
 
-Legacy `consultModel`, token, temperature, and timeout settings have no role in
-conference mode. The cutover treats their presence as a clear migration problem rather
-than silently ignoring them or retaining an external-consult compatibility adapter.
+Retired `consultModel`, token, temperature, and timeout settings have no role in
+conference mode. Their presence is a direct migration error rather than a silently
+ignored value or an external-consult compatibility adapter.
 
 ### Independent conversation, not a fork
 
@@ -473,9 +474,9 @@ promotion. Normal sandbox arguments and session windows are not consultation scr
 
 ### UI
 
-The current UI only understands legacy storyteller threads. The conference view replaces
-that special rendering at cutover; once archival shelf migration succeeds, no live
-storyteller or Case view remains. New conference rows should show:
+The Work view renders conference audits on demand from their `co<N>` records. It has no
+live storyteller or Case renderer; historical consultation rows are labelled as static
+archive notices. Conference rows show:
 
 - `co<N>`, captured model, lifecycle state, elapsed/budget facts, and grammar-adapter
   availability;
@@ -497,81 +498,48 @@ lifecycle, subject to policy caps. A future purge/export policy must leave visib
 provenance (for example, “sources purged”) rather than a dangling apparently
 reproducible result.
 
-## Consolidation and migration
+## C5 delivered cutover
 
-This is a replacement, not a compatibility layer that leaves two meanings of
-`consult` in the product. The end state has no `consult_external`, no external-model
-fallback, and no separate `case` tool or runtime.
+C5 completed the replacement rather than leaving a compatibility layer. There is no
+`consult_external`, external-model fallback, story lifecycle, separate `case` tool, or
+Case runtime.
 
-1. **Inventory before cutover.** The migrator inventories legacy storyteller threads,
-   shelf placements that resolve through them, Case records, and any active Case
-   Durable child. An active or resumable Case blocks cutover until the user explicitly
-   stops and archives it; no unfinished isolated context is silently orphaned.
-2. **Archive without perpetuating a reader.** Migration preserves exact legacy bytes
-   and digests under a clearly labelled `.brain/legacy/` archive and produces a static,
-   human-readable export for each thread/case. That archive is never projected into a
-   conference request and is not a new live product database. A later purge is explicit
-   user action; migration does not discard records automatically.
-3. **Remove special shelf/story routing.** A shelf placement for a legacy storyteller
-   transcript is converted to an ordinary immutable text snapshot during migration.
-   The live shelf resolver, UI, and context builder then need no storyteller parser or
-   special transcript path.
-4. **Make breaking inputs explicit.** Target `consult` accepts `question`, optional
-   `context`, optional `files`, and required `myPersona`; a supplied `thread` fails
-   with a direct migration error. Legacy `consultModel`, token, temperature, and timeout
-   settings—including their environment override—are reported as removed settings,
-   never silently ignored or used to start a second model.
-5. **Delete the retired verticals after verified migration.** Remove external-consult
-   HTTP behavior, `story` persistence/rendering, Case creation/resume/phase/witness
-   behavior, Case-specific harness and return branches, associated policy/config
-   limits, prompts, UI commands, documentation, and tests. Do not retain a permanent
-   legacy adapter or Case reader merely because historical data exists.
-6. **Change public wording only with behavior.** README, prompt, config help, screen
-   help, shelf resolver, and tests change atomically with the cutover. Until then they
-   continue to describe the shipped behavior honestly.
+1. **Inventory and strict blocker.** The migrator inventories legacy storyteller
+   bytes, shelf placements that resolve through them, Case records, and retired Case
+   task metadata. Any active, resumable, unreadable, or malformed Case blocks startup.
+   The user must use the pre-C5 release to explicitly stop unfinished work; no flag or
+   automatic conversion can orphan it.
+2. **Static archive.** Terminal records are copied byte-for-byte into
+   `.brain/legacy/raw/`, SHA-256 digests are recorded in the manifest, and readable
+   static exports are written to `.brain/legacy/exports/`. A missing export can be
+   regenerated from the raw bytes without a former-product parser.
+3. **Inert shelf/context conversion.** A legacy storyteller placement becomes an
+   ordinary immutable snapshot with archive metadata. If pointers or retired Case task
+   metadata require a context rewrite, the exact pre-rewrite context bytes are also
+   archived and exported before the live context changes.
+4. **Explicit broken inputs.** `consult` takes `question`, optional `context`, optional
+   `files`, and required `myPersona`; a supplied `thread` is refused. Retired
+   `consultModel`, token, temperature, timeout, and environment settings are rejected
+   as removed configuration rather than ignored or reused.
+5. **Deletion.** External HTTP consultation behavior, story persistence/rendering, Case
+   creation/resume/phase/witness behavior, Case-specific harness and return branches,
+   policy/config limits, prompt/UI commands, and their old tests were removed. Archive
+   existence does not retain a live adapter or reader.
 
-## Implementation slices and acceptance evidence
+## Delivered acceptance evidence
 
-1. **Conference record and immutable capture**
-   - Add `co<N>` records, atomic writes, caller/file snapshots, book snapshots, empty
-     book representations, digests, and read-only snapshot resolution.
-   - Prove live file/book mutation after entry cannot alter an active conference;
-     reject path escapes, range expansion, and uncaptured source IDs. Keep the capture
-     schema consult-local rather than importing Case capsule/artifact machinery.
-
-2. **Persona registry, Durable child, and transient request construction**
-   - Define the initial roster and versioned book mappings; add `myPersona` input;
-     create the independent Durable child and request-local persona injection.
-   - Prove the opening Cartographer turn uses `myPersona`, an empty book persona still
-     has its role, a nonempty persona sees only its own frozen book source, and a prior
-     persona prompt is absent after a handoff while its spoken turn remains.
-
-3. **Grammar-constrained selector and stable prefill**
-   - Add a tested provider adapter for finite enum grammar and the consult-local
-     selector path.
-   - Prove output can only be an eligible exact ID, the previous speaker is excluded,
-     selector events are durable, no active persona leaks into selector input, and an
-     unsupported server fails explicitly rather than routing with unconstrained prose.
-   - Capture participant → selector → participant plans and prove the common prefill is
-     preserved, shared history is append-only, and only the transient tail changes.
-
-4. **Turn/return lifecycle and consultation UI**
-   - Keep a speaker active through tool calls; hand off only after a no-tool response;
-     let any speaker make `consult_return`; add cancellation/restart/limit recovery and
-     an auditable conference view.
-   - Prove tool-plus-text and text-plus-tool responses retain the same speaker, a plain
-     response triggers exactly one selector decision, malformed return keeps that
-     speaker active, and failure/limit never invents a result.
-
-5. **One cutover, then deletion**
-   - Implement the inventory/archive and shelf migration; make active Case records a
-     visible cutover block; reject legacy call/config inputs clearly.
-   - Once the conference passes its end-to-end acceptance suite, remove the external
-     consultation and Case verticals rather than leaving adapters, dead configuration,
-     duplicate UI, or unreachable code.
-   - Prove fresh installs expose one `consult` contract and no `case`; migrated legacy
-     bytes/digests and shelf text remain available without a live Case/story parser;
-     no conference provider request reaches archived data or a second configured model.
+- `co<N>` records capture caller/file/book snapshots with digests; tests prove later
+  file/book mutation cannot change the entry packet.
+- An independent Durable child uses the launching conversation's captured model,
+  request-local personas, and only `consult_source`/`consult_return` authority.
+- The provider adapter probes a required finite grammar choice; selector records are
+  durable, exclude the prior speaker, retain a common append-only prefix, and fail
+  explicitly when the capability is unavailable.
+- Participant return, malformed return, recovery, cancellation, limits, and bounded
+  request-plan audit retention are tested without fabricating a result.
+- Cutover tests prove fresh requests expose only conference consultation, archived
+  bytes/digests/export recovery stay readable, legacy shelf text is inert, and no
+  archived material or second configured model enters a conference request.
 
 ## Non-goals
 

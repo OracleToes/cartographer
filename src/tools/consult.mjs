@@ -1,11 +1,9 @@
 // `consult`: launch an isolated same-model conference and return its final advisory
-// synthesis to the conversation that called it. Until the separately gated C5 cutover,
-// the retained legacy storyteller path stays behind its old argument shape; a conference
-// request never reaches it, a second configured model, or an unconstrained router.
+// synthesis to the conversation that called it. This is the sole consultation surface:
+// there is no external-model request, thread revival, storyteller store, or routing fallback.
 import { configure, defineTool } from "@earendil-works/pi-durable";
 import { arr, obj, opt, str, union } from "@earendil-works/pi-schema";
 import { POLICY } from "../config.mjs";
-import { clipConsultContext, legacyConsultTool } from "./consult-legacy.mjs";
 import {
 	ConferenceError,
 	attachChildConference,
@@ -93,47 +91,24 @@ async function waitWithConferenceLimit(handle, submission, callContext) {
  * resolved model of that conversation, so `/model` and a retained focus model are
  * honored without reading config.model.
  */
-export function consultTool({ root, brainDir, config, conferenceExtension, fetchImpl }) {
-	// C5 is deliberately not in this change. Preserve the already-shipped external storyteller implementation for
-	// callers using its old shape while C1–C4 conference acceptance is established. The new field is an unambiguous,
-	// additive opt-in: a request with `myPersona` (or captured `files`) enters only the same-model conference path.
-	// Conference execution never passes `config` to that legacy implementation or reads its model/settings.
-	const legacy = legacyConsultTool({ root, brainDir, config, fetchImpl });
+export function consultTool({ root, brainDir, conferenceExtension }) {
 	return defineTool({
 		name: "consult",
 		description: describe("consult"),
 		parameters: obj({
-			// Keep the pre-C5 legacy question shape broad. createConferenceCapture() enforces the narrower conference
-			// bound only after a caller explicitly opts into it with myPersona/files.
-			question: str({ minLength: POLICY.validation.nonEmptyStringMinLength, pattern: "\\S", description: "One concrete consultation question and desired deliverable." }),
-			context: opt(str({ maxLength: POLICY.limits.conference.contextChars, description: "Optional caller-supplied facts. A conference freezes exact captured bytes as c0." })),
-			files: opt(arr(fileSpec, { maxItems: POLICY.limits.conference.files, description: "Conference-only confined project files captured immutably at entry. Using this requires myPersona." })),
-			myPersona: opt(str({ maxLength: POLICY.limits.conference.personaChars, description: "Required to opt into the isolated same-model conference; its opening Cartographer perspective is consult-local only." })),
-			// Until the one-way C5 cutover, a legacy call without myPersona/files continues to use its existing st<N>
-			// storyteller contract. A conference request deliberately refuses thread instead of silently mixing products.
-			thread: opt(str({ maxLength: 256, description: "Legacy storyteller follow-up thread. It is not accepted by an isolated conference request." })),
+			question: str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.conference.questionChars, pattern: "\\S", description: "One bounded consultation question and desired advisory deliverable." }),
+			context: opt(str({ maxLength: POLICY.limits.conference.contextChars, description: "Optional caller-supplied facts. Exact captured bytes become immutable source c0." })),
+			files: opt(arr(fileSpec, { maxItems: POLICY.limits.conference.files, description: "Optional confined project files captured immutably at entry." })),
+			myPersona: str({ minLength: POLICY.validation.nonEmptyStringMinLength, maxLength: POLICY.limits.conference.personaChars, pattern: "\\S", description: "Required consult-local opening perspective for Cartographer; it grants no authority and never becomes a parent prompt." }),
+			// Kept solely to issue a direct C5 migration refusal instead of silently accepting/replaying a legacy thread.
+			thread: opt(str({ maxLength: 256, description: "Removed C5 legacy field. Any supplied value is refused; begin a new conference with explicit current context." })),
 		}),
-		prepareArguments(args) {
-			if (args === null || typeof args !== "object") return args;
-			const conference = args.myPersona !== undefined || args.files !== undefined;
-			if (conference || typeof args.context !== "string") return args;
-			// Match the retained legacy tool's historical head-clipping before this combined schema validates it.
-			return { ...args, context: clipConsultContext(args.context).text };
-		},
 		executionMode: "sequential",
-		// Conference executions locate their durable co<N> record/child before making anything new and are safe to
-		// replay. The retained legacy implementation remains otherwise intact until the one-way C5 cutover.
+		// Conference executions locate their durable co<N> record/child before making anything new and are safe to replay.
 		replay: POLICY.enums.toolReplay.safe,
-		// Preserve the legacy streaming-tail contract while the two products coexist; conference results are compact.
-		outputLimits: legacy.outputLimits,
 		execute: async (args, api, callContext) => {
-				const conferenceRequest = args.myPersona !== undefined || args.files !== undefined;
-				if (!conferenceRequest) return legacy.execute(args, api, callContext);
 				if (args.thread !== undefined) {
-					return fail("`consult.thread` belongs to the retained legacy storyteller contract and cannot be mixed with an isolated conference. Start the conference without `thread`; after C5, archived material must be supplied explicitly as context.");
-				}
-				if (typeof args.myPersona !== "string" || args.myPersona.trim() === "") {
-					return fail("An isolated same-model consult conference requires a non-empty `myPersona`. Omit conference-only `files` to use the retained legacy consultation until C5.");
+					return fail("`consult.thread` was removed by the C5 cutover. Legacy transcripts are static archives only and cannot be resumed; begin a new conference with explicit current context.");
 				}
 				let conference = findConferenceByCaller(brainDir, { taskId: api.taskId, callId: api.callId });
 				// A completed record is replayable as its compact receipt even if the provider has since been removed.

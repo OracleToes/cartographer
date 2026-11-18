@@ -1,6 +1,6 @@
 // A normal writable-command stage: a disposable source copy outside the project.
 //
-// It is deliberately narrower than a project checkout and deliberately not case scratch.
+// It is deliberately narrower than a project checkout and never a general-purpose scratch workspace.
 // A command can alter only `work`; this module turns that work tree into a bounded candidate
 // and, only after the ordinary move gate has accepted it, applies the candidate atomically.
 import { createHash, randomUUID } from "node:crypto";

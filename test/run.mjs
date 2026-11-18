@@ -37,7 +37,6 @@ import { startStandIn } from "./stand-in.mjs";
 import { RECORD } from "../src/voice.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
-import { beginCasePhase, createCase, finishCasePhase } from "../src/case.mjs";
 import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
 import { loadConference } from "../src/conference.mjs";
 
@@ -61,17 +60,6 @@ const NO_SANDBOX = () => (findSandbox().ok ? undefined : `no sandbox on this mac
 /** The windows manager for one project, as carto builds it. */
 const windowsOf = (root, brainDir, { mode = "sandbox", read = [] } = {}) => createWindows({ root, brainDir, config: { shellRead: read }, runner: { mode, available: findSandbox() } });
 const LOOP = (file) => `while :; do echo $(date +%s%N) > ${file}; sleep 0.05; done`;
-const caseArtifact = (candidate, values = {}) => ({
-	candidate,
-	observations: [],
-	assumptions: [],
-	citations: [],
-	falsifiers: [],
-	proposed_witness: "No further witness is available in this fixture.",
-	closure_gaps: [],
-	uncertainty: [],
-	...values,
-});
 async function beating(file) {
 	const before = readFileSync(file, "utf8");
 	await new Promise((resolve) => setTimeout(resolve, 400))
@@ -836,61 +824,7 @@ test("task: a change focus executes the cached declared move contract through an
 	}
 });
 
-test("case: bounded same-model phases keep blind evidence flow, artifacts, and shared-brain authority separate", async () => {
-	const root = makeProject("evidence-case", { git: false });
-	configure(root, { initiate: false });
-	const server = await startStandIn({
-		tokenDelayMs: 0,
-		caseSteps: {
-			construct: [
-				'book: {"target":"ledger","action":"add","kind":"note","text":"phase side channel"}',
-				"shell[action=read,window=main]:",
-			],
-		},
-	});
-	try {
-		const result = await carto(root, server, ["-p", "case: Does src/main.js call the exported add function? || then think"]);
-		ok(result, "bounded evidence case");
-		const file = join(root, ".brain", "cases", "c1.json");
-		assert.equal(existsSync(file), true, "the case has its own durable evidence file");
-		const evidence = JSON.parse(readFileSync(file, "utf8"));
-		assert.equal(evidence.status, "running", "C2 pauses at the main-owned witness-specification boundary rather than synthesizing from phase count");
-		assert.equal(evidence.flow.state, "awaiting-witness-specification");
-		assert.deepEqual(evidence.phases.map((phase) => [phase.id, phase.status]), [["construct", "complete"], ["falsify-blind", "complete"], ["falsify-cross-exam", "complete"], ["witness", "queued"]]);
-		assert.match(evidence.capsule.digest, /^[a-f0-9]{64}$/, "the capsule is frozen and digested");
-		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
-		assert.equal(phases.length, 5, "the constructor gets bounded retries for refused side channels, followed by blind and controlled cross-examination requests");
-		const text = (request) => request.messages.map(rawText).join("\n");
-		const construct = phases.filter((request) => text(request).includes("in the construction phase"));
-		const blind = phases.filter((request) => text(request).includes("in the blind falsification phase") && !text(request).includes("Controlled cross-examination packet"));
-		const cross = phases.filter((request) => text(request).includes("Controlled cross-examination packet"));
-		assert.equal(construct.length, 3, "construction is the only phase that made the deliberately refused side-channel calls");
-		assert.equal(blind.length, 1);
-		assert.equal(cross.length, 1, "the sealed blind context receives exactly one recorded constructor packet");
-		const constructorResult = construct.at(-1).messages.filter((message) => message.role === "tool").map(rawText).join("\n");
-		assert.match(constructorResult, /does not edit the shared brain or shelf/, "a phase cannot mutate shared brain state as an evidence side channel");
-		assert.match(constructorResult, /does not use shell windows/, "a phase cannot read or control an ambient shell window as an evidence side channel");
-		const blindText = text(blind[0]);
-		const constructArtifact = evidence.phases.find((phase) => phase.id === "construct").artifact;
-		assert.doesNotMatch(blindText, /CASE construct ARTIFACT/, "the blind request excludes constructor prose byte-for-byte");
-		assert.doesNotMatch(blindText, new RegExp(constructArtifact.digest), "the blind request excludes the constructor digest as well as its prose");
-		const crossText = text(cross[0]);
-		const blindArtifact = evidence.phases.find((phase) => phase.id === "falsify-blind").artifact;
-		assert.match(crossText, /Recorded constructor packet/, "the constructor packet is only visible after the blind phase");
-		assert.match(crossText, new RegExp(constructArtifact.digest), "the cross packet identifies the recorded constructor artifact");
-		assert.match(crossText, new RegExp(blindArtifact.digest), "the cross packet identifies the durable blind seal that preceded it");
-		assert.equal(evidence.flow.blind.digest, blindArtifact.digest);
-		assert.equal(evidence.flow.crossPacket.delivery.conversationId, evidence.phases.find((phase) => phase.id === "falsify-blind").conversationId, "cross-examination reuses the blind falsifier context rather than opening a constructor debate context");
-		const { ledger } = loadLedger(join(root, ".brain"));
-		assert.equal(ledger.items.some((entry) => entry.text === "phase side channel"), false, "the blocked phase attempt did not promote its note");
-		assert.equal(Object.values(loadContext(join(root, ".brain")).tasks).some((task) => task.caseId === "c1"), false, "each temporary case-phase context is cleaned from the ordinary task store after its artifact is recorded");
-		assert.equal(evidence.synthesis, undefined, "phase execution ends with retained evidence and no automatic vote or synthesis");
-	} finally {
-		await server.close();
-	}
-});
-
-test("consult C1-C4: a CLI conference uses the caller model, returns an isolated bounded audit, and leaves legacy storage untouched", async () => {
+test("consult C1-C5: a CLI conference uses the caller model, returns an isolated bounded audit, and has no legacy writer", async () => {
 	const root = makeProject("consult-conference-cli", { git: false });
 	configure(root, { initiate: false, consultGrammar: "openai" });
 	const server = await startStandIn({ tokenDelayMs: 0 });
@@ -904,7 +838,7 @@ test("consult C1-C4: a CLI conference uses the caller model, returns an isolated
 		assert.equal(loaded.final.synthesis, "CONFERENCE RETURN FROM atlas");
 		assert.ok(loaded.childConversationId, "the independent child identity is durable");
 		assert.ok(loaded.requestPlans.length >= 2, "participant and finite selector provider plans are auditable");
-		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the new conference does not enter the retained external storyteller store");
+		assert.equal(existsSync(join(root, ".brain", "storyteller")), false, "the conference has no storyteller writer");
 		const custom = server.requests.find((request) => request.tool_choice === "required" && request.tools?.some((tool) => tool.type === "custom"));
 		assert.ok(custom, "the configured adapter receives a provider-enforced required custom grammar request");
 		const participantRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Active participant packet"));
@@ -914,169 +848,33 @@ test("consult C1-C4: a CLI conference uses the caller model, returns an isolated
 	}
 });
 
-test("case C3: the main-owned witness docket bounds source access and the final report names its witness", async () => {
-	const root = makeProject("evidence-case-witness", { git: false });
-	configure(root, { initiate: false });
-	const docket = {
-		kind: "specification",
-		target_claims: ["construct:candidate"],
-		method: "read",
-		allowed_inputs: [{ kind: "source", ref: "s1" }, { kind: "tool-call", tool: "read", input: { path: "src/math.js" } }],
-		expected_discriminator: "The exact source read either supports or refutes the constructor candidate.",
-		unresolved_if: "The one allowed source read does not discriminate the candidate.",
-		budget: { source_calls: 1 },
-	};
-	const server = await startStandIn({ tokenDelayMs: 0, caseSteps: { witness: ["read: src/main.js", "read: src/math.js"] } });
-	try {
-		const result = await cartoOnTerminal(root, server, [], [
-			["Set one up in", ""],
-			["Type a message", `shelf: ${JSON.stringify({ action: "add", path: "src/math.js" })} || case: ${JSON.stringify({ question: "Does src/main.js call the exported add function?", shelf: ["sh1"] })}`],
-			["awaiting-witness-specification", "PARENT-WITNESS-EXCLUSION-SENTINEL"],
-			["OK", `case witness: c1 ${JSON.stringify(docket)}`],
-			["ready for my case-level report", `case synthesize: c1 ${JSON.stringify({ outcome: "supported", report: "The one docketed witness, not phase agreement, settles the sole material candidate claim." })}`],
-			["Case c1 is recorded as supported.", "/case c1"],
-			["Main case-level report: supported.", "/quit"],
-		]);
-		if (result === undefined) return "python3 is needed for a terminal";
-		ok(result, "running an isolated bounded witness");
-		has(result.screen, "Main case-level report: supported.", "/case renders the durable final report through the terminal");
-		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
-		assert.equal(evidence.status, "synthesized");
-		assert.equal(evidence.flow.witness.id, "w1");
-		assert.deepEqual(evidence.synthesis.witnesses, ["w1"], "the final report names its settling witness rather than a count of phase artifacts");
-		assert.equal(evidence.flow.witness.usage.sourceCalls, 1, "the one admitted source call is durably charged to the witness docket");
-		const witnessRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("Witness boundary"));
-		assert.ok(witnessRequests.length >= 2, "the witness retried after one refused undeclared source call");
-		const witnessBrief = witnessRequests[0].messages.map(rawText).join("\n");
-		assert.match(witnessBrief, /read {"path":"src\/math\.js"}/, "the witness receives only the exact source input the main docket named");
-		assert.doesNotMatch(witnessBrief, /Participant input routed to this phase/, "the witness does not receive ambient participant prose");
-		assert.doesNotMatch(witnessRequests.map((request) => request.messages.map(rawText).join("\n")).join("\n"), /PARENT-WITNESS-EXCLUSION-SENTINEL/, "the isolated witness request does not inherit an intervening parent-conversation line");
-		assert.match(witnessRequests[1].messages.map(rawText).join("\n"), /Witness source call refused: The read call is outside case c1's exact main-owned witness docket/, "an attempted generic project read is refused before the bounded witness can continue");
-	} finally {
-		await server.close();
-	}
-});
-
-test("case v2: source reads append immutable phase receipts outside the frozen capsule", async () => {
-	const root = makeProject("evidence-case-receipt", { git: false });
-	configure(root, { initiate: false });
-	const server = await startStandIn({ tokenDelayMs: 0, caseSteps: { construct: ["read: src/main.js"], cross: ["read: src/math.js"] } });
-	try {
-		const result = await carto(root, server, ["-p", "case: Does src/main.js import add? || then think"]);
-		ok(result, "recording a case source receipt");
-		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
-		assert.equal(evidence.version, 2);
-		assert.deepEqual(evidence.capsule.ledger, [], "the frozen capsule keeps only its initial ledger; phase inspection does not mutate it");
-		const receipts = evidence.ledger.filter((entry) => entry.kind === "receipt");
-		assert.equal(receipts.length, 2, "the construction and controlled cross-examination reads each retain a phase-local immutable receipt");
-		const constructReceipt = receipts.find((entry) => entry.phase === "construct");
-		const crossReceipt = receipts.find((entry) => entry.phase === "falsify-cross-exam");
-		assert.ok(constructReceipt);
-		assert.ok(crossReceipt);
-		assert.deepEqual([constructReceipt.phase, constructReceipt.tool], ["construct", "read"]);
-		assert.match(constructReceipt.digest, /^[a-f0-9]{64}$/);
-		assert.match(constructReceipt.inputDigest, /^[a-f0-9]{64}$/);
-		assert.match(constructReceipt.outputDigest, /^[a-f0-9]{64}$/);
-		assert.deepEqual(constructReceipt.input, { path: "src/main.js" }, "the receipt retains the exact bounded source-tool input it digests");
-		assert.match(constructReceipt.output, /src\/main\.js/, "the receipt retains the bounded source-tool output it digests");
-		assert.deepEqual(evidence.phases[0].artifact.data.citations, [{ ref: constructReceipt.id, kind: "receipt" }], "the phase's subsequent structured return actually cites the receipt it was shown");
-		assert.deepEqual(evidence.phases[0].artifact.data.observations[0].citations, [constructReceipt.id], "the citation is attached to a direct observation rather than only named in prose");
-		const crossArtifact = evidence.phases.find((phase) => phase.id === "falsify-cross-exam").artifact.data;
-		assert.deepEqual(crossArtifact.crossExamination[0].citations, [crossReceipt.id], "the controlled classification names its own phase-local receipt rather than treating the constructor as primary evidence");
-		assert.equal(crossArtifact.crossExamination[0].disposition, "failed-challenge");
-		assert.equal(existsSync(join(root, ".brain", "carto-atlas.json")), false, "a case source read does not mutate the shared atlas as an implicit evidence side channel");
-		const constructRequests = server.requests.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase"));
-		assert.match(constructRequests.at(-1).messages.map(rawText).join("\n"), new RegExp(`Case evidence receipt ${constructReceipt.id} is durable`), "the same phase receives the receipt id it must cite on return");
-	} finally {
-		await server.close();
-	}
-});
-
-test("case: /case stop interrupts a held phase and leaves a stopped durable trail", async () => {
-	const root = makeProject("evidence-case-stop", { git: false });
-	configure(root, { initiate: false });
-	const server = await startStandIn({
-		tokenDelayMs: 0,
-		holdWhen: (body) => body.messages.some((message) => rawText(message).includes("\nCase phase\n")),
-	});
-	try {
-		const result = await cartoOnTerminal(root, server, [], [
-			["Set one up in", ""],
-			["Type a message", "case: Does src/main.js call the exported add function?"],
-			[1, "Check the exceptional input before stopping."],
-			["recorded for evidence case c1", "/case stop c1"],
-			["the active phase was interrupted", "/case c1"],
-			["Status: stopped.", "/quit"],
-		]);
-		if (result === undefined) return "python3 is needed for a terminal";
-		ok(result, "stopping a held evidence case");
-		has(result.screen, "case  c1 stopped", "the terminal confirms the durable case stop");
-		has(result.screen, "the active phase was interrupted", "the terminal says that the held phase was interrupted");
-		has(result.screen, "Status: stopped.", "/case inspects the stopped durable record");
-		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
-		assert.equal(evidence.status, "stopped");
-		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped", "stopped"], "the stop prevents later phases from starting");
-		assert.match(evidence.phases[0].artifact.failure, /interrupted/i, "the active phase records the interrupted outcome rather than a successful return");
-		assert.deepEqual(evidence.messages, [{
-			id: "u1",
-			at: evidence.messages[0].at,
-			text: "Check the exceptional input before stopping.",
-			route: "queued",
-			unreadBy: "construct",
-			afterCase: true,
-		}], "an active-phase participant line that could not reach a result is retained with exact interrupted-phase provenance");
-		assert.equal(server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n"))).length, 1, "only the active construction phase was started before the terminal stop");
-	} finally {
-		await server.close();
-	}
-});
-
-test("case: the fixed phase runtime stops a held phase before later phases can start", async () => {
-	const root = makeProject("evidence-case-timeout", { git: false });
-	configure(root, { initiate: false });
-	// The production bound is two minutes. This child-process-only preload preserves every other timer but makes
-	// that exact phase timer fire after one second, so the test can exercise a live held-request abort without waiting two minutes.
-	const preload = join(root, "case-timeout-preload.mjs");
-	writeFileSync(preload, `const original = globalThis.setTimeout;\nglobalThis.setTimeout = (callback, delay, ...args) => original(callback, delay === 120000 ? 1000 : delay, ...args);\n`);
-	const server = await startStandIn({
-		tokenDelayMs: 0,
-		holdWhen: (body) => body.messages.some((message) => rawText(message).includes("\nCase phase\n")),
-	});
-	try {
-		const result = await carto(root, server, ["-p", "case: Does src/main.js call the exported add function? || then think"], { env: { NODE_OPTIONS: `--import=${preload}` } });
-		ok(result, "timing out a held evidence phase");
-		const evidence = JSON.parse(readFileSync(join(root, ".brain", "cases", "c1.json"), "utf8"));
-		assert.equal(evidence.status, "stopped");
-		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["stopped", "stopped", "stopped", "stopped"], "the timeout stops the active phase and bars later phases");
-		assert.match(evidence.stopReason, /construction exceeded its 120 second runtime limit/);
-		assert.match(evidence.phases[0].artifact.failure, /exceeded its 120 second runtime limit/i, "the timed-out phase receives a durable timeout artifact rather than a return");
-		assert.equal(server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n"))).length, 1, "the runtime limiter aborts before any second phase starts");
-	} finally {
-		await server.close();
-	}
-});
-
-test("case: a fresh session resumes durable unfinished phases without rerunning a recorded artifact", async () => {
-	const root = makeProject("evidence-case-resume", { git: false });
-	configure(root, { initiate: false });
+test("C5 CLI cutover blocks running Cases, archives stopped data, and exposes no Case tool", async () => {
+	const root = makeProject("c5-cli-cutover", { git: false });
 	const brainDir = join(root, ".brain");
-	const prior = createCase(brainDir, { question: "Does src/main.js call the exported add function?", context: "Resume only the phases that were not completed before the restart.", at: 100 });
-	beginCasePhase(brainDir, prior.id, "construct", { conversationId: "prior-session-construct", at: 101 });
-	finishCasePhase(brainDir, prior.id, "construct", { returned: true, done: true, artifact: caseArtifact("construction artifact survives the restart") }, { at: 102 });
+	configure(root, { initiate: false });
+	mkdirSync(join(brainDir, "storyteller"), { recursive: true });
+	mkdirSync(join(brainDir, "cases"), { recursive: true });
+	const story = "<!-- storyteller v1 -->\nlegacy transcript\n";
+	writeFileSync(join(brainDir, "storyteller", "st1.md"), story);
+	writeFileSync(join(brainDir, "cases", "c1.json"), JSON.stringify({ id: "c1", status: "running" }));
+	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ shelf: [{ id: "sh1", ref: { type: "story", id: "st1" } }], tasks: { legacy: { caseId: "c1", phase: "construct" } } }));
 	const server = await startStandIn({ tokenDelayMs: 0 });
 	try {
-		const result = await carto(root, server, ["-p", "case resume: c1 || then think"]);
-		ok(result, "resuming a durable evidence case");
-		const evidence = JSON.parse(readFileSync(join(brainDir, "cases", "c1.json"), "utf8"));
-		assert.equal(evidence.status, "running");
-		assert.equal(evidence.flow.state, "awaiting-witness-specification");
-		assert.deepEqual(evidence.phases.map((phase) => phase.status), ["complete", "complete", "complete", "queued"]);
-		assert.equal(evidence.phases[0].artifact.data.candidate, "construction artifact survives the restart", "resume keeps the already durable structured construction artifact byte-for-byte");
-		const phases = server.requests.filter((request) => request.messages.some((message) => rawText(message).includes("\nCase phase\n")));
-		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the construction phase")).length, 0, "a completed phase is not replayed after restart");
-		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("in the blind falsification phase") && !request.messages.map(rawText).join("\n").includes("Controlled cross-examination packet")).length, 1);
-		assert.equal(phases.filter((request) => request.messages.map(rawText).join("\n").includes("Controlled cross-examination packet")).length, 1, "resume appends exactly one cross packet after the recorded blind pass");
-		assert.equal(Object.values(loadContext(brainDir).tasks).some((task) => task.caseId === "c1"), false, "resumed phase contexts are cleaned when their artifacts return");
+		const blocked = await carto(root, server, ["-p", "say: should not start || sleep"]);
+		assert.equal(blocked.code, 1, `a running legacy Case blocks startup:\n${blocked.all}`);
+		has(blocked.stderr, "active or resumable legacy Case material: c1", "the blocker identifies the Case once");
+		assert.equal(existsSync(join(brainDir, "cases", "c1.json")), true, "the blocked source is untouched");
+
+		writeFileSync(join(brainDir, "cases", "c1.json"), JSON.stringify({ id: "c1", status: "stopped" }));
+		const migrated = await carto(root, server, ["-p", "say: archive complete || sleep"]);
+		ok(migrated, "stopped legacy data starts through the C5 cutover");
+		has(migrated.stdout, "C5 legacy archive", "startup reports the static archive");
+		assert.equal(existsSync(join(brainDir, "storyteller")), false);
+		assert.equal(existsSync(join(brainDir, "cases")), false);
+		assert.equal(readFileSync(join(brainDir, "legacy", "raw", "storyteller", "st1.md"), "utf8"), story);
+		assert.match(readFileSync(join(brainDir, "legacy", "exports", "cases", "c1.md"), "utf8"), /Recorded legacy status: stopped/);
+		const requestToolNames = server.requests.flatMap((request) => request.tools ?? []).map((tool) => tool.function?.name ?? tool.name).filter(Boolean);
+		assert.equal(requestToolNames.includes("case"), false, "fresh C5 provider payloads contain no Case tool");
 	} finally {
 		await server.close();
 	}
@@ -2125,166 +1923,47 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
 });
 
-test("screen: a consult call folds to one line, and opens to the full consultation transcript — context, question, and answer under its thread", async () => {
+test("screen: consult rows fetch only conference audits and render old rows as static archive notices", async () => {
 	const { createChat } = await import("../src/screen/chat.mjs");
-	let clock = 1000;
-	const thread = "st-20261116-053946-a1b2";
-	const roundOne = [
-		"<!-- storyteller v1 -->",
-		"Consultation transcript — one long problem, kept whole",
-		"",
-		"Model: MythosNano",
-		"Started: 2026-11-16T05:39:46.000Z",
-		"",
-		"## Round 1 — 2026-11-16T05:39:46.000Z",
-		"Elapsed: 1 m 12 s · 9,001 output tokens · finish: stop",
-		"",
-		"Context:",
-		"```text",
-		"The roller rolls one die.",
-		"The user suspects it is unfair.",
-		"```",
-		"",
-		"Question:",
-		"```text",
-		"Is the roller sound?",
-		"```",
-		"",
-		"Answer:",
-		"```text",
-		"It is not. Roll twice, not once, or the die never lands on six.",
-		"```",
-		"",
-	].join("\n");
-	const stories = { [thread]: roundOne };
-	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const record = {
+		id: "co7",
+		status: "returned",
+		model: { provider: "openai-completions", modelId: "stand-in" },
+		question: "What must the parent verify?",
+		createdAt: "2026-11-17T00:00:00.000Z",
+		roster: { version: 1 },
+		bookSources: {},
+		myPersona: { digest: "a".repeat(64) },
+		turns: [], selectorEvents: [], requestPlans: [], sources: [],
+		final: { participant: "atlas", outcome: "answered", at: "2026-11-17T00:00:01.000Z", synthesis: "Verify the current source before acting.", evidence: [], assumptions: [], uncertainties: [], alternatives: [], next_checks: [], digest: "b".repeat(64) },
+	};
+	let reads = 0;
+	const chat = createChat({ now: () => 1_000, readConference: (id) => { reads += 1; return id === "co7" ? record : undefined; } });
 	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
 	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
 	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
+	const text = () => chat.lines(100).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	chat.entry(0, reply([call("c1", "consult", { question: "What must the parent verify?", myPersona: "Audit the source boundary." })], 1));
+	chat.entry(0, result("c1", "consult", "Consult conference co7 returned answered from atlas.", { details: { consult: true, conference: "co7" } }));
+	assert.equal(reads, 0, "the private notebook is not loaded into ordinary Chat");
+	chat.toggle(chat.lines(100).find((line) => line.kind === "group").item);
+	const row = chat.lines(100).find((line) => line.kind === "call");
+	chat.toggleRow(row.item, row.row);
+	const opened = text(); // Rendering the deliberately opened row is the on-demand audit read.
+	assert.equal(reads, 1, "opening the row deliberately reads its co<N> audit");
+	has(opened, "consult conference co7 · private audit notebook", "the opened row names the conference record");
+	has(opened, "Verify the current source before acting.", "the selected audit renders on demand");
+	has(chat.textOf(row.item, row.row), "Consult conference co7", "copy reads the same conference audit");
 
-	chat.user("Is the roller sound?");
-	chat.entry(0, reply([call("c1", "consult", { question: "Is the roller sound?", context: "The roller rolls one die.\nThe user suspects it is unfair." })], 1));
-	clock += 72_000;
-	chat.entry(0, result("c1", "consult", `The consultation took 1 m 12 s (9,001 output tokens). The consultation transcript stands under thread ${thread}; shelved as placement sh1 (12,340 rendered tokens); beyond what the shelf renders, the consultation transcript remains in the brain and the state block says so. This is advisory material, not an authoritative verdict: assess its assumptions and proposals, verify factual or technical claims against relevant sources, tests, or proof before acting, and keep decisions of taste with the user. I can continue with \`thread: "${thread}"\`; the consultation model sees the original question and its answer.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
-	chat.entry(0, reply([call("c2", "chat", { text: "It rolls once; the consultation proposes rolling twice." })], 2));
-
-	// Folded: one line for the run, and the line says whose work it was; nothing of the answer stands until it is opened.
-	has(text(), "▸ 1 call · Is the roller sound? · 1m 12s", "once something is said, the run is one line, and the line says what the consultation was asked");
-	hasNot(text(), "consultation  Is the roller sound?", "the call's own line is folded away with the run");
-	hasNot(text(), "Roll twice", "the answer is not shown until the call is opened");
-	hasNot(text(), "It is not.", "and the receipt never carried it either");
-
-	// The run opened: the call is one line — what was asked, how long it took, and how much it wrote.
-	chat.toggle(chat.lines(80).find((line) => line.kind === "group").item);
-	has(text(), "consultation  Is the roller sound?  → 1 m 12 s · 9,001 tokens", "opened, the call line says what the consultation was asked, how long it took and how much it wrote");
-	hasNot(text(), "Roll twice", "the answer stands behind the call");
-
-	// Opened: the full consultation transcript stands in the row, read from the brain under its thread, never from the session.
-	const consultRow = chat.lines(80).find((line) => line.kind === "call");
-	chat.toggleRow(consultRow.item, consultRow.row);
-	const opened = text();
-	has(opened, `the consultation transcript stands under thread ${thread} · 1 round`, "the opened row names the thread, never a path");
-	has(opened, "round 1 · 2026-11-16 05:39 UTC", "the round is labelled");
-	has(opened, "what I sent — the context", "the ask says what was sent");
-	has(opened, "The roller rolls one die.", "the context of the call");
-	has(opened, "The user suspects it is unfair.", "all of it");
-	has(opened, "what I asked — the question", "and what was asked");
-	has(opened, "Is the roller sound?", "the question in full");
-	has(opened, "what the consultation answered", "and what came back");
-	has(opened, "It is not. Roll twice, not once, or the die never lands on six.", "the answer, from the transcript it stands in");
-	hasNot(opened, "Shelved as placement", "the receipt is not repeated inside the opened row");
-
-	// y copies the full consultation: the context, the question and the answer, not just the one line.
-	const copied = chat.textOf(consultRow.item, consultRow.row);
-	has(copied, `The consultation transcript stands under thread ${thread}`, "the copied text carries the thread");
-	has(copied, "The roller rolls one die.", "the copied text carries the context");
-	has(copied, "Is the roller sound?", "the question");
-	has(copied, "Roll twice, not once", "and the answer");
-
-	// A follow-up is its own call; the transcript grew under the same thread, and its row reads the whole of it.
-	stories[thread] = roundOne.replace(/\s+$/, "\n\n") + [
-		"## Round 2 — 2026-11-16T06:10:02.000Z",
-		"Elapsed: 0 m 41 s · 640 output tokens · finish: stop",
-		"",
-		"Question:",
-		"```text",
-		"Why twice?",
-		"```",
-		"",
-		"Answer:",
-		"```text",
-		"Once lands on six only half the time.",
-		"```",
-		"",
-	].join("\n");
-	chat.entry(0, reply([call("c3", "consult", { question: "Why twice?", thread })], 3));
-	clock += 41_000;
-	chat.entry(0, result("c3", "consult", `Round 2. The consultation took 0 m 41 s (640 output tokens). The consultation transcript (2 rounds) stands under thread ${thread}; shelved as placement sh1 (12,410 rendered tokens); beyond what the shelf renders, the consultation transcript remains in the brain and the state block says so. This remains advisory material, not an authoritative verdict: assess it and verify factual or technical claims before acting. Continue with \`thread: "${thread}"\` when another focused pass would resolve a material uncertainty; the consultation model sees the whole exchange.`, { details: { consult: true, thread, rounds: 2, placement: "sh1", tokens: 640, finish: "stop", seconds: 41 } }));
-	const consultLines = chat.lines(80).filter((line) => line.kind === "call" && line.spans.some(([part]) => String(part).includes("Why twice?")));
-	const secondRow = consultLines.at(-1);
-	chat.toggleRow(secondRow.item, secondRow.row);
-	const opened2 = text();
-	has(opened2, `the consultation transcript stands under thread ${thread} · 2 rounds`, "the follow-up row reads the transcript, both rounds");
-	has(opened2, "round 1 · 2026-11-16 05:39 UTC", "the first round stands in it");
-	has(opened2, "round 2 · 2026-11-16 06:10 UTC", "and so does the second");
-	has(opened2, "Why twice?", "the follow-up question");
-	has(opened2, "Once lands on six only half the time.", "the follow-up answer");
-
-	// A missing transcript is said as such, not as an empty answer: a fresh chat cannot read a thread the brain no longer holds.
-	delete stories[thread];
-	const gone = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	gone.entry(0, reply([call("c9", "consult", { question: "Is the roller sound?", context: "" })], 1));
-	gone.entry(0, result("c9", "consult", `The consultation took 1 m 12 s. The consultation transcript stands under thread ${thread}.`, { details: { consult: true, thread, rounds: 1, placement: "sh1", tokens: 9001, finish: "stop", seconds: 72.4 } }));
-	gone.toggle(gone.lines(80).find((line) => line.kind === "group").item);
-	const goneRow = gone.lines(80).find((line) => line.kind === "call");
-	gone.toggleRow(goneRow.item, goneRow.row);
-	has(gone.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n"), "from the brain", "a consultation transcript that is gone is said as gone");
-
-	// A failed consult shows why it failed, once, where the answer would stand.
-	const failed = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	failed.entry(0, reply([call("c8", "consult", { question: "Is the roller sound?", context: "" })], 1));
-	failed.entry(0, result("c8", "consult", "The consultation model refused the call: HTTP 500. boom", { isError: true }));
-	failed.toggle(failed.lines(80).find((line) => line.kind === "group").item);
-	const failedRow = failed.lines(80).find((line) => line.kind === "call");
-	failed.toggleRow(failedRow.item, failedRow.row);
-	const failedText = failed.lines(80).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	has(failedText, "why it failed", "a failed consult says why");
-	has(failedText, "HTTP 500", "with what the endpoint said");
-	hasNot(failedText, "what the consultation answered", "and no empty answer section under it");
-
-	// A consult that fails carries no answer section and no transcript; the harness line stands alone.
-	hasNot(text(), "why it failed", "the successful exchange stands without the failure block");
-});
-
-test("screen: while a consultation writes, Work shows the tail of its draft, and wipes it when the answer lands", async () => {
-	const { createChat } = await import("../src/screen/chat.mjs");
-	let clock = 1000;
-	const thread = "st-20261116-053946-a1b2";
-	const stories = { [thread]: "<!-- storyteller v1 -->\nConsultation transcript — one long problem, kept whole\n\nModel: Mythos-nano\nStarted: 2026-11-16T05:39:46.000Z\n\n## Round 1 — 2026-11-16T05:39:46.000Z\nElapsed: 0 m 12 s · finish: stop\n\nQuestion:\n```text\nq?\n```\n\nAnswer:\n```text\nIt is not. Roll twice.\n```\n" };
-	const chat = createChat({ now: () => clock, readStory: (id) => stories[id] });
-	const text = (cols = 80) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
-	const call = (id, name, args) => ({ type: "toolCall", id, name, arguments: args });
-	const reply = (content, stamp) => ({ model: [{ role: "assistant", content, timestamp: stamp }] });
-	const result = (id, name, body, extra = {}) => ({ model: [{ role: "toolResult", toolCallId: id, toolName: name, content: [{ type: "text", text: body }], ...extra }] });
-
-	chat.user("q?");
-	chat.entry(0, reply([call("c1", "consult", { question: "q?", context: "" })], 1));
-	// The draft streams in through the harness's live slot, a bounded tail — nothing from the session.
-	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six" }]);
-	has(text(), "… consultation", "while it runs, the call line shows the waiting mark");
-	has(text(), "No. The uniform() call modulo six", "and the draft as far as it has come");
-	clock += 3000;
-	chat.liveTools(0, [{ callId: "c1", name: "consult", status: "running", output: "No. The uniform() call modulo six biases toward 1 and 2. Draw with rejection." }]);
-	has(text(), "biases toward 1 and 2. Draw with", "the tail grows as it writes");
-	has(text(), "rejection.", "wrapped onto the next row like everything else");
-	assert.equal(chat.doing().what, "the consultation is writing", "the strip says whose words those are");
-	// The answer lands: the tool result stands, the tail is gone.
-	clock += 2000;
-	chat.entry(0, result("c1", "consult", `The consultation took 0 m 05 s (40 output tokens). The consultation transcript stands under thread ${thread}; shelved as placement sh1.`, { details: { consult: true, thread, rounds: 1, tokens: 40, finish: "stop", seconds: 5 } }));
-	chat.liveTools(0, []);
-	hasNot(text(), "modulo six", "once the answer lands, the draft leaves the tab — the transcript holds it");
-	has(text(), "→ 0 m 05 s · 40 tokens", "and the call line keeps how long it took and how much it wrote");
+	const historical = createChat({ readConference: () => { throw new Error("a historical row must not load an archive"); } });
+	historical.entry(0, reply([call("c2", "consult", { question: "Old question", thread: "st1" })], 1));
+	historical.entry(0, result("c2", "consult", "Legacy row", { details: { consult: true, thread: "st1" } }));
+	historical.toggle(historical.lines(100).find((line) => line.kind === "group").item);
+	const oldRow = historical.lines(100).find((line) => line.kind === "call");
+	historical.toggleRow(oldRow.item, oldRow.row);
+	const oldText = historical.lines(100).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	has(oldText, "historical consult row predates the C5 conference audit", "old Durable rows are notices, not parser-backed conversations");
+	hasNot(oldText, "Legacy row\nLegacy row", "the static notice avoids fabricating a transcript");
 });
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {

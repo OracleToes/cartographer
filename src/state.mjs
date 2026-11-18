@@ -17,7 +17,6 @@ import { activeMoveOverlays, attentionSnapshot, fileMarks, linkedCount, loadAtla
 import { loadLedger, open, renderLedger, salientNotes } from "./ledger.mjs";
 import { awaitsApproval, loadPlan, movesOf, reportedMoves, runnableMoves, renderPlan } from "./plan.mjs";
 import { loadContext, shelfFreshness, shelfLabel } from "./context.mjs";
-import { caseStatusLine, listCases } from "./case.mjs";
 import { requestLines } from "./requests.mjs";
 import { eventLine } from "./wake.mjs";
 import { ago, stamp, took } from "./time.mjs";
@@ -120,19 +119,6 @@ function dispatch(ledger, plan, brainDir, root, yolo = false) {
 		});
 		lines.push(`Main shelf: ${entries.join("; ")}${shelf.length > entries.length ? `; and ${shelf.length - entries.length} more` : ""}.`);
 	} else lines.push("Main shelf: empty.");
-	try {
-		const cases = listCases(brainDir);
-		const openCases = cases.filter((entry) => entry.error === undefined && (entry.status === "running" || entry.status === "ready" || entry.status === "needs-user-input"));
-		const broken = cases.filter((entry) => entry.error !== undefined);
-		if (openCases.length > 0) {
-			lines.push(`Evidence cases: ${openCases.slice(0, POLICY.limits.state.listedNames).map(caseStatusLine).join("; ")}${openCases.length > POLICY.limits.state.listedNames ? `; and ${openCases.length - POLICY.limits.state.listedNames} more` : ""}.`);
-			if (openCases.some((entry) => entry.status === "ready")) lines.push("A ready case is not concluded yet: I weigh its artifacts myself, then call `case` with synthesize and supported, refuted, unresolved, or needs_user_input.");
-			if (openCases.some((entry) => entry.status === "needs-user-input")) lines.push("A case has an exact recorded blocking question and successor-capsule boundary; I ask that question rather than pretending the case settled itself.");
-		}
-		if (broken.length > 0) lines.push(`Evidence cases unreadable: ${broken.slice(0, POLICY.limits.state.listedNames).map((entry) => entry.id).join(", ")}.`);
-	} catch {
-		// A hand-edited case file must not prevent the ordinary state block from reaching the model.
-	}
 	lines.push("Before a focus, I decide whether one local outcome can close here: a current claim, a boundary that can realize it, and a reachable witness. If not, I read, map, or revise first. I choose selected shelf evidence and a narrowing boundary. This lens neither delegates work nor approves a move.");
 	return lines.join("\n");
 }
@@ -143,8 +129,7 @@ function focusDirection(task) {
 	const item = task?.item === undefined ? "" : ` Envelope: ${task.item}.`;
 	const move = task?.move === undefined ? "" : ` Move: ${task.move} revision ${task.revision}.`;
 	const limits = task?.budget === undefined ? "" : ` Budget: ${task.budget.replies} replies, ${task.budget.fileOps} file operations, ${task.budget.commandStarts} command starts.`;
-	const evidenceCase = typeof task?.caseId === "string" ? ` Evidence case: ${task.caseId}${typeof task.phase === "string" ? `, ${task.phase} phase` : ""}.` : "";
-	return `Focus${item}${move}${limits}${evidenceCase}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan and accepts a reported move.`;
+	return `Focus${item}${move}${limits}\nI am ${purpose}. I am the same mind in a focused, temporary working context, not a different worker. I keep useful findings in the shared atlas, ledger or report before returning; anything not kept may be forgotten when this context leaves view. The orchestrating context alone changes the plan and accepts a reported move.`;
 }
 
 /** Said only while approval is off, as the plain state of how this session runs. Here and not in the system prompt, because the user can change it while the session runs, and the present state is all the prompt needs to carry. */

@@ -5,6 +5,7 @@ import { ConfigError, contextWindowLimits, CORE_DIR, loadConfig, POLICY } from "
 import { createInterface } from "node:readline";
 import { BRAIN, checkProject, findProject, hasBrain, lockBrain, ProjectError, setUpBrain } from "./project.mjs";
 import { forkCatalogNamespace } from "./catalog.mjs";
+import { LegacyCutoverError, migrateLegacyProducts } from "./legacy-cutover.mjs";
 import { traceFile } from "./trace.mjs";
 
 const HELP = `carto: Cartographer, run from a project folder.
@@ -150,6 +151,9 @@ export async function main(argv) {
 		}
 		const { brainDir, created, migrated } = setUpBrain(project.root);
 		release = lockBrain(brainDir);
+		// C5 runs before any session/context reader opens retired surfaces. It is one-way: active or resumable
+		// Cases block startup until the pre-C5 runtime explicitly stops them.
+		const legacyCutover = migrateLegacyProducts(brainDir);
 		const forked = flags.forkBrain === true ? forkCatalogNamespace(brainDir) : undefined;
 		const { adoptOldLedger } = await import("./ledger.mjs");
 		const adopted = adoptOldLedger(brainDir);
@@ -167,6 +171,7 @@ export async function main(argv) {
 		say(`Cartographer · ${project.root}`);
 		if (migrated) say(`the brain was renamed from .atlas to .brain, as it is called now`);
 		say(`${created ? "new brain" : "brain"} ${brainPath} · ${config.model} at ${config.server}${contextNote}`);
+		if (legacyCutover.migrated) say(`C5 legacy archive ${legacyCutover.archive} · ${legacyCutover.inventory.storyteller} storyteller transcript(s), ${legacyCutover.inventory.cases} Case record(s), and ${legacyCutover.inventory.shelfPlacements} shelf snapshot(s) retired`);
 		const { createRunner, sandboxLine } = await import("./sandbox.mjs");
 		const { YOLO_LINE } = await import("./plan.mjs");
 		const runner = createRunner({ off: flags.noBwrap === true || config.bwrap === false });
@@ -216,7 +221,7 @@ export async function main(argv) {
 		});
 		process.exitCode = code;
 	} catch (error) {
-		if (error instanceof ConfigError || error instanceof ProjectError) console.error(error.message);
+		if (error instanceof ConfigError || error instanceof ProjectError || error instanceof LegacyCutoverError) console.error(error.message);
 		else console.error(error);
 		process.exitCode = 1;
 	} finally {

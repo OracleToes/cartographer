@@ -54,7 +54,6 @@ import { entryLine, loadLedger, salientNotes, saveLedger } from "./ledger.mjs";
 import { confine, LookError } from "./tools/look.mjs";
 import { fileReference } from "./catalog.mjs";
 import { USER_NAME, USER_HEAD } from "./user.mjs";
-import { parseStory, readStory, renderStory, STORY_ID } from "./story.mjs";
 
 const OPEN = POLICY.markup.context.open;
 const CLOSE = POLICY.markup.context.close;
@@ -701,17 +700,6 @@ const pinnedText = (brainDir, ref) => {
 };
 const snapshotText = (brainDir, item) => readShelfSnapshot(brainDir, item);
 const SHELF_RESOLVERS = {
-	// A consultation transcript remains in the brain; the shelf carries the exchange for whoever asked. The path is never shown.
-	story: (brainDir, ref, item) => {
-		if (!STORY_ID.test(String(ref.id))) return undefined;
-		const raw = readStory(brainDir, ref.id);
-		if (raw !== undefined) {
-			try {
-				return renderStory(parseStory(raw).rounds);
-			} catch { /* fall back to the shelf's own backing snapshot */ }
-		}
-		return snapshotText(brainDir, item);
-	},
 	report: (brainDir, ref, item) => {
 		const row = composedRows(loadContext(brainDir)).find((entry) => entry.id === ref.id);
 		if (row !== undefined) { const body = loadReport(brainDir, ref.id); if (body !== undefined) return body; }
@@ -818,6 +806,7 @@ export function shelfText(root, item, brainDir) {
 /** Whether a shelf snapshot still describes the source it was taken from. The saved snapshot remains evidence even
  * when it has changed; callers use this only to label it honestly, never to replace it invisibly. */
 export function shelfFreshness(root, item, brainDir) {
+	if (item?.legacyArchive?.kind === "storyteller") return { state: "archived" };
 	try {
 		const current = shelfIdLine(resolveShelfText(root, item, brainDir), item);
 		if (typeof item?.snapshot !== "string") return { state: "unknown" };
@@ -922,7 +911,11 @@ function shelfBlock(root, items, max, brainDir) {
 	for (const original of items) {
 		let item = { ...original };
 		let text;
-		if (item.ref === undefined) {
+		// C5 archive placements deliberately have no live source. Their stored display snapshot is the immutable
+		// ordinary text item, so a later render never tries to revive a storyteller reference.
+		if (item?.legacyArchive?.kind === "storyteller" && typeof item.snapshot === "string") {
+			text = item.snapshot;
+		} else if (item.ref === undefined) {
 			const live = liveShelfSource(root, item);
 			if (live?.content !== undefined) {
 				if (item.target === undefined) {

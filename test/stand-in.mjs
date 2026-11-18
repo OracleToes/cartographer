@@ -7,10 +7,6 @@
 //   say: TEXT            answer TEXT
 //   task: BRIEF          call `task` with BRIEF; when the report is back, answer "Report received: <report>"
 //   task(m2): BRIEF      run declared move m2; the stored move contract supplies the brief
-//   case: QUESTION       start one bounded evidence case; case phases return named fixed artifacts
-//   case resume: c1     continue a durable running evidence case by id
-//   case witness: c1 {JSON}  record one main-owned witness docket and run only its bounded witness phase
-//   case synthesize: c1 {JSON}  record the main durable case-level report
 //   look: DIRECTIVE      call a look or change tool itself (the harness should refuse it)
 //   ledger: [OPS]        call `ledger` with these operations, written as JSON; then answer as after a task
 //   plan: [OPS]          the same with `plan`
@@ -177,23 +173,9 @@ function mainCalls(text) {
 			const brief = task[2].trim().replaceAll(/(?<!\\)\\n/g, "\n").replaceAll("\\\\n", "\\n");
 			calls.push({ name: "task", args: task[1] ? { move: task[1] } : { brief, done_when: "The requested observation is stated in the report." } });
 		}
-		else if (/^case\s+resume:\s*\S+\s*$/.test(part)) calls.push({ name: "case", args: { action: "resume", id: part.replace(/^case\s+resume:\s*/, "").trim() } });
-		else if (/^case\s+witness:\s*(\S+)\s+(\{[\s\S]*\})$/.test(part)) {
-			const [, id, docket] = /^case\s+witness:\s*(\S+)\s+(\{[\s\S]*\})$/.exec(part);
-			calls.push({ name: "case", args: { action: "witness", id, docket: JSON.parse(docket) } });
-		}
-		else if (/^case\s+synthesize:\s*(\S+)\s+(\{[\s\S]*\})$/.test(part)) {
-			const [, id, report] = /^case\s+synthesize:\s*(\S+)\s+(\{[\s\S]*\})$/.exec(part);
-			calls.push({ name: "case", args: { action: "synthesize", id, ...JSON.parse(report) } });
-		}
 		else if (part.startsWith("consult:")) {
 			const requested = part.slice(8).trim();
 			calls.push({ name: "consult", args: JSON.parse(requested) });
-		}
-		else if (part.startsWith("case:")) {
-			const requested = part.slice(5).trim();
-			if (requested.startsWith("{")) calls.push({ name: "case", args: { action: "start", ...JSON.parse(requested) } });
-			else calls.push({ name: "case", args: { action: "start", question: requested } });
 		}
 		else if (part.startsWith("look:")) calls.push(lookCall(part.slice(5)));
 		else if (/^(read|shelf|ledger|plan|atlas|assess|window|wake|ask|return)[:[]/.test(part) || /^book(?:[:[]|\s+context:)/.test(part)) calls.push(lookCall(part));
@@ -206,7 +188,7 @@ function mainCalls(text) {
 const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
-export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof, caseSteps: forcedCaseSteps } = {}) {
+export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof } = {}) {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		const text = textOf(message);
@@ -229,57 +211,6 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 		if (message.role === "user" && text.startsWith(NOTED) && messages.some((entry) => entry.role === "tool" && textOf(entry).startsWith(TASK_HEADER))) continue;
 		// The block that stands for a task's collapsed steps is not a message to obey.
 		if (message.role === "user" && /steps up to here \(\d+ repl/.test(raw)) continue;
-		if (message.role === "user" && text.startsWith("Controlled cross-examination packet")) {
-			const scripted = Array.isArray(forcedCaseSteps?.["falsify-cross-exam"] ?? forcedCaseSteps?.cross) ? (forcedCaseSteps?.["falsify-cross-exam"] ?? forcedCaseSteps?.cross).map((step) => String(step).trim()).filter((step) => step !== "") : [];
-			const turns = later.filter((entry) => entry.role === "assistant").length;
-			if (turns < scripted.length) {
-				const calls = scripted[turns].split(" +++ ").map(lookCall).filter((call) => call !== undefined);
-				if (calls.length > 0) return { calls };
-			}
-			const receiptId = /Case evidence receipt (r\d+) is durable/.exec(later.map(rawOf).join("\n"))?.[1];
-			const resolved = receiptId !== undefined;
-			const artifact = {
-				candidate: "CASE falsify-cross-exam ARTIFACT",
-				observations: receiptId === undefined ? [] : [{ kind: "direct", text: `The cross-examination received immutable source receipt ${receiptId}.`, citations: [receiptId] }],
-				assumptions: [],
-				citations: [{ ref: "phase:construct", kind: "claim" }, ...(receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }])],
-				falsifiers: [],
-				proposed_witness: "No additional witness is proposed in the stand-in fixture.",
-				closure_gaps: resolved ? [] : ["The fixture has no independent source check for the constructor candidate."],
-				uncertainty: resolved ? [] : ["The constructor candidate was not independently discriminated in this fixture."],
-				cross_examination: [{ claim: "construct:candidate", disposition: resolved ? "failed-challenge" : "unresolved", text: resolved ? `The cited receipt ${receiptId} supplies the fixture's controlled check.` : "No independent frozen source or phase-local receipt discriminates the constructor candidate.", citations: [receiptId ?? "phase:construct"] }],
-			};
-			return { calls: [{ name: "return", args: { report: "CASE falsify-cross-exam ARTIFACT", done: resolved, artifact } }] };
-		}
-		if (message.role === "tool" && text.startsWith(TASK_HEADER) && text.includes("\nCase phase\n")) {
-			const phaseName = /\bin the (construction|blind falsification|controlled cross-examination|concrete witness) phase\b/.exec(text)?.[1] ?? "case";
-			const phase = { construction: "construct", "blind falsification": "falsify-blind", "controlled cross-examination": "falsify-cross-exam", "concrete witness": "witness" }[phaseName] ?? "case";
-			const legacy = phase === "falsify-blind" ? "falsify" : phase === "falsify-cross-exam" ? "cross" : phase;
-			const scripted = Array.isArray(forcedCaseSteps?.[phase] ?? forcedCaseSteps?.[legacy]) ? (forcedCaseSteps?.[phase] ?? forcedCaseSteps?.[legacy]).map((step) => String(step).trim()).filter((step) => step !== "") : [];
-			const turns = later.filter((entry) => entry.role === "assistant").length;
-			if (turns < scripted.length) {
-				const calls = scripted[turns].split(" +++ ").map(lookCall).filter((call) => call !== undefined);
-				if (calls.length > 0) return { calls };
-			}
-			const results = later.filter((entry) => entry.role === "tool").map((entry) => textOf(entry).split("\n")[0]);
-			const receiptId = /Case evidence receipt (r\d+) is durable/.exec(later.map(rawOf).join("\n"))?.[1];
-			const cross = phase === "falsify-cross-exam";
-			const witness = phase === "witness";
-			const witnessResolved = witness && receiptId !== undefined;
-			const artifact = {
-				candidate: `CASE ${phase} ARTIFACT`,
-				observations: receiptId === undefined ? [] : [{ kind: "direct", text: `The phase received immutable source receipt ${receiptId}.`, citations: [receiptId] }],
-				assumptions: [],
-				citations: cross || witness ? [{ ref: "phase:construct", kind: "claim" }, ...(receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }])] : receiptId === undefined ? [] : [{ ref: receiptId, kind: "receipt" }],
-				falsifiers: [],
-				proposed_witness: "No additional witness is proposed in the stand-in fixture.",
-				closure_gaps: cross || (witness && !witnessResolved) ? ["The fixture has no independent source check for the constructor candidate."] : [],
-				uncertainty: cross || (witness && !witnessResolved) ? ["The constructor candidate was not independently discriminated in this fixture."] : [],
-				...(cross ? { cross_examination: [{ claim: "construct:candidate", disposition: "unresolved", text: "No independent frozen source or phase-local receipt discriminates the constructor candidate.", citations: ["phase:construct"] }] } : {}),
-				...(witness ? { witness_assessment: [{ claim: "construct:candidate", disposition: witnessResolved ? "supports" : "unresolved", text: witnessResolved ? `The cited receipt ${receiptId} is the docketed source-level discriminator.` : "The docketed source check did not return direct evidence.", citations: [receiptId ?? "phase:construct"] }] } : {}),
-			};
-			return { calls: [{ name: "return", args: { report: `CASE ${phase} ARTIFACT\n${results.join("\n")}`, done: cross ? false : witness ? witnessResolved : true, artifact } }] };
-		}
 		if (message.role === "tool" && text.startsWith(TASK_HEADER)) {
 			const contractAt = text.indexOf("Move contract:\n");
 			const briefAt = text.indexOf("Brief:\n");
@@ -419,7 +350,6 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   closureGap: when set, a focused task's automatic return reports this exact durable closure gap.
  *   focusSteps: a fixed sequence of focused-task directives, used instead of what a capsule's brief says.
- *   caseSteps: `{ construct, falsify, witness }` directives for named evidence phases; each phase otherwise returns its fixed artifact.
  *   returnProof: the proof text for that focused task's automatic return.
  */
 export async function startStandIn(options = {}) {
@@ -470,7 +400,7 @@ export async function startStandIn(options = {}) {
 			return;
 		}
 		requests.push(body);
-		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof, caseSteps: options.caseSteps });
+		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof });
 		// The conference selector uses OpenAI's custom grammar-tool wire shape, not a function schema. The fixture
 		// enforces that small contract: it emits only the first enum literal from the supplied grammar as custom input.
 		const customTool = Array.isArray(body.tools) && body.tools.length === 1 && body.tools[0]?.type === "custom" ? body.tools[0].custom : undefined;

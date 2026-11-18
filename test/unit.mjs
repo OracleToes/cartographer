@@ -47,10 +47,10 @@ import { topPath } from "../src/top.mjs";
 import { traceFile, watchTrace } from "../src/trace.mjs";
 import { USER_NAME } from "../src/user.mjs";
 import { RECORD } from "../src/voice.mjs";
-import { admitWitnessSourceTool, appendCaseReceipt, beginCasePhase, CaseError, createCase, finishCasePhase, loadCase, markCaseMessagesDelivered, markCrossExaminationPacketDelivered, noteCaseMessage, readyCase, recordWitnessDocket, renderCapsule, renderCase, renderCaseForSynthesis, renderCrossExaminationPacket, renderWitnessDocket, stopCase, synthesizeCase } from "../src/case.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { createChat } from "../src/screen/chat.mjs";
+import { inventoryLegacyProducts, LegacyCutoverBlockedError, migrateLegacyProducts } from "../src/legacy-cutover.mjs";
 
 const fresh = (t) => {
 	const root = mkdtempSync(join(tmpdir(), "carto-test-"));
@@ -61,35 +61,6 @@ const fresh = (t) => {
 };
 const NOW = "2026-11-15T00:00:00.000Z";
 const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
-const caseArtifact = (candidate, values = {}) => ({
-	candidate,
-	observations: [],
-	assumptions: [],
-	citations: [],
-	falsifiers: [],
-	proposed_witness: "No further witness is available in this bounded phase.",
-	closure_gaps: [],
-	uncertainty: [],
-	...values,
-});
-
-const advanceToWitnessBoundary = (brainDir, id, at = 1) => {
-	beginCasePhase(brainDir, id, "construct", { conversationId: `${id}-construct`, at });
-	finishCasePhase(brainDir, id, "construct", { returned: true, done: true, artifact: caseArtifact(`${id} constructor candidate`) }, { at: at + 1 });
-	beginCasePhase(brainDir, id, "falsify-blind", { conversationId: `${id}-blind`, at: at + 2 });
-	finishCasePhase(brainDir, id, "falsify-blind", { returned: true, done: true, artifact: caseArtifact(`${id} blind artifact`) }, { at: at + 3 });
-	const afterBlind = loadCase(brainDir, id).case;
-	markCrossExaminationPacketDelivered(brainDir, id, { conversationId: `${id}-blind`, entryId: `${id}-cross-entry`, packetDigest: afterBlind.flow.crossPacket.textDigest, at: at + 4 });
-	beginCasePhase(brainDir, id, "falsify-cross-exam", { conversationId: `${id}-blind`, at: at + 5 });
-	finishCasePhase(brainDir, id, "falsify-cross-exam", { returned: true, done: false, artifact: caseArtifact(`${id} cross artifact`, {
-		citations: [{ ref: "phase:construct", kind: "claim" }],
-		closure_gaps: ["No source has yet discriminated the candidate."],
-		uncertainty: ["The candidate remains unresolved."],
-		cross_examination: [{ claim: "construct:candidate", disposition: "unresolved", text: "The bounded cross pass has no independent discriminator.", citations: ["phase:construct"] }],
-	}) }, { at: at + 6 });
-	return loadCase(brainDir, id).case;
-};
-
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
@@ -97,52 +68,102 @@ test("prompt: the sleep checklist names the person whose message may be waiting"
 	assert.ok(TOOLS.sleep.includes(`${USER_NAME} speaks`));
 });
 
-test("prompt: consult describes an isolated same-model conference while Case remains a separate pre-cutover product", () => {
-	const prompt = systemPrompt({ root: "/project" });
-	assert.match(TOOLS.consult, /isolated same-model consultation conference/i);
-	assert.match(TOOLS.consult, /`myPersona`/);
-	assert.match(TOOLS.consult, /grammar-constrained selector/i);
-	assert.match(TOOLS.consult, /no project, shell, network, shared-brain, plan, approval, or user-decision authority/i);
-	assert.match(TOOLS.consult, /There is no `thread` follow-up/i);
-	assert.match(prompt, /isolated same-model conference/i);
-	assert.match(TOOLS.case, /supplied-context, long-form consultation/i, "the legacy Case surface remains intact until the separate C5 cutover");
-	assert.match(TOOLS.shelf, /consultation threads/i, "the live story shelf stays intact until C5 migrates it atomically");
-	const fallback = consultTool({ root: "/project", brainDir: "/project/.brain" });
-	assert.equal(fallback.description, TOOLS.consult, "the standalone tool declaration cannot drift from the harness prompt");
-});
-
-test("consult C1-C4 stays additive: an existing storyteller call remains outside the same-model conference path", async (t) => {
+test("C5: the only consult contract is same-model conference, and obsolete thread/config inputs are refused", async (t) => {
 	const { root, brainDir } = fresh(t);
-	const calls = [];
-	const config = { server: "http://legacy.example/v1", consultModel: "LegacyModel", consultMaxTokens: 64, consultTemperature: 0, consultTimeoutSeconds: 1, contextWindow: 100_000 };
-	const tool = consultTool({
-		root,
-		brainDir,
-		config,
-		fetchImpl: async (_url, init) => {
-			calls.push(JSON.parse(init.body));
-			return new Response(JSON.stringify({ choices: [{ message: { content: "Retained legacy answer." }, finish_reason: "stop" }], usage: { completion_tokens: 1 } }), { status: 200, headers: { "content-type": "application/json" } });
-		},
-	});
-	const api = { conversationId: ROOT_CONVERSATION_ID, taskId: "legacy-consult", now: () => 1, executeTool: () => Promise.reject(new Error("unexpected nested tool")) };
-	const legacy = await tool.execute({ question: "Keep the earlier contract alive." }, api, undefined);
-	assert.equal(legacy.isError, undefined, legacy.output[0].text);
-	assert.equal(calls.length, 1);
-	assert.equal(calls[0].model, "LegacyModel", "only the explicitly legacy shape reads consultModel");
-	assert.match(legacy.details.thread, /^st\d+$/);
-	assert.equal(existsSync(join(brainDir, "consults")), false, "a legacy call does not allocate a co<N> record");
-	const mixed = await tool.execute({ question: "Do not cross paths.", myPersona: "Conference only.", thread: legacy.details.thread }, api, undefined);
-	assert.equal(mixed.isError, true);
-	assert.match(mixed.output[0].text, /cannot be mixed with an isolated conference/i);
-	assert.equal(calls.length, 1, "a conference-shaped request never falls back to the external endpoint");
+	const prompt = systemPrompt({ root });
+	assert.equal(Object.hasOwn(TOOLS, "case"), false, "the retired Case tool is absent from the prompt registry");
+	assert.doesNotMatch(prompt, /evidence case|\bcase tool\b/i, "the active system prompt does not advertise a Case product");
+	assert.match(TOOLS.consult, /current resolved model/i);
+	assert.match(TOOLS.consult, /There is no `thread` follow-up/i);
+	const consult = consultTool({ root, brainDir });
+	const rejected = await consult.execute({ question: "Can an old transcript continue?", myPersona: "Audit the migration boundary.", thread: "st1" }, {}, undefined);
+	assert.equal(rejected.isError, true);
+	assert.match(rejected.output[0].text, /thread.*removed by the C5 cutover/i);
+	for (const retired of ["consultModel", "consultMaxTokens", "consultTemperature", "consultTimeoutSeconds"]) {
+		writeFileSync(join(brainDir, "config.json"), JSON.stringify({ [retired]: retired === "consultModel" ? "" : 1 }));
+		assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model" } }), new RegExp(`Removed external-consult setting\\(s\\): .*${retired}`));
+	}
+	writeFileSync(join(brainDir, "config.json"), "{}");
+	assert.throws(() => loadConfig({ brainDir, flags: {}, env: { CARTO_CONFIG: join(root, "no-core-config.json"), CARTO_SERVER: "http://example.test/v1", CARTO_MODEL: "model", CARTO_CONSULT_MODEL: "" } }), /CARTO_CONSULT_MODEL was removed/i);
 });
 
-test("prompt: case describes the main-owned bounded witness and report boundary", () => {
-	assert.match(TOOLS.case, /main context.*exactly one `witness` docket/i);
-	assert.match(TOOLS.case, /exact docketed read\/search\/list input/i);
-	assert.match(TOOLS.case, /needs_user_input.*exact blocking question/i);
-	assert.match(TOOLS.case, /participant prose.*kept outside the isolated witness/i);
-	assert.doesNotMatch(TOOLS.case, /witness\/synthesis transition is not yet/i);
+test("C5: stopped legacy data is byte-archived, shelf snapshots become inert, and exports recover", (t) => {
+	const { brainDir } = fresh(t);
+	const storyteller = join(brainDir, "storyteller");
+	const cases = join(brainDir, "cases");
+	mkdirSync(storyteller, { recursive: true });
+	mkdirSync(cases, { recursive: true });
+	const transcript = "<!-- storyteller v1 -->\nlegacy bytes stay exact\n";
+	const stoppedCase = `${JSON.stringify({ id: "c1", status: "stopped", note: "explicitly stopped before C5" }, null, "\t")}\n`;
+	writeFileSync(join(storyteller, "st1.md"), transcript);
+	writeFileSync(join(cases, "c1.json"), stoppedCase);
+	const originalContext = `${JSON.stringify({
+		version: 1,
+		shelf: [{ id: "sh1", ref: { type: "story", id: "st1" }, path: "story:st1" }],
+		front: { shelf: [{ id: "sh1", target: { kind: "story", id: "st1" }, path: "story:st1" }] },
+		tasks: { oldCase: { caseId: "c1", phase: "construct", shelf: [] }, ordinary: { mode: "look", shelf: [] } },
+	}, null, "\t")}\n`;
+	writeFileSync(join(brainDir, "carto-context.json"), originalContext);
+
+	const inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active, [], "a stopped Case task is retired, not treated as resumable");
+	const migrated = migrateLegacyProducts(brainDir, { at: Date.UTC(2026, 10, 17) });
+	assert.equal(migrated.migrated, true);
+	assert.equal(existsSync(storyteller), false);
+	assert.equal(existsSync(cases), false);
+	const rawStory = join(brainDir, "legacy", "raw", "storyteller", "st1.md");
+	const rawCase = join(brainDir, "legacy", "raw", "cases", "c1.json");
+	const rawContext = join(brainDir, "legacy", "raw", "context", "carto-context.json");
+	assert.equal(readFileSync(rawStory, "utf8"), transcript);
+	assert.equal(readFileSync(rawCase, "utf8"), stoppedCase);
+	assert.equal(readFileSync(rawContext, "utf8"), originalContext, "the pre-migration context bytes are retained before its pointers are rewritten");
+	const manifest = JSON.parse(readFileSync(join(brainDir, "legacy", "cutover-v1.json"), "utf8"));
+	assert.equal(manifest.state, "completed");
+	assert.match(manifest.storyteller[0].digest, /^[a-f0-9]{64}$/);
+	assert.match(manifest.cases[0].digest, /^[a-f0-9]{64}$/);
+	assert.match(manifest.context.digest, /^[a-f0-9]{64}$/);
+	assert.match(readFileSync(join(brainDir, "legacy", "exports", "storyteller", "st1.md"), "utf8"), /static C5 archive export/);
+	assert.match(readFileSync(join(brainDir, "legacy", "exports", "cases", "c1.md"), "utf8"), /explicitly stopped before C5/);
+	assert.match(readFileSync(join(brainDir, "legacy", "exports", "context", "carto-context.json.md"), "utf8"), /oldCase/);
+	const context = JSON.parse(readFileSync(join(brainDir, "carto-context.json"), "utf8"));
+	assert.equal(context.tasks.oldCase, undefined, "retired Case task metadata is removed from live context");
+	assert.ok(context.tasks.ordinary, "ordinary task state is retained");
+	for (const item of [context.shelf[0], context.front.shelf[0]]) {
+		assert.equal(item.ref, undefined);
+		assert.equal(item.target, undefined);
+		assert.equal(item.legacyArchive.kind, "storyteller");
+		assert.match(item.snapshot, /immutable C5 migration snapshot/);
+	}
+	const exportFile = join(brainDir, "legacy", "exports", "storyteller", "st1.md");
+	rmSync(exportFile);
+	assert.equal(migrateLegacyProducts(brainDir).migrated, true, "a missing static export is recreated from retained exact bytes");
+	assert.equal(existsSync(exportFile), true);
+	assert.equal(migrateLegacyProducts(brainDir).migrated, false, "a completed intact archive is a no-op");
+});
+
+test("C5: active, unreadable, or malformed legacy Cases block cutover without an override", (t) => {
+	const { brainDir } = fresh(t);
+	const cases = join(brainDir, "cases");
+	mkdirSync(cases, { recursive: true });
+	writeFileSync(join(cases, "c7.json"), JSON.stringify({ id: "c7", status: "running" }));
+	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ tasks: { phase: { caseId: "c7", phase: "construct" } } }));
+	let inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active.map((entry) => entry.id), ["c7"], "the record and task metadata produce one blocker, not duplicates");
+	assert.throws(() => migrateLegacyProducts(brainDir), (error) => error instanceof LegacyCutoverBlockedError && /explicitly stop each Case/i.test(error.message));
+	assert.equal(existsSync(join(cases, "c7.json")), true, "blocked cutover leaves the source record in place");
+
+	rmSync(join(cases, "c7.json"));
+	writeFileSync(join(brainDir, "carto-context.json"), JSON.stringify({ tasks: {} }));
+	writeFileSync(join(cases, "c8.json"), "{ not valid JSON");
+	inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active.map((entry) => [entry.id, entry.status]), [["c8", "unreadable"]], "unreadable bytes are treated as potentially resumable");
+	assert.throws(() => migrateLegacyProducts(brainDir), LegacyCutoverBlockedError);
+
+	writeFileSync(join(cases, "c8.json"), JSON.stringify({ id: "c99", status: "stopped" }));
+	inventory = inventoryLegacyProducts(brainDir);
+	assert.deepEqual(inventory.active.map((entry) => [entry.id, entry.status]), [["c8", "malformed"]], "a mismatched stopped envelope cannot evade the blocker");
+	assert.throws(() => migrateLegacyProducts(brainDir), LegacyCutoverBlockedError);
+	assert.equal(existsSync(join(cases, "c8.json")), true, "malformed source bytes remain untouched while cutover is blocked");
 });
 
 test("harness: a cached inspect brief restores its look contract", () => {
@@ -150,290 +171,8 @@ test("harness: a cached inspect brief restores its look contract", () => {
 		mode: "look", move: "m2", revision: 3, targets: ["src/index.mjs"], turns: 2,
 	});
 	assert.deepEqual(runFromBrief({ mode: "change", network: false, move: "m3", revision: 4 }), { mode: "change", move: "m3", revision: 4 }, "only an explicit true carries network");
-	assert.deepEqual(runFromBrief({ mode: "look", turns: 3, caseId: "c1", phase: "falsify" }), { mode: "look", turns: 3, caseId: "c1", phase: "falsify" }, "a durable case-phase brief restores its separate evidence identity");
+	assert.deepEqual(runFromBrief({ mode: "look", turns: 3, caseId: "c1", phase: "falsify" }), { mode: "look", turns: 3 }, "retired Case metadata cannot revive a legacy phase route");
 	assert.deepEqual(runFromBrief({ mode: "unknown", network: true, move: "m4" }), { mode: "look" }, "a malformed stored brief fails closed to inspect");
-});
-
-test("case: a frozen capsule keeps phase artifacts and participant routes without turning them into votes", (t) => {
-	const { brainDir } = fresh(t);
-	const created = createCase(brainDir, {
-		question: "Does the fixture support the stated invariant?",
-		context: "Only the selected snapshot and source reads count as evidence.",
-		evidence: [
-			{ placement: "sh1", label: "fixture", source: { path: "src/math.js" }, digest: sha256("export const witness = true;"), item: { snapshot: "export const witness = true;" } },
-			{ placement: "sh2", label: "undeclared witness source", source: { path: "src/other.js" }, digest: sha256("export const other = false;"), item: { snapshot: "export const other = false;" } },
-		],
-		at: 100,
-	});
-	assert.equal(created.id, "c1");
-	assert.match(created.capsule.digest, /^[a-f0-9]{64}$/, "the frozen capsule records a digest");
-	assert.equal(noteCaseMessage(brainDir, "c1", "Check the exceptional input too.", { at: 110 }).entry.route, "queued", "input before a phase is queued durably");
-	const construct = beginCasePhase(brainDir, "c1", "construct", { conversationId: "phase-construct", at: 120 });
-	assert.deepEqual(construct.messages.map((message) => message.id), ["u1"], "the queued line joins the construction capsule");
-	markCaseMessagesDelivered(brainDir, "c1", ["u1"], "construct", { at: 121, via: "initial capsule" });
-	assert.equal(noteCaseMessage(brainDir, "c1", "Do not assume the happy path.", { at: 122, phase: "construct" }).entry.route, "active", "input during a phase names that active phase");
-	finishCasePhase(brainDir, "c1", "construct", { returned: true, done: true, artifact: caseArtifact("construction observation", {
-		observations: [{ kind: "direct", text: "The frozen fixture exports witness as true.", citations: ["s1"] }],
-		citations: [{ ref: "s1", kind: "source" }],
-	}) }, { at: 130 });
-	let afterConstruct = loadCase(brainDir, "c1").case;
-	assert.equal(afterConstruct.version, 2, "new cases use the versioned capsule schema");
-	assert.equal(afterConstruct.phases.find((phase) => phase.id === "construct").artifact.data.candidate, "construction observation");
-	assert.equal(afterConstruct.messages.find((message) => message.id === "u2").route, "queued", "unread active input is retained for the next phase rather than dropped");
-	assert.equal(afterConstruct.messages.find((message) => message.id === "u2").unreadBy, "construct");
-	assert.equal(noteCaseMessage(brainDir, "c1", "Try the boundary value.", { at: 131 }).entry.route, "queued");
-	const blind = beginCasePhase(brainDir, "c1", "falsify-blind", { conversationId: "phase-falsify", at: 140 });
-	assert.deepEqual(blind.messages.map((message) => message.id), ["u2", "u3"], "the blind pass receives both previously unread and between-phase input");
-	markCaseMessagesDelivered(brainDir, "c1", ["u2", "u3"], "falsify-blind", { at: 141, via: "initial capsule" });
-	finishCasePhase(brainDir, "c1", "falsify-blind", { returned: true, done: false, artifact: caseArtifact("no counterexample in the bounded check", { uncertainty: ["The bounded check did not inspect all inputs."] }) }, { at: 150 });
-	let afterBlind = loadCase(brainDir, "c1").case;
-	assert.equal(afterBlind.flow.state, "falsify-cross-exam", "a returned blind pass advances only to the packet-gated controlled cross-examination");
-	assert.equal(afterBlind.flow.blind.digest, afterBlind.phases.find((phase) => phase.id === "falsify-blind").artifact.digest, "the blind artifact is sealed before a cross packet can exist");
-	assert.throws(() => beginCasePhase(brainDir, "c1", "falsify-cross-exam", { conversationId: "phase-falsify", at: 151 }), /not durably delivered/, "a cross-examination cannot start before its recorded packet delivery");
-	assert.match(renderCrossExaminationPacket(afterBlind), /construction observation/, "the packet contains the recorded constructor artifact only after the blind pass has been sealed");
-	markCrossExaminationPacketDelivered(brainDir, "c1", { conversationId: "phase-falsify", entryId: "durable-cross-entry", packetDigest: afterBlind.flow.crossPacket.textDigest, at: 152 });
-	beginCasePhase(brainDir, "c1", "falsify-cross-exam", { conversationId: "phase-falsify", at: 153 });
-	assert.throws(() => finishCasePhase(brainDir, "c1", "falsify-cross-exam", { returned: true, done: true, artifact: caseArtifact("missing cross classification") }, { at: 154 }), /missing required field cross_examination/, "a cross-examination cannot fall back to the ordinary artifact shape");
-	assert.throws(() => finishCasePhase(brainDir, "c1", "falsify-cross-exam", { returned: true, done: true, artifact: caseArtifact("unsupported claim classification", {
-		citations: [{ ref: "phase:construct", kind: "claim" }],
-		cross_examination: [{ claim: "construct:invented", disposition: "unresolved", text: "This claim id was not in the constructor packet.", citations: ["phase:construct"] }],
-		closure_gaps: ["The fixture needs a real recorded constructor claim."],
-	}) }, { at: 154 }), /not a recorded material constructor claim/, "a cross artifact must classify the packet's exact material claims rather than inventing a debate topic");
-	assert.throws(() => finishCasePhase(brainDir, "c1", "falsify-cross-exam", { returned: true, done: true, artifact: caseArtifact("unsupported evidence classification", {
-		citations: [{ ref: "phase:construct", kind: "claim" }],
-		cross_examination: [{ claim: "construct:candidate", disposition: "failed-challenge", text: "A failed challenge cannot rest on the constructor claim alone.", citations: ["phase:construct"] }],
-	}) }, { at: 154 }), /needs direct cited evidence/, "confirmed or failed classifications cannot turn the constructor artifact itself into direct evidence");
-	assert.throws(() => finishCasePhase(brainDir, "c1", "falsify-cross-exam", { returned: true, done: false, artifact: caseArtifact("unresolved without a gap", {
-		citations: [{ ref: "phase:construct", kind: "claim" }],
-		cross_examination: [{ claim: "construct:candidate", disposition: "unresolved", text: "The fixture has not resolved this candidate.", citations: ["phase:construct"] }],
-	}) }, { at: 154 }), /needs an exact closure gap/, "an unresolved classification cannot disappear behind a clean completion-shaped artifact");
-	finishCasePhase(brainDir, "c1", "falsify-cross-exam", { returned: true, done: true, artifact: caseArtifact("cross-examination classification", {
-		citations: [{ ref: "phase:construct", kind: "claim" }, { ref: "s1", kind: "source" }],
-		cross_examination: [{ claim: "construct:candidate", disposition: "failed-challenge", text: "The frozen fixture is consistent with the candidate but does not independently settle it.", citations: ["s1"] }],
-	}) }, { at: 155 });
-	const awaiting = loadCase(brainDir, "c1").case;
-	assert.equal(awaiting.flow.state, "awaiting-witness-specification", "C2 returns authority to the main context before any witness starts");
-	assert.match(renderCase(awaiting), /awaiting-witness-specification/, "inspection exposes the durable cross-examination boundary");
-	assert.throws(() => readyCase(brainDir, "c1", { at: 180 }), /witness specification/, "phase count cannot manufacture a ready synthesis outcome");
-	assert.throws(() => synthesizeCase(brainDir, "c1", { outcome: "unresolved", report: "No witness specification exists yet.", at: 190 }), /only a ready case/, "only the main context after the later witness transition may name a truth outcome");
-
-	// C3: the main owns exactly one bounded witness docket. It gates exact source calls, keeps participant input out
-	// of the witness, and gives a supported/refuted report a concrete settling witness rather than phase agreement.
-	noteCaseMessage(brainDir, "c1", "This late participant line belongs to the main context, not the isolated witness.", { at: 191 });
-	const docket = recordWitnessDocket(brainDir, "c1", {
-		kind: "specification",
-		target_claims: ["construct:candidate"],
-		method: "read",
-		allowed_inputs: [{ kind: "source", ref: "s1" }, { kind: "tool-call", tool: "read", input: { path: "src/math.js" } }],
-		expected_discriminator: "The specified source read either supports or refutes the constructor candidate.",
-		unresolved_if: "The bounded source check cannot discriminate the candidate.",
-		budget: { source_calls: 1 },
-	}, { at: 192 });
-	assert.equal(docket.id, "w1");
-	let witnessing = loadCase(brainDir, "c1").case;
-	assert.equal(witnessing.flow.state, "witness", "a main-owned specification is the only route into the witness phase");
-	assert.equal(witnessing.messages.at(-1).afterCase, true, "participant prose is retained for the main context rather than entering witness inputs");
-	assert.match(renderWitnessDocket(witnessing), /0\/1 admitted source calls/, "inspection exposes the fixed witness source budget before it is spent");
-	assert.equal(admitWitnessSourceTool(brainDir, "c1", "witness", "read", { path: "src/other.js" }, { at: 193 }).allowed, false, "an unlisted source read is refused before project bytes are inspected");
-	beginCasePhase(brainDir, "c1", "witness", { conversationId: "phase-witness", at: 194 });
-	const lateWitnessMessage = noteCaseMessage(brainDir, "c1", "A line arriving during witness work stays with the main report.", { at: 194.5, phase: "witness" });
-	assert.equal(lateWitnessMessage.entry.afterCase, true, "a message arriving during the isolated witness is durable main-context provenance, not an active witness input");
-	assert.equal(lateWitnessMessage.entry.route, "queued");
-	assert.equal(appendCaseReceipt(brainDir, "c1", "witness", { tool: "read", arguments: { path: "src/other.js" }, output: "export const other = false;", at: 194.75 }), undefined, "an undeclared witness read cannot be persisted as a receipt even if an internal caller tries to append it");
-	assert.equal(admitWitnessSourceTool(brainDir, "c1", "witness", "read", { path: "src/math.js" }, { at: 195 }).allowed, true, "the exact docketed source read is admitted once");
-	const witnessReceipt = appendCaseReceipt(brainDir, "c1", "witness", { tool: "read", arguments: { path: "src/math.js" }, output: "export const witness = true;", at: 196 });
-	assert.equal(admitWitnessSourceTool(brainDir, "c1", "witness", "read", { path: "src/math.js" }, { at: 197 }).allowed, false, "the durable witness source-call budget cannot be bypassed with a repeated exact call");
-	assert.throws(() => finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, artifact: caseArtifact("witness without the required classification", { citations: [{ ref: "phase:construct", kind: "claim" }] }) }, { at: 198 }), /missing required field witness_assessment/, "a witness cannot fall back to an ordinary artifact without settling its named target");
-	assert.throws(() => finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, artifact: caseArtifact("witness bypasses its source list", {
-		observations: [{ kind: "direct", text: "An undeclared frozen source cannot become witness evidence.", citations: ["s2"] }],
-		citations: [{ ref: "phase:construct", kind: "claim" }, { ref: "s2", kind: "source" }],
-		witness_assessment: [{ claim: "construct:candidate", disposition: "supports", text: "This attempted conclusion uses an undeclared source.", citations: ["s2"] }],
-	}) }, { at: 198 }), /outside the main-owned witness docket/, "the witness artifact cannot cite another frozen source merely because the capsule displays it");
-	finishCasePhase(brainDir, "c1", "witness", { returned: true, done: true, artifact: caseArtifact("witness check", {
-		observations: [{ kind: "direct", text: "The bounded source read retained the expected fixture value.", citations: [witnessReceipt.id] }],
-		citations: [{ ref: "phase:construct", kind: "claim" }, { ref: witnessReceipt.id, kind: "receipt" }],
-		witness_assessment: [{ claim: "construct:candidate", disposition: "supports", text: "The exact docketed read supports the candidate in this bounded fixture.", citations: [witnessReceipt.id] }],
-	}) }, { at: 199 });
-	assert.equal(loadCase(brainDir, "c1").case.flow.state, "ready-for-synthesis", "only a completed witness advances the flow to the final main report boundary");
-	readyCase(brainDir, "c1", { at: 200 });
-	const supported = synthesizeCase(brainDir, "c1", { outcome: "supported", report: "The one named witness settles the only material constructor claim in the bounded fixture.", at: 201 });
-	assert.equal(supported.synthesis.witnesses[0], "w1", "a supported report names the concrete witness rather than phase agreement");
-	assert.match(renderCase(supported), /Main case-level report: supported/, "case inspection exposes the one durable main report");
-	assert.match(renderCase(supported), /Scratch\/candidate patch: unavailable/, "case inspection cannot misdescribe C3 as a live-project or scratch patch path");
-
-	const stopped = createCase(brainDir, { question: "Can this second case be stopped?", at: 210 });
-	beginCasePhase(brainDir, stopped.id, "construct", { conversationId: "phase-stop", at: 201 });
-	const halted = stopCase(brainDir, stopped.id, { at: 202, why: "user stopped it" });
-	assert.equal(halted.status, "stopped");
-	assert.equal(halted.phases.find((phase) => phase.id === "falsify-blind").status, "stopped", "a stop prevents later phases from starting");
-	const lateReturn = finishCasePhase(brainDir, stopped.id, "construct", { returned: true, done: true, report: "a return raced with the stop" }, { at: 203 });
-	assert.equal(lateReturn.status, "stopped", "a late ordinary return cannot revive the stopped active phase");
-	assert.equal(lateReturn.artifact.done, undefined, "a stopped case never presents the raced report as a completed artifact");
-	assert.equal(loadCase(brainDir, stopped.id).case.status, "stopped", "the case-level stop remains durable after the race");
-});
-
-test("case C3: a closure gap or source-only main observation has one durable report boundary", (t) => {
-	const { brainDir } = fresh(t);
-	const sourceText = "export const answer = 42;\n";
-	const source = {
-		id: "s1",
-		role: "primary",
-		label: "frozen answer fixture",
-		capture: { status: "captured", origin: { kind: "project-file" }, locator: { path: "src/math.js", from: 1, to: 1 }, digest: sha256(sourceText), at: 1, freshness: "current" },
-		content: sourceText,
-	};
-	const blocked = createCase(brainDir, { question: "Does a missing user fact block this case?", sources: [source], at: 1 });
-	advanceToWitnessBoundary(brainDir, blocked.id, 10);
-	recordWitnessDocket(brainDir, blocked.id, { kind: "closure-gap", target_claims: ["construct:candidate"], closure_gap: "The exact production input is not in the frozen capsule." }, { at: 20 });
-	readyCase(brainDir, blocked.id, { at: 21 });
-	assert.throws(() => synthesizeCase(brainDir, blocked.id, { outcome: "supported", report: "Phase agreement cannot settle this gap.", at: 22 }), /cannot be recorded without a witness/, "supported cannot turn phase agreement or a closure gap into a witness");
-	assert.throws(() => synthesizeCase(brainDir, blocked.id, { outcome: "refuted", report: "Phase agreement cannot settle this gap.", at: 22 }), /cannot be recorded without a witness/, "refuted has the same named-witness boundary");
-	assert.throws(() => synthesizeCase(brainDir, blocked.id, { outcome: "needs_user_input", report: "The production input is missing.", at: 22 }), /exact blocking question/, "needs_user_input cannot omit the precise user question and successor-capsule boundary");
-	const needsInput = synthesizeCase(brainDir, blocked.id, {
-		outcome: "needs_user_input",
-		report: "The retained cross artifact cannot substitute for the missing production input.",
-		blockingQuestion: "Which exact production input should the successor capsule freeze?",
-		successorBoundary: "Capture that user-provided input as a new primary source; do not mutate this capsule.",
-		at: 23,
-	});
-	assert.equal(needsInput.status, "needs-user-input");
-	assert.deepEqual(needsInput.synthesis.witnesses, [], "a documented closure gap does not masquerade as a witness");
-	assert.match(renderCase(needsInput), /Blocking question: Which exact production input/, "terminal inspection renders the durable user-input boundary rather than a fabricated conclusion");
-
-	const direct = createCase(brainDir, { question: "Does the frozen source directly support the simple candidate?", sources: [source], at: 30 });
-	advanceToWitnessBoundary(brainDir, direct.id, 40);
-	recordWitnessDocket(brainDir, direct.id, {
-		kind: "main-observation",
-		target_claims: ["construct:candidate"],
-		method: "source",
-		allowed_inputs: [{ kind: "source", ref: "s1" }],
-		expected_discriminator: "The frozen source itself either has the asserted export or not.",
-		unresolved_if: "The frozen text does not name the asserted export.",
-		budget: { source_calls: 0 },
-		observation: "The frozen source text contains the directly named export.",
-		citations: [{ ref: "s1", kind: "source" }],
-		assessment: [{ claim: "construct:candidate", disposition: "supports", text: "The explicit frozen source supports the sole candidate claim.", citations: ["s1"] }],
-	}, { at: 50 });
-	const directReady = readyCase(brainDir, direct.id, { at: 51 });
-	const directReport = synthesizeCase(brainDir, direct.id, { outcome: "supported", report: "The one source-only direct observation names w1 and settles the sole material claim.", at: 52 });
-	assert.equal(directReady.flow.witness.kind, "main-observation");
-	assert.deepEqual(directReport.synthesis.witnesses, ["w1"], "a narrowly scoped main direct observation uses the same durable witness identity without new project authority");
-});
-
-test("case v2: frozen provenance and schema-validated artifacts reject source confusion without rewriting v1", (t) => {
-	const { brainDir } = fresh(t);
-	const sourceText = "export const answer = 42;\n";
-	const source = {
-		id: "s-main",
-		role: "primary",
-		label: "math fixture",
-		capture: { status: "captured", origin: { kind: "project-file" }, locator: { path: "src/math.js", from: 1, to: 1 }, digest: sha256(sourceText), at: 10, freshness: "current" },
-		content: sourceText,
-	};
-	assert.throws(() => createCase(brainDir, { question: "Q?", criteria: [], at: 1 }), /Resolution criteria needs at least one entry/, "an explicitly malformed resolution criterion is refused");
-	assert.throws(() => createCase(brainDir, { question: "Q?", sources: [{ ...source, content: "x".repeat(POLICY.limits.case.sourceTextChars + 1), capture: { ...source.capture, digest: sha256("x".repeat(POLICY.limits.case.sourceTextChars + 1)) }}], at: 1 }), /source bound/, "an oversized frozen source is refused before a case exists");
-	assert.throws(() => createCase(brainDir, { question: "Q?", sources: [{ ...source, capture: { ...source.capture, origin: { kind: "project-file", detail: "x".repeat(POLICY.limits.case.sourceMetadataChars + 1) } } }], at: 1 }), /capture origin exceeds/, "unbounded provenance metadata cannot bypass the capsule budget");
-	assert.throws(() => createCase(brainDir, { question: "Q?", sources: [
-		{ ...source, id: "s-a", role: "derived", derivedFrom: ["s-b"] },
-		{ ...source, id: "s-b", role: "derived", derivedFrom: ["s-a"] },
-	], at: 1 }), /circular provenance chain/, "derived sources need an acyclic provenance chain");
-	const created = createCase(brainDir, {
-		question: "Does the fixture export the answer?",
-		claim: "The fixture exports answer 42.",
-		criteria: ["A direct observation names the frozen fixture or a phase receipt."],
-		constraints: ["No phase writes the project."],
-		nonGoals: ["Do not infer runtime behavior."],
-		sources: [source],
-		ledger: [{ id: "l1", kind: "observation", text: "The source was frozen before the phase.", citations: ["s-main"], at: 10 }],
-		at: 10,
-	});
-	const frozen = JSON.stringify(created.capsule);
-	beginCasePhase(brainDir, created.id, "construct", { conversationId: "v2-construct", at: 11 });
-	assert.throws(() => finishCasePhase(brainDir, created.id, "construct", { returned: true, done: true, artifact: caseArtifact("candidate", { observations: [{ kind: "direct", text: "answer is 42", citations: [] }] }) }, { at: 12 }), /needs at least one entry/, "an uncited direct observation is refused");
-	assert.throws(() => finishCasePhase(brainDir, created.id, "construct", { returned: true, done: true, artifact: (() => { const value = caseArtifact("candidate"); delete value.uncertainty; return value; })() }, { at: 12 }), /missing required field uncertainty/, "a missing mandatory artifact field is refused");
-	assert.throws(() => finishCasePhase(brainDir, created.id, "construct", { returned: true, done: true, artifact: caseArtifact("x".repeat(POLICY.limits.case.artifactChars + 1)) }, { at: 12 }), /candidate is missing or oversized/, "an oversized artifact field is refused rather than clipped");
-	assert.throws(() => appendCaseReceipt(brainDir, created.id, "construct", { tool: "shell", arguments: {}, output: "not a source inspection", at: 13 }), /read, search, or list/, "only source-inspection tools can mint direct-evidence receipts");
-	const receipt = appendCaseReceipt(brainDir, created.id, "construct", { tool: "read", arguments: { path: "src/math.js" }, output: sourceText, at: 13 });
-	assert.match(receipt.id, /^r\d+$/, "a newly inspected source becomes a phase-local immutable receipt");
-	assert.equal(receipt.input.path, "src/math.js", "the receipt retains the bounded source-tool input it digests");
-	assert.equal(receipt.outputDigest, sha256(sourceText), "the receipt separately digests its bounded source-tool output");
-	const afterReceipt = loadCase(brainDir, created.id).case;
-	assert.equal(JSON.stringify(afterReceipt.capsule), frozen, "a source receipt appends to the ledger without mutating frozen capsule bytes");
-	finishCasePhase(brainDir, created.id, "construct", { returned: true, done: true, artifact: caseArtifact("The fixture exports answer 42.", {
-		observations: [{ kind: "direct", text: "The frozen fixture text exports answer as 42.", citations: ["s-main", receipt.id] }],
-		citations: [{ ref: "s-main", kind: "source" }, { ref: receipt.id, kind: "receipt" }],
-		falsifiers: ["A frozen source or receipt showing another exported answer."],
-		proposed_witness: "A later witness may run a specified source-level check.",
-	}) }, { at: 14 });
-	const resumed = loadCase(brainDir, created.id).case;
-	assert.equal(JSON.stringify(resumed.capsule), frozen, "resume sees exactly the original frozen input capsule");
-	assert.equal(resumed.phases[0].artifact.data.observations[0].citations[1], receipt.id, "the completed structured artifact retains its receipt citation");
-	assert.match(renderCapsule(resumed), /s-main · primary · captured · current at capture/, "the readable capsule exposes source role and capture freshness");
-	assert.match(renderCaseForSynthesis(resumed), /read {"path":"src\/math\.js"} .*output sha256/, "the main synthesis receives the cited receipt's bounded tool provenance");
-	assert.match(renderCaseForSynthesis(resumed), /export const answer = 42;/, "the main synthesis can inspect the output behind a cited receipt rather than only its hash");
-	beginCasePhase(brainDir, created.id, "falsify-blind", { at: 15 });
-	assert.throws(() => finishCasePhase(brainDir, created.id, "falsify-blind", { returned: true, done: true, artifact: caseArtifact("A blind phase cannot inspect construction.", { citations: [{ ref: "phase:construct", kind: "claim" }] }) }, { at: 16 }), /Blind falsification cannot cite/, "the validator preserves the blind boundary as well as the request boundary");
-
-	const claimSource = { ...source, role: "claim", label: "unverified claim", claim: "answer is 42", capture: { ...source.capture, origin: { kind: "claim" } } };
-	assert.throws(() => createCase(brainDir, {
-		question: "Can a claim source become an initial observation?",
-		sources: [claimSource],
-		ledger: [{ id: "l1", kind: "observation", text: "The claim says answer is 42.", citations: ["s-main"], at: 20 }],
-		at: 20,
-	}), /cannot promote claim source/, "the initial evidence ledger cannot silently promote a claim source either");
-	const claimCase = createCase(brainDir, {
-		question: "Can a claim source become direct evidence?",
-		sources: [claimSource],
-		at: 20,
-	});
-	beginCasePhase(brainDir, claimCase.id, "construct", { at: 21 });
-	assert.throws(() => finishCasePhase(brainDir, claimCase.id, "construct", { returned: true, done: true, artifact: caseArtifact("claim", {
-		observations: [{ kind: "direct", text: "The claim says answer is 42.", citations: ["s-main"] }],
-		citations: [{ ref: "s-main", kind: "source" }],
-	}) }, { at: 22 }), /cannot be cited as direct source evidence/, "a claim source cannot be silently promoted to primary evidence");
-
-	// C2 is additive: a C1-v2 record lacking the flow field remains a readable, runnable historical three-phase record.
-	const historicV2 = JSON.parse(JSON.stringify(created));
-	historicV2.id = "c97";
-	historicV2.status = "running";
-	historicV2.updatedAt = 23;
-	delete historicV2.flow;
-	historicV2.phases = ["construct", "falsify", "witness"].map((id) => ({ id, status: "queued" }));
-	writeFileSync(join(brainDir, "cases", "c97.json"), `${JSON.stringify(historicV2, null, "\t")}\n`);
-	assert.equal(loadCase(brainDir, "c97").case.flow, undefined, "a pre-C2 v2 case is not silently migrated to the new information flow");
-	beginCasePhase(brainDir, "c97", "construct", { at: 24 });
-	finishCasePhase(brainDir, "c97", "construct", { returned: true, done: true, artifact: caseArtifact("historic C1-v2 construction") }, { at: 25 });
-	assert.equal(beginCasePhase(brainDir, "c97", "falsify", { at: 26 }).phase.id, "falsify", "the pre-C2 v2 lifecycle retains its historical falsify id and phase layout");
-
-	mkdirSync(join(brainDir, "cases"), { recursive: true });
-	const legacy = {
-		version: 1,
-		id: "c99",
-		createdAt: 30,
-		updatedAt: 30,
-		status: "ready",
-		question: "Did the old record stay readable?",
-		capsule: { context: "legacy context", evidence: [], digest: "legacy-digest" },
-		phases: ["construct", "falsify", "witness"].map((id) => ({ id, status: "complete" })),
-		messages: [],
-		nextMessage: 1,
-	};
-	const legacyPath = join(brainDir, "cases", "c99.json");
-	writeFileSync(legacyPath, `${JSON.stringify(legacy, null, "\t")}\n`);
-	const legacyBytes = readFileSync(legacyPath, "utf8");
-	const loadedLegacy = loadCase(brainDir, "c99").case;
-	assert.equal(readFileSync(legacyPath, "utf8"), legacyBytes, "loading a v1 case never migrates or rewrites its file");
-	assert.equal(renderCapsule(loadedLegacy), "Evidence capsule\n\nQuestion\n  Did the old record stay readable?\n\nContext supplied by the main agent\nlegacy context\n\nCapsule digest: legacy-digest.", "v1 capsule rendering stays unchanged");
-	assert.doesNotMatch(renderCase(loadedLegacy), /Version:/, "v1 inspection keeps its original rendering rather than presenting a v2 rewrite");
-	const legacyRunning = {
-		...legacy,
-		id: "c98",
-		status: "running",
-		phases: legacy.phases.map((phase, index) => ({ ...phase, status: index === 0 ? "active" : "queued" })),
-	};
-	writeFileSync(join(brainDir, "cases", "c98.json"), `${JSON.stringify(legacyRunning, null, "\t")}\n`);
-	finishCasePhase(brainDir, "c98", "construct", { returned: true, done: true, report: "v1 free-form artifact remains supported" }, { at: 31 });
-	assert.equal(loadCase(brainDir, "c98").case.phases[0].artifact.text, "v1 free-form artifact remains supported", "an existing v1 lifecycle still records its original free-form artifact API");
 });
 
 test("context window: a reported capacity reserves configured reply room without raising the setting cap", () => {
@@ -2059,26 +1798,6 @@ test("return: a closure gap cannot accompany a completion claim and is kept for 
 	assert.equal(loadContext(brainDir).tasks["gap-focus"].returned.closureGap, "index.html is outside the declared targets.");
 });
 
-test("return: a v2 case phase refuses a free-form report and records only a validated structured artifact", async (t) => {
-	const { root, brainDir } = fresh(t);
-	const created = createCase(brainDir, { question: "Does the v2 return require structure?", at: 1 });
-	beginCasePhase(brainDir, created.id, "construct", { conversationId: "case-return", at: 2 });
-	updateContext(brainDir, (store) => Object.assign(taskState(store, "case-return"), { caseId: created.id, phase: "construct", mode: "look" }));
-	const tool = returnTool({ root, brainDir, config: {} });
-	const api = { conversationId: "case-return", now: () => 3 };
-	const freeForm = await tool.execute({ report: "I observed something.", done: true }, api, undefined);
-	assert.equal(freeForm.isError, true);
-	assert.match(freeForm.output[0].text, /must return its schema-validated `artifact`/, "a v2 phase cannot turn its free-form report into durable evidence");
-	assert.equal(loadContext(brainDir).tasks["case-return"].returned, undefined, "the refused report does not end the case phase");
-	const returned = await tool.execute({ report: "Short transient return label.", done: true, artifact: caseArtifact("The structured candidate.") }, api, undefined);
-	assert.equal(returned.isError, undefined, returned.output[0].text);
-	assert.equal(loadContext(brainDir).tasks["case-return"].returned.artifact.candidate, "The structured candidate.");
-	finishCasePhase(brainDir, created.id, "construct", { returned: true, done: true, report: "Short transient return label.", artifact: loadContext(brainDir).tasks["case-return"].returned.artifact }, { at: 4 });
-	const saved = loadCase(brainDir, created.id).case.phases[0].artifact;
-	assert.equal(saved.data.candidate, "The structured candidate.");
-	assert.doesNotMatch(saved.rendering, /Short transient return label/, "the durable phase artifact is generated from structured fields, not the free-form report");
-});
-
 test("book: flat plan, ledger, context recall, task report, and prompt contract", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let messages = [];
@@ -2695,7 +2414,7 @@ test("conference C4: stopping the outer tool records cancellation rather than a 
 });
 
 
-test("conference C4: final objects require an honest structured return and thread revival fails before model work", async (t) => {
+test("conference C4/C5: final objects require an honest structured return and legacy thread revival is refused before model work", async (t) => {
 	assert.throws(() => validateConsultReturn({ outcome: "needs_input", synthesis: "Need a choice." }), /blocking_question/);
 	assert.deepEqual(validateConsultReturn({ outcome: "answered", synthesis: "Use the frozen packet.", evidence: [{ source: "s1", claim: "The captured file says so." }], uncertainties: ["No live verification yet."] }), {
 		outcome: "answered",
@@ -2710,5 +2429,5 @@ test("conference C4: final objects require an honest structured return and threa
 	const tool = consultTool({ root, brainDir });
 	const result = await tool.execute({ question: "q", myPersona: "p", thread: "st1" }, {}, undefined);
 	assert.equal(result.isError, true);
-	assert.match(result.output[0].text, /cannot be mixed with an isolated conference/i);
+	assert.match(result.output[0].text, /thread.*removed by the C5 cutover/i);
 });

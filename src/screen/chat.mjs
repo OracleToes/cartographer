@@ -21,7 +21,6 @@ import { POLICY } from "../config.mjs";
 import { describeCall, describeResult } from "../terminal.mjs";
 import { isFront } from "../context.mjs";
 import { splitTop } from "../top.mjs";
-import { parseStory, STORY_ID } from "../story.mjs";
 import { renderConference } from "../conference.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
@@ -31,8 +30,6 @@ const LIVE_ROWS = POLICY.limits.screen.chatLiveRows;
 const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
 /** How many rows of live reasoning stay in Chat until it is opened deliberately. */
 const LIVE_NOTE_ROWS = POLICY.limits.screen.notePreviewLines;
-/** The most of the context sent to the consultation model that an opened consult row shows; the question always shows in full. */
-const CONTEXT_MAX = Math.floor(POLICY.limits.screen.chatDetailChars / 2);
 /** The most of one result that is kept for opening it in place. */
 const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
 /** The most rows an opened result shows; the rest is in the tab it leads to, or in /report. */
@@ -98,13 +95,12 @@ function previewTail(text, cols, rows) {
 }
 
 /**
- * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readStory?: (id: string) => string | undefined, readConference?: (id: string) => object | undefined }} options
+ * @param {{ now?: () => number, markdown?: (text: string, cols: number) => { styled: string, cells: number, text: string }[], describeRef?: (ref: object) => string | undefined, readFile?: (rel: string) => string | undefined, readConference?: (id: string) => object | undefined }} options
  *   markdown: renders what the agent says; without it, the text is wrapped as it is
- *   readStory: reads a legacy durable consultation transcript under a thread (st1, st2, …).
  *   readConference: reads the consult-local co<N> audit record. It is only fetched when the Work row opens; no
  *   private conference notebook is copied into the parent session or ordinary conversation projection.
  */
-export function createChat({ now = () => Date.now(), markdown, describeRef, readStory, readConference } = {}) {
+export function createChat({ now = () => Date.now(), markdown, describeRef, readConference } = {}) {
 	/** @type {any[]} */
 	const items = [];
 	const rows = new Map(); // call id -> row
@@ -144,32 +140,6 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 		return push({ at: now(), ...item });
 	};
 
-	/**
-	 * What a consult row holds, assembled once and kept: the rounds from its durable transcript (never from the
-	 * session — the exchange is large and belongs in the brain exactly once), the thread marker from the call's
-	 * details, and the call's own ask as the fallback when no consultation transcript stands behind it (a failed
-	 * call, or a thread the brain no longer holds).
-	 */
-	const shortWhen = (at) => `${String(at ?? "").slice(0, 16).replace("T", " ")} UTC`;
-	const storyOf = (row) => {
-		if (row.story !== undefined) return row.story;
-		const args = row.args ?? {};
-		const question = String(args.question ?? "").trim();
-		const context = typeof args.context === "string" ? args.context.trim() : "";
-		const thread = typeof row.details?.thread === "string" && STORY_ID.test(row.details.thread) ? row.details.thread : undefined;
-		const raw = thread !== undefined && typeof readStory === "function" ? readStory(thread) : undefined;
-		let rounds;
-		let unparsable = false;
-		if (raw !== undefined) {
-			try {
-				rounds = parseStory(raw).rounds;
-			} catch {
-				unparsable = true;
-			}
-		}
-		row.story = { thread, rounds, question, context, unparsable, missing: thread !== undefined && raw === undefined };
-		return row.story;
-	};
 	/** The new conference notebook is a separate durable record, never a parent-chat payload. */
 	const conferenceOf = (row) => {
 		// A Work row can stay open while its private child progresses. Refresh that audit record while the outer call
@@ -410,7 +380,7 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 			}
 			// The call that runs now: inside a task, the task's own call and not the task.
 			const row = running.filter((entry) => entry !== taskRow).at(-1);
-			if (row?.name === "consult") return { what: "the consultation is writing", depth: row.depth, task };
+			if (row?.name === "consult") return { what: "the consultation conference is running", depth: row.depth, task };
 			if (row !== undefined) return { what: cut(row.label.replace(/\s+/g, " "), POLICY.limits.screen.activeCallChars), depth: row.depth, task };
 			if (taskRow !== undefined) return { what: "between two steps", depth: 1, task };
 			return undefined;
@@ -538,14 +508,14 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 					return;
 				}
 				if (row.name === "consult") {
-					// The consultation: the call opens to the whole transcript — what I asked and what it answered.
+					// C5 has one consult surface: the private same-model conference audit. Historical storyteller rows
+					// may still appear in an old Durable session, but this UI deliberately never reads or parses them.
 					add(callLine(row), { ...ref, kind: "call" });
 					if (row.state === "running") {
-						// Its words as they come: the tail the harness keeps, not the transcript (the round lands in the brain when it finishes).
 						const tail = toolTails.get(row.id);
 						if (tail !== undefined) {
 							const indentLive = row.depth > 0 ? "  │   " : "    ";
-							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the consultation is on its way to the brain", "faint"]], { ...ref, kind: "detail" });
+							if (tail.clipped) add([[indentLive, "faint"], ["… the beginning of the conference receipt is retained privately", "faint"]], { ...ref, kind: "detail" });
 							const shown = wrap(tail.text.replace(/\s+$/, ""), inner - width(indentLive));
 							for (const piece of shown.slice(-POLICY.limits.screen.chatLiveTextRows)) add([[indentLive, "faint"], [piece, "muted"]], { ...ref, kind: "detail" });
 						}
@@ -556,50 +526,15 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 						const body = (text, style = "muted") => {
 							for (const piece of wrap(text, inner - width(indent))) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : style]], { ...ref, kind: "detail" });
 						};
-							const conference = conferenceOf(row);
-							if (conference.id !== undefined) {
-								section(`consult conference ${conference.id} · private audit notebook`);
-								if (conference.record === undefined) body(`(The conference record ${conference.id} cannot be read; the outer receipt remains: ${plain(row.receipt ?? "no receipt")})`, row.state === "failed" ? "err" : "faint");
-								else body(renderConference(conference.record));
-								return;
-							}
-							const story = storyOf(row);
-							const clippedContext = (text) => (text.length > CONTEXT_MAX ? `${text.slice(0, CONTEXT_MAX)}\n… (${text.length - CONTEXT_MAX} more characters of context)` : text);
-							if (story.thread !== undefined) add([[indent, "faint"], [`the consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`, "faint"]], { ...ref, kind: "detail" });
-						if (story.rounds !== undefined) {
-							for (const [index, round] of story.rounds.entries()) {
-								section(`round ${index + 1} · ${shortWhen(round.at)}`);
-								if (round.context !== "") {
-									section("what I sent — the context");
-									body(clippedContext(round.context));
-								}
-								section("what I asked — the question");
-								body(round.question === "" ? "(the question is not in the call)" : round.question);
-								section("what the consultation answered");
-								body(round.answer);
-							}
-							if (row.state === "failed") {
-								section("why it failed");
-								body(plain(row.receipt ?? ""));
-							}
-							return;
+						const conference = conferenceOf(row);
+						if (conference.id !== undefined) {
+							section(`consult conference ${conference.id} · private audit notebook`);
+							if (conference.record === undefined) body(`(The conference record ${conference.id} cannot be read; the outer receipt remains: ${plain(row.receipt ?? "no receipt")})`, row.state === "failed" ? "err" : "faint");
+							else body(renderConference(conference.record));
+						} else {
+							section("consult conference");
+							body("(This historical consult row predates the C5 conference audit. C5 keeps any storyteller bytes only as static files under .brain/legacy/; this screen does not parse or resume them.)", "faint");
 						}
-						if (story.context !== "") {
-							section("what I sent — the context");
-							body(clippedContext(story.context));
-						}
-						section("what I asked — the question");
-						body(story.question === "" ? "(the question is not in the call)" : story.question);
-						if (row.state === "failed") {
-							section("why it failed");
-							body(plain(row.receipt ?? ""));
-							return;
-						}
-						section("what the consultation answered");
-						if (row.state === "running") body("(the consultation is still writing; the answer lands in its transcript when it finishes)", "faint");
-						else if (story.unparsable) body(`(the consultation transcript under thread ${story.thread} cannot be read; the answer stood there)`, "faint");
-						else if (story.missing) body(story.thread === undefined ? "(the answer is not in the session, and no thread was named)" : `(the consultation transcript under thread ${story.thread} is gone from the brain; the answer stood there)`, "faint");
-						else body("(no answer stands behind this call)", "faint");
 					}
 					return;
 				}
@@ -788,23 +723,10 @@ export function createChat({ now = () => Date.now(), markdown, describeRef, read
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note" || row?.kind === "reasoning") return row.text;
 					if (row?.name === "consult") {
-						const conference = conferenceOf(row);
-						if (conference.id !== undefined) return `${row.label}\n\n${conference.record === undefined ? `(The conference record ${conference.id} cannot be read; outer receipt: ${plain(row.receipt ?? "none")})` : renderConference(conference.record)}`;
-						const story = storyOf(row);
-						const parts = [row.label];
-					if (story.thread !== undefined) parts.push(`The consultation transcript stands under thread ${story.thread}${story.rounds !== undefined ? ` · ${story.rounds.length} ${story.rounds.length === 1 ? "round" : "rounds"}` : ""}`);
-					if (story.rounds !== undefined) {
-						for (const [index, round] of story.rounds.entries()) {
-							parts.push("", `Round ${index + 1} — ${shortWhen(round.at)}`);
-							if (round.context !== "") parts.push("", "What I sent — the context", "", round.context);
-							parts.push("", "What I asked — the question", "", round.question === "" ? "(the question is not in the call)" : round.question, "", "What the consultation answered", "", round.answer);
+							const conference = conferenceOf(row);
+							if (conference.id !== undefined) return `${row.label}\n\n${conference.record === undefined ? `(The conference record ${conference.id} cannot be read; outer receipt: ${plain(row.receipt ?? "none")})` : renderConference(conference.record)}`;
+							return `${row.label}\n\nThis historical consult row predates the C5 conference audit. Any migrated storyteller material is a static archive under .brain/legacy/ and is not read or parsed by the runtime.`;
 						}
-						return parts.join("\n");
-					}
-					if (story.context !== "") parts.push("", "What I sent — the context", "", story.context);
-					parts.push("", "What I asked — the question", "", story.question === "" ? "(the question is not in the call)" : story.question, "", "What the consultation answered", "", story.unparsable ? `(the consultation transcript under thread ${story.thread} cannot be read; the answer stood there)` : story.missing ? `(the consultation transcript under thread ${story.thread} is gone from the brain; the answer stood there)` : "(the answer is not in the session)");
-					return parts.join("\n");
-				}
 				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
 				return item.rows.map((entry) => ((entry.kind === "note" || entry.kind === "reasoning") ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
 			}

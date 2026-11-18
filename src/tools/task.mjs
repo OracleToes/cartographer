@@ -333,12 +333,9 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			const handle = await api.conversation(child, callContext);
 			// While the task runs, what the user types is for it (src/harness.mjs).
 			active.kind = "task";
-			active.caseId = undefined;
-			active.phase = undefined;
 			active.id = child;
 			active.said = [];
 			active.heard = [];
-			delete active.deliver;
 			let settled;
 			try {
 				const submission = await handle.submit({ type: "continue", requestId: `task:${api.taskId}` }, callContext);
@@ -346,9 +343,6 @@ export function taskTool({ root, brainDir, config, runner = { mode: "none" }, wi
 			} finally {
 				active.id = undefined;
 				active.kind = undefined;
-				active.caseId = undefined;
-				active.phase = undefined;
-				delete active.deliver;
 			}
 			const heard = active.heard.splice(0);
 			const unread = active.said.splice(0);

@@ -29,7 +29,6 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSy
 import { basename, delimiter, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
-import { readStory } from "../story.mjs";
 import { loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
@@ -112,7 +111,6 @@ const COMMANDS = [
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
-	["case", "bounded evidence cases; /case c1 shows one docket, witness budget, and final report; /case stop c1 ends one", ["stop"]],
 	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
@@ -283,11 +281,9 @@ export async function runScreen(session, options, runTerminal) {
 		return new Markdown(text, 0, 0, mdTheme).render(cols).map((styled) => ({ styled, cells: visibleWidth(styled), text: strip(styled).trimEnd() }));
 	};
 	const describeRef = createRefDescriber({ brainDir });
-	// Consult rows open their private durable material only on demand: legacy threads remain readable until C5,
-	// while co<N> conferences read their compact audit notebook rather than leaking it into parent chat history.
-	const readStoryRaw = (thread) => readStory(brainDir, thread);
+	// Consult rows open only their private co<N> audit notebook on demand; it is never copied into parent chat history.
 	const readConferenceRaw = (id) => loadConference(brainDir, id).conference;
-	const chat = createChat({ markdown, describeRef, readStory: readStoryRaw, readConference: readConferenceRaw });
+	const chat = createChat({ markdown, describeRef, readConference: readConferenceRaw });
 	const askColors = () => {
 		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
 		const take = (told) => {
@@ -460,8 +456,7 @@ export async function runScreen(session, options, runTerminal) {
 		else if (busy) {
 			const doing = chat.doing();
 			// The mark turns while the agent works: the screen is alive also when nothing else on it moves.
-			const activeCase = session.activeCase?.();
-			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (activeCase !== undefined ? `case ${activeCase.id}` : session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
+			first.push([`${SPINNER[Math.floor(Date.now() / SPIN_MS) % SPINNER.length]} `, "ok"], [doing?.task ?? (session.activeTask?.() !== undefined ? "task" : "working"), "bold"]);
 			const reading = state.prefill?.phase === "reading" && state.prefill.fresh >= (config.prefillTokens ?? DEFAULTS.prefillTokens);
 			if (reading) {
 				const { fresh, done, ms } = state.prefill;
@@ -485,8 +480,6 @@ export async function runScreen(session, options, runTerminal) {
 		if (ledger !== undefined) second.push([` · ${ledger}`, "muted"]);
 		if (plan !== undefined) second.push([` · ${plan}`, waits ? "warn" : "muted"]);
 		if (requests > 0) second.push([` · ${requests === 1 ? "1 request" : `${requests} requests`} for you`, waits ? "warn" : "muted"]);
-		const evidenceCase = session.activeCase?.();
-		if (evidenceCase !== undefined) second.push([` · case ${evidenceCase.id}${evidenceCase.phase ? `/${evidenceCase.phase}` : ""}`, "warn"]);
 		const windows = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
 		if (windows.length > 0) {
 			const running = windows.filter((win) => win.state === POLICY.enums.windowStates.busy).length;
@@ -1460,17 +1453,13 @@ export async function runScreen(session, options, runTerminal) {
 			// rather than a bare glyph. The strip repeats the broader state; this is the immediate composition cue.
 			const marks = state.prompt.replace(/\s*›\s*$/, "").trim();
 			const task = session.activeTask?.() !== undefined && core.busy();
-			const evidenceCase = session.activeCase?.();
-			const role = task ? "Task" : evidenceCase !== undefined && core.busy() ? `Case ${evidenceCase.id}` : "You";
+			const role = task ? "Task" : "You";
 			if (marks !== "") return { text: `${marks} ${role} › `, style: "warn bold" };
 			if (task) return { text: "Task › ", style: "tool bold" };
-			if (evidenceCase !== undefined && core.busy()) return { text: `Case ${evidenceCase.id} › `, style: "tool bold" };
 			return { text: "You › ", style: "user bold" };
 		},
 		placeholder: () => {
 			if (session.asks?.pending() !== undefined) return "Write the answer";
-			const evidenceCase = session.activeCase?.();
-			if (evidenceCase !== undefined && core.busy()) return `Message evidence case ${evidenceCase.id}; it records the phase route · Esc for commands`;
 			if (core.busy()) return "Message the agent while it works · Esc for commands";
 			return "Message Cartographer, or /help · Esc for commands";
 		},
