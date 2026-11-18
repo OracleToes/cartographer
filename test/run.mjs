@@ -2585,17 +2585,16 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 	assert.equal(commands.get("exit")?.description, "leave; the same as /quit", "the full-screen composer retains the terminal exit alias");
 	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION].flatMap((actions) => Object.values(actions));
 	assert.equal(registered.length, 30, "the complete application action registry has the expected phase-six surface");
-	for (const action of registered) {
-		const destination = paletteDestinationFor(action);
-		assert.ok(destination, `${action} remains discoverable from the command palette`);
-		assert.ok(TABS.some((tab) => tab.id === destination.tab), `${action} has a declared palette tab`);
-		assert.ok(VIEWS[destination.tab]?.some((view) => view.id === destination.view), `${action} has a declared palette subview`);
-		const item = paletteItemForCapability({ id: action, label: `Label for ${action}`, category: "test", availability: { enabled: false, reason: "Unavailable in this fixture." } });
-		assert.equal(item.id, `capability:${action}`, `${action} has one actual palette entry`);
-		assert.deepEqual(item.destination, destination, `${action}'s actual palette entry keeps its declared destination`);
-		assert.deepEqual(item.availability, { enabled: false, reason: "Unavailable in this fixture." }, `${action}'s actual palette entry preserves its availability reason`);
-		assert.doesNotMatch(item.description, /remains on the terminal command surface/, `${action} has a focused screen seam rather than a terminal-only fallback`);
-	}
+	const unavailable = { enabled: false, reason: "Unavailable in this fixture." };
+	const entries = registered.map((action) => ({
+		action,
+		destination: paletteDestinationFor(action),
+		item: paletteItemForCapability({ id: action, label: `Label for ${action}`, category: "test", availability: unavailable }),
+	}));
+	assert.ok(entries.every(({ destination }) => destination !== undefined), "every registered action remains discoverable from the command palette");
+	assert.ok(entries.every(({ destination }) => TABS.some((tab) => tab.id === destination.tab) && VIEWS[destination.tab]?.some((view) => view.id === destination.view)), "every registered action has a declared palette tab and subview");
+	assert.deepEqual(entries.map(({ action, destination, item }) => ({ id: item.id, destination: item.destination, availability: item.availability })), entries.map(({ action, destination }) => ({ id: `capability:${action}`, destination, availability: unavailable })), "every registered action materializes one palette entry with its destination and availability reason");
+	assert.ok(entries.every(({ item }) => !/remains on the terminal command surface/.test(item.description)), "every registered action has a focused screen seam rather than a terminal-only fallback");
 });
 
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
