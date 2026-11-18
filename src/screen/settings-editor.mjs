@@ -120,11 +120,31 @@ export function settingsEditorField(row, target) {
 	});
 }
 
+const detailFor = (row, write, target) => {
+	const source = record(row.source) ? row.source : {};
+	const saved = contributionFor(row, write.scope);
+	return [
+		`Effective value: ${row.displayValue ?? valueText(row.effectiveValue)}.`,
+		sourceLine(source),
+		targetLine(target),
+		saved === undefined
+			? `No ${target.label} override is saved for this setting.`
+			: write.shadowed
+				? `A ${target.label} override is saved (${valueText(saved.value)}), but ${layerName(source.layer)} currently overrides it.`
+				: `This ${target.label} override is effective now.`,
+		`Applies ${applyName(row.apply)}.`,
+		riskLine(row),
+		validationLine(row.validation),
+		"Enter or e edits this source · x resets this source override · s chooses a writable source.",
+	].join("\n");
+};
+
 /**
- * The compact Configuration collection. Enter opens each row's provenance inspector, which keeps identity, value,
- * source, and timing visible before longer explanatory text; the Screen owns editing/reset keys around this model.
+ * The Configuration collection. Wide views retain a compact inspector for the selected setting above the collection;
+ * compact views keep the same provenance in an opened row (Space, o, or l) while Enter/e open the saved-setting
+ * editor. The Screen owns editing/reset keys around this settled model.
  */
-export function settingsConfigurationView({ settings, scope = SETTINGS_SCOPE.project } = {}) {
+export function settingsConfigurationView({ settings, scope = SETTINGS_SCOPE.project, selected, wide = false } = {}) {
 	const configuration = settings?.configuration;
 	const rows = Array.isArray(configuration?.rows) ? configuration.rows.filter((row) => record(row) && typeof row.key === "string" && row.key !== "") : [];
 	const target = sourceFor(configuration, scope);
@@ -140,27 +160,25 @@ export function settingsConfigurationView({ settings, scope = SETTINGS_SCOPE.pro
 			head: [["  Configuration provenance is unavailable. Refresh Settings after its saved sources can be read.", "warn"]],
 		}],
 	};
+	const selectedKey = typeof selected === "string" ? selected.replace(/^setting:/, "") : undefined;
+	const inspected = rows.find((row) => row.key === selectedKey) ?? rows[0];
+	if (wide === true && inspected !== undefined) {
+		const write = settingsWriteTarget(settings, inspected, scope);
+		const source = record(inspected.source) ? inspected.source : {};
+		header.push(
+			[["── Selected setting ──", "muted"]],
+			[[`${inspected.label ?? inspected.key}  `, "bold"], [inspected.displayValue ?? valueText(inspected.effectiveValue), ""], [`  · ${layerName(source.layer)}`, source.layer === "environment" || source.layer === "command-line" ? "warn" : "muted"]],
+			[[`Save target: ${target.label}${target.writable === true ? "" : " (read-only)"} · applies ${applyName(inspected.apply)}.`, target.writable === true ? "muted" : "warn"]],
+		);
+		if (inspected.risk === "guarded") header.push([["This saved policy change may require typed confirmation.", "warn"]]);
+	}
 	return {
 		header,
 		items: rows.map((row) => {
 			const write = settingsWriteTarget(settings, row, scope);
 			const source = record(row.source) ? row.source : {};
-			const saved = contributionFor(row, scope);
 			const sourceState = source.layer === scope ? "" : `  · ${layerName(source.layer)}`;
-			const body = [
-				`Effective value: ${row.displayValue ?? valueText(row.effectiveValue)}.`,
-				sourceLine(source),
-				targetLine(target),
-				saved === undefined
-					? `No ${target.label} override is saved for this setting.`
-					: write.shadowed
-						? `A ${target.label} override is saved (${valueText(saved.value)}), but ${layerName(source.layer)} currently overrides it.`
-						: `This ${target.label} override is effective now.`,
-				`Applies ${applyName(row.apply)}.`,
-				riskLine(row),
-				validationLine(row.validation),
-				"Enter or e edits this source · x resets this source override · s chooses a writable source.",
-			].join("\n");
+			const body = detailFor(row, write, target);
 			return {
 				key: `setting:${row.key}`,
 				head: [[`${row.label ?? row.key}  `, "bold"], [row.displayValue ?? valueText(row.effectiveValue), ""], [sourceState, source.layer === "environment" || source.layer === "command-line" ? "warn" : "muted"]],
