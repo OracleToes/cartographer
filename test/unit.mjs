@@ -2161,7 +2161,7 @@ test("application: Settings & Safety is a deferred, fail-closed configuration an
 	const overviewText = JSON.stringify(overview);
 	assert.match(overviewText, /Settings & Safety/);
 	assert.match(overviewText, /Route listing/);
-	assert.match(overviewText, /native llama\.cpp GBNF validation is blocked/);
+	assert.match(overviewText, /native llama\.cpp GBNF validation is blocked/i);
 	assert.match(overviewText, /does not fall back to ordinary tool calls or prompt-only decisions/);
 	assert.match(overviewText, /YOLO · approval off/);
 	assert.match(overviewText, /the agent waits/);
