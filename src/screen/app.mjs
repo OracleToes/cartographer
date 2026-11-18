@@ -38,6 +38,7 @@ import { REQUEST_ACTION } from "../application/requests.mjs";
 import { REVIEW_ACTION } from "../application/review.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
+import { RUNTIME_ACTION } from "../application/runtime-actions.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
@@ -62,7 +63,7 @@ import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs"
 import { TOKEN } from "./tokens.mjs";
 import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
-import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView } from "./runtime.mjs";
+import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -101,6 +102,7 @@ export const VIEWS = {
 	shells: [
 		{ id: "list", name: "List" },
 		{ id: "out", name: "Output" },
+		{ id: "wakes", name: "Wakes" },
 	],
 	context: [
 		{ id: "window", name: "Latest sent" },
@@ -111,7 +113,7 @@ export const VIEWS = {
 	],
 };
 /** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
 const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
@@ -128,6 +130,7 @@ const paletteDestinationFor = (id) => {
 	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Inspect the latest checkpoint change, then use its contextual recovery action." };
 	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
 	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
+	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
 	if (id.startsWith("runtime.model.")) return { tab: "context", view: "preview", name: "Model · Next preview", hint: "Inspect the route before changing it." };
 	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
 	return undefined;
@@ -195,15 +198,15 @@ export const KEYS_HELP = [
 	"",
 	"Commands",
 	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
-	"  [ and ]          the previous and the next view inside Chat, Carto, Diff and Model (H and L do the same)",
+	"  [ and ]          the previous and the next view inside Chat, Carto, Diff, Shells and Model (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
-	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back)",
+	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back); in Wakes it opens the selected schedule row.",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
 	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
 	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d opens a confirmation before it deletes for good, and in Requests before it forgets without a word to the agent; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d opens a confirmation before it deletes for good, in Requests before it forgets without a word to the agent, and in Shells → Wakes before it removes the selected wake; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  u                in Diff, asks before taking the latest checkpoint change back and reopening its move for approval when it has one",
 	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
@@ -600,6 +603,7 @@ export async function runScreen(session, options, runTerminal) {
 			"diff.git": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
 			"shells.list": ["Enter output", "y copy"],
 			"shells.out": ["Enter back"],
+			"shells.wakes": [{ text: "d remove", capability: RUNTIME_ACTION.removeWake }, "Enter open", "y copy"],
 			"context.window": ["Enter open", "y copy"],
 			"context.main": ["Enter open", "y copy"],
 			"context.raw": ["Enter open", "y copy"],
@@ -672,6 +676,7 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.git": ({ signal }) => queries.review.git({ signal }),
 		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
 		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
+		"shells.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
 		"runtime.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
 		"context.window": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
 		"context.main": ({ signal }) => queries.runtime.sent({ scope: "main", signal }),
@@ -691,6 +696,7 @@ export async function runScreen(session, options, runTerminal) {
 		"diff.git": "Git changes",
 		"shells.list": "Shell windows",
 		"shells.out": "Shell output",
+		"shells.wakes": "Wake schedule",
 		"runtime.wakes": "Wake schedule",
 		"context.window": "Latest sent provider request",
 		"context.main": "Main sent provider request",
@@ -736,10 +742,12 @@ export async function runScreen(session, options, runTerminal) {
 		if (event.type !== "projection.invalidated") return;
 		const scopes = event.payload.scopes ?? [];
 		const brainChanged = scopes.some((scope) => ["workspace", "context", "requests"].includes(scope));
-		const projectionChanged = brainChanged || scopes.includes("review");
+		const runtimeChanged = scopes.includes("runtime");
+		const projectionChanged = brainChanged || runtimeChanged || scopes.includes("review");
 		if (!projectionChanged) return;
 		if (brainChanged) invalidateBrain();
 		invalidateProjections();
+		if (runtimeChanged) refreshWakeProjection(true);
 		refresh(viewId(), true);
 	});
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
@@ -755,6 +763,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ review: data, presentation: reviewPresentation }, id.slice(5)));
 		if (id === "shells.list") return projectionView(id, (data) => shellsView({ ...data, presentation: runtimePresentation.shells }));
 		if (id === "shells.out") return projectionView(id, (data) => shellsOutView({ ...data, presentation: runtimePresentation.shells }));
+		if (id === "shells.wakes") return projectionView(id, (data) => wakesView({ wakes: data.wakes, lines: data.lines, presentation: runtimePresentation.wakes }));
 		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
 			const sent = data.sent;
 			return contextView({ sent, windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, presentation: runtimePresentation.sent });
@@ -801,6 +810,25 @@ export async function runScreen(session, options, runTerminal) {
 		if (!result.ok) refresh(id, true);
 		draw();
 		return result.ok;
+	};
+	/** Runtime controls use the same typed result/confirmation boundary as terminal commands and other feature actions. */
+	const presentRuntimeResult = (result, id = viewId()) => {
+		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+		if (!result.ok) refresh(id, true);
+		draw();
+		return result.ok;
+	};
+	const requestWakeRemoval = (wake) => {
+		if (wake === undefined || typeof wake.id !== "string" || wake.id === "") return flash("choose a wake before removing it");
+		const route = viewId();
+		void application.execute(RUNTIME_ACTION.removeWake, { id: wake.id })
+			.then((asked) => {
+				if (asked.confirmation === undefined) return presentRuntimeResult(asked, route);
+				openConfirmation(asked.confirmation, () => application.execute(RUNTIME_ACTION.removeWake, { id: wake.id }, {
+					confirmation: { ...asked.confirmation, acknowledged: true },
+				}).then((result) => presentRuntimeResult(result, route)), { title: wake.id === "all" ? "Remove every wake?" : "Remove wake?" });
+			})
+			.catch((error) => flash(`could not prepare that wake removal: ${error?.message ?? error}`));
 	};
 	/** Run a row action through the typed application boundary, then redraw its projection after it settles. */
 	const runWorkspaceAction = (action, input, options_ = {}) => {
@@ -1456,6 +1484,7 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void runWorkspaceAction(item.archived === true ? WORKSPACE_ACTION.unarchive : WORKSPACE_ACTION.archive, { id: bookId });
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
 			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
+			if (key === "d" && viewId() === "shells.wakes" && rowKey?.startsWith("wake:")) return void requestWakeRemoval({ id: rowKey.slice(5) });
 			// Deleting is for good, so it always opens the same scoped confirmation. A request is not deleted but
 			// forgotten: the agent is told nothing of it, and so forgets it had asked.
 			if (key === "d" && deletable) return void requestWorkspaceDelete(bookId);

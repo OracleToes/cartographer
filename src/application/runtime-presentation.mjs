@@ -7,6 +7,7 @@ import { POLICY } from "../config.mjs";
 import { composedRows, estimate, isFront, recordLine, sameShelfItem, shelfLabel, splitReadTail } from "../context.mjs";
 import { flat } from "../rows.mjs";
 import { ago, stamp, took } from "../time.mjs";
+import { wakeAbout, wakeLine } from "../wakes.mjs";
 import { RECORD } from "../voice.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -269,6 +270,15 @@ const previewDescription = (preview) => {
 	};
 };
 
+/** A wake's lifecycle stays in the manager; these pure display facts are safe for a settled screen snapshot. */
+const wake = (entry, line, now = Date.now()) => ({
+	about: wakeAbout(entry),
+	// The Runtime reader captures this canonical manager line together with its wake list, including a window wake's
+	// open/closed fact. Keep a pure fallback for focused projections that supply only the raw snapshot.
+	line: typeof line === "string" && line.trim() !== "" ? line : wakeLine(entry, now),
+	kindLabel: entry.kind === POLICY.enums.wakeKinds.time ? "time" : entry.kind === POLICY.enums.wakeKinds.file ? "file" : "window",
+});
+
 /** Current active-context accounting stays distinct from a sent request or a next-request preview. */
 const accountingRows = ({ messages = [], sizes = {}, contextWindow } = {}, config = {}) => {
 	const tokens = (value) => Number.isFinite(value) ? shortCount(value) : "?";
@@ -315,6 +325,7 @@ const accountingRows = ({ messages = [], sizes = {}, contextWindow } = {}, confi
 export function createRuntimePresentation() {
 	return Object.freeze({
 		shells: Object.freeze({ shell, shellOutput }),
+		wakes: Object.freeze({ describe: wake }),
 		sent: Object.freeze({ categories, styleOf, short: shortCount, estimate, pretty, firstWords, describe: sentRequest, raw: rawPayload, contextBar }),
 		preview: Object.freeze({ describe: previewDescription }),
 		accounting: Object.freeze({ rows: accountingRows }),

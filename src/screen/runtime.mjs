@@ -40,6 +40,33 @@ export function shellsOutView({ window, lines = [], presentation } = {}) {
 	return { header, items };
 }
 
+/** The Runtime wake schedule receives a settled snapshot and never reads its live scheduler. */
+export function wakesView({ wakes = [], lines = [], presentation } = {}) {
+	if (presentation === undefined || typeof presentation.describe !== "function") throw new TypeError("Wake schedules need their Runtime presentation adapter.");
+	if (wakes.length === 0) {
+		return {
+			header: [[["Wake schedule", "bold"]], [["Wakes belong to the main agent and remain scheduled until they fire their last time or are removed.", "muted"]]],
+			items: [note("  The agent has set no wake.")],
+		};
+	}
+	const items = wakes.map((wake, index) => {
+		const described = presentation.describe(wake, Array.isArray(lines) ? lines[index] : undefined);
+		return {
+			key: `wake:${wake.id}`,
+			head: [[`${wake.id}  `, "bold"], [described.about, ""], [`  · ${described.kindLabel}`, "muted"]],
+			body: described.line,
+			copy: described.line,
+		};
+	});
+	return {
+		header: [
+			[[`${wakes.length === 1 ? "1 wake" : `${wakes.length} wakes`} scheduled`, "bold"], ["  · remove one with d; /wakes remove ID remains available in the prompt", "muted"]],
+			[["A wake starts no provider request while this view is read. Its lifecycle is refreshed through the Runtime projection.", "faint"]],
+		],
+		items,
+	};
+}
+
 /** The Model tab's frozen-provider-request view. It receives a settled request snapshot and no engine. */
 export function contextView({ sent, windowSize, cols, writing, isOpen, presentation } = {}) {
 	if (presentation === undefined || typeof presentation.describe !== "function" || typeof presentation.styleOf !== "function" || typeof presentation.contextBar !== "function" || typeof presentation.short !== "function" || typeof presentation.estimate !== "function" || typeof presentation.pretty !== "function" || typeof presentation.firstWords !== "function" || !Array.isArray(presentation.categories)) throw new TypeError("Sent provider requests need their Runtime presentation adapter.");

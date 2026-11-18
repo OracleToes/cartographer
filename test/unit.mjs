@@ -84,7 +84,7 @@ import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
-import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView } from "../src/screen/runtime.mjs";
+import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -723,6 +723,45 @@ test("screen: Runtime shell views render settled projections through their appli
 	const outputStale = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { window, lines: window.tail }, loading: true }, render: renderOutput });
 	assert.equal(outputRendered, 3, "cached Shell output remains renderable while its replacement is in flight");
 	assert.match(outputStale.header[0][0][0], /showing cached data/);
+});
+
+test("screen: Runtime wakes render settled projections through their application presentation adapter", () => {
+	const presentation = createRuntimePresentation().wakes;
+	const wake = {
+		id: "w1",
+		kind: POLICY.enums.wakeKinds.time,
+		every: 300,
+		times: 2,
+		left: 2,
+		note: "Check the handoff.",
+		fired: 0,
+		due: Date.parse(NOW) + 300_000,
+	};
+	const data = { wakes: [wake], lines: ["w1 · every 5 m · Check the handoff. · window source is not open now"] };
+	let rendered = 0;
+	const render = (projection) => {
+		rendered++;
+		return wakesView({ ...projection, presentation });
+	};
+	assert.throws(() => wakesView(data), /presentation adapter/, "Wake schedules cannot fall back to direct scheduler formatting");
+	const loading = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { loading: true }, render });
+	assert.equal(rendered, 0, "Wake schedules are not asked to invent data while their projection is loading");
+	assert.match(loading.header[0][0][0], /Wake schedule is loading/, "the shared boundary names Runtime wake loading");
+	const failed = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { error: { message: "The wake scheduler is unavailable." } }, render });
+	assert.equal(rendered, 0, "a wake query error remains outside the feature renderer");
+	assert.match(failed.items[0].head[0][0], /Wake schedule could not be loaded/, "the error state retains its retry affordance");
+	const empty = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { data: { wakes: [] } }, render });
+	assert.equal(rendered, 1, "a settled empty wake projection reaches Runtime");
+	assert.match(JSON.stringify(empty), /The agent has set no wake/, "Runtime owns its successful empty wake state");
+	const settled = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { data }, render });
+	assert.equal(rendered, 2, "a settled wake projection uses the application adapter for lifecycle vocabulary");
+	assert.match(JSON.stringify(settled), /every 5 m/, "the adapter keeps the established wake cadence wording");
+	assert.match(JSON.stringify(settled), /Check the handoff/, "the settled wake keeps its own note visible");
+	assert.match(JSON.stringify(settled), /window source is not open now/, "the renderer preserves the scheduler's captured window-state wording rather than probing a live manager");
+	assert.equal(settled.items.every((item) => item.editKind === undefined), true, "wake rows are not directly editable; removal crosses the confirmed Runtime action");
+	const stale = renderAsyncBoundary({ id: "shells.wakes", name: "Wake schedule", projection: { data, loading: true }, render });
+	assert.equal(rendered, 3, "cached wakes remain renderable while their replacement is in flight");
+	assert.match(stale.header[0][0][0], /showing cached data/, "the stale state stays visible above wake rows");
 });
 
 test("screen: Runtime sent, audit, preview, and accounting views render settled projections through their application presentation adapter", () => {
