@@ -202,7 +202,7 @@ test("configuration: precedence exposes saved overrides that environment and CLI
 	const startup = loadConfig({ brainDir, flags, env });
 	assert.equal(startup.server, "http://command-line.test/v1", "the compatibility startup resolver shares the new precedence rules");
 	assert.equal(startup.model, "command-line-model");
-	assert.equal(startup.colors, "light");
+	assert.equal(startup.colors, "none");
 });
 
 test("configuration repository: source permissions, revisions, atomic writes, and write failures are typed", async (t) => {
