@@ -287,6 +287,11 @@ test("application: workspace actions expose typed outcomes, cancellation, and de
 	if (missingShelfPath.ok) throw new Error("a shelf action without a target must be refused before the context mutation");
 	assert.equal(missingShelfPath.error.code, UI_ERROR_CODE.invalidInput);
 	assert.equal(missingShelfPath.error.field, "path");
+	const malformedShelfRange = await app.execute(WORKSPACE_ACTION.shelve, { path: "shelf.txt", lines: "around here" });
+	assert.equal(malformedShelfRange.ok, false);
+	if (malformedShelfRange.ok) throw new Error("an invalid shelf range must be refused before the context mutation");
+	assert.equal(malformedShelfRange.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(malformedShelfRange.error.field, "lines");
 	writeFileSync(join(root, "shelf.txt"), "first\nsecond\n");
 	const shelved = await app.execute(WORKSPACE_ACTION.shelve, { path: "shelf.txt", lines: "1-1" });
 	assert.equal(shelved.ok, true);

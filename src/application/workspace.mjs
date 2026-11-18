@@ -4,7 +4,7 @@
 // synchronous storage internally, so this adapter intentionally contains that transitional seam. Presentation
 // code consumes the structured result below rather than inferring success from those lines; later async storage
 // work stays behind this facade instead of changing every caller again.
-import { ShelfError, foldReports, recallReport, shelveForUser } from "../context.mjs";
+import { ShelfError, foldReports, parseLines, recallReport, shelveForUser } from "../context.mjs";
 import { ADD_BOOKS, addMove, addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
 import { createCapabilityRegistry } from "./capabilities.mjs";
 import { UI_ACTION_INTENT, UI_CONFIRMATION, UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
@@ -84,6 +84,13 @@ const shelfInput = (input, meta) => {
 	const path = nonEmpty(input.path);
 	if (path === undefined) return { result: invalidInput("Choose a file or reference before shelving it.", meta, "path") };
 	if (input.lines !== undefined && typeof input.lines !== "string") return { result: invalidInput("A shelf line range must be text.", meta, "lines") };
+	if (typeof input.lines === "string") {
+		try { parseLines(input.lines); }
+		catch (error) {
+			if (error instanceof ShelfError) return { result: invalidInput(error.message, meta, "lines") };
+			throw error;
+		}
+	}
 	return { value: { path, ...(typeof input.lines === "string" ? { lines: input.lines } : {}) } };
 };
 
