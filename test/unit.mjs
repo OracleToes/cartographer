@@ -12,6 +12,7 @@ import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
+import { createApplication } from "../src/application/app.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
@@ -386,6 +387,47 @@ test("application: workspace queries defer readers and return typed empty, unava
 	assert.equal(status.ok, true, "status retains readable ledger information while naming a separate plan issue");
 	if (!status.ok) throw new Error(status.error.message);
 	assert.deepEqual(status.data.issues, [{ source: "plan", message: "carto-plan.json is not valid JSON" }]);
+});
+
+test("application: composed facade dispatches actions and publishes cache-invalidating facts", async (t) => {
+	const { brainDir, root } = fresh(t);
+	const events = [];
+	const app = createApplication({
+		brainDir,
+		root,
+		now: () => Date.parse(NOW),
+		workspace: { operations: {
+			addMove: () => "",
+			addTemplate: () => ({}),
+			applyAdd: () => "",
+			archiveRow: () => "archived entry",
+			dropRow: () => "",
+			editRow: () => "",
+			focusAtlas: () => "",
+			foldRow: () => "",
+			recallReport: () => undefined,
+			settleRow: () => "",
+			unarchiveRow: () => "",
+			unfocusAtlas: () => "",
+			unshelveRow: () => "",
+			foldReports: () => "",
+			shelveForUser: () => "",
+		} },
+	});
+	app.events.subscribe((event) => events.push(event));
+	const result = await app.execute(WORKSPACE_ACTION.archive, { id: "a1" }, { requestId: "archive-1" });
+	assert.equal(result.ok, true);
+	assert.equal(result.meta.requestId, "archive-1");
+	assert.deepEqual(events.map((event) => [event.type, event.payload.action]), [
+		["action.completed", WORKSPACE_ACTION.archive],
+		["projection.invalidated", WORKSPACE_ACTION.archive],
+	]);
+	assert.deepEqual(events.at(-1).payload.scopes, ["workspace", "context"]);
+	assert.equal(app.capabilities.get(WORKSPACE_ACTION.archive)?.label, "Archive");
+	const unknown = await app.execute("workspace.unknown", {});
+	assert.equal(unknown.ok, false);
+	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");
+	assert.equal(unknown.error.code, UI_ERROR_CODE.unknownAction);
 });
 
 test("application: request decisions have typed validation and durable-operation outcomes", async (t) => {
