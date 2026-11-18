@@ -12,6 +12,7 @@ import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
+import { createWorkspaceQueries } from "../src/application/queries.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
 import { pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
@@ -327,6 +328,63 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	});
 	assert.match(exported.file, /export\/session-20261115-000000\.md$/);
 	assert.equal(readFileSync(exported.file, "utf8"), "exported words\n");
+});
+
+test("application: workspace queries defer readers and return typed empty, unavailable, and cancelled outcomes", async (t) => {
+	const { brainDir } = fresh(t);
+	let ledgerReads = 0;
+	const queries = createWorkspaceQueries({
+		brainDir,
+		now: () => Date.parse(NOW),
+		readers: {
+			loadAtlas: () => ({ atlas: { nodes: [] } }),
+			loadLedger: () => {
+				ledgerReads++;
+				return { ledger: { items: [] } };
+			},
+			loadPlan: () => ({ plan: { items: [], moves: [] } }),
+		},
+	});
+	const pending = queries.ledger({ requestId: "ledger-query" });
+	assert.equal(ledgerReads, 0, "the legacy reader is not called in the render/key stack that asked for a projection");
+	const empty = await pending;
+	assert.equal(empty.ok, true);
+	if (!empty.ok) throw new Error(empty.error.message);
+	assert.equal(ledgerReads, 1);
+	assert.deepEqual(empty.data.ledger.items, []);
+	assert.equal(empty.meta.requestId, "ledger-query");
+	const absent = await queries.entry({ book: "ledger", id: "g1" });
+	assert.equal(absent.ok, false);
+	if (absent.ok) throw new Error("a missing entry must be explicit");
+	assert.equal(absent.error.code, UI_ERROR_CODE.notFound);
+	const invalid = await queries.entry({ book: "unknown", id: "x1" });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("an unknown book must be refused before its reader runs");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	const stopped = new AbortController();
+	stopped.abort();
+	const cancelled = await queries.plan({ signal: stopped.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("an aborted projection must not read disk");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+
+	const unavailable = createWorkspaceQueries({
+		brainDir,
+		readers: {
+			loadAtlas: () => ({ atlas: { nodes: [] } }),
+			loadLedger: () => ({ ledger: { items: [] } }),
+			loadPlan: () => ({ error: "carto-plan.json is not valid JSON" }),
+		},
+	});
+	const broken = await unavailable.plan();
+	assert.equal(broken.ok, false);
+	if (broken.ok) throw new Error("unreadable durable state must not masquerade as an empty plan");
+	assert.equal(broken.error.kind, UI_ERROR_KIND.unavailable);
+	assert.equal(broken.error.retryable, true);
+	const status = await unavailable.status();
+	assert.equal(status.ok, true, "status retains readable ledger information while naming a separate plan issue");
+	if (!status.ok) throw new Error(status.error.message);
+	assert.deepEqual(status.data.issues, [{ source: "plan", message: "carto-plan.json is not valid JSON" }]);
 });
 
 test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {

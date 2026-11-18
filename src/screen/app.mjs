@@ -26,18 +26,13 @@ import { DEFAULTS, POLICY } from "../config.mjs";
 import { EventEmitter } from "node:events";
 import { basename, join, relative } from "node:path";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
-import { contextPath } from "../context.mjs";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { TALK_ACTION, createTalkApplication } from "../application/talk.mjs";
+import { createWorkspaceQueries } from "../application/queries.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
-import { assessmentPath } from "../assessment.mjs";
-import { atlasPath, loadAtlas } from "../atlas.mjs";
-import { loadLedger, open as openEntries } from "../ledger.mjs";
-import { isAuthorized, loadPlan, planPath, waiting } from "../plan.mjs";
-import { listRequests } from "../requests.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
 import { createRefDescriber } from "../refs.mjs";
@@ -418,31 +413,43 @@ export async function runScreen(session, options, runTerminal) {
 			rateMark = { at: now, size };
 		}
 	};
-	let brain = { at: 0 };
+	let brain = { at: 0, loading: false, request: 0 };
+	/** Refresh status outside rendering. The newest request alone may replace the strip's cached projection. */
+	const refreshBrain = (force = false) => {
+		if (brain.loading || (!force && Date.now() - brain.at < POLICY.timing.screen.stateCacheMs)) return;
+		const request = brain.request + 1;
+		brain = { ...brain, at: Date.now(), loading: true, request };
+		void queries.status({ yolo: options.gate?.yolo === true })
+			.then((result) => {
+				if (brain.request !== request) return;
+				if (!result.ok) {
+					brain = { ...brain, loading: false };
+					return;
+				}
+				const { plan, ledger, requests, waits } = result.data;
+				brain = {
+					at: brain.at,
+					loading: false,
+					request,
+					requests,
+					waits,
+					...(plan === undefined || plan.total === 0 ? {} : { plan: `plan ${plan.total - plan.open}/${plan.total} envelopes · ${plan.moves} moves${plan.awaiting > 0 ? ` · ${plan.awaiting} awaiting` : plan.ready ? " · move ready" : ""}` }),
+					...(ledger === undefined ? {} : { ledger: ledger.goals === 0 ? "no goal" : `${ledger.goals === 1 ? "1 goal" : `${ledger.goals} goals`}` }),
+				};
+				draw();
+			})
+			.catch(() => {
+				if (brain.request === request) brain = { ...brain, loading: false };
+			});
+	};
 	const readBrain = () => {
-		if (Date.now() - brain.at < POLICY.timing.screen.stateCacheMs) return brain;
-		const next = { at: Date.now() };
-		try {
-			const requests = listRequests(brainDir, { yolo: options.gate?.yolo === true });
-			next.requests = requests.length;
-			next.waits = requests.some((request) => request.kind === "approval");
-			const { plan } = loadPlan(brainDir);
-			if (plan !== undefined && plan.items.length > 0) {
-				const open = plan.items.filter((item) => item.status === POLICY.enums.entryStatus.open && item.archived !== true).length;
-				const awaiting = waiting(plan).length;
-				const ready = isAuthorized(plan);
-				next.plan = `plan ${plan.items.length - open}/${plan.items.length} envelopes · ${plan.moves.length} moves${awaiting > 0 ? ` · ${awaiting} awaiting` : ready ? " · move ready" : ""}`;
-			}
-			const { ledger } = loadLedger(brainDir);
-			if (ledger !== undefined) {
-				const goals = openEntries(ledger, POLICY.enums.ledgerKind.goal).length;
-				next.ledger = goals === 0 ? "no goal" : `${goals === 1 ? "1 goal" : `${goals} goals`}`;
-			}
-		} catch {
-			// A file edited into something unreadable is said by its tab, not by the strip.
-		}
-		brain = next;
+		refreshBrain();
 		return brain;
+	};
+	/** Drop a possibly stale status result after a durable workspace action, then request a replacement. */
+	const invalidateBrain = () => {
+		brain = { at: 0, loading: false, request: brain.request + 1 };
+		refreshBrain(true);
 	};
 	/** The activity, shared-state, and key-reminder rows of the strip, as spans. */
 	const status = () => {
@@ -533,14 +540,15 @@ export async function runScreen(session, options, runTerminal) {
 	/** The file a view comes from, for `e` when no item names one. */
 	const fileOf = (id) =>
 		({
-			"carto.atlas": atlasPath(brainDir),
-			"carto.ledger": join(brainDir, "carto-ledger.json"),
-			"carto.plan": planPath(brainDir),
+			"carto.atlas": queries.paths.atlas,
+			"carto.ledger": queries.paths.ledger,
+			"carto.plan": queries.paths.plan,
 		})[id];
 	const env = { root, brainDir, session, started };
 	// Workspace rows and field forms enter the application boundary here. The external file-editor handoffs remain
 	// narrow transitional seams; keyboard actions and overlays consume typed results.
 	const workspace = createWorkspaceApplication({ brainDir, root, config });
+	const queries = createWorkspaceQueries({ brainDir });
 	const talk = createTalkApplication({ brainDir });
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();
@@ -615,7 +623,7 @@ export async function runScreen(session, options, runTerminal) {
 	/** Present one typed workspace outcome, then redraw the projection that started the action. */
 	const presentWorkspaceResult = (result, id = viewId()) => {
 		flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
-		if (result.ok) brain.at = 0;
+		if (result.ok) invalidateBrain();
 		refresh(id, true);
 		draw();
 		return result.ok;
@@ -626,6 +634,17 @@ export async function runScreen(session, options, runTerminal) {
 		void workspace.execute(action, input, options_)
 			.then((result) => presentWorkspaceResult(result, id))
 			.catch((error) => flash(`could not complete that workspace action: ${error?.message ?? error}`));
+	};
+	/** A reported move needs its evidence review in the composer; every other row can settle immediately. */
+	const settleWorkspaceRow = async (rowKey, id) => {
+		if (!rowKey.startsWith("move:")) return runWorkspaceAction(WORKSPACE_ACTION.settle, { id });
+		const found = await queries.entry({ book: "plan", id });
+		if (!found.ok) return flash(found.error.message);
+		if (found.data.item.status !== POLICY.enums.moveStatus.reported) return runWorkspaceAction(WORKSPACE_ACTION.settle, { id });
+		if (viewId() !== "carto.plan") return;
+		setMode("type");
+		prompt.insertTextAtCursor(`/done ${id} -- `);
+		flash(`Write why ${id}'s reported proof witnesses its done-when, then press Enter.`);
 	};
 
 	// ─── Copying ─────────────────────────────────────────────────────────────
@@ -842,13 +861,13 @@ export async function runScreen(session, options, runTerminal) {
 			case "tools":
 				return flash("the tools are one block; Enter opens it to a line per tool, and e on one opens where it is defined");
 			case "assessment": {
-				const file = assessmentPath(brainDir);
+				const file = queries.paths.assessment;
 				if (!(await runEditor(file))) return;
 				refresh(viewId(), true);
 				return flash("edited; the copy at the top of the context is rewritten at the next collapse, or /pin now");
 			}
 			case "store": {
-				if (!(await runEditor(contextPath(brainDir)))) return;
+				if (!(await runEditor(queries.paths.context))) return;
 				refresh(viewId(), true);
 				return flash("the store of what the collapse keeps, edited by hand · take care: a file that does not parse falls back to a fresh one");
 			}
@@ -894,71 +913,64 @@ export async function runScreen(session, options, runTerminal) {
 		const single = !fields.some((field) => field.multiline);
 		return Math.max(46, Math.min(cols - 4, single ? longest + 14 : 78));
 	};
-	/** The fields of the row the list has selected, with their current values; undefined when the row is not an entry. */
-	const editFieldsFor = (viewId_, rowKey) => {
+	/** The fields of the row the list has selected, read through the workspace query boundary. */
+	const editFieldsFor = async (viewId_, rowKey) => {
 		const id = rowKey.slice(rowKey.indexOf(":") + 1);
-		if (viewId_ === "carto.ledger" || (viewId_ === "context.main" || viewId_ === "context.window") && rowKey.startsWith("entry:")) {
-			const { ledger } = loadLedger(brainDir);
-			const item = ledger?.items.find((entry) => entry.id === id);
-			if (item === undefined) return undefined;
+		const book = viewId_ === "carto.atlas" ? "atlas" : viewId_ === "carto.plan" ? "plan" : (viewId_ === "carto.ledger" || ((viewId_ === "context.main" || viewId_ === "context.window") && rowKey.startsWith("entry:"))) ? "ledger" : undefined;
+		if (book === undefined) return undefined;
+		const found = await queries.entry({ book, id });
+		if (!found.ok) return { error: found.error.message };
+		const { item } = found.data;
+		if (book === "ledger") {
 			const fields = [{ id: "text", label: "Text", limit: POLICY.limits.ledger.textChars, value: item.text }];
 			if (item.kind === POLICY.enums.ledgerKind.goal) fields.push({ id: "doneWhen", label: "Done when", limit: POLICY.limits.ledger.textChars, multiline: true, value: item.doneWhen ?? "" });
 			if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.ledger.textChars, value: item.outcome ?? "" });
 			return { id, fields };
 		}
-		if (viewId_ === "carto.plan") {
-			const { plan } = loadPlan(brainDir);
-			const envelope = plan?.items.find((entry) => entry.id === id);
-			if (envelope !== undefined) {
+		if (book === "plan") {
+			if (!rowKey.startsWith("move:")) {
 				const fields = [
-					{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: envelope.text },
-					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: envelope.doneWhen ?? "" },
+					{ id: "text", label: "Intent", limit: POLICY.limits.plan.itemChars, value: item.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: item.doneWhen ?? "" },
 				];
-				if (envelope.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: envelope.outcome ?? "" });
+				if (item.status === POLICY.enums.entryStatus.done) fields.push({ id: "outcome", label: "Outcome", limit: POLICY.limits.plan.itemChars, value: item.outcome ?? "" });
 				return { id, fields };
 			}
-			const move = plan?.moves.find((entry) => entry.id === id);
-			if (move === undefined) return undefined;
-			const parent = plan?.items.find((entry) => entry.id === move.parent);
-			const changing = parent?.mode === POLICY.enums.planMode.change;
-			const budget = move.budget ?? { replies: move.turns, fileOps: 0, commandStarts: 0 };
+			const changing = found.data.parent?.mode === POLICY.enums.planMode.change;
+			const budget = item.budget ?? { replies: item.turns, fileOps: 0, commandStarts: 0 };
 			return {
 				id,
 				fields: [
-					{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: move.action ?? move.text },
-					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: move.doneWhen ?? "" },
-					{ id: "proof", label: changing ? "Required proof" : "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: move.proof ?? "" },
-					{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: (move.targets ?? []).join("\n") },
+					{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: item.action ?? item.text },
+					{ id: "doneWhen", label: "Done when", limit: POLICY.limits.plan.itemChars, multiline: true, value: item.doneWhen ?? "" },
+					{ id: "proof", label: changing ? "Required proof" : "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: item.proof ?? "" },
+					{ id: "targets", label: "Targets, one per line", limit: POLICY.limits.plan.itemChars, multiline: true, value: (item.targets ?? []).join("\n") },
 					...(changing ? [
-						{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: String(move.capabilities?.files === true) },
-						{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: String(move.capabilities?.commands === true) },
-						{ id: "networkAllowed", label: "Network allowed", limit: 5, value: String(move.capabilities?.network === true) },
-						{ id: "replies", label: "Reply budget", limit: 1, value: String(budget.replies ?? move.turns ?? POLICY.limits.plan.moveTurns.change) },
+						{ id: "filesAllowed", label: "File operations allowed", limit: 5, value: String(item.capabilities?.files === true) },
+						{ id: "commandsAllowed", label: "Commands allowed", limit: 5, value: String(item.capabilities?.commands === true) },
+						{ id: "networkAllowed", label: "Network allowed", limit: 5, value: String(item.capabilities?.network === true) },
+						{ id: "replies", label: "Reply budget", limit: 1, value: String(budget.replies ?? item.turns ?? POLICY.limits.plan.moveTurns.change) },
 						{ id: "fileOps", label: "File-operation budget", limit: 1, value: String(budget.fileOps ?? POLICY.limits.plan.moveBudget.fileOps) },
 						{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(budget.commandStarts ?? POLICY.limits.plan.moveBudget.commandStarts) },
 					] : []),
 				],
 			};
 		}
-		if (viewId_ === "carto.atlas") {
-			const { atlas } = loadAtlas(brainDir);
-			const node = atlas?.nodes.find((entry) => entry.name === id);
-			if (node === undefined) return undefined;
-			return {
-				id,
-				fields: [
-					{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: node.gist },
-					{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: node.detail ?? "" },
-					{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: node.name },
-				],
-			};
-		}
-		return undefined;
+		return {
+			id,
+			fields: [
+				{ id: "gist", label: "Gist", limit: POLICY.limits.atlas.gistChars, value: item.gist },
+				{ id: "detail", label: "Detail", limit: POLICY.limits.atlas.detailChars, multiline: true, value: item.detail ?? "" },
+				{ id: "name", label: "Name", limit: POLICY.limits.atlas.nameChars, value: item.name },
+			],
+		};
 	};
 	// Snapshot of what the box opens with, so a save knows which fields were edited.
-	const openFieldBox = (viewId_, rowKey) => {
-		const found = editFieldsFor(viewId_, rowKey);
+	const openFieldBox = async (viewId_, rowKey) => {
+		const found = await editFieldsFor(viewId_, rowKey);
+		if (viewId() !== viewId_) return;
 		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
+		if (found.error !== undefined) return flash(found.error);
 		const { id, fields } = found;
 		const handle = tui.showOverlay(new Box({
 			title: id,
@@ -1053,10 +1065,11 @@ export async function runScreen(session, options, runTerminal) {
 		}), { width: boxWidth(fields, terminal.columns), anchor: "center" });
 	};
 	/** `n` on an envelope declares a child move through the typed workspace action. */
-	const openMoveBox = (parentId) => {
-		const { plan } = loadPlan(brainDir);
-		const parent = plan?.items.find((item) => item.id === parentId);
-		if (parent === undefined) return flash("that envelope is no longer in the plan");
+	const openMoveBox = async (parentId) => {
+		const found = await queries.entry({ book: "plan", id: parentId });
+		if (viewId() !== "carto.plan") return;
+		if (!found.ok || found.data.item.parent !== undefined) return flash(found.ok ? "that envelope is no longer in the plan" : found.error.message);
+		const parent = found.data.item;
 		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) return flash(`${parent.id} is not an open envelope`);
 		const changing = parent.mode === POLICY.enums.planMode.change;
 		const fields = [
@@ -1108,7 +1121,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (target.folder) return flash("that is a folder: open it with Enter, and press e on a file");
 		if (!(await pathExists(target.file))) return flash(`${relative(root, target.file)} does not exist`);
 		if (!(await runEditor(target.file, target.line))) return;
-		brain.at = 0;
+		invalidateBrain();
 		refresh(viewId(), true);
 	};
 	const edit = async () => {
@@ -1241,16 +1254,7 @@ export async function runScreen(session, options, runTerminal) {
 			const deletable = rowKey !== undefined && /^(?:report|entry|item|envelope|move|node|request):/.test(rowKey);
 			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) return void runWorkspaceAction(WORKSPACE_ACTION.toggleFold, { id: bookId });
 			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void runWorkspaceAction(item.archived === true ? WORKSPACE_ACTION.unarchive : WORKSPACE_ACTION.archive, { id: bookId });
-			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
-				const move = rowKey.startsWith("move:") ? loadPlan(brainDir).plan?.moves.find((entry) => entry.id === bookId) : undefined;
-				if (move?.status === POLICY.enums.moveStatus.reported) {
-					setMode("type");
-					prompt.insertTextAtCursor(`/done ${bookId} -- `);
-					flash(`Write why ${bookId}'s reported proof witnesses its done-when, then press Enter.`);
-					return;
-				}
-				return void runWorkspaceAction(WORKSPACE_ACTION.settle, { id: bookId });
-			}
+			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
 			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
 			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
 			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
@@ -1305,7 +1309,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "e") return void edit();
 		if (key === "E") return void editInEditor();
 		if (key === "r") {
-			brain.at = 0;
+			invalidateBrain();
 			refresh(viewId(), true);
 			return void flash("read again");
 		}
