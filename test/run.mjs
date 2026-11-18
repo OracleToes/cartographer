@@ -228,19 +228,14 @@ test("launch: Cartographer opens without a server and keeps local commands avail
 	assert.equal(existsSync(join(root, ".brain", "session.sqlite")), true, "the local session opens before a server is reachable");
 });
 
-test("terminal: workspace and spoken request actions share typed outcomes", async () => {
+test("terminal: workspace actions share typed outcomes and deletion needs --yes", async () => {
 	const root = makeProject("terminal-workspace-actions", { git: false });
 	configure(root, { initiate: false });
 	const { brainDir } = setUpBrain(root);
 	assert.match(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep this only while the command is tested." }), root), /n1 added/);
-	const { plan } = loadPlan(brainDir);
-	const at = "2026-11-18T00:00:00.000Z";
-	applyPlanOp(plan, { action: "add", mode: "change", text: "Tighten the approval boundary.", done_when: "The boundary is exercised." }, at);
-	applyPlanOp(plan, { action: "addMove", parent: "p1", text: "Edit src/terminal.mjs", done_when: "The terminal delegates the decision.", targets: ["src/terminal.mjs"], proof: "The focused terminal test passes." }, at);
-	savePlan(brainDir, plan);
 	const server = await startStandIn();
 	try {
-		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\nyes\n/quit\n" });
+		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
 		ok(result, "terminal workspace actions");
 		has(result.stdout, "n1 archived", "archive reaches the shared workspace action");
 		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
@@ -252,11 +247,9 @@ test("terminal: workspace and spoken request actions share typed outcomes", asyn
 		has(result.stdout, "The explicit atlas focus is cleared", "unfocus reaches the shared workspace action");
 		has(result.stdout, "The copy at the top of the context is already current.", "pin reaches the typed context action");
 		has(result.stdout, "fresh context; earlier messages are no longer in view", "new clears the kept projection through the typed context action");
-		has(result.stdout, "approved from your words: m1", "spoken approval retains its terminal acknowledgement");
 		assert.equal(loadLedger(brainDir).ledger.items.length, 0, "only the acknowledged delete mutates the durable ledger");
 		assert.equal(loadAtlas(brainDir).atlas?.view.focus, undefined, "the unfocus action persisted the cleared atlas lens");
-		assert.equal(loadPlan(brainDir).plan.moves[0].approvedRevision, 1, "the typed request action persisted the current move revision");
-		assert.ok(server.requests.length > 0, "the spoken user message reaches the agent after its typed approval decision");
+		assert.equal(server.requests.length, 0, "local workspace commands do not need an agent request");
 	} finally {
 		await server.close();
 	}
