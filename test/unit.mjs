@@ -9,6 +9,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
+import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
+import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
 import { applyOp, loadLedger, saveLedger } from "../src/ledger.mjs";
 import { applyPlanOp, approve, findMove, liveMove, loadPlan, mayRun, PlanError, reportMove, savePlan, startMove, undoMove } from "../src/plan.mjs";
 import { activeMoveOverlays, applyAtlasOp, attentionSnapshot, fileMarks, loadAtlas, observeAtlas, renderAttention, saveAtlas } from "../src/atlas.mjs";
@@ -237,6 +239,70 @@ test("context window: a reported capacity is the whole active context without a 
 		configuredContextWindow: 100_000,
 		usableContextWindow: 100_000,
 	}, "without server metadata, the configured cap remains in force");
+});
+
+test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const app = createWorkspaceApplication({ brainDir, root, now: () => Date.parse(NOW) });
+	const invalid = await app.execute(WORKSPACE_ACTION.add, { book: "unknown", text: "{}" }, { requestId: "invalid-add" });
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("an invalid book must not add a row");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(invalid.error.kind, UI_ERROR_KIND.validation);
+	assert.equal(invalid.error.field, "book");
+	assert.equal(invalid.meta.requestId, "invalid-add");
+	assert.equal(invalid.meta.at, NOW);
+
+	const added = await app.execute(WORKSPACE_ACTION.add, {
+		book: "ledger",
+		text: JSON.stringify({ kind: "note", text: "Move UI actions behind the application boundary", salient: false, done_when: "" }),
+	});
+	assert.equal(added.ok, true);
+	if (!added.ok) throw new Error(added.error.message);
+	assert.equal(added.data.action, WORKSPACE_ACTION.add);
+	assert.equal(added.notices[0].level, "success");
+	const entry = loadLedger(brainDir).ledger.items[0];
+	assert.ok(entry, "the successful result comes from the same durable row operation the terminal already uses");
+	const cannotFold = await app.execute(WORKSPACE_ACTION.fold, { id: entry.id });
+	assert.equal(cannotFold.ok, false);
+	if (cannotFold.ok) throw new Error("a ledger entry cannot be folded as a report");
+	assert.equal(cannotFold.error.code, UI_ERROR_CODE.actionRefused);
+	assert.equal(cannotFold.error.kind, UI_ERROR_KIND.validation);
+
+	const cancelledController = new AbortController();
+	cancelledController.abort();
+	const cancelled = await app.execute(WORKSPACE_ACTION.archive, { id: entry.id }, { signal: cancelledController.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("an aborted action must not run");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(loadLedger(brainDir).ledger.items[0].archived, undefined, "cancellation occurs before the legacy mutation seam");
+
+	const missing = await app.execute(WORKSPACE_ACTION.archive, { id: "g999" });
+	assert.equal(missing.ok, false);
+	if (missing.ok) throw new Error("a missing row must be a typed failure");
+	assert.equal(missing.error.code, UI_ERROR_CODE.notFound);
+	assert.equal(missing.error.kind, UI_ERROR_KIND.notFound);
+
+	const asked = await app.execute(WORKSPACE_ACTION.delete, { id: entry.id });
+	assert.equal(asked.ok, false);
+	if (asked.ok) throw new Error("delete needs confirmation");
+	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.deepEqual(asked.confirmation, {
+		actionId: WORKSPACE_ACTION.delete,
+		target: entry.id,
+		summary: `Delete ${entry.id} permanently. This cannot be undone.`,
+		strength: "acknowledge",
+	});
+	assert.ok(loadLedger(brainDir).ledger.items.some((item) => item.id === entry.id), "a confirmation request does not mutate durable state");
+
+	const deleted = await app.execute(WORKSPACE_ACTION.delete, { id: entry.id }, {
+		confirmation: { actionId: WORKSPACE_ACTION.delete, target: entry.id, acknowledged: true },
+	});
+	assert.equal(deleted.ok, true);
+	assert.equal(loadLedger(brainDir).ledger.items.some((item) => item.id === entry.id), false);
+	const deleteCapability = app.capabilities.list().find((capability) => capability.id === WORKSPACE_ACTION.delete);
+	assert.deepEqual(deleteCapability?.availability, { enabled: true });
+	assert.equal(deleteCapability?.confirmation, "acknowledge");
 });
 
 test("model listing: llama-swap context_length wins over legacy metadata", () => {

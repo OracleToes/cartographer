@@ -31,7 +31,8 @@ import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerm
 import { contextPath, loadContext, removeTalkSource, reviseTalkSource, shelveForUser } from "../context.mjs";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
-import { addTemplate, applyAdd, archiveRow, dropRow, editRow, foldRow, settleRow, unarchiveRow, unshelveRow } from "../ops.mjs";
+import { addTemplate, applyAdd, editRow } from "../ops.mjs";
+import { WORKSPACE_ACTION, createWorkspaceApplication } from "../application/workspace.mjs";
 import { assessmentPath } from "../assessment.mjs";
 import { atlasPath, loadAtlas } from "../atlas.mjs";
 import { loadLedger, open as openEntries } from "../ledger.mjs";
@@ -549,6 +550,9 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.plan": planPath(brainDir),
 		})[id];
 	const env = { root, brainDir, session, started };
+	// Row mutations enter the application boundary here. The direct editor forms remain a later migration because
+	// Box currently needs a synchronous save decision; keyboard row actions already consume typed results.
+	const workspace = createWorkspaceApplication({ brainDir, root });
 	/** Each view: its list, the part that draws it, and the scroll view the part stands in. */
 	const pages = new Map();
 	const pageOf = (id = viewId()) => pages.get(id);
@@ -617,6 +621,17 @@ export async function runScreen(session, options, runTerminal) {
 		const before = page.list.version;
 		rebuild(id);
 		if (page.list.version !== before) draw();
+	};
+
+	/** Run a row action through the typed application boundary, then redraw its projection after it settles. */
+	const runWorkspaceAction = (action, input, options_ = {}) => {
+		void workspace.execute(action, input, options_)
+			.then((result) => {
+				flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "));
+				if (result.ok) brain.at = 0;
+				refresh(viewId(), true);
+			})
+			.catch((error) => flash(`could not complete that workspace action: ${error?.message ?? error}`));
 	};
 
 	// ─── Copying ─────────────────────────────────────────────────────────────
@@ -1234,17 +1249,8 @@ export async function runScreen(session, options, runTerminal) {
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
 			const deletable = rowKey !== undefined && /^(?:report|entry|item|envelope|move|node|request):/.test(rowKey);
-			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) {
-				const said = foldRow(brainDir, bookId);
-				flash(said.replace(/\n+/g, " "));
-				refresh(viewId(), true);
-				return;
-			}
-			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
-				flash(item.archived === true ? unarchiveRow(brainDir, bookId) : archiveRow(brainDir, bookId));
-				refresh(viewId(), true);
-				return;
-			}
+			if (key === "f" && rowKey !== undefined && rowKey.startsWith("report:")) return void runWorkspaceAction(WORKSPACE_ACTION.fold, { id: bookId });
+			if (key === "v" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void runWorkspaceAction(item.archived === true ? WORKSPACE_ACTION.unarchive : WORKSPACE_ACTION.archive, { id: bookId });
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) {
 				const move = rowKey.startsWith("move:") ? loadPlan(brainDir).plan?.moves.find((entry) => entry.id === bookId) : undefined;
 				if (move?.status === POLICY.enums.moveStatus.reported) {
@@ -1253,27 +1259,17 @@ export async function runScreen(session, options, runTerminal) {
 					flash(`Write why ${bookId}'s reported proof witnesses its done-when, then press Enter.`);
 					return;
 				}
-				flash(settleRow(brainDir, bookId, root));
-				refresh(viewId(), true);
-				return;
+				return void runWorkspaceAction(WORKSPACE_ACTION.settle, { id: bookId });
 			}
-			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) {
-				try {
-					flash(unshelveRow(brainDir, bookId));
-				} catch (error) {
-					flash(error.message);
-				}
-				refresh(viewId(), true);
-				return;
-			}
+			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
 			// Deleting is for good, so it asks twice: the first d arms it, the second, soon after, carries it out.
 			// A request is not deleted but forgotten: the agent is told nothing of it, and so forgets it had asked.
 			if (key === "d" && deletable) {
 				if (state.deleteArm?.id === rowKey && Date.now() - state.deleteArm.at < POLICY.timing.screen.deleteConfirmMs) {
 					state.deleteArm = undefined;
-					flash(dropRow(brainDir, bookId));
-					refresh(viewId(), true);
-					return;
+					return void runWorkspaceAction(WORKSPACE_ACTION.delete, { id: bookId }, {
+						confirmation: { actionId: WORKSPACE_ACTION.delete, target: bookId, acknowledged: true },
+					});
 				}
 				state.deleteArm = { id: rowKey, at: Date.now() };
 				flash(viewId() === "carto.requests" ? `Press d again: ${bookId} is forgotten` : `Press d again: ${bookId} goes for good`);
