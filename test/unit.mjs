@@ -10,6 +10,8 @@ import assert from "node:assert/strict";
 
 import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
+import { createApplicationEvents } from "../src/application/events.mjs";
+import { createJobManager } from "../src/application/jobs.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
@@ -241,6 +243,59 @@ test("context window: a reported capacity is the whole active context without a 
 		configuredContextWindow: 100_000,
 		usableContextWindow: 100_000,
 	}, "without server metadata, the configured cap remains in force");
+});
+
+test("application: events and jobs publish isolated, typed asynchronous lifecycle facts", async () => {
+	let clock = Date.parse(NOW);
+	const events = createApplicationEvents({ now: () => clock, nextId: (() => { let id = 0; return () => ++id; })() });
+	const seen = [];
+	const off = events.subscribe((event) => seen.push(event));
+	events.subscribe(() => { throw new Error("a stale presentation listener"); });
+	const published = events.publish("projection.invalidated", { scope: "workspace" });
+	assert.equal(published.type, "projection.invalidated");
+	assert.equal(published.at, NOW);
+	assert.deepEqual(published.payload, { scope: "workspace" });
+	assert.deepEqual(seen.map((event) => event.type), ["projection.invalidated"], "one listener cannot stop another from seeing a durable application fact");
+	off();
+
+	const jobs = createJobManager({ events, now: () => clock, nextId: (() => { let id = 0; return () => `test-${++id}`; })() });
+	const succeeded = jobs.start({
+		kind: "projection.refresh",
+		meta: { requestId: "refresh-1" },
+		run: async ({ reportProgress }) => {
+			reportProgress({ current: 1, total: 2, message: "Reading the workspace." });
+			clock += 1_000;
+			return { rows: 2 };
+		},
+	});
+	assert.equal(succeeded.snapshot().state, "queued", "job work is deferred out of the caller's render/key stack");
+	const completed = await succeeded.promise;
+	assert.equal(completed.ok, true);
+	if (!completed.ok) throw new Error(completed.error.message);
+	assert.deepEqual(completed.data, { rows: 2 });
+	assert.equal(completed.meta.jobId, "test-1");
+	assert.equal(jobs.get("test-1")?.state, "succeeded");
+	assert.deepEqual(jobs.get("test-1")?.progress, { current: 1, total: 2, message: "Reading the workspace." });
+	assert.ok(seen.some((event) => event.type === "job.progress"));
+	assert.ok(seen.some((event) => event.type === "job.succeeded"));
+
+	let began;
+	const beganPromise = new Promise((resolve) => { began = resolve; });
+	const cancelled = jobs.start({
+		kind: "editor.wait",
+		run: ({ signal }) => new Promise((resolve) => {
+			began();
+			signal.addEventListener("abort", () => resolve("too late"), { once: true });
+		}),
+	});
+	await beganPromise;
+	assert.equal(cancelled.cancel(), true);
+	const stopped = await cancelled.promise;
+	assert.equal(stopped.ok, false);
+	if (stopped.ok) throw new Error("a cancelled job must be typed as cancelled");
+	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(jobs.get(cancelled.id)?.state, "cancelled");
+	assert.equal(cancelled.cancel(), false, "settled jobs cannot be cancelled again");
 });
 
 test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {
