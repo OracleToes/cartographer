@@ -2430,6 +2430,20 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
+	const registeredActions = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION].flatMap((actions) => Object.values(actions));
+	assert.equal(registeredActions.length, 30, "the composed application has the complete phase-six action surface");
+	assert.equal(new Set(registeredActions).size, registeredActions.length, "every declared action id is unique");
+	const registeredCapabilities = app.capabilities.list().map((capability) => capability.id);
+	assert.equal(registeredCapabilities.length, registeredActions.length, "every action has one capability presentation");
+	assert.deepEqual([...registeredCapabilities].sort(), [...registeredActions].sort(), "the composed capability registry covers every action owner");
+	for (const action of registeredActions) {
+		const controller = new AbortController();
+		controller.abort();
+		const stopped = await app.execute(action, {}, { signal: controller.signal });
+		assert.equal(stopped.ok, false, `${action} declines a cancelled dispatch before it reaches a durable or runtime owner`);
+		if (stopped.ok) throw new Error(`${action} must not run after cancellation`);
+		assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled, `${action} has a composed owner rather than falling through as an unknown action`);
+	}
 	const unknown = await app.execute("workspace.unknown", {});
 	assert.equal(unknown.ok, false);
 	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");
