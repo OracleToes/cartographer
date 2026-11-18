@@ -154,7 +154,7 @@ The implementation is present in:
   focus/archive/restore operations, and active-move overlays;
 - `src/harness.mjs` — batches successful factual tool results before one durable
   `observeAtlas()` call;
-- `src/state.mjs`, `src/terminal.mjs`, and `src/screen/views.mjs` — shared snapshot and
+- `src/state.mjs`, `src/terminal.mjs`, and `src/screen/workspace.mjs` — shared snapshot and
   renderer consumers; and
 - `src/config.mjs` — bounded Atlas-attention policy values.
 

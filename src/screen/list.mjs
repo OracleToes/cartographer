@@ -3,7 +3,7 @@
 // A tab is a few lines at its top that are only read (a summary, the bar of the context), then items. An item is
 // one line, and it may hold more: a body of text that shows when the item is opened, or, for a folder, the items
 // below it. One item is selected; the keys move the selection, open and fold, and act on what is selected (open
-// it in the editor, copy it). Nothing here knows what the items are: src/screen/views.mjs builds them, and is
+// it in the editor, copy it). Nothing here knows what the items are: the feature renderers build them, and are
 // asked again whenever what is open changes, because for a folder that decides which items there are. Nor does
 // it scroll: it gives all its rows, and the screen shows the ones in view (src/screen/parts.mjs).
 //

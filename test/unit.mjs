@@ -84,7 +84,7 @@ import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
-import { shellsOutView, shellsView } from "../src/screen/runtime.mjs";
+import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView } from "../src/screen/runtime.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -723,6 +723,86 @@ test("screen: Runtime shell views render settled projections through their appli
 	const outputStale = renderAsyncBoundary({ id: "shells.out", name: "Shell output", projection: { data: { window, lines: window.tail }, loading: true }, render: renderOutput });
 	assert.equal(outputRendered, 3, "cached Shell output remains renderable while its replacement is in flight");
 	assert.match(outputStale.header[0][0][0], /showing cached data/);
+});
+
+test("screen: Runtime sent, audit, preview, and accounting views render settled projections through their application presentation adapter", () => {
+	const presentation = createRuntimePresentation();
+	const sent = {
+		task: false,
+		requestId: "main:1",
+		payload: { messages: [{ role: "system", content: "You are Cartographer." }], tools: [] },
+		results: new Map(),
+		at: Date.parse(NOW),
+		count: 1,
+		collapsedSince: false,
+	};
+	const accounting = { messages: [], sizes: { fixed: 120, top: 24, work: 8, frees: 4, state: 12, full: 900 }, contextWindow: 1_000 };
+	const cases = [
+		{
+			id: "context.window",
+			name: "Latest sent provider request",
+			withoutPresentation: () => contextView({ sent, windowSize: 1_000, cols: 80 }),
+			render: (data) => contextView({ sent: data.sent, windowSize: 1_000, cols: 80, presentation: presentation.sent }),
+			empty: { sent: undefined },
+			data: { sent },
+			emptyText: "Nothing has been sent to a provider",
+			settledText: "Sent provider request",
+		},
+		{
+			id: "context.raw",
+			name: "Raw provider payload",
+			withoutPresentation: () => rawPayloadView({ sent }),
+			render: (data) => rawPayloadView({ sent: data.sent, presentation: presentation.sent }),
+			empty: { sent: undefined },
+			data: { sent: { ...sent, payloadJson: "{}" } },
+			emptyText: "Nothing has been sent to a provider",
+			settledText: "Raw provider payload",
+		},
+		{
+			id: "context.preview",
+			name: "Next request preview",
+			withoutPresentation: () => previewView({ preview: { plan: { parts: [] } } }),
+			render: (data) => previewView({ preview: data.preview, presentation: presentation.preview }),
+			empty: { preview: {} },
+			data: { preview: { at: Date.parse(NOW), plan: { parts: [] } } },
+			emptyText: "No main-agent request can be planned now",
+			settledText: "Next request preview",
+		},
+		{
+			id: "context.parts",
+			name: "Current active-context accounting",
+			withoutPresentation: () => accountingProjectionView({ accounting, config: {} }),
+			render: (data) => accountingProjectionView({ accounting: data, config: {}, presentation: presentation.accounting }),
+			empty: { messages: [], sizes: {}, contextWindow: 1_000 },
+			data: accounting,
+			emptyText: "not measured yet",
+			settledText: "fixed",
+		},
+	];
+	for (const current of cases) {
+		let rendered = 0;
+		const render = (data) => {
+			rendered++;
+			return current.render(data);
+		};
+		assert.throws(current.withoutPresentation, /presentation adapter/, `${current.name} cannot fall back to direct Runtime formatting`);
+		const loading = renderAsyncBoundary({ id: current.id, name: current.name, projection: { loading: true }, render });
+		assert.equal(rendered, 0, `${current.name} is not asked to invent data while its projection is loading`);
+		assert.match(loading.header[0][0][0], /is loading/, `${current.name} has a named Runtime loading state`);
+		const failed = renderAsyncBoundary({ id: current.id, name: current.name, projection: { error: { message: "The Runtime projection is unavailable." } }, render });
+		assert.equal(rendered, 0, `${current.name} leaves query errors outside its feature renderer`);
+		assert.match(failed.items[0].head[0][0], /could not be loaded/, `${current.name} retains the shared retry affordance`);
+		const empty = renderAsyncBoundary({ id: current.id, name: current.name, projection: { data: current.empty }, render });
+		assert.equal(rendered, 1, `${current.name} receives settled successful-empty data`);
+		assert.match(JSON.stringify(empty), new RegExp(current.emptyText), `${current.name} owns its successful empty state`);
+		const settled = renderAsyncBoundary({ id: current.id, name: current.name, projection: { data: current.data }, render });
+		assert.equal(rendered, 2, `${current.name} renders its settled Runtime projection through the adapter`);
+		assert.match(JSON.stringify(settled), new RegExp(current.settledText));
+		assert.equal(settled.items.every((item) => item.editKind === undefined), true, `${current.name} stays read-only and has no mutation confirmation path`);
+		const stale = renderAsyncBoundary({ id: current.id, name: current.name, projection: { data: current.data, loading: true }, render });
+		assert.equal(rendered, 3, `${current.name} keeps cached data renderable while its replacement is in flight`);
+		assert.match(stale.header[0][0][0], /showing cached data/, `${current.name} exposes its cached-stale state`);
+	}
 });
 
 test("screen: notices retain a bounded history while only their current live status occupies the persistent footer", () => {
@@ -1693,8 +1773,7 @@ test("application: active-context accounting is a deferred typed runtime project
 	if (cancelled.ok) throw new Error("a cancelled runtime projection must not ask the session for accounting");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
 	assert.equal(reads, 1);
-	const { accountingProjectionView } = await import("../src/screen/views.mjs");
-	const view = accountingProjectionView(result.data, { config: { chatWindow: 200, collapseTokens: 400, collapseMinutes: 0 } });
+	const view = accountingProjectionView({ accounting: result.data, config: { chatWindow: 200, collapseTokens: 400, collapseMinutes: 0 }, presentation: createRuntimePresentation().accounting });
 	const shown = [...view.header, ...view.items.map((item) => item.head)].flat().flat().map((part) => Array.isArray(part) ? part[0] : part).join("\n");
 	assert.match(shown, /Current active-context accounting/);
 	assert.match(view.items.map((item) => item.head.map(([text]) => text).join("")).join("\n"), /fixed/, "the screen renders structured runtime data rather than terminal command text");
@@ -1834,13 +1913,12 @@ test("application: runtime view, status, activity, and model projections defer s
 	assert.equal(wakeFailure.error.kind, UI_ERROR_KIND.internal);
 	assert.equal(wakeFailure.error.retryable, true);
 	assert.match(wakeFailure.error.message, /wake schedule/i);
-	const { contextView, previewView, rawPayloadView } = await import("../src/screen/views.mjs");
-	const shellPresentation = createRuntimePresentation().shells;
-	assert.match(shellsView({ ...shells.data, presentation: shellPresentation }).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
-	assert.match(shellsOutView({ ...output.data, presentation: shellPresentation }).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
-	assert.match(contextView(current.data.sent, { windowSize: 1_000, cols: 80 }).header[0][0][0], /Sent provider request/, "the sent-request renderer consumes its typed engine snapshot");
-	assert.match(rawPayloadView(current.data.sent).header[0][0][0], /Raw provider payload/, "the raw audit renderer reuses that same projection");
-	assert.match(previewView(planned.data.preview).header[0][0][0], /Next request preview/, "the preview renderer receives prepared runtime data");
+	const runtimePresentation = createRuntimePresentation();
+	assert.match(shellsView({ ...shells.data, presentation: runtimePresentation.shells }).header[0][0][0], /1 shell window/, "the list renderer consumes its typed shell snapshot");
+	assert.match(shellsOutView({ ...output.data, presentation: runtimePresentation.shells }).items[0].head.map(([text]) => text).join("\n"), /TAP version 13/, "the output renderer consumes prepared lines, not a process manager");
+	assert.match(contextView({ sent: current.data.sent, windowSize: 1_000, cols: 80, presentation: runtimePresentation.sent }).header[0][0][0], /Sent provider request/, "the sent-request renderer consumes its typed engine snapshot");
+	assert.match(rawPayloadView({ sent: current.data.sent, presentation: runtimePresentation.sent }).header[0][0][0], /Raw provider payload/, "the raw audit renderer reuses that same projection");
+	assert.match(previewView({ preview: planned.data.preview, presentation: runtimePresentation.preview }).header[0][0][0], /Next request preview/, "the preview renderer receives prepared runtime data");
 	const stoppedActivity = new AbortController();
 	stoppedActivity.abort();
 	const cancelledActivity = await queries.runtime.activity({ signal: stoppedActivity.signal });

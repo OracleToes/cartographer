@@ -17,7 +17,8 @@
 // whatever way the terminal speaks (the Kitty keyboard protocol where there is one), lays the parts out, scrolls
 // them, lets text be selected with the mouse and copies it, lays sheets over the screen, and writes only the rows
 // that changed. What is Cartographer's own is in the other files of this folder: what the tabs hold (chat.mjs,
-// list.mjs, views.mjs), how it is coloured (theme.mjs), and how the two are fitted to the screen (parts.mjs).
+// workspace.mjs, review.mjs, runtime.mjs, list.mjs), how it is coloured (theme.mjs), and how the two are fitted to
+// the screen (parts.mjs).
 //
 // And it is a face, not a second program. The session is run by the plain terminal (src/terminal.mjs), which is
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
@@ -59,9 +60,9 @@ import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, S
 import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
 import { TOKEN } from "./tokens.mjs";
-import { accountingProjectionView, contextView, editorCommand, previewView, rawPayloadView } from "./views.mjs";
+import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
-import { shellsOutView, shellsView } from "./runtime.mjs";
+import { accountingProjectionView, contextView, previewView, rawPayloadView, shellsOutView, shellsView } from "./runtime.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -756,11 +757,11 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "shells.out") return projectionView(id, (data) => shellsOutView({ ...data, presentation: runtimePresentation.shells }));
 		if (id === "context.window" || id === "context.main") return projectionView(id, (data) => {
 			const sent = data.sent;
-			return contextView(sent, { windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen });
+			return contextView({ sent, windowSize: options.config?.contextWindow ?? options.contextWindow, cols, writing: sent === undefined || sent.reply !== undefined ? undefined : chat.liveMessage(sent.task ? 1 : 0), isOpen, presentation: runtimePresentation.sent });
 		});
-		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView(data.sent));
-		if (id === "context.preview") return projectionView(id, (data) => previewView(data.preview));
-		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView(data, { config }));
+		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView({ sent: data.sent, presentation: runtimePresentation.sent }));
+		if (id === "context.preview") return projectionView(id, (data) => previewView({ preview: data.preview, presentation: runtimePresentation.preview }));
+		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView({ accounting: data, config, presentation: runtimePresentation.accounting }));
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {

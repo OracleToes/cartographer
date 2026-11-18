@@ -39,6 +39,7 @@ import { USER_NAME } from "../src/user.mjs";
 import { POLICY } from "../src/config.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createChatPresentation } from "../src/application/chat.mjs";
+import { createRuntimePresentation } from "../src/application/runtime-presentation.mjs";
 import { createChat as createChatModel, homeOf } from "../src/screen/chat.mjs";
 import { collectStageCandidate, createStage, disposeStage } from "../src/stage.mjs";
 import { loadConference } from "../src/conference.mjs";
@@ -59,6 +60,7 @@ const createChat = (options = {}) => {
 	const { presentation, describeRef, ...rest } = options;
 	return createChatModel({ ...rest, presentation: presentation ?? createChatPresentation({ describeRef }) });
 };
+const runtimePresentation = createRuntimePresentation();
 /** Write the project's config by hand (tests use it to switch features off). */
 const configure = (root, config) => {
 	mkdirSync(join(root, ".brain"), { recursive: true });
@@ -2437,7 +2439,7 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 });
 
 test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
-	const { contextBar, contextView, rawPayloadView } = await import("../src/screen/views.mjs");
+	const { contextView, rawPayloadView } = await import("../src/screen/runtime.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
 		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
@@ -2451,15 +2453,15 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	const reply = { role: "assistant", content: [{ type: "thinking", thinking: "Say it." }, { type: "toolCall", id: "c2", name: "chat", arguments: { text: "It is in src/config.js." } }] };
 	const payloadJson = JSON.stringify(payload);
 	const sent = { task: false, requestId: "main:7", payload, payloadJson, payloadHash: "a1b2c3d4e5f60708", model: { provider: "local", api: "openai-completions", id: "qwen" }, reply, results: new Map([["c2", "Shown to the user."]]), at: Date.now() - 5000, count: 7, usage: { input: 6000, cacheRead: 100, output: 500 }, used: 6100, collapsedSince: false };
-	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
+	const view = contextView({ sent, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent });
 	const titles = view.items.map((item) => (item.plain ? item.head[0][0] : item.head[2][0].trim()));
 	assert.deepEqual(titles, ["System prompt", "Tools · 1: read", "Assessment and graph, as copied at the last collapse", "What the last collapse kept", "Chat · You", "Chat · Agent · note and call: task", "Result of task", "State block: the time, the tree, the ledger, the plan", "Windows block: the shell windows as they are", "── since main:7: response material, not sent ──", "Response received · call: chat", "Result after chat"], "the semantic sent request stays in provider order, then the explicit not-sent response boundary");
 	assert.deepEqual(view.items.slice(0, 2).map((item) => item.head.map(([part]) => part).join("")), ["■     6  System prompt  You are Cartographer.", "■    38  Tools · 1: read  "], "each semantic part is one line: its colour, its size, what it is, how it begins");
 	assert.equal(view.items.some((item) => item.key === "payload"), false, "the serialized audit copy is not rendered as a first context part");
-	const raw = rawPayloadView(sent);
+	const raw = rawPayloadView({ sent, presentation: runtimePresentation.sent });
 	assert.equal(raw.items[0].body, payloadJson, "the raw frozen provider body remains available without reconstructing it");
 	assert.match(raw.header.map((line) => line.map(([part]) => part).join(" ")).join("\n"), /not another model-context part/, "the raw view makes clear that its duplicate JSON is not a second prompt");
-	has(rawPayloadView({ ...sent, payloadJson: undefined }).items[0].head[0][0], "This sent request has no retained raw provider JSON", "the audit view does not manufacture a serialized body from the semantic snapshot");
+	has(rawPayloadView({ sent: { ...sent, payloadJson: undefined }, presentation: runtimePresentation.sent }).items[0].head[0][0], "This sent request has no retained raw provider JSON", "the audit view does not manufacture a serialized body from the semantic snapshot");
 	assert.equal(view.items.every((item) => item.editKind === undefined), true, "sent payload and since-send response rows have no edit route");
 	const byKey = (title) => view.items.find((item) => !item.plain && item.head[2][0].trim().startsWith(title));
 	assert.equal(byKey("System prompt").body, "You are Cartographer.", "opened, a part is its text exactly");
@@ -2486,28 +2488,31 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	assert.ok(resultCells >= 9 && resultCells <= 11, `a part takes as much of the bar as of the window: ${resultCells} of 40 cells for about 5k of 20k tokens`);
 	has(top.join("\n"), "■ Tool results ", "what each colour is");
 	has(top.join("\n"), "□ Free ", "and how much is free");
-	assert.deepEqual(contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
+	assert.deepEqual(runtimePresentation.sent.contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
 
-	const task = contextView({ ...sent, task: true, reply: undefined, results: new Map() }, { windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] } });
+	const task = contextView({ sent: { ...sent, task: true, reply: undefined, results: new Map() }, windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] }, presentation: runtimePresentation.sent });
 	has(task.header[0][0][0], "Sent provider request", "while a task runs, the frozen request stays labelled as sent");
 	has(task.header[0].map(([part]) => part).join(""), "focus", "and names the focus rather than calling it main");
 	const writing = task.items.at(-1);
 	assert.deepEqual([writing.head.map(([part]) => part).join("").includes("Response, as it is being written"), writing.body], [true, "Half a tho"], "and unfinished response material is explicitly not sent");
-	has(contextView({ ...sent, collapsedSince: true }, { windowSize: 20_000, cols: 40 }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
-	has(contextView(undefined, { windowSize: 20_000, cols: 40 }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
-	has(rawPayloadView(undefined).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "and the audit view does not invent raw JSON before a request exists");
+	has(contextView({ sent: { ...sent, collapsedSince: true }, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent }).header.map((line) => line.map(([part]) => part).join("")).join("\n"), "A collapse happened after this request was sent", "a later collapse is said without changing the snapshot");
+	has(contextView({ sent: undefined, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "before the first request there is no payload to show");
+	has(rawPayloadView({ sent: undefined, presentation: runtimePresentation.sent }).items[0].head[0][0], "Nothing has been sent to a provider in this run of carto yet", "and the audit view does not invent raw JSON before a request exists");
 });
 
 test("screen: the Next preview is explicit that its request plan was not sent", async () => {
-	const { accountingView, previewView } = await import("../src/screen/views.mjs");
+	const { accountingView, previewView } = await import("../src/screen/runtime.mjs");
 	const view = previewView({
-		at: Date.parse("2026-11-16T14:05:00.000Z"),
-		plan: {
-			parts: [
-				{ id: "part:1:message:0", kind: "active-message", source: "durable:main:u1:0", sourceRef: { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
-				{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
-			],
+		preview: {
+			at: Date.parse("2026-11-16T14:05:00.000Z"),
+			plan: {
+				parts: [
+					{ id: "part:1:message:0", kind: "active-message", source: "durable:main:u1:0", sourceRef: { kind: "durable-message", conversationId: "main", entryId: "u1", position: 0 }, lifecycle: "planned", role: "user", fragment: { role: "user", content: [{ type: "text", text: "Please inspect the parser." }] } },
+					{ id: "part:1:state", kind: "generated-state", source: "harness:state", lifecycle: "planned", fragment: "<state>\ncurrent state\n</state>" },
+				],
+			},
 		},
+		presentation: runtimePresentation.preview,
 	});
 	const header = view.header.map((line) => line.map(([part]) => part).join(" ")).join("\n");
 	assert.match(header, /Next request preview · not sent/, "the prospective boundary is in the title");
@@ -2544,7 +2549,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 });
 
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
-	const { contextView } = await import("../src/screen/views.mjs");
+	const { contextView } = await import("../src/screen/runtime.mjs");
 	// Exactly what dressRequest produces after a read batch: the blocks are glued to the result, and the current batch stands at the very end.
 	const payload = {
 		messages: [
@@ -2553,7 +2558,7 @@ test("screen: a windows block followed by an ephemeral read batch tail is still 
 		],
 	};
 	const sent = { task: false, payload, reply: undefined, results: new Map(), at: Date.now(), count: 1, used: undefined, collapsedSince: false };
-	const view = contextView(sent, { windowSize: 20_000, cols: 40 });
+	const view = contextView({ sent, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent });
 	const keys = view.items.map((item) => String(item.key ?? ""));
 	const byKey = (key) => view.items.find((item) => item.key === key);
 	assert.ok(keys.some((key) => key.endsWith(".windows")), "the windows block stands as its own part even with the read tail after it");
@@ -2564,13 +2569,13 @@ test("screen: a windows block followed by an ephemeral read batch tail is still 
 	hasNot(byKey("m0.0.result").body, "<read-tail>", "the original result does not duplicate the tail");
 	// A request with no state block at all: a loud, visible marker, not silence.
 	const bare = { ...sent, payload: { messages: [{ role: "system", content: "You are Cartographer." }, { role: "tool", tool_call_id: "c1", content: "== a.js" }] } };
-	const bareView = contextView(bare, { windowSize: 20_000, cols: 40 });
+	const bareView = contextView({ sent: bare, windowSize: 20_000, cols: 40, presentation: runtimePresentation.sent });
 	assert.ok(bareView.items.some((item) => item.key === "state:missing"), "the absence of the state block is said out loud");
 	has(bareView.items.find((item) => item.key === "state:missing").head.map(([part]) => part).join(""), "No state block in this sent request", "and the marker tells the user what this payload did not carry");
 });
 
 test("screen: a sent collapse block stays frozen when the current brain changes", async () => {
-	const { contextView } = await import("../src/screen/views.mjs");
+	const { contextView } = await import("../src/screen/runtime.mjs");
 	const { writeFront, noteChat, updateContext } = await import("../src/context.mjs");
 	const root = mkdtempSync(join(tmpdir(), "carto-snapshot-"));
 	const brainDir = join(root, ".brain");
@@ -2584,7 +2589,7 @@ test("screen: a sent collapse block stays frozen when the current brain changes"
 		// These are later current-brain changes. A historical sent request must not gain either one.
 		noteChat(brainDir, "user", at(15, 0), "words added after send");
 		updateContext(brainDir, (store) => { store.front.text = "replaced current front"; });
-		const view = contextView(sent, { windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept" });
+		const view = contextView({ sent, windowSize: 100_000, cols: 80, isOpen: (key) => key === "kept", presentation: runtimePresentation.sent });
 		const kept = view.items.find((item) => item.head?.[2]?.[0]?.includes("What the last collapse kept"));
 		assert.ok(kept, "the sent collapse block remains one frozen payload part");
 		assert.match(kept.body, /words at collapse/, "it shows the bytes that were sent");

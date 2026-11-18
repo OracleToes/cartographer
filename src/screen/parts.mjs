@@ -2,8 +2,8 @@
 //
 // pi-tui lays the screen out, scrolls it, reads the keys and the mouse, and writes only the rows that changed. A
 // part here is what pi-tui calls a component: it is asked for its lines at a width, and may be told of a click.
-// What the lines say comes from the models (chat.mjs, list.mjs, views.mjs) and how they are coloured from the
-// palette (theme.mjs); a part only fits the two to the screen: the margin, the background of a block, the mark
+// What the lines say comes from the models (chat.mjs, workspace.mjs, review.mjs, runtime.mjs, list.mjs) and how
+// they are coloured from the palette (theme.mjs); a part only fits the two to the screen: the margin, the background of a block, the mark
 // of what is selected.
 //
 // Every row is the margin, the cells between the margins, and the margin again. A row of content has its block's

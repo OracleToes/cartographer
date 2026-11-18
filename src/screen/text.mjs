@@ -52,7 +52,7 @@ const FALLBACK = {
 	bgSel: "7",
 	bgTab: "7",
 	chip: "7",
-	// The parts of a context (src/screen/views.mjs).
+	// The parts of a sent provider request (src/screen/runtime.mjs).
 	catSystem: "33",
 	catTools: "36",
 	catTop: "32",

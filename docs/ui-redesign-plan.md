@@ -1,6 +1,6 @@
 # UI Redesign Architecture and Design-System Plan
 
-**Status:** Phase 5 view migration in progress — Chat, Workspace, and Review are complete; Runtime is next.
+**Status:** Phase 5 view migration in progress — Chat, Workspace, and Review are complete; Runtime is in progress.
 
 **Date:** 2026-11-16
 
@@ -154,7 +154,8 @@ Existing flat domain modules remain in place initially. They are treated as doma
 | Current area | Target responsibility |
 | --- | --- |
 | `src/screen/app.mjs` | Thin composition, route, focus, overlay, and input coordination |
-| `src/screen/views.mjs` | Application query projections plus focused feature renderers |
+| `src/screen/{chat,workspace,review,runtime}.mjs` | Focused consumption-only feature renderers over settled application projections |
+| `src/screen/views.mjs` | Shared non-feature screen helpers during the transition |
 | `src/screen/theme.mjs`, `parts.mjs`, `list.mjs` | Transitional basis for centralized design tokens and components |
 | `src/terminal.mjs` | Presentation adapter over shared application capabilities |
 | `src/ops.mjs` | Basis for application action services |
@@ -441,7 +442,9 @@ Migrate capability groups in this order:
 
 **Review completion record (2026-11-16).** Diff now renders settled checkpoint and Git projections through the Review presentation adapter; its renderer owns no checkpoint/Git read or durable path construction. The shared async boundary owns first-load, failure, and cached-stale states while Diff retains its successful empty states. `review.undo` is a destructive, capability-gated action shared by `/undo` and Diff's `u` control: it previews the current checkpoint, asks for a scoped acknowledgement before files change, warns when a cut-off task returns the project to its earlier checkpoint, and reopens a move revision only after recovery. Diff's recovery control records active shell changes through the typed Review ingress when a window manager is available before it names a recovery.
 
-**Runtime Shells completion record (2026-11-16).** Shell lists and selected output now render settled Runtime projections through a Runtime presentation adapter. The screen composes that adapter and the migrated renderers own no window-manager/domain import or read. The shared async boundary retains first-load, failure, and cached-stale handling; Shells retains its successful empty state. Existing typed shell actions and their confirmation behavior remain unchanged. Context, Wakes, and Model/transport remain in the Runtime migration group.
+**Runtime Shells completion record (2026-11-16).** Shell lists and selected output now render settled Runtime projections through a Runtime presentation adapter. The screen composes that adapter and the migrated renderers own no window-manager/domain import or read. The shared async boundary retains first-load, failure, and cached-stale handling; Shells retains its successful empty state. Existing typed shell actions and their confirmation behavior remain unchanged.
+
+**Runtime Model-surface completion record (2026-11-16).** Latest/Main sent, Raw payload, Next preview, and Current active-context accounting now render settled Runtime projections through the same Runtime presentation adapter. Frozen provider parsing, prospective-plan text, and context-accounting vocabulary stay in that adapter; the screen renderer owns no engine/context/domain import and treats all four surfaces as read-only. The shared async boundary owns first-load, failure, and cached-stale state while each surface retains its successful empty state. Wake and transport/model surfaces remain in the Runtime migration group.
 
 Each migrated view removes direct domain imports and gains loading, empty, error, stale, and confirmation states before the next group begins.
 
