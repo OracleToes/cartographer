@@ -21,7 +21,7 @@ import { createRefDescriber } from "./refs.mjs";
 import { join, relative } from "node:path";
 import { createInterface } from "node:readline";
 import { assessmentPath, loadAssessment } from "./assessment.mjs";
-import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, attentionSummary, fileMarks, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
+import { activeMoveOverlays, atlasSummary, attentionSnapshot, attentionSummary, loadAtlas, renderAttention, renderOutline } from "./atlas.mjs";
 import { changeRecord, changeSummary, CheckpointError, lastChange, undo, windowStep } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, loadContext, loadReport, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
@@ -33,8 +33,8 @@ import { ConsultProbeError, renderLlamaCppSelectorProbe, runLlamaCppSelectorProb
 import { HANDOFF_NOTE } from "./prompt.mjs";
 import { sandboxLine } from "./sandbox.mjs";
 import { loadLedger, open, openCounts, renderLedger } from "./ledger.mjs";
-import { awaitsApproval, loadPlan, planPath, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
-import { listRequests, approvalWords } from "./requests.mjs";
+import { awaitsApproval, loadPlan, planSummary, planWaits, renderPlan, runnableMoves, savePlan, undoMove, waiting as waitingItems, YOLO_LINE } from "./plan.mjs";
+import { approvalWords } from "./requests.mjs";
 import { stateBlock, splitState, windowLines } from "./state.mjs";
 import { ago, stamp, took } from "./time.mjs";
 import { loadTop, sinceTop, splitTop } from "./top.mjs";
@@ -211,6 +211,7 @@ export async function runTerminal(session, options) {
 	const streamFreeze = session.streamFreeze ?? createStreamFreeze();
 	const config = options.config ?? {};
 	const application = options.application ?? createApplication({ brainDir: options.brainDir, root: options.root, config });
+	const queries = application.queries;
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -1321,15 +1322,17 @@ export async function runTerminal(session, options) {
 				);
 				return true;
 			case "requests": {
-				const all = listRequests(options.brainDir, { yolo: gate.yolo });
-				if (all.length === 0) line("  Nothing waits for you. /plan, /ledger and /requests show what the agent has written.");
+				const result = await queries.requests({ yolo: gate.yolo });
+				if (!result.ok) line(`! ${result.error.message}`);
 				else {
-					line(`  ${bold("Requests")}  ${plural(all.length, "request")} wait${all.length === 1 ? "s" : ""} for you:`);
-					for (const request of all) {
-						line(`    ${request.id}  [${request.kind}]  ${request.text}`);
-						for (const detail of request.detail ?? []) line(dim(`      ${detail}`));
+					const all = result.data.items;
+					for (const issue of result.data.issues) line(`! ${issue.message}`);
+					if (all.length === 0) line("  Nothing waits for you. /plan, /ledger and /requests show what the agent has written.");
+					else {
+						line(`  ${bold("Requests")}  ${plural(all.length, "request")} wait${all.length === 1 ? "s" : ""} for you:`);
+						for (const request of all) line(`    ${request.id}  [${request.kind}]  ${request.text}`);
+						line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
 					}
-					line(dim("  /approve ID ... approves · /deny ID [why] turns one down · /answer ID words answers a question"));
 				}
 				return true;
 			}
@@ -1431,17 +1434,17 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "ledger": {
-				const { ledger, error } = loadLedger(options.brainDir);
-				if (ledger === undefined) line(`! The ledger cannot be read: ${error}`);
-				else line(renderLedger(ledger, { closed: true }));
-				line(dim(`  ${join(options.brainDir, "carto-ledger.json")} · edit it by hand, or tell the agent what to change`));
+				const result = await queries.ledger();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else line(renderLedger(result.data.ledger, { closed: true }));
+				line(dim(`  ${queries.paths.ledger} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "plan": {
-				const { plan, error } = loadPlan(options.brainDir);
-				if (plan === undefined) line(`! The plan cannot be read: ${error}`);
-				else line(renderPlan(plan, { done: true, yolo: gate.yolo }));
-				line(dim(`  ${planPath(options.brainDir)} · edit it by hand, or tell the agent what to change`));
+				const result = await queries.plan();
+				if (!result.ok) line(`! ${result.error.message}`);
+				else line(renderPlan(result.data.plan, { done: true, yolo: gate.yolo }));
+				line(dim(`  ${queries.paths.plan} · edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "focus": {
@@ -1456,18 +1459,27 @@ export async function runTerminal(session, options) {
 				line(await workspaceLine(WORKSPACE_ACTION.unfocusAtlas));
 				return true;
 			case "atlas": {
-				const { atlas, error } = loadAtlas(options.brainDir);
+				const [result, tree] = await Promise.all([queries.atlas(), queries.tree()]);
+				const atlas = result.ok ? result.data.atlas : undefined;
 				line(bold("Tree"));
-				line(treeSection(options.root, atlas?.view, { marks: atlas ? fileMarks(atlas) : undefined, depth: options.treeDepth }).text);
-				if (atlas === undefined) line(`! The graph cannot be read: ${error}`);
+				if (!tree.ok) line(`! ${tree.error.message}`);
 				else {
+					if (result.ok) for (const issue of tree.data.issues) line(`! ${issue.message}`);
+					line(treeSection(options.root, atlas?.view, {
+						marks: new Map(Object.entries(tree.data.marks)),
+						files: tree.data.files.map((file) => file.path),
+						depth: options.treeDepth,
+					}).text);
+				}
+				if (!result.ok) line(`! ${result.error.message}`);
+				else {
+					for (const issue of result.data.issues) line(`! ${issue.message}`);
 					line(bold(`Graph: ${atlasSummary(atlas)}`));
-					const overlays = activeMoveOverlays(loadPlan(options.brainDir).plan);
-					const local = renderAttention(attentionSnapshot(options.root, atlas, { active: overlays }), { idle: !busy && overlays.length === 0 });
+					const local = renderAttention(result.data.attention, { idle: !busy && result.data.attention.active.length === 0 });
 					if (local !== "") line(local);
 					if (atlas.nodes.length > 0) line(renderOutline(atlas, Number.POSITIVE_INFINITY));
 				}
-				line(dim(`  ${atlasPath(options.brainDir)} · /focus TARGET reason sets a lens; /unfocus clears it; edit it by hand, or tell the agent what to change`));
+				line(dim(`  ${queries.paths.atlas} · /focus TARGET reason sets a lens; /unfocus clears it; edit it by hand, or tell the agent what to change`));
 				return true;
 			}
 			case "assessment": {

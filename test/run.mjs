@@ -1129,6 +1129,8 @@ test("tree: levels, folders with counts, the anchor, the marks of nodes, and a d
 	has(whole, "From the project root, 3 levels deep: 5 files in all.\nsrc/\n  deep/\n    er/  (1 file)\n  main.js\n  math.js\nREADME.md\nlong.txt", "the whole project");
 	hasNot(whole, ".brain", "the brain is not part of the project");
 	has(treeSection(root, { anchor: "src/", depth: 1 }).text, 'From src/ (the anchor I set), 1 level deep: 3 of the project\'s 5 files are under it. `atlas` with a tree operation and anchor "." returns to the project root.\nsrc/\n  deep/  (1 file)\n  main.js\n  math.js', "anchored");
+	const projected = treeSection(join(root, "not-read-again"), { anchor: "src", depth: 1 }, { files: ["README.md", "src/deep/er/leaf.txt", "src/main.js", "src/math.js", "long.txt"] });
+	has(projected.text, "From src/ (the anchor I set), 1 level deep", "a prepared file projection does not synchronously validate the anchor again");
 	const lost = treeSection(root, { anchor: "gone" });
 	has(lost.text, "The anchor was gone, which is no longer a folder with files in it.", "a folder that is gone is said");
 	has(lost.text, "From the project root", "and the tree falls back to the root");
