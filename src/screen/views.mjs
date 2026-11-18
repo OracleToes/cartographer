@@ -12,9 +12,8 @@
 // Response material belongs below a plain `not sent` boundary. Current shared-brain state lives in Carto; a sent
 // snapshot is never rebuilt from it.
 import { POLICY } from "../config.mjs";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { activeMoveOverlays, atlasPath, atlasSummary, attentionSnapshot, fileMarks, loadAtlas, renderAttention } from "../atlas.mjs";
 import { changeSince, changeSummary, lastChange, uncommitted } from "../checkpoints.mjs";
 import { estimate, loadContext, loadReport, recordLine, shelfLabel, shelfText, composedRows, splitReadTail } from "../context.mjs";
@@ -783,15 +782,6 @@ export function editorCommand(editor, file, line) {
 	return `${editor} +${line} ${quote(file)}`;
 }
 
-/** Whether a path names a folder, which an editor is not asked to open. */
-export const isFolder = (path) => {
-	try {
-		return existsSync(path) && statSync(path).isDirectory();
-	} catch {
-		return false;
-	}
-};
-
 // ─── Current shared brain ───────────────────────────────────────────────────
 
 /**
@@ -867,27 +857,6 @@ export function handsView({ root, brainDir, context: provided, error: providedEr
 	return { header, items };
 }
 
-/**
- * Where a tool of the context is defined: cartographer's own source, by its `name: "…"` line. `e` on a tool
- * part of the Model tab opens it there.
- * @returns {{ file: string, line: number } | undefined}
- */
-export function toolSource(name) {
-	const dir = fileURLToPath(new URL("../tools", import.meta.url));
-	try {
-		for (const entry of readdirSync(dir).sort()) {
-			if (!entry.endsWith(".mjs")) continue;
-			const file = join(dir, entry);
-			const text = readFileSync(file, "utf8");
-			const at = text.indexOf(`name: "${name}"`);
-			if (at >= 0) return { file, line: text.slice(0, at).split("\n").length };
-		}
-	} catch {
-		// The folder is not there, or cannot be read: no source to open.
-	}
-	return undefined;
-}
-
 /** The shell windows as a terminal emulator sees them: the newest lines of a window, the newest at the bottom. */
 export function shellsOutView({ session }, name) {
 	const all = (session.windows?.list(0) ?? []).filter((win) => win.state !== POLICY.enums.windowStates.gone);
@@ -909,13 +878,4 @@ export function shellsOutView({ session }, name) {
 		{ key: "term", plain: true, head: lines.length === 0 ? [["  (nothing has been printed yet)", "muted"]] : lines.map((line) => [line || " ", ""]) },
 	];
 	return { header, items };
-}
-
-/**
- * Where the built-in system prompt lives: source code reviewed and changed by the developer.
- * @returns {string | undefined}
- */
-export function promptsSource() {
-	const file = fileURLToPath(new URL("../prompt.mjs", import.meta.url));
-	return existsSync(file) ? file : undefined;
 }

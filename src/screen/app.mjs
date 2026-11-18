@@ -25,6 +25,7 @@
 import { DEFAULTS, POLICY } from "../config.mjs";
 import { EventEmitter } from "node:events";
 import { basename, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { listConferences, loadConference } from "../conference.mjs";
 import { charsPerTokenNow } from "../calibrate.mjs";
@@ -32,7 +33,7 @@ import { createApplication } from "../application/app.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
-import { findExecutable, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
+import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
 import { createRefDescriber } from "../refs.mjs";
@@ -42,8 +43,13 @@ import { createList } from "./list.mjs";
 import { Air, AIRY_ROWS, Box, ChatBody, Farewell, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, bar, cut, sgr, short, span } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
-import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, promptsSource, rawPayloadView, requestsView, shellsOutView, shellsView, toolSource, treeView } from "./views.mjs";
+import { accountingView, atlasView, contextView, diffView, editorCommand, handsView, ledgerView, planView, previewView, rawPayloadView, requestsView, shellsOutView, shellsView, treeView } from "./views.mjs";
 import { USER_NAME } from "../user.mjs";
+
+const TOOL_SOURCE_DIR = fileURLToPath(new URL("../tools", import.meta.url));
+const PROMPT_SOURCE = fileURLToPath(new URL("../prompt.mjs", import.meta.url));
+const promptSource = async () => (await pathExists(PROMPT_SOURCE) ? PROMPT_SOURCE : undefined);
+const toolSource = (name) => findTextSource(TOOL_SOURCE_DIR, `name: "${name}"`, { suffix: ".mjs" });
 
 export const TABS = [
 	{ id: "chat", name: "Chat" },
@@ -943,14 +949,14 @@ export async function runScreen(session, options, runTerminal) {
 		if (item === undefined) return flash("nothing is selected");
 		switch (item.editKind) {
 			case "prompt": {
-				const file = promptSource();
+				const file = await promptSource();
 				if (file === undefined) return flash("the source of the prompt is not here");
 				if (!(await runEditor(file))) return;
 				return flash("the prompt's wording is code: the next run of carto reads it as it is now");
 			}
 			case "tool": {
 				const name = String(item.key).startsWith("tool:") ? String(item.key).slice(5) : String(item.key);
-				const found = toolSource(name);
+				const found = await toolSource(name);
 				if (found === undefined) return flash(`no source file defines the ${name} tool`);
 				if (!(await runEditor(found.file, found.line))) return;
 				return flash(`${name}'s description is code: the next run of carto reads it as it is now`);

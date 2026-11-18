@@ -16,7 +16,7 @@ import { createApplication } from "../src/application/app.mjs";
 import { createWorkspaceQueries } from "../src/application/queries.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
-import { pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
+import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
@@ -308,6 +308,12 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	const scratch = await writeScratch(brainDir, "message.md", "A draft from the editor");
 	assert.equal(await pathExists(scratch), true);
 	assert.equal(await pathExists(join(brainDir, "missing.md")), false);
+	const sources = join(brainDir, "sources");
+	mkdirSync(sources);
+	writeFileSync(join(sources, "a.txt"), "name: \"kept\"\n");
+	writeFileSync(join(sources, "b.mjs"), "first\nname: \"kept\"\n");
+	assert.deepEqual(await findTextSource(sources, "name: \"kept\"", { suffix: ".mjs" }), { file: join(sources, "b.mjs"), line: 2 });
+	assert.equal(await findTextSource(sources, "not here", { suffix: ".mjs" }), undefined);
 	const writes = [];
 	const calls = [];
 	const ways = await toClipboard("copied words", {
