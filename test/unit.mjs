@@ -256,7 +256,6 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	assert.equal(published.at, NOW);
 	assert.deepEqual(published.payload, { scope: "workspace" });
 	assert.deepEqual(seen.map((event) => event.type), ["projection.invalidated"], "one listener cannot stop another from seeing a durable application fact");
-	off();
 
 	const jobs = createJobManager({ events, now: () => clock, nextId: (() => { let id = 0; return () => `test-${++id}`; })() });
 	const succeeded = jobs.start({
@@ -296,6 +295,7 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled);
 	assert.equal(jobs.get(cancelled.id)?.state, "cancelled");
 	assert.equal(cancelled.cancel(), false, "settled jobs cannot be cancelled again");
+	off();
 });
 
 test("application: workspace actions expose typed outcomes, cancellation, and destructive confirmation", async (t) => {
