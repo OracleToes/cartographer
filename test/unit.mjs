@@ -1469,6 +1469,15 @@ test("screen: job status and drawer inspect snapshots and dispatch only typed ca
 	});
 	const status = rows.map((row) => row.map(([text]) => text).join("")).join("\n");
 	assert.match(status, /Scanning project files\. 3\/9 · cancelling/, "the persistent strip names progress and a pending cancellation without opening the drawer");
+	const stoppedRows = renderStatusBar({
+		state: { restSince: 0 },
+		core: { busy: () => false, thinking: () => true },
+		chat: { doing: () => undefined },
+		jobs: [jobs[2]],
+		options: { contextWindow: 1_000 },
+		now: () => 1_000,
+	});
+	assert.match(stoppedRows.flat().map(([text]) => text).join(""), /1 stopped job · J inspect/, "a cancelled job remains visibly inspectable after it leaves the active strip");
 });
 
 test("screen: shared key hints keep shell navigation while hiding unavailable capability actions", () => {

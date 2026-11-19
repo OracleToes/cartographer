@@ -91,12 +91,14 @@ export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, 
 	if (wakeCount > 0) second.push([` · ${wakeCount === 1 ? "1 wake" : `${wakeCount} wakes`}${typeof runtime.wakes.next === "string" && runtime.wakes.next !== "" ? `, ${runtime.wakes.next}` : ""}`, "muted"]);
 	if (runtime?.diagnostic !== undefined && typeof runtime.diagnostic.text === "string" && runtime.diagnostic.text !== "") second.push([` · ${cut(runtime.diagnostic.text, POLICY.limits.screen.consoleErrorChars)}`, runtime.diagnostic.style ?? "muted"]);
 	const active = activeJobs(jobs);
+	const inspectableJobs = Array.isArray(jobs) ? jobs.filter((job) => job?.state === "failed" || job?.state === "cancelled") : [];
 	if (active.length > 0) {
 		const job = active.at(-1);
 		const cancelling = job?.cancellation?.requested === true ? " · cancelling" : "";
 		second.push([` · ${SPINNER[Math.floor(at / SPIN_MS) % SPINNER.length]} ${cut(jobText(job), POLICY.limits.screen.consoleErrorChars)}${cancelling}`, job?.cancellation?.requested === true ? "warn" : "tool"]);
 		if (active.length > 1) second.push([` · +${active.length - 1} job${active.length === 2 ? "" : "s"}`, "muted"]);
 	}
+	if (inspectableJobs.length > 0) second.push([` · ${inspectableJobs.length === 1 ? "1 stopped job · J inspect" : `${inspectableJobs.length} stopped jobs · J inspect`}`, "warn"]);
 	if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 	if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
 	if (!core.thinking()) second.push([" · notes hidden", "muted"]);

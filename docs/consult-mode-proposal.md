@@ -1,6 +1,6 @@
 # Proposal: same-model consultation conference
 
-**Status:** delivered C1–C5 contract plus native-GBNF control-plane cutover. `docs/plan.md` records the completed product cutover, and the README describes the shipped behavior and migration boundary.
+**Status:** delivered C1–C5 contract plus native-GBNF control-plane cutover. [The Phase 2 UI delivery plan](./ui-redesign-phase-2-architecture-plan.md) records the active delivery sequence, and the README describes the shipped behavior and migration boundary.
 **Date:** 2026-11-16
 
 > **Implementation note.** This document began as the design contract and remains the

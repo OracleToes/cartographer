@@ -157,12 +157,14 @@ Static component tests exercise several widths (including 35, 80, and 120 column
 
 ---
 
-### P3 — Documentation has two concrete stale references
+### P3 — Documentation had two concrete stale references
 
-1. `docs/design.md` says `docs/plan.md` carries the active delivery sequence, but no `docs/plan.md` exists in the repository.
-2. `README.md` describes `npm test` as “about three and a half minutes,” while `test/all.mjs` enforces a 10-second aggregate budget and the current suite is designed to finish within it.
+1. The delivery-plan links in `docs/design.md` and `docs/consult-mode-proposal.md` needed to name the active [Phase 2 UI delivery plan](./ui-redesign-phase-2-architecture-plan.md).
+2. `README.md` described `npm test` as “about three and a half minutes,” while `test/all.mjs` enforces a 10-second aggregate budget and the current suite is designed to finish within it.
 
-**Impact:** these undermine the otherwise strong documentation contract and can misdirect future work.
+**Resolved in Slice F:** the links now name the active plan and the README names the hard aggregate watchdog.
+
+**Impact before repair:** these undermined the otherwise strong documentation contract and could misdirect future work.
 
 ## Keybinding and state-management findings
 

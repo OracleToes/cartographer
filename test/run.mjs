@@ -153,17 +153,60 @@ for step in steps:
     elif not pump(wait, 20): break
     # A third entry that is false: the keys alone, without Enter after them.
     os.write(fd, text.encode() + (b"" if len(step) > 2 and not step[2] else b"\\r"))
-pump(None, 20)
+# Every assertion waits for its relevant terminal state before the final action. Drain one last frame rather than
+# idling for the old 20-second diagnostic window after Cartographer has received its quit/interrupt key.
+pump(None, 0.2)
+sys.stdout.write(seen.decode(errors="replace"))
+`;
+
+// Like PTY above, but a step may resize the real terminal before it types. This keeps resize evidence on the actual
+// full-Screen path rather than simulating columns in a component test.
+const PTY_RESIZE = `
+import fcntl, json, os, pty, select, struct, sys, termios, time
+steps = json.loads(sys.argv[1])
+cols, rows = int(sys.argv[2]), int(sys.argv[3])
+os.environ["COLUMNS"] = str(cols)
+os.environ["LINES"] = str(rows)
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[4], sys.argv[4:])
+def resize(cols, rows):
+    size = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
+    os.kill(pid, __import__("signal").SIGWINCH)
+resize(cols, rows)
+seen = b""
+def pump(until, limit, start = 0):
+    global seen
+    end = time.time() + limit
+    while time.time() < end:
+        if until is not None and until.encode() in seen[start:]: return True
+        if select.select([fd], [], [], 0.05)[0]:
+            try: seen += os.read(fd, 65536)
+            except OSError: return until is None
+    return False
+for step in steps:
+    wait, text = step[0], step[1]
+    if isinstance(wait, (int, float)): pump(None, wait)
+    elif not pump(wait, 3, len(seen)): break
+    if isinstance(text, dict) and "resize" in text:
+        resize(int(text["resize"][0]), int(text["resize"][1]))
+        continue
+    os.write(fd, text.encode() + (b"" if len(step) > 2 and not step[2] else b"\\r"))
+pump(None, 0.2)
 sys.stdout.write(seen.decode(errors="replace"))
 `;
 let python;
-async function cartoOnTerminal(cwd, server, args, steps) {
+async function cartoOnTerminal(cwd, server, args, steps, { env, resize } = {}) {
 	python ??= (await run("python3", ["-c", "import pty"])).code === 0;
 	if (!python) return undefined;
 	const serverUrl = typeof server === "string" ? server : server.url;
 	// The line-by-line terminal, unless the test is about the full screen.
 	const command = [process.execPath, CARTO, "--url", serverUrl, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
-	const result = await run("python3", ["-c", PTY, JSON.stringify(steps), ...command], { cwd, timeoutMs: 70_000 });
+	const launcher = resize === undefined
+		? ["-c", PTY, JSON.stringify(steps), ...command]
+		: ["-c", PTY_RESIZE, JSON.stringify(steps), String(resize.cols), String(resize.rows), ...command];
+	const result = await run("python3", launcher, { cwd, timeoutMs: 70_000, env });
 	// Colour codes and carriage returns are the terminal's business, not the test's.
 	return { ...result, screen: result.stdout.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "") };
 }
@@ -302,13 +345,44 @@ test("launch: an offline interactive terminal renders before it reports the serv
 	assert.ok(result.screen.indexOf("Type a message.") < result.screen.indexOf("Could not connect to the model server"), "the terminal renders before its unavailable-server error");
 });
 
-test("launch: the full-screen terminal keeps an offline server error visible", async () => {
-	const root = makeProject("offline-screen", { git: false });
-	configure(root, { initiate: false });
-	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [["Set one up in", ""], ["Could not connect to the model server", "\x03", false], [0.1, "\x03", false]]);
-	if (result === undefined) return "python3 is needed for the full-screen terminal check";
-	ok(result, "an offline full-screen Cartographer session");
-	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the full-screen status strip says the server is unavailable");
+test("screen: a compact no-color full Screen keeps disabled action text, Settings confirmation, and resize parity", async () => {
+	const root = makeProject("screen-settings-flow", { git: false });
+	configure(root, { initiate: false, colors: "none" });
+	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [
+		["Set one up in", ""],
+		["model stand-in un", "\x1b", false],
+		["COMMAND MODE", "\x0b", false],
+		["Command palette", "stop", false],
+		["The agent is already resting.", "\x1b", false],
+		[0.1, "6", false],
+		["Provider endpoint", "e", false],
+		["Value: text.", "\x1b", false],
+		["Configuration", { resize: [100, 30] }],
+		[0.15, "j".repeat(17), false],
+		["Approval default", "e", false],
+		["Value: true or false.", "\x7f".repeat(5) + "true", false],
+		[0.1, ""],
+		["Type project:yolo", "project:yolo", false],
+		[0.1, ""],
+		["Saved Approval default", { resize: [42, 16] }],
+		[0.15, "i", false],
+		[0.1, "/quit"],
+	], { env: { NO_COLOR: "1" }, resize: { cols: 42, rows: 16 } });
+	if (result === undefined) return "python3 is needed for the full-screen Settings flow check";
+	ok(result, "a compact no-color full-screen Settings flow");
+	has(result.screen, "Could not connect to the model server", "the compact full-screen status strip keeps the offline server error visible rather than relying on colour");
+	has(result.screen, "Configuration", "Settings reaches its Configuration route at compact width and after a real resize");
+	has(result.screen, "Provider endpoint", "the selected saved setting remains identifiable in compact mode");
+	has(result.screen, "Value: text.", "Enter/e opens the schema-derived saved-setting form");
+	has(result.screen, "unavailable", "the no-color palette keeps a disabled lifecycle action discoverable without relying on colour");
+	has(result.screen, "The agent is already resting.", "the disabled lifecycle action keeps its explicit settled reason at compact width");
+	has(result.screen, "Approval default", "the route reaches the settled guarded setting row");
+	has(result.screen, "Type project:yolo", "the backend-owned confirmation presents its fresh target token");
+	has(result.screen, "Saved Approval default", "the typed confirmation dispatches the actual Settings action");
+	has(result.screen, "[ ]", "compact view navigation remains explicit rather than clipping hidden view labels");
+	assert.equal(JSON.parse(readFileSync(join(root, ".brain", "config.json"), "utf8")).yolo, true, "the confirmed Screen form persisted only its selected project setting");
+	assert.equal(result.stdout.includes("\x1b[38;"), false, "NO_COLOR suppresses extended palette foreground escapes in the full-screen route");
+	assert.equal(result.stdout.includes("\x1b[48;"), false, "NO_COLOR suppresses palette backgrounds in the full-screen route");
 });
 
 test("launch: a grammar-ignoring route is refused before its first agent request", async () => {
@@ -2203,7 +2277,7 @@ test("screen: Consult is a separate persona-attributed conference timeline with 
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
 	const { colorMode, makeTheme, markdownTheme, parseColorReply, schemeFromEnv, schemeOf, to256, HUES } = await import("../src/screen/theme.mjs");
-	const { TOKEN } = await import("../src/screen/tokens.mjs");
+	const { LEGACY_STYLE_ALIASES, TOKEN } = await import("../src/screen/tokens.mjs");
 	const { colorToOklch, rgbColor } = await import("@earendil-works/pi-tui");
 	const light = ([r, g, b]) => (r * 299 + g * 587 + b * 114) / 1000;
 	const far = (a, b) => Math.abs(light(a) - light(b));
@@ -2221,19 +2295,20 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(hues.every((hue) => hue.c > 0.07), `and each is a colour, not a grey: ${what}`);
 		assert.ok(Math.abs(hues[0].h - HUES.user) < 12 && Math.abs(hues[1].h - HUES.tool) < 12, `the hues are the ones named: ${what}`);
 		// Where it is: every block is near the background, in its own direction, and all of them tell apart.
-		const blocks = ["bgUser", "bgTool", "bgNote", "bgPanel", "bgInput", "bgBar", "bgSel"];
-		for (const name of blocks) assert.ok(far(rgb[name], rgb.bg) < 70, `${name} stays near the background: ${what}`);
-		assert.equal(new Set(blocks.map((name) => rgb[name].join())).size, blocks.length, `each block has a background of its own: ${what}`);
-		assert.ok(far(rgb.bgSel, rgb.bg) > far(rgb.bgUser, rgb.bg) && far(rgb.bgUser, rgb.bg) > far(rgb.bgTool, rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
-		assert.ok(far(rgb.bgBar, rgb.bg) > far(rgb.bgPanel, rgb.bg) && far(rgb.bgPanel, rgb.bg) > far(rgb.bgInput, rgb.bg), `the more a thing is chrome, the further from the background: ${what}`);
+		const blocks = [TOKEN.activity.userSurface, TOKEN.activity.shellSurface, TOKEN.activity.noteSurface, TOKEN.surface.content, TOKEN.surface.input, TOKEN.surface.raised, TOKEN.interaction.selected];
+		for (const token of blocks) assert.ok(far(rgb[token], rgb.bg) < 70, `${token} stays near the background: ${what}`);
+		assert.equal(new Set(blocks.map((token) => rgb[token].join())).size, blocks.length, `each block has a background of its own: ${what}`);
+		assert.ok(far(rgb[TOKEN.interaction.selected], rgb.bg) > far(rgb[TOKEN.activity.userSurface], rgb.bg) && far(rgb[TOKEN.activity.userSurface], rgb.bg) > far(rgb[TOKEN.activity.shellSurface], rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
+		assert.ok(far(rgb[TOKEN.surface.raised], rgb.bg) > far(rgb[TOKEN.surface.content], rgb.bg) && far(rgb[TOKEN.surface.content], rgb.bg) > far(rgb[TOKEN.surface.input], rgb.bg), `the more a thing is chrome, the further from the background: ${what}`);
 		// Text stays readable on every block.
-		for (const name of blocks) assert.ok(far(rgb.fg, rgb[name]) > 0.65 * far(rgb.fg, rgb.bg), `plain text stands out on ${name} nearly as it does on the background: ${what}`);
+		for (const token of blocks) assert.ok(far(rgb.fg, rgb[token]) > 0.65 * far(rgb.fg, rgb.bg), `plain text stands out on ${token} nearly as it does on the background: ${what}`);
 		const blue = (color) => color[2] - (color[0] + color[1]) / 2;
-		assert.ok(blue(rgb.bgUser) > blue(rgb.bg) && blue(rgb.bgUser) > blue(rgb.bgBar), `a block has the tint of its hue (yours is blue): ${what}`);
+		assert.ok(blue(rgb[TOKEN.activity.userSurface]) > blue(rgb.bg) && blue(rgb[TOKEN.activity.userSurface]) > blue(rgb[TOKEN.surface.raised]), `a block has the tint of its hue (yours is blue): ${what}`);
 	}
 	const exact = makeTheme({ mode: "truecolor" }).styles;
-	assert.equal(exact.bgTool, exact[TOKEN.activity.shellSurface], "the former feature surface remains an alias for its semantic activity token");
-	assert.equal(exact.bgSel, exact[TOKEN.interaction.selected], "selection has one semantic source despite compatibility styling");
+	assert.equal(exact.bgTool, exact[TOKEN.activity.shellSurface], "the former Chat surface remains an alias while that renderer still consumes it");
+	const retired = ["bgPanel", "bgInput", "bgBar", "bgSel", "bgTab", "catSystem", "catTools", "catTop", "catKept", "catYou", "catCarto", "catAgent", "catResult", "catState", "catWindows"];
+	assert.ok(retired.every((name) => !Object.hasOwn(LEGACY_STYLE_ALIASES, name) && !Object.hasOwn(exact, name)), "migrated surfaces and provider categories no longer recreate legacy renderer aliases");
 	assert.equal(exact.muted, exact[TOKEN.text.secondary], "text hierarchy is also reachable by semantic token");
 	assert.match(exact[TOKEN.activity.shellSurface], /^48;2;\d+;\d+;\d+$/, "a semantic background is in exact colour");
 	assert.match(exact.muted, /^38;2;\d+;\d+;\d+$/, "a text colour");
@@ -2257,16 +2332,21 @@ test("screen: lines are painted on their block's background, and text says by it
 	const { applyTheme, paint, paintStyled, sgr, STYLES } = await import("../src/screen/text.mjs");
 	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	try {
-		applyTheme({ bgTool: "48;5;235", bgSel: "48;5;239", muted: "38;5;246", ok: "38;5;115" });
-		assert.equal(paint([["✓ ", "ok"], ["read", ""]], 8, "bgTool"), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");
-		assert.equal(paintStyled("a\x1b[1mb\x1b[22m", 2, 4, "bgSel"), "\x1b[48;5;239ma\x1b[1mb\x1b[22m  \x1b[0m", "and under a line that came styled");
+		applyTheme({
+			[TOKEN.activity.shellSurface]: "48;5;235",
+			[TOKEN.interaction.selected]: "48;5;239",
+			[TOKEN.text.secondary]: "38;5;246",
+			[TOKEN.feedback.success]: "38;5;115",
+		});
+		assert.equal(paint([["✓ ", TOKEN.feedback.success], ["read", ""]], 8, TOKEN.activity.shellSurface), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");
+		assert.equal(paintStyled("a\x1b[1mb\x1b[22m", 2, 4, TOKEN.interaction.selected), "\x1b[48;5;239ma\x1b[1mb\x1b[22m  \x1b[0m", "and under a line that came styled");
 		assert.equal(sgr("bgNothing"), "", "a style the palette does not have is no style");
 		assert.equal(sgr(TOKEN.activity.shellSurface), "\x1b[48;5;235m", "a shell component can ask for its semantic surface directly");
 		assert.equal(sgr(TOKEN.interaction.selected), "\x1b[48;5;239m", "focus and selection have semantic styles too");
 		applyTheme(undefined);
-		assert.deepEqual([STYLES.bgTool, STYLES.muted, STYLES.bgSel, STYLES.ok], [undefined, "2", "7", "32"], "without a palette: no backgrounds, dim for muted, inverse for what is selected, the terminal's own green");
+		assert.deepEqual([STYLES.bgTool, STYLES.muted, STYLES[TOKEN.interaction.selected], STYLES.ok], [undefined, "2", "7", "32"], "without a palette: retained aliases and semantic selection keep terminal-safe fallbacks");
 		assert.deepEqual([STYLES[TOKEN.activity.shellSurface], STYLES[TOKEN.text.secondary], STYLES[TOKEN.interaction.selected], STYLES[TOKEN.feedback.success]], [undefined, "2", "7", "32"], "semantic tokens retain the same no-colour fallbacks");
-		assert.equal(paint([["x", "muted"]], 3, "bgTool"), "\x1b[2mx\x1b[0m  ");
+		assert.equal(paint([["x", TOKEN.text.secondary]], 3, TOKEN.activity.shellSurface), "\x1b[2mx\x1b[0m  ");
 	} finally {
 		applyTheme(undefined);
 	}
@@ -2442,6 +2522,7 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 
 test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
 	const { contextView, rawPayloadView } = await import("../src/screen/runtime.mjs");
+	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
 		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
@@ -2486,11 +2567,11 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	assert.equal(top[3].length, 40, "the bar is as wide as the screen");
 	assert.match(top[3], /^■+□+$/, "used cells, then free ones");
 	// A quarter of the window is the big sent result: about ten of forty cells are its colour.
-	const resultCells = view.header[3].filter(([, style]) => style === "catResult").reduce((sum, [cells]) => sum + cells.length, 0);
+	const resultCells = view.header[3].filter(([, style]) => style === TOKEN.domain.context.result).reduce((sum, [cells]) => sum + cells.length, 0);
 	assert.ok(resultCells >= 9 && resultCells <= 11, `a part takes as much of the bar as of the window: ${resultCells} of 40 cells for about 5k of 20k tokens`);
 	has(top.join("\n"), "■ Tool results ", "what each colour is");
 	has(top.join("\n"), "□ Free ", "and how much is free");
-	assert.deepEqual(runtimePresentation.sent.contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
+	assert.deepEqual(runtimePresentation.sent.contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, TOKEN.domain.context.system], [5, TOKEN.domain.context.tools], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free without category aliases");
 
 	const task = contextView({ sent: { ...sent, task: true, reply: undefined, results: new Map() }, windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] }, presentation: runtimePresentation.sent });
 	has(task.header[0][0][0], "Sent provider request", "while a task runs, the frozen request stays labelled as sent");

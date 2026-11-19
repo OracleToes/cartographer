@@ -18,7 +18,7 @@ bash install.sh --server http://127.0.0.1:8888/v1 --model ByteShape
 
 Start it with `bash` as shown. A downloaded copy of this folder has lost its executable marks, so `./install.sh` and `carto` would both answer "Permission denied" until the script has run once.
 
-Check the install without a model (about three and a half minutes):
+Check the install without a model (the aggregate test watchdog is 10 seconds):
 
 ```sh
 npm test
@@ -73,6 +73,7 @@ The screen is deliberately static: the filled top tab is the primary location, t
 | **3 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
 | **4 Shells** | The shell windows, live, plus **Wakes**. Open a window for its newest lines or its terminal-emulator output; Wakes lists the main agent's scheduled time, file, and window triggers. |
 | **5 Model** | **Routes**, **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. Routes shows discovered model names, the active route's native-GBNF readiness, and an explicit connect/select control; the other views separate frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
+| **6 Settings · Configuration** | All saved settings with their effective value, source, and apply timing. `Enter`/`e` edits the selected setting in the chosen writable project or install source; `x` resets that source override and `s` chooses the source. Environment and command-line overrides stay descriptive and read-only. |
 | **6 Settings · Safety** | The configured provider and limits, the live approval, initiation, and sandbox policy, plus separate route-listing and native llama.cpp GBNF diagnostics. It reports the backend-owned state; it does not authorize agent work. |
 | **6 Settings · Assessment** | The current durable assessment and whether its top-of-context copy is current, stale, or missing. A current assessment can be opened in the editor; the top copy changes only through its safe refresh path. |
 
@@ -92,11 +93,12 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | `j`, `k` | Move down and up. `g` and `G` go to the first and last row. |
 | Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Chat Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Consult, it opens an attributed audit block or folds a conference. In Shells, Enter opens a window's output and goes back from it; in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another listed route. |
 | `+` and `-` | Open everything or fold everything (`zR` and `zM` do the same). |
-| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. In Settings → Assessment, it opens the current durable assessment; Safety rows are descriptive and read-only. |
+| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. In Settings → Configuration, it opens the selected saved-setting form for the chosen writable source; `x` resets that source override and `s` chooses project or install. In Settings → Assessment, it opens the current durable assessment; Safety rows are descriptive and read-only. |
 | `d` | In Chat Conversation, confirm **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. Work and Consult are private and cannot be removed from future kept talk. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. In Shells → Wakes, it opens confirmation before removing the selected wake. |
 | `u` | In Diff, confirm **Undo last checkpoint change**. Active shell changes are checkpointed first, so the dialog may name a shell window. Recovery restores that checkpoint's changed files; a move's revision returns to unapproved review. A cut-off task warns that recovery returns the project to its earlier checkpoint. |
 | `f`, `v`, `x`, `t`, `n` | On the relevant Carto row: fold a report, archive a brain record out of what the agent reads, unshelve a file, settle a record, or create a new entry. `a` shelves from Current shared brain or approves in Requests. |
 | `y`, `Y` | Copy the selected row or the whole tab. |
+| `J` | When several background jobs run, or a job stopped or failed, inspect **Background work**. Enter or `c` requests cancellation only for the selected live job. |
 | `r` | Read the tab again. |
 | `:` | Type a command. |
 | `i`, `a`, Esc | Type. |
@@ -116,7 +118,7 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 | Ctrl-O | Open the selected source or template in `$EDITOR`. |
 | `?`, F1 | Show the keys. |
 
-**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. A quieter third row keeps the relevant key reminder beside the input.
+**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, active abort-aware background work, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. When several jobs compete, or a job stopped or failed, `J` opens **Background work** to inspect it and request meaningful cancellation. A quieter third row keeps the relevant key reminder beside the input.
 
 #### Chat, Work, Consult, Model, and Settings
 

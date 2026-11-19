@@ -1,10 +1,10 @@
 # UI redesign — Phase 2 architecture and design-system plan
 
-**Status:** proposed — implementation approval required
+**Status:** active delivery record — Slices A–F delivered
 
 **Date:** 2026-11-16
 
-**Scope:** a targeted continuation of the completed six-tab Screen migration, based on [the Phase 1 gap analysis](./ui-redesign-phase-1-gap-analysis.md). This plan is architecture and design only. It does not authorize implementation.
+**Scope:** a targeted continuation of the completed six-tab Screen migration, based on [the Phase 1 gap analysis](./ui-redesign-phase-1-gap-analysis.md). This record constrains the approved incremental implementation; it does not authorize scope beyond the active slice.
 
 ## Decision summary
 
@@ -480,7 +480,7 @@ Existing slash commands remain valid. The terminal stays a text adapter over the
 
 - `/approve`, `/deny`, `/answer`, `/focus`, `/unfocus`, `/undo`, `/send`, `/kill`, `/wakes remove`, `/model`, `/pin`, and `/new` retain their current aliases and acknowledgement wording.
 - `/stop`, `/pause`, `/collapse`, `/yolo`, `/initiate`, `/bwrap`, and `/consult probe` map to the lifecycle owner; their existing safety sequencing stays authoritative.
-- A later small parser extraction may add `/settings`, `/settings set KEY VALUE`, and `/settings reset KEY` only when its exact grammar and test budget are approved. It is not a prerequisite for the full-Screen Settings editor.
+- A later small parser extraction may add `/settings`, `/settings set KEY VALUE`, and `/settings reset KEY` only when its exact grammar and test budget are approved. It is not a prerequisite for the full-Screen Settings editor. Slice F leaves that grammar unextracted: the existing Screen forwards established slash commands unchanged, while inventing a second saved-setting form grammar would add confirmation and revision semantics without a proven line-mode consumer.
 - `/wait` remains line/piped-input-only and is explicitly unavailable in the interactive Screen.
 
 ## 9. Implementation sequence after approval
@@ -510,8 +510,8 @@ The test budget changes neither the implementation scope nor the acceptance stan
 | Screen integration | One deterministic PTY route/action/form/confirmation flow, one compact resize transition, and one no-color/disabled-action flow. Broader behavior stays in fast unit/component tests. |
 | Regression | Native grammar fail-closed behavior, offline launch, consultation isolation, approval/sandbox/checkpoint behavior, Ctrl-C/Ctrl-X/Ctrl-V semantics, and 10-second aggregate watchdog. |
 
-Documentation cleanup is part of Slice F: replace the missing `docs/plan.md` reference with the active plan path and correct README's stale test-duration claim after the code/test state being described is final.
+Documentation cleanup is part of Slice F: point stale delivery-plan references to this active plan and correct README's stale test-duration claim after the code/test state being described is final.
 
-## Implementation gate
+## Delivery gate
 
-This plan intentionally stops before code. Approval of this plan authorizes the first implementation slice only: **configuration contract and provenance (Slice A)**. It does not authorize a wholesale rewrite, a test-budget change, or relaxation of any safety boundary.
+This record constrains the incremental delivery. Slices A–F were approved and delivered. It does not authorize a wholesale rewrite, a test-budget change, or relaxation of any safety boundary.

@@ -33,7 +33,7 @@ const BLOCK_RAILS = {
 	[TOKEN.activity.userSurface]: ["▎", TOKEN.activity.user],
 	[TOKEN.activity.shellSurface]: ["│", TOKEN.activity.shell],
 	[TOKEN.activity.noteSurface]: ["┊", TOKEN.activity.note],
-	// Compatibility for feature projections that still name their former surfaces.
+	// Chat has not migrated these three activity blocks yet, so their retained aliases keep its identity rails intact.
 	bgUser: ["▎", TOKEN.activity.user],
 	bgTool: ["│", TOKEN.activity.shell],
 	bgNote: ["┊", TOKEN.activity.note],
@@ -408,16 +408,16 @@ export class Prompt extends Editor {
 		return guarded(width, () => {
 			const { ui } = this;
 			const airy = this.tui.terminal.rows >= AIRY_ROWS;
-			const blank = barRow([], width, "bgInput");
-			if (ui.state.mode === "command") return [barRow(ui.commandLine(), width, "bgInput"), ...(airy ? [blank] : [])];
+			const blank = barRow([], width, TOKEN.surface.input);
+			if (ui.state.mode === "command") return [barRow(ui.commandLine(), width, TOKEN.surface.input), ...(airy ? [blank] : [])];
 			const margin = marginOf(width);
 			const inner = width - 2 * margin;
 			const { text: prompt, style } = ui.prompt();
 			const lead = cells(prompt);
 			const pad = " ".repeat(lead);
-			const bg = sgr("bgInput");
-			const left = `${edge(width, "bgInput")}${bg}`;
-			const right = `\x1b[0m${edge(width, "bgInput")}`;
+			const bg = sgr(TOKEN.surface.input);
+			const left = `${edge(width, TOKEN.surface.input)}${bg}`;
+			const right = `\x1b[0m${edge(width, TOKEN.surface.input)}`;
 			const rows = [];
 			let part = "above"; // above the text, in it, or below it (the completions)
 			let first = true;
@@ -432,14 +432,14 @@ export class Prompt extends Editor {
 					if (part === "above") {
 						part = "text";
 						if (hidden !== "") {
-							rows.push(barRow([[pad, ""], [`↑ ${hidden} more rows`, "faint"]], width, "bgInput"));
+							rows.push(barRow([[pad, ""], [`↑ ${hidden} more rows`, "faint"]], width, TOKEN.surface.input));
 							this.offset.y = 0;
 						}
 					} else {
 						part = "below";
 						const count = this.getLines().length;
-						if (hidden !== "") rows.push(barRow([[pad, ""], [`↓ ${hidden} more rows`, "faint"]], width, "bgInput"));
-						else if (count > 1) rows.push(barRow([[pad, ""], [`${count} lines · Enter sends them as one message · Alt-Enter adds a line`, "faint"]], width, "bgInput"));
+						if (hidden !== "") rows.push(barRow([[pad, ""], [`↓ ${hidden} more rows`, "faint"]], width, TOKEN.surface.input));
+						else if (count > 1) rows.push(barRow([[pad, ""], [`${count} lines · Enter sends them as one message · Alt-Enter adds a line`, "faint"]], width, TOKEN.surface.input));
 						else if (airy) rows.push(blank);
 					}
 					continue;
@@ -448,7 +448,7 @@ export class Prompt extends Editor {
 					// A row of the list of completions, on a panel of its own, in line with what is typed.
 					this.listAt ??= { row: rows.length, editorRow: textRows + 2 };
 					const row = truncateToWidth(line, Math.max(1, inner - 2), "");
-					rows.push(`${edge(width, "bgPanel")}${sgr("bgPanel")}  ${row}${sgr("bgPanel")}${" ".repeat(Math.max(0, inner - 2 - visibleWidth(row)))}\x1b[0m${edge(width, "bgPanel")}`);
+					rows.push(`${edge(width, TOKEN.surface.content)}${sgr(TOKEN.surface.content)}  ${row}${sgr(TOKEN.surface.content)}${" ".repeat(Math.max(0, inner - 2 - visibleWidth(row)))}\x1b[0m${edge(width, TOKEN.surface.content)}`);
 					continue;
 				}
 				const head = first ? `${sgr(style)}${prompt}\x1b[22;39m` : pad;
@@ -512,7 +512,7 @@ export class Sheet {
 			this.page = room;
 			this.most = Math.max(0, lines.length - room);
 			this.top = Math.max(0, Math.min(this.top, this.most));
-			const row = (spans) => paint([["   ", ""], ...spans], width, "bgPanel");
+			const row = (spans) => paint([["   ", ""], ...spans], width, TOKEN.surface.content);
 			const more = lines.length > room ? `   ${this.top + 1}–${Math.min(lines.length, this.top + room)} of ${lines.length} · j k scroll` : "";
 			return [row([]), row([[this.given.title, "user bold"], [`${more}   Esc closes`, "faint"]]), row([]), ...lines.slice(this.top, this.top + room).map(row), row([])];
 		});

@@ -3,6 +3,7 @@
 // Each renderer receives an already-settled application projection and a small presentation vocabulary assembled by
 // screen composition. It owns no Runtime/domain import and starts no live read while it makes list rows.
 import { width } from "./text.mjs";
+import { TOKEN } from "./tokens.mjs";
 
 /** A passive line in a Runtime collection. */
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
@@ -203,7 +204,7 @@ export function rawPayloadView({ sent, presentation } = {}) {
 		header,
 		items: [{
 			key: "payload",
-			head: [["■ ", "catSystem"], ["  Provider payload JSON", ""], [`  ${presentation.short(described.payloadJson.length)} chars · audit only`, "faint"]],
+			head: [["■ ", TOKEN.domain.context.system], ["  Provider payload JSON", ""], [`  ${presentation.short(described.payloadJson.length)} chars · audit only`, "faint"]],
 			body: described.payloadJson,
 			copy: described.payloadJson,
 		}],
@@ -224,7 +225,7 @@ export function previewView({ preview, presentation } = {}) {
 	];
 	const items = described.parts.map((part) => ({
 		key: `preview:${part.id}`,
-		head: [["◇ ", "catState"], [`${part.title}  `, ""], [`${part.source} · preview only`, "faint"]],
+		head: [["◇ ", TOKEN.domain.context.state], [`${part.title}  `, ""], [`${part.source} · preview only`, "faint"]],
 		body: part.text === "" ? "(empty)" : part.text,
 		copy: part.text,
 	}));

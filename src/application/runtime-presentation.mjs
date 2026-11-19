@@ -10,6 +10,7 @@ import { ago, stamp, took } from "../time.mjs";
 import { wakeAbout, wakeLine } from "../wakes.mjs";
 import { RECORD } from "../voice.mjs";
 import { USER_NAME } from "../user.mjs";
+import { TOKEN } from "../screen/tokens.mjs";
 
 const PROJECT_BLOCK = new RegExp(`^${POLICY.markup.project.open}\\n[\\s\\S]*?\\n${POLICY.markup.project.close}\\n*`);
 const ANCHOR = RECORD.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -17,17 +18,19 @@ const CONTEXT_BLOCK = new RegExp(`${POLICY.markup.context.open}\\n${ANCHOR}[\\s\
 const STATE_BLOCK = new RegExp(`\\n*${POLICY.markup.state.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.state.close}`);
 const WINDOWS_BLOCK = new RegExp(`\\n*${POLICY.markup.windows.open}\\n${ANCHOR}[\\s\\S]*?\\n${POLICY.markup.windows.close}`);
 
+// Frozen provider-request categories carry semantic tokens, not Screen-era category aliases. The presentation
+// adapter remains pure; TOKEN is the shared vocabulary, not a renderer or a live Screen dependency.
 const categories = Object.freeze([
-	Object.freeze({ id: "system", name: "System prompt", style: "catSystem" }),
-	Object.freeze({ id: "tools", name: "Tools", style: "catTools" }),
-	Object.freeze({ id: "top", name: "Assessment and graph", style: "catTop" }),
-	Object.freeze({ id: "kept", name: "Kept by a collapse", style: "catKept" }),
-	Object.freeze({ id: "you", name: "Your messages", style: "catYou" }),
-	Object.freeze({ id: "carto", name: "Cartographer's notes", style: "catCarto" }),
-	Object.freeze({ id: "agent", name: "Agent: notes and calls", style: "catAgent" }),
-	Object.freeze({ id: "result", name: "Tool results", style: "catResult" }),
-	Object.freeze({ id: "state", name: "State block", style: "catState" }),
-	Object.freeze({ id: "windows", name: "Windows block", style: "catWindows" }),
+	Object.freeze({ id: "system", name: "System prompt", style: TOKEN.domain.context.system }),
+	Object.freeze({ id: "tools", name: "Tools", style: TOKEN.domain.context.tools }),
+	Object.freeze({ id: "top", name: "Assessment and graph", style: TOKEN.domain.context.top }),
+	Object.freeze({ id: "kept", name: "Kept by a collapse", style: TOKEN.domain.context.kept }),
+	Object.freeze({ id: "you", name: "Your messages", style: TOKEN.domain.context.user }),
+	Object.freeze({ id: "carto", name: "Cartographer's notes", style: TOKEN.domain.context.cartographer }),
+	Object.freeze({ id: "agent", name: "Agent: notes and calls", style: TOKEN.domain.context.agent }),
+	Object.freeze({ id: "result", name: "Tool results", style: TOKEN.domain.context.result }),
+	Object.freeze({ id: "state", name: "State block", style: TOKEN.domain.context.state }),
+	Object.freeze({ id: "windows", name: "Windows block", style: TOKEN.domain.context.windows }),
 ]);
 const styleOf = (id) => categories.find((category) => category.id === id)?.style ?? "";
 const shortCount = (value) => {
