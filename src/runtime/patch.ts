@@ -64,7 +64,7 @@ export function parseUnifiedPatch(patch: string): PatchFile[] {
     }
   }
   if (current !== undefined) files.push(finishPatchFile(current));
-  if (files.length === 0) throw new PatchError("Mini accepts unified diffs with diff --git headers only.");
+  if (files.length === 0) throw new PatchError("Carto accepts unified diffs with diff --git headers only.");
   return files;
 }
 
@@ -101,7 +101,7 @@ async function verifyBase(projectRoot: string, change: ChangeProposal, files: re
     try {
       current = await digestProjectFile(projectRoot, path);
     } catch (error) {
-      throw new PatchError(`Mini cannot verify the patch base for ${path}: ${messageOf(error)}`);
+      throw new PatchError(`Carto cannot verify the patch base for ${path}: ${messageOf(error)}`);
     }
     if (current.digest !== expected) throw new PatchError(`The patch base changed for ${path}. Review the change again.`);
   }
@@ -114,12 +114,12 @@ async function verifyBase(projectRoot: string, change: ChangeProposal, files: re
 function parseDiffHeader(line: string): PatchFile & { diffPath: string } {
   const parts = line.split(" ");
   if (parts.length !== 4 || !parts[2]?.startsWith("a/") || !parts[3]?.startsWith("b/")) {
-    throw new PatchError("Mini does not accept quoted, renamed, or malformed diff paths.");
+    throw new PatchError("Carto does not accept quoted, renamed, or malformed diff paths.");
   }
   const oldPath = parseHeaderPath(parts[2], "a/");
   const newPath = parseHeaderPath(parts[3], "b/");
   if (oldPath === null || newPath === null || oldPath !== newPath) {
-    throw new PatchError("Mini does not accept renamed diff paths.");
+    throw new PatchError("Carto does not accept renamed diff paths.");
   }
   return { diffPath: oldPath, oldPath: undefined as never, newPath: undefined as never };
 }
@@ -141,7 +141,7 @@ function finishPatchFile(file: PatchFile & { diffPath: string }): PatchFile & { 
 function parseHeaderPath(value: string, prefix: "a/" | "b/"): string | null {
   if (value === "/dev/null") return null;
   if (!value.startsWith(prefix) || /[\t\s]/.test(value)) {
-    throw new PatchError("Mini does not accept quoted or spaced patch paths.");
+    throw new PatchError("Carto does not accept quoted or spaced patch paths.");
   }
   try {
     return normalizePatchPath(value.slice(prefix.length));
@@ -162,7 +162,7 @@ function rejectUnsupportedPatchFeatures(lines: readonly string[]): void {
       line.startsWith("copy to ") ||
       /(?:^| )120000(?:$| )/.test(line)
     ) {
-      throw new PatchError("Mini accepts regular text-file patches only.");
+      throw new PatchError("Carto accepts regular text-file patches only.");
     }
   }
 }
@@ -190,14 +190,14 @@ async function runGitApply(projectRoot: string, patch: string, extra: string[]):
       stderr += chunk;
     });
     child.once("error", (error) => {
-      reject(new PatchError(`Mini could not start its fixed patch applicator: ${messageOf(error)}`));
+      reject(new PatchError(`Carto could not start its fixed patch applicator: ${messageOf(error)}`));
     });
     child.stdin.once("error", (error) => {
-      reject(new PatchError(`Mini could not write to its fixed patch applicator: ${messageOf(error)}`));
+      reject(new PatchError(`Carto could not write to its fixed patch applicator: ${messageOf(error)}`));
     });
     child.once("close", (code) => {
       if (code === 0) resolve();
-      else reject(new PatchError(`Mini could not apply the approved patch: ${stderr.trim() || `git exited ${code ?? "without a code"}`}`));
+      else reject(new PatchError(`Carto could not apply the approved patch: ${stderr.trim() || `git exited ${code ?? "without a code"}`}`));
     });
     child.stdin.end(patch);
   });

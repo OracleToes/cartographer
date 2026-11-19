@@ -20,11 +20,13 @@ export type SourceRef =
       freshness: Freshness;
     };
 
+/** A deliberate durable conversation record. Raw model output is not Chat. */
 export interface ChatRecord {
   id: RecordId;
   author: "user" | "agent";
   text: string;
   createdAt: number;
+  updatedAt: number;
 }
 
 export interface LedgerEntry {
@@ -92,11 +94,15 @@ export interface ChangeProposal {
   resolvedAt: number | null;
 }
 
-export interface DeletionMark {
-  target: "chat" | "ledger" | "atlas";
-  id: RecordId;
+export type DeletionRecordTarget = "chat" | "ledger" | "atlas";
+export type DeletionTarget =
+  | { target: DeletionRecordTarget; id: RecordId }
+  | { target: "user-pin"; id: RecordId }
+  | { target: "carry-pin"; id: RecordId };
+
+export type DeletionMark = DeletionTarget & {
   markedAt: number;
-}
+};
 
 export type ActivityKind =
   | "idle"
@@ -119,7 +125,36 @@ export interface ContextGenerations {
   archiveGeneration: GenerationId | null;
 }
 
-export interface MiniBrain {
+export type HandleKind = "ledger" | "chat" | "atlas" | "pin" | "handoff" | "wake" | "change" | "deletion";
+
+/**
+ * One short, type-prefixed public handle for one durable record. Carto keeps
+ * this table for one live context generation; a collapse rebuilds it from 1.
+ */
+export interface RecordHandle {
+  kind: HandleKind;
+  /** The private durable ID. It is never rendered to the agent. */
+  id: RecordId;
+  /** A short public handle such as `L1`, `C10`, `A1`, `P1`, or `H1`. */
+  handle: string;
+  /** Creation time for display order and public metadata. */
+  timestamp: number;
+}
+
+/**
+ * The generation-local resolver. It converts a public handle to a private
+ * durable ID for tool and UI actions, and back for display.
+ */
+export interface HandleTable {
+  counters: Record<string, number>;
+  entries: RecordHandle[];
+}
+
+/**
+ * Stable storage IDs stay private. Carto creates short presentation handles for
+ * each live context projection and renews them after a collapse.
+ */
+export interface CartoBrain {
   version: 1;
   chat: ChatRecord[];
   ledger: LedgerEntry[];
@@ -130,8 +165,9 @@ export interface MiniBrain {
   wakes: WakeEntry[];
   changes: ChangeProposal[];
   deletionMarks: DeletionMark[];
+  /** Generation-local public handles. Rebuilt on every collapse. */
+  handles: HandleTable;
   context: ContextGenerations;
   activity: Activity;
 }
 
-export type DeletionTarget = Pick<DeletionMark, "target" | "id">;

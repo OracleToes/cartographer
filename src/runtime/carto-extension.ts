@@ -3,6 +3,12 @@ import { CompactionTask, defineExtension, defineTool, hook, section } from "@ear
 import type { AnyTask } from "@earendil-works/pi-durable";
 
 import { mergeCarryPins, projectContext, renderContextPlan } from "../domain/context.js";
+import {
+  handleOf,
+  resolveHandle,
+  resolveHandleOfKind,
+  resolveHandlesOfKind,
+} from "../domain/handles.js";
 import type { SourceRef, WakeEntry } from "../domain/types.js";
 import { BrainStore } from "./brain-store.js";
 import { LiveCarryDocument, readLiveCarry } from "./live-carry.js";
@@ -11,7 +17,11 @@ import { pathFingerprint } from "./path-wake-task.js";
 import { parseTimeWakeCondition } from "./wake.js";
 import { digestProjectFile, inspectProjectFile, resolveProjectWatchPath } from "./workspace.js";
 
-const RecordId = str({ minLength: 1, maxLength: 160 });
+/**
+ * Public generation-local handles are the only record references a model may
+ * use. A private durable ID never appears in a tool schema or a tool result.
+ */
+const HandleRef = str({ minLength: 1, maxLength: 8 });
 const Text = str({ minLength: 1, maxLength: 24_000 });
 const OptionalText = opt(str({ maxLength: 24_000 }));
 const Status = oneOf(["open", "answered", "closed"] as const);
@@ -34,21 +44,21 @@ const PinRequest = union([
       obj({ kind: lit("context"), excerpt: Text }),
     ]),
   }),
-  obj({ action: lit("remove"), id: RecordId }),
+  obj({ action: lit("remove"), handle: HandleRef }),
 ]);
 const WakeRequest = union([
   obj({
     action: lit("arm"),
-    id: RecordId,
+    handle: opt(HandleRef),
     kind: WakeKind,
     condition: str({ minLength: 1, maxLength: 4096 }),
     reason: str({ minLength: 1, maxLength: 1000 }),
   }),
-  obj({ action: lit("cancel"), id: RecordId, reason: str({ minLength: 1, maxLength: 1000 }) }),
-  obj({ action: lit("view"), id: opt(RecordId) }),
+  obj({ action: lit("cancel"), handle: HandleRef, reason: str({ minLength: 1, maxLength: 1000 }) }),
+  obj({ action: lit("view"), handle: opt(HandleRef) }),
 ]);
 
-export interface MiniExtensionOptions {
+export interface CartoExtensionOptions {
   brain: BrainStore;
   projectRoot: string;
   /** The generation file that owns this live context. */
@@ -57,12 +67,12 @@ export interface MiniExtensionOptions {
   durableTasks?: readonly AnyTask[];
 }
 
-export function createMiniExtension(options: MiniExtensionOptions) {
+export function createCartoExtension(options: CartoExtensionOptions) {
   return defineExtension({
-    name: "cartographer-mini",
+    name: "carto",
     sections: [
       section(
-        "mini-context",
+        "carto-context",
         async (input, context) => {
           const brain = await options.brain.read();
           const stored = await input.read.snapshot(LiveCarryDocument, input.conversationId, context);
@@ -97,45 +107,50 @@ export function createMiniExtension(options: MiniExtensionOptions) {
         execute: async (args, api) => {
           await options.brain.apply({
             kind: "chat.record",
-            record: { id: `agent:${api.callId}`, author: "agent", text: args.text, createdAt: api.now() },
+            record: { id: `agent:${api.callId}`, author: "agent", text: args.text, createdAt: api.now(), updatedAt: api.now() },
           });
           return textOutput("Chat message saved.");
         },
       }),
       defineTool({
         name: "ledger",
-        description: "Create or update one durable goal, note, or question.",
+        description:
+          "Create or update one durable goal, note, or question. Give the handle of the Ledger record to update, or leave it out to create one.",
         parameters: obj({
-          id: RecordId,
+          handle: opt(HandleRef),
           kind: LedgerKind,
           text: Text,
           status: Status,
           answer: OptionalText,
-          evidenceIds: opt(arr(RecordId, { maxItems: 32 })),
+          evidence: opt(arr(HandleRef, { maxItems: 32 })),
         }),
         replay: "safe",
         execute: async (args, api) => {
-          const previous = (await options.brain.read()).ledger.find((entry) => entry.id === args.id);
+          const brain = await options.brain.read();
+          const previous = args.handle === undefined ? undefined : findLedger(brain, args.handle);
+          const id = previous?.id ?? `ledger:${api.callId}`;
+          const evidenceIds = resolveHandlesOfKind(brain.handles, args.evidence ?? [], "ledger");
           await options.brain.apply({
             kind: "ledger.upsert",
             entry: {
-              id: args.id,
+              id,
               kind: args.kind,
               text: args.text,
               status: args.status,
-              answer: args.answer === undefined ? null : { text: args.answer, evidenceIds: args.evidenceIds ?? [] },
+              answer: args.answer === undefined ? null : { text: args.answer, evidenceIds },
               createdAt: previous?.createdAt ?? api.now(),
               updatedAt: api.now(),
             },
           });
-          return textOutput(`Ledger ${args.id} saved.`);
+          return textOutput(`Ledger ${handleOf((await options.brain.read()).handles, "ledger", id) ?? "record"} saved.`);
         },
       }),
       defineTool({
         name: "atlas",
-        description: "Create or update one short, source-backed Atlas claim.",
+        description:
+          "Create or update one short, source-backed Atlas claim. Give the handle of the Atlas record to update, or leave it out to create one.",
         parameters: obj({
-          id: RecordId,
+          handle: opt(HandleRef),
           title: str({ minLength: 1, maxLength: 240 }),
           claim: Text,
           evidence: arr(
@@ -148,25 +163,28 @@ export function createMiniExtension(options: MiniExtensionOptions) {
             }),
             { minItems: 1, maxItems: 12 },
           ),
-          links: opt(arr(RecordId, { maxItems: 32 })),
+          links: opt(arr(HandleRef, { maxItems: 32 })),
         }),
         replay: "safe",
         execute: async (args, api) => {
           const evidence = await Promise.all(args.evidence.map((item) => verifyFileEvidence(options.projectRoot, item)));
-          const previous = (await options.brain.read()).atlas.find((entry) => entry.id === args.id);
+          const brain = await options.brain.read();
+          const previous = args.handle === undefined ? undefined : findAtlas(brain, args.handle);
+          const id = previous?.id ?? `atlas:${api.callId}`;
+          const links = resolveHandlesOfKind(brain.handles, args.links ?? [], "atlas");
           await options.brain.apply({
             kind: "atlas.upsert",
             node: {
-              id: args.id,
+              id,
               title: args.title,
               claim: args.claim,
               evidence,
-              links: args.links ?? [],
+              links,
               createdAt: previous?.createdAt ?? api.now(),
               updatedAt: api.now(),
             },
           });
-          return textOutput(`Atlas ${args.id} saved.`);
+          return textOutput(`Atlas ${handleOf((await options.brain.read()).handles, "atlas", id) ?? "record"} saved.`);
         },
       }),
       defineTool({
@@ -188,23 +206,30 @@ export function createMiniExtension(options: MiniExtensionOptions) {
       defineTool({
         name: "pin",
         description:
-          "Add or remove one agent carry pin. A file source needs exact inspected evidence. A context source keeps a selected current-context item for one collapse period.",
+          "Add or remove one agent carry pin. A file source needs exact inspected evidence. A context source keeps a selected current-context item for one collapse period. Remove a pin by its short handle.",
         parameters: PinRequest,
         replay: "safe",
         execute: async (args, api) => {
           if (args.action === "remove") {
-            await options.brain.apply({ kind: "pin.carry.remove", id: args.id });
-            return textOutput(`Carry pin ${args.id} removed.`);
+            const brain = await options.brain.read();
+            const resolved = resolveHandleOfKind(brain.handles, args.handle, ["pin"]);
+            // A pin handle can name a user pin or a carry pin. Mark the correct
+            // target so the collapse removes the record the agent named.
+            const target = brain.userPins.some((pin) => pin.id === resolved.id) ? "user-pin" : "carry-pin";
+            await options.brain.apply({ kind: "deletion.mark", mark: { target, id: resolved.id, markedAt: api.now() } });
+            return textOutput(`Pin ${args.handle.toUpperCase()} is marked for removal at collapse.`);
           }
           const source: SourceRef =
             args.source.kind === "file"
               ? await verifyFileEvidence(options.projectRoot, args.source)
               : { kind: "context", contextId: options.contextId, excerpt: args.source.excerpt, freshness: "fresh" };
+          const id = `carry:${api.callId}`;
           await options.brain.apply({
             kind: "pin.carry.add",
-            pin: { id: `carry:${api.callId}`, item: args.item, reason: args.reason, source, createdAt: api.now() },
+            pin: { id, item: args.item, reason: args.reason, source, createdAt: api.now() },
           });
-          return textOutput("Carry pin saved.");
+          const handle = handleOf((await options.brain.read()).handles, "pin", id);
+          return textOutput(handle === undefined ? "Carry pin saved." : `Carry pin ${handle} saved.`);
         },
       }),
       defineTool({
@@ -244,35 +269,44 @@ export function createMiniExtension(options: MiniExtensionOptions) {
       }),
       defineTool({
         name: "wake",
-        description: "Arm, cancel, or view durable time and path wakes. A time condition is ISO 8601 or Unix milliseconds.",
+        description:
+          "Arm, cancel, or view durable time and path wakes. Use a short wake handle to cancel, view, or update a wake. A time condition is ISO 8601 or Unix milliseconds.",
         parameters: WakeRequest,
         replay: "safe",
         execute: async (args, api) => {
           const brain = await options.brain.read();
           if (args.action === "view") {
-            const wakes = args.id === undefined ? brain.wakes : brain.wakes.filter((wake) => wake.id === args.id);
-            return textOutput(renderWakes(wakes));
+            const wants = args.handle === undefined ? undefined : resolveHandleOfKind(brain.handles, args.handle, ["wake"]);
+            const wakes = wants === undefined ? brain.wakes : brain.wakes.filter((wake) => wake.id === wants.id);
+            return textOutput(renderWakes(brain, wakes));
           }
 
-          const previous = brain.wakes.find((wake) => wake.id === args.id);
           if (args.action === "cancel") {
-            if (previous === undefined) return textOutput(`Wake ${args.id} is not active.`);
+            const wants = resolveHandleOfKind(brain.handles, args.handle, ["wake"]);
+            const previous = brain.wakes.find((wake) => wake.id === wants.id);
+            if (previous === undefined) return textOutput(`Wake ${args.handle.toUpperCase()} is not active.`);
             await options.brain.apply({
               kind: "wake.upsert",
               wake: { ...previous, status: "cancelled", reason: args.reason },
             });
-            return textOutput(`Wake ${args.id} cancelled.`);
+            return textOutput(`Wake ${args.handle.toUpperCase()} cancelled.`);
           }
 
+          const existing = args.handle === undefined ? undefined : resolveHandle(brain.handles, args.handle);
+          if (existing !== undefined && existing.kind !== "wake") {
+            throw new Error(`The handle ${args.handle} does not name a wake.`);
+          }
           if (args.kind === "time") parseTimeWakeCondition(args.condition);
           else {
             await resolveProjectWatchPath(options.projectRoot, args.condition);
             await pathFingerprint(options.projectRoot, args.condition);
           }
+          const previous = existing === undefined ? undefined : brain.wakes.find((wake) => wake.id === existing.id);
+          const id = previous?.id ?? `wake:${api.callId}`;
           await options.brain.apply({
             kind: "wake.upsert",
             wake: {
-              id: args.id,
+              id,
               kind: args.kind,
               condition: args.condition,
               status: "armed",
@@ -280,12 +314,13 @@ export function createMiniExtension(options: MiniExtensionOptions) {
               createdAt: previous?.createdAt ?? api.now(),
             },
           });
-          return textOutput(`Wake ${args.id} armed.`);
+          const handle = handleOf((await options.brain.read()).handles, "wake", id) ?? "record";
+          return textOutput(`Wake ${handle} armed.`);
         },
       }),
       defineTool({
         name: "request_collapse",
-        description: "Request a Mini context collapse when the current live context is no longer useful. Do not call this for ordinary work.",
+        description: "Request a Carto context collapse when the current live context is no longer useful. Do not call this for ordinary work.",
         parameters: obj({ reason: str({ minLength: 1, maxLength: 1000 }) }),
         replay: "safe",
         execute: async (args) => {
@@ -298,28 +333,29 @@ export function createMiniExtension(options: MiniExtensionOptions) {
         description: "Store a short handoff and enter the sleeping state.",
         parameters: obj({
           intent: Text,
-          activeLedgerIds: arr(RecordId, { maxItems: 32 }),
-          openQuestionIds: arr(RecordId, { maxItems: 32 }),
-          relevantAtlasIds: arr(RecordId, { maxItems: 32 }),
+          activeLedger: arr(HandleRef, { maxItems: 32 }),
+          openQuestions: arr(HandleRef, { maxItems: 32 }),
+          relevantAtlas: arr(HandleRef, { maxItems: 32 }),
           nextAction: Text,
           note: opt(str({ maxLength: 4000 })),
         }),
         replay: "safe",
         execute: async (args, api) => {
+          const brain = await options.brain.read();
           await options.brain.apply({
             kind: "handoff.set",
             handoff: {
               intent: args.intent,
-              activeLedgerIds: args.activeLedgerIds,
-              openQuestionIds: args.openQuestionIds,
-              relevantAtlasIds: args.relevantAtlasIds,
+              activeLedgerIds: resolveHandlesOfKind(brain.handles, args.activeLedger, "ledger"),
+              openQuestionIds: resolveHandlesOfKind(brain.handles, args.openQuestions, "ledger"),
+              relevantAtlasIds: resolveHandlesOfKind(brain.handles, args.relevantAtlas, "atlas"),
               nextAction: args.nextAction,
               note: args.note ?? "",
               updatedAt: api.now(),
             },
           });
           await options.brain.apply({ kind: "activity.set", activity: { kind: "sleeping", detail: null } });
-          return textOutput("Mini is sleeping.");
+          return textOutput("Carto is sleeping.");
         },
       }),
     ],
@@ -332,7 +368,7 @@ async function verifyFileEvidence(
 ): Promise<SourceRef> {
   const inspected = await inspectProjectFile(projectRoot, evidence);
   if (inspected.digest !== evidence.digest) {
-    throw new Error(`Evidence changed before Mini could save ${inspected.path}.`);
+    throw new Error(`Evidence changed before Carto could save ${inspected.path}.`);
   }
   return {
     kind: "file",
@@ -345,9 +381,28 @@ async function verifyFileEvidence(
   };
 }
 
-function renderWakes(wakes: readonly WakeEntry[]): string {
+function findLedger(brain: Awaited<ReturnType<BrainStore["read"]>>, handle: string) {
+  const resolved = resolveHandleOfKind(brain.handles, handle, ["ledger"]);
+  const entry = brain.ledger.find((candidate) => candidate.id === resolved.id);
+  if (entry === undefined) throw new Error(`The handle ${handle.toUpperCase()} does not name a Ledger record.`);
+  return entry;
+}
+
+function findAtlas(brain: Awaited<ReturnType<BrainStore["read"]>>, handle: string) {
+  const resolved = resolveHandleOfKind(brain.handles, handle, ["atlas"]);
+  const node = brain.atlas.find((candidate) => candidate.id === resolved.id);
+  if (node === undefined) throw new Error(`The handle ${handle.toUpperCase()} does not name an Atlas record.`);
+  return node;
+}
+
+function renderWakes(brain: Awaited<ReturnType<BrainStore["read"]>>, wakes: readonly WakeEntry[]): string {
   if (wakes.length === 0) return "No wakes are stored.";
-  return wakes.map((wake) => `${wake.id}: ${wake.kind}; ${wake.status}; ${wake.condition}; ${wake.reason}`).join("\n");
+  return wakes
+    .map((wake) => {
+      const handle = handleOf(brain.handles, "wake", wake.id) ?? "sleeping wake";
+      return `${handle}: ${wake.kind}; ${wake.status}; ${wake.condition}; ${wake.reason}`;
+    })
+    .join("\n");
 }
 
 function textOutput(text: string) {

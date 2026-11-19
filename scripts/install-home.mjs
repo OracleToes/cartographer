@@ -23,7 +23,7 @@ const installed = spawnSync(process.platform === "win32" ? "npm.cmd" : "npm", ["
 if (installed.status !== 0) process.exit(installed.status ?? 1);
 
 const bin = join(home, "bin");
-process.stdout.write(`Installed Cartographer Mini in ${home}\n`);
+process.stdout.write(`Installed Carto in ${home}\n`);
 process.stdout.write(`For this shell, run: export PATH="${bin}:$PATH"\n`);
 process.stdout.write("Then run: hash -r\n");
 process.stdout.write(`On first use, run carto --model provider/model to create ${join(home, "config.json")}.\n`);

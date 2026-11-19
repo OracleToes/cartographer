@@ -27,7 +27,7 @@ export function contextDirectory(root: string): string {
 
 export function contextDatabasePath(root: string, generation: string): string {
   if (!isContextGenerationName(generation)) {
-    throw new Error("A Mini context generation has an unsafe file name.");
+    throw new Error("A Carto context generation has an unsafe file name.");
   }
   return join(contextDirectory(root), `${generation}.sqlite`);
 }

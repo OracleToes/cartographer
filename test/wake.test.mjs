@@ -19,7 +19,7 @@ test("a Pi model tool call writes deliberate Chat while plain output stays out o
   faux.setResponses([
     fauxAssistantMessage(
       [
-        fauxToolCall("chat", { text: "A deliberate Mini reply." }),
+        fauxToolCall("chat", { text: "A deliberate Carto reply." }),
         fauxToolCall("pin", {
           action: "add",
           item: "Selected working-context item",
@@ -41,10 +41,86 @@ test("a Pi model tool call writes deliberate Chat while plain output stays out o
   try {
     await session.submit("Please respond.", "test-request");
     const current = await brain.read();
-    assert.deepEqual(current.chat.map((entry) => [entry.author, entry.text]), [["agent", "A deliberate Mini reply."]]);
+    assert.deepEqual(current.chat.map((entry) => [entry.author, entry.text]), [["agent", "A deliberate Carto reply."]]);
     assert.equal(current.carryPins[0]?.source.kind, "context");
     assert.equal(current.carryPins[0]?.item, "Selected working-context item");
     assert.equal(faux.state.callCount, 2);
+  } finally {
+    await session.close();
+    await brain.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Carto tools use public handles and never expose private record IDs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-handle-tools-"));
+  const brain = await BrainStore.open(join(root, ".brain", "brain.sqlite"));
+  await brain.apply({
+    kind: "ledger.upsert",
+    entry: { id: "ledger:private", kind: "goal", text: "Original goal", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
+  });
+  const models = createModels();
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage(
+      [
+        fauxToolCall("ledger", { handle: "L1", kind: "goal", text: "Edited from a handle", status: "open" }),
+        fauxToolCall("pin", {
+          action: "add",
+          item: "Handle test pin",
+          reason: "Check P1",
+          source: { kind: "context", excerpt: "Handle test pin" },
+        }),
+      ],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage("Done."),
+  ]);
+  const session = await LiveSession.open({
+    path: join(root, ".brain", "context", "live.sqlite"),
+    model: { provider: "faux", modelId: "faux-1" },
+    projectRoot: root,
+    brain,
+    models,
+  });
+  try {
+    await session.submit("Edit L1 and add a pin.", "handle-request");
+    const current = await brain.read();
+    assert.equal(current.ledger.length, 1);
+    assert.equal(current.ledger[0]?.id, "ledger:private");
+    assert.equal(current.ledger[0]?.text, "Edited from a handle");
+    assert.equal(current.handles.entries.find((entry) => entry.kind === "ledger")?.handle, "L1");
+    assert.equal(current.carryPins.length, 1);
+    const entries = (await session.view()).activity.map((item) => item.text).join("\n");
+    assert.doesNotMatch(entries, /ledger:private|carry:/);
+    assert.match(entries, /L1/);
+  } finally {
+    await session.close();
+    await brain.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("idle start work creates no Person Chat record", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-idle-start-"));
+  const brain = await BrainStore.open(join(root, ".brain", "brain.sqlite"));
+  const models = createModels();
+  const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1" }] });
+  models.setProvider(faux.provider);
+  faux.setResponses([fauxAssistantMessage("The agent started useful work.")]);
+  const session = await LiveSession.open({
+    path: join(root, ".brain", "context", "live.sqlite"),
+    model: { provider: "faux", modelId: "faux-1" },
+    projectRoot: root,
+    brain,
+    models,
+  });
+  try {
+    await session.continueOrStart("idle-start");
+    assert.equal((await brain.read()).chat.length, 0);
+    assert.equal(faux.state.callCount, 1);
+    assert.ok((await session.view()).activity.some((item) => item.text.includes("started useful work")));
   } finally {
     await session.close();
     await brain.close();
@@ -139,7 +215,7 @@ test("a Pi Durable folder wake detects a direct child file change", async () => 
   }
 });
 
-test("a project-root path wake ignores Mini Brain files but sees direct project entries", async () => {
+test("a project-root path wake ignores Carto Brain files but sees direct project entries", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-root-wake-"));
   const brain = await BrainStore.open(join(root, ".brain", "brain.sqlite"));
   const wakeId = "wake:root";
@@ -157,7 +233,7 @@ test("a project-root path wake ignores Mini Brain files but sees direct project 
   const session = await openSession(root, brain);
   try {
     await session.ensurePathWake(wakeId, ".");
-    await writeFile(join(root, ".brain", "ignored.txt"), "Mini data\n", "utf8");
+    await writeFile(join(root, ".brain", "ignored.txt"), "Carto data\n", "utf8");
     await new Promise((resolve) => setTimeout(resolve, 1_250));
     assert.equal((await brain.read()).wakes.find((wake) => wake.id === wakeId)?.status, "armed");
 

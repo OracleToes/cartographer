@@ -7,7 +7,7 @@ type StoredCarry = Record<string, JsonValue>;
 
 /** Selected carry pins belong to one live context generation, not the long-lived Brain. */
 export const LiveCarryDocument = defineDoc<StoredCarry>({
-  kind: "cartographer.mini.live-carry",
+  kind: "carto.live-carry",
   version: 1,
   scope: "conversation",
   history: "latest",

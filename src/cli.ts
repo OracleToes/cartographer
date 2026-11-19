@@ -7,7 +7,7 @@ function usage(): string {
   return [
     "Usage: carto [project-path] [--model provider/model] [--endpoint http://host:port/v1] [--import-legacy] [--help]",
     "",
-    "Mini reads its global configuration from ~/.carto/config.json.",
+    "Carto reads its global configuration from ~/.carto/config.json.",
     "The first --model value creates that file.",
     "Use --model llama-swap/Flint --endpoint http://localhost:8888/v1 for llama-swap or llama-server.",
     "--endpoint is valid only with a llama-swap/model model. It does not store an API key.",
@@ -57,15 +57,15 @@ async function main(): Promise<void> {
     ...(parsed.values.endpoint === undefined ? {} : { llamaSwapEndpointOverride: parsed.values.endpoint }),
   });
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new ConfigError("carto needs an interactive terminal for the Shared Brain UI.");
+    throw new ConfigError("carto needs an interactive terminal for the Carto UI.");
   }
-  const [{ MiniProject }, { runMiniUi }] = await Promise.all([
+  const [{ CartoProject }, { runCartoUi }] = await Promise.all([
     import("./runtime/project.js"),
     import("./runtime/ui.js"),
   ]);
-  const project = await MiniProject.open(root, config);
+  const project = await CartoProject.open(root, config);
   try {
-    await runMiniUi(project);
+    await runCartoUi(project);
   } finally {
     await project.close();
   }

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { BrainStore } from "./brain-store.js";
 import { resolveProjectWatchPath } from "./workspace.js";
 
-export const PATH_WAKE_TASK_NAME = "cartographer.mini.path-wake";
+export const PATH_WAKE_TASK_NAME = "carto.path-wake";
 export const PATH_WAKE_POLL_MS = 1_000;
 export const MAX_PATH_WAKE_ENTRIES = 10_000;
 
@@ -78,7 +78,7 @@ async function fingerprintEntry(
     .filter((entry) => !ignoredDirectEntries?.has(entry.name))
     .sort((first, second) => first.name.localeCompare(second.name));
   if (entries.length > MAX_PATH_WAKE_ENTRIES) {
-    throw new PathWakeError(`Mini watches folders with up to ${MAX_PATH_WAKE_ENTRIES} direct entries.`);
+    throw new PathWakeError(`Carto watches folders with up to ${MAX_PATH_WAKE_ENTRIES} direct entries.`);
   }
   return {
     ...current,

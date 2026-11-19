@@ -12,7 +12,7 @@ export const LLAMA_SWAP_PROVIDER_ID = "llama-swap";
 export function modelsForConfig(config: GlobalConfig, model: ModelRef) {
   if (model.provider !== LLAMA_SWAP_PROVIDER_ID) return undefined;
   if (config.llamaSwapEndpoint === undefined) {
-    throw new Error("A llama-swap model needs llamaSwapEndpoint in Mini configuration.");
+    throw new Error("A llama-swap model needs llamaSwapEndpoint in Carto configuration.");
   }
 
   const models = createModels();

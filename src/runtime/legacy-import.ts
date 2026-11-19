@@ -57,12 +57,12 @@ async function readOptionalJson(path: string): Promise<unknown | undefined> {
     text = await readFile(path, "utf8");
   } catch (error) {
     if (isMissingFile(error)) return undefined;
-    throw new LegacyImportError(`Mini cannot read ${path}: ${messageOf(error)}`);
+    throw new LegacyImportError(`Carto cannot read ${path}: ${messageOf(error)}`);
   }
   try {
     return JSON.parse(text) as unknown;
   } catch (error) {
-    throw new LegacyImportError(`Mini cannot read ${path}: it is not valid JSON (${messageOf(error)}).`);
+    throw new LegacyImportError(`Carto cannot read ${path}: it is not valid JSON (${messageOf(error)}).`);
   }
 }
 
@@ -142,7 +142,7 @@ function parseLegacyAtlas(value: unknown, now: number, warnings: string[]): Atla
   const idByName = new Map(candidates.map((candidate) => [candidate.name, candidate.id]));
   return candidates.map((candidate) => {
     const excerpt = [
-      "Imported legacy Atlas record. It is stale until Mini checks current project evidence.",
+      "Imported legacy Atlas record. It is stale until Carto checks current project evidence.",
       `Title: ${candidate.title}`,
       `Claim: ${candidate.claim}`,
       candidate.detail === "" ? "" : `Legacy detail: ${candidate.detail}`,

@@ -3,7 +3,7 @@ import { defineTask } from "@earendil-works/pi-durable";
 import { BrainStore } from "./brain-store.js";
 import { applyApprovedChange, type ChangeApplyResult } from "./change-apply.js";
 
-export const PATCH_APPLY_TASK_NAME = "cartographer.mini.apply-approved-patch";
+export const PATCH_APPLY_TASK_NAME = "carto.apply-approved-patch";
 
 type PatchApplyInput = { changeId: string };
 type PatchApplyState = { phase: "apply" };

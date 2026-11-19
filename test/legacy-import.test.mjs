@@ -17,7 +17,7 @@ test("the optional legacy importer copies plain Atlas and Ledger records without
     JSON.stringify({
       version: 1,
       items: [
-        { id: "g1", kind: "goal", text: "Keep Mini small", status: "open", added: "2025-01-01T00:00:00.000Z" },
+        { id: "g1", kind: "goal", text: "Keep Carto small", status: "open", added: "2025-01-01T00:00:00.000Z" },
         { id: "n2", kind: "note", text: "An old decision", status: "done", outcome: "It was accepted." },
       ],
     }),

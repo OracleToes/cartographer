@@ -176,7 +176,7 @@ test("model URLs and llama-swap endpoints with a non-llama-swap model are reject
   );
 });
 
-test("Pi Durable stores one current Mini Brain document", async () => {
+test("Pi Durable stores one current Carto Brain document", async () => {
   const root = await temporaryDirectory("carto-brain-");
   const path = join(root, ".brain", "brain.sqlite");
   const store = await BrainStore.open(path);

@@ -13,7 +13,7 @@ export interface TimeWakeInput {
 type TimeWakeState = { phase: "wait" } | { phase: "deliver" };
 type TimeWakeRuntime = TaskRuntime<TimeWakeInput, TimeWakeState, { wakeId: string }, object>;
 
-export const TIME_WAKE_TASK_NAME = "cartographer.mini.time-wake";
+export const TIME_WAKE_TASK_NAME = "carto.time-wake";
 
 /** A Pi Durable sleep task. Its durable checkpoint survives a process restart. */
 export function createTimeWakeTask(brain: BrainStore) {

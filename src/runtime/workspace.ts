@@ -38,12 +38,12 @@ export async function inspectProjectFile(projectRoot: string, request: InspectRe
     throw new WorkspaceError("The last line must be at or after the first line.");
   }
   if (request.endLine - request.startLine + 1 > MAX_INSPECT_LINES) {
-    throw new WorkspaceError(`Mini reads at most ${MAX_INSPECT_LINES} lines at one time.`);
+    throw new WorkspaceError(`Carto reads at most ${MAX_INSPECT_LINES} lines at one time.`);
   }
 
   const file = await resolveProjectFile(projectRoot, request.path);
   const bytes = await readBoundedFile(file.path);
-  if (bytes.includes(0)) throw new WorkspaceError("Mini does not inspect binary files in version one.");
+  if (bytes.includes(0)) throw new WorkspaceError("Carto does not inspect binary files in version one.");
   const text = bytes.toString("utf8");
   const lines = text.split(/\r?\n/);
   if (request.startLine > lines.length) throw new WorkspaceError("The first line is outside the file.");
@@ -66,11 +66,11 @@ export async function digestProjectFile(projectRoot: string, path: string): Prom
 export async function resolveProjectFile(projectRoot: string, path: string): Promise<ProjectFile> {
   const resolved = await resolveProjectWatchPath(projectRoot, path);
   const info = await stat(resolved.path);
-  if (!info.isFile()) throw new WorkspaceError("Mini can use files only.");
+  if (!info.isFile()) throw new WorkspaceError("Carto can use files only.");
   return resolved;
 }
 
-/** Resolve an existing file or directory that Mini may watch. */
+/** Resolve an existing file or directory that Carto may watch. */
 export async function resolveProjectWatchPath(projectRoot: string, path: string): Promise<ProjectFile> {
   const root = await realProjectRoot(projectRoot);
   const requested = resolve(root, path);
@@ -92,7 +92,7 @@ export async function resolveProjectWritePath(projectRoot: string, path: string)
     const link = await lstat(requested);
     const resolved = await realpath(requested);
     assertResolvedProjectPath(root, resolved);
-    if (link.isSymbolicLink()) throw new WorkspaceError("Mini does not apply a patch through a symbolic link.");
+    if (link.isSymbolicLink()) throw new WorkspaceError("Carto does not apply a patch through a symbolic link.");
     return { root, path: requested, relativePath };
   }
 
@@ -110,7 +110,7 @@ export function normalizePatchPath(path: string): string {
     throw new WorkspaceError("A patch path must stay inside the project root.");
   }
   if (path === ".brain" || path.startsWith(".brain/")) {
-    throw new WorkspaceError("Mini does not patch .brain.");
+    throw new WorkspaceError("Carto does not patch .brain.");
   }
   return path;
 }
@@ -119,23 +119,23 @@ async function realProjectRoot(projectRoot: string): Promise<string> {
   try {
     return await realpath(projectRoot);
   } catch (error) {
-    throw new WorkspaceError(`Mini cannot resolve the project root: ${messageOf(error)}`);
+    throw new WorkspaceError(`Carto cannot resolve the project root: ${messageOf(error)}`);
   }
 }
 
 function assertLexicalProjectPath(root: string, candidate: string): void {
   if (!isInsideRoot(root, candidate)) throw new WorkspaceError("The path is outside the project root.");
-  if (isInsideRoot(brainDirectory(root), candidate)) throw new WorkspaceError("Mini does not inspect or patch .brain.");
+  if (isInsideRoot(brainDirectory(root), candidate)) throw new WorkspaceError("Carto does not inspect or patch .brain.");
 }
 
 function assertResolvedProjectPath(root: string, candidate: string): void {
   if (!isInsideRoot(root, candidate)) throw new WorkspaceError("A symbolic link resolves outside the project root.");
-  if (isInsideRoot(brainDirectory(root), candidate)) throw new WorkspaceError("Mini does not inspect or patch .brain.");
+  if (isInsideRoot(brainDirectory(root), candidate)) throw new WorkspaceError("Carto does not inspect or patch .brain.");
 }
 
 async function readBoundedFile(path: string): Promise<Buffer> {
   const info = await stat(path);
-  if (info.size > MAX_INSPECT_BYTES) throw new WorkspaceError(`Mini reads files up to ${MAX_INSPECT_BYTES} bytes.`);
+  if (info.size > MAX_INSPECT_BYTES) throw new WorkspaceError(`Carto reads files up to ${MAX_INSPECT_BYTES} bytes.`);
   return readFile(path);
 }
 
