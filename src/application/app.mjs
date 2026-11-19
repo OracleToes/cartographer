@@ -270,7 +270,7 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		/** Pure presentation metadata paired by id with every registered capability. */
 		actionSpecs,
 		events: eventStream,
-		/** Safe immutable facts for Screen's job presentation; no controller, result payload, or job closure crosses this boundary. */
+		/** Safe immutable facts for Screen's job presentation; no controller or job closure crosses this boundary. */
 		jobSnapshots: () => Object.freeze(jobManager.list()),
 		cancelJob,
 		/** Starts only named asynchronous projection ports and returns a job id plus its typed result promise. */

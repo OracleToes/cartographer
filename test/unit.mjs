@@ -626,7 +626,7 @@ test("application: projection jobs expose safe snapshots and only wrap real abor
 	const settled = app.jobSnapshots()[0];
 	assert.equal(settled.state, "cancelled");
 	assert.equal(settled.result?.ok, false);
-	assert.equal(Object.hasOwn(settled.result ?? {}, "data"), false, "job presentation gets a compact outcome, not a projection payload");
+	assert.equal(settled.result?.error.kind, UI_ERROR_KIND.cancelled, "a snapshot retains the typed outcome without revealing a controller or job closure");
 
 	const unsupported = app.projections.start("carto.atlas");
 	assert.equal(unsupported.jobId, undefined, "a legacy synchronous reader is not manufactured into a job");
