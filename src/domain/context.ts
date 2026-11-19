@@ -1,5 +1,5 @@
 import { visibleAtlas, visibleLedger } from "./brain.js";
-import type { AtlasNode, MiniBrain, SourceRef } from "./types.js";
+import type { AtlasNode, CarryPin, MiniBrain, SourceRef } from "./types.js";
 
 export interface ContextBlock {
   id: string;
@@ -25,6 +25,8 @@ export interface ContextPlan {
 export interface ContextInput {
   budget: number;
   userMessage?: string;
+  /** Carry pins selected by the active context generation. */
+  carryPins?: readonly CarryPin[];
 }
 
 export const MINI_RULES = [
@@ -56,7 +58,7 @@ export function projectContext(brain: MiniBrain, input: ContextInput): ContextPl
     addPin(plan, "user-pin", pin.id, pin.item, pin.reason, pin.source, true);
   }
 
-  for (const pin of brain.carryPins) {
+  for (const pin of input.carryPins ?? brain.carryPins) {
     addPin(plan, "carry-pin", pin.id, pin.item, pin.reason, pin.source, false);
   }
 
@@ -84,6 +86,15 @@ export function renderContextPlan(plan: ContextPlan): string {
   return plan.blocks.map((block) => `## ${block.section}\n${block.text}`).join("\n\n");
 }
 
+/** Keep each carry pin once when a live generation and the Brain both refer to it. */
+export function mergeCarryPins(...groups: ReadonlyArray<readonly CarryPin[]>): CarryPin[] {
+  const pins = new Map<string, CarryPin>();
+  for (const group of groups) {
+    for (const pin of group) pins.set(pin.id, pin);
+  }
+  return [...pins.values()];
+}
+
 function add(plan: ContextPlan, block: ContextBlock): void {
   if (block.required || plan.estimatedTokens + block.estimatedTokens <= plan.budget) {
     plan.blocks.push(block);
@@ -107,7 +118,7 @@ function addPin(
     add(plan, makeBlock(section, `${section}:${id}:stale`, `Stale pin: ${reason}. Inspect ${sourceLabel(source)} again.`, "Stale pin warning", false));
     return;
   }
-  const text = `Reason: ${reason}\nSource: ${sourceLabel(source)}\n${item}`;
+  const text = `Reason: ${reason}\nSource: ${sourceLabel(source)}\n${pinItemText(item, source)}`;
   add(plan, makeBlock(section, `${section}:${id}`, text, `${section} selected by ${required ? "person" : "agent"}`, required));
 }
 
@@ -165,6 +176,11 @@ function runtimeText(brain: MiniBrain): string {
 function sourceLabel(source: SourceRef): string {
   if (source.kind === "context") return `context ${source.contextId}`;
   return `${source.path}:${source.startLine}-${source.endLine}`;
+}
+
+function pinItemText(item: string, source: SourceRef): string {
+  if (source.kind !== "context" || source.excerpt === item) return item;
+  return `${item}\nSelected context:\n${source.excerpt}`;
 }
 
 function estimateTokens(text: string): number {

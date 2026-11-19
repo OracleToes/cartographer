@@ -34,13 +34,20 @@ export class BrainStore {
   static async open(path: string): Promise<BrainStore> {
     await mkdir(dirname(path), { recursive: true });
     const database = await openNodeSqliteDatabase(path);
-    await database.exec("PRAGMA secure_delete = ON");
-    const storage = await SqliteStorage.open(database, { prefix: "mini_" });
-    const harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
-    const root = await harness.root(BACKGROUND_CONTEXT);
-    const store = new BrainStore(harness, root, database);
-    await store.ensureDocument();
-    return store;
+    let harness: Harness | undefined;
+    try {
+      await database.exec("PRAGMA secure_delete = ON");
+      const storage = await SqliteStorage.open(database, { prefix: "mini_" });
+      harness = await Harness.open(storage, { models: createModels(), registry: createRegistry() }, BACKGROUND_CONTEXT);
+      const root = await harness.root(BACKGROUND_CONTEXT);
+      const store = new BrainStore(harness, root, database);
+      await store.ensureDocument();
+      return store;
+    } catch (error) {
+      if (harness === undefined) await database.close();
+      else await harness.close(BACKGROUND_CONTEXT);
+      throw error;
+    }
   }
 
   async read(): Promise<MiniBrain> {

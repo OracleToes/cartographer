@@ -24,7 +24,7 @@ It does not keep the old runtime, user interface, tests, package files, or comma
 
 The old code has useful ideas. It has no module that Mini must keep.
 
-An old Cartographer brain can later be an import source for Atlas and Ledger. Mini does not need old Cartographer code to run.
+An old Cartographer brain can be an import source for Atlas and Ledger. Run `carto --import-legacy` in that project. Mini reads only `.brain/carto-atlas.json` and `.brain/carto-ledger.json`, copies useful records into the current Brain, and leaves the old JSON files unchanged. Imported Atlas records are stale until Mini checks current project evidence. Mini does not need old Cartographer code to run.
 
 ## Runtime home and configuration
 
@@ -123,17 +123,16 @@ The Brain contains:
 
 Mini uses Pi Durable SQLite storage. It does not make a new storage engine.
 
-Mini has three small storage files:
+Mini has one Brain file and generation-named context files:
 
 ```text
-.brain/brain.sqlite     the Mini Brain document
-.brain/live.sqlite      the current Pi Durable model session
-.brain/archive.sqlite   the previous model session, if one exists
+.brain/brain.sqlite                    the Mini Brain document
+.brain/context/<generation>.sqlite     one live or archived Pi Durable model session
 ```
 
-The live and archive files are context files. They are not the Brain.
+There is one live context file and at most one archive context file. They are not the Brain.
 
-The Brain names the current live generation and archive generation. It is the source of truth.
+The Brain names the current live generation and archive generation. It is the source of truth. Generation names let Mini create a new live file before it changes the Brain, then remove an old unreferenced file after a successful commit.
 
 ## Two rules for keeping data
 
@@ -221,7 +220,7 @@ A changed file makes a source pin stale. Mini shows the stale state. Mini does n
 
 The default collapse mode is a visible, user-confirmed action.
 
-In `request` mode, the agent can request a collapse when the live context is too large. The person confirms it. The agent cannot delete an archive in the background.
+In `request` mode, the agent can request a collapse when the live context is too large. The person confirms it or cancels the request. The agent cannot delete an archive in the background.
 
 In `agent` mode, the agent can run the same collapse without a confirmation. The mode is a global configuration choice.
 
@@ -413,7 +412,8 @@ Wake and sleep are durable states.
 Mini uses Pi Durable tasks for them.
 
 - A time wake uses a Pi Durable sleep.
-- A file or folder watcher sends a Pi Durable signal.
+- A file or folder wake uses a Pi Durable sleep task to recheck a bounded project path.
+- A folder wake checks its direct entries. Mini limits a folder wake to 10,000 direct entries. A wake of the project root ignores `.brain`.
 - A user message wakes the active work.
 
 Mini does not make a second timer system or a second task queue.

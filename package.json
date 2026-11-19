@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A small, durable shared brain for one project.",
   "engines": {
-    "node": ">=22.15.0"
+    "node": ">=22.19.0"
   },
   "bin": {
     "carto": "./bin/carto.mjs"

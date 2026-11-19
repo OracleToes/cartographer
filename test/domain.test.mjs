@@ -51,6 +51,26 @@ test("a collapse needs a current live generation", () => {
   assert.throws(() => decide(createEmptyBrain(), { kind: "collapse.rotate", newLiveGeneration: "g1" }), DomainError);
 });
 
+test("a context plan uses the active generation carry selection", () => {
+  let brain = createEmptyBrain();
+  brain = decide(brain, {
+    kind: "pin.carry.add",
+    pin: { id: "carry:future", item: "Future carry", reason: "For the next collapse", source: source(), createdAt: 1 },
+  }).brain;
+  const selected = {
+    id: "carry:selected",
+    item: "Selected live carry",
+    reason: "It entered this live generation.",
+    source: { kind: "context", contextId: "old-generation", excerpt: "Exact selected working context.", freshness: "fresh" },
+    createdAt: 1,
+  };
+
+  const plan = projectContext(brain, { budget: 1000, carryPins: [selected, ...brain.carryPins] });
+
+  assert.ok(plan.blocks.some((block) => block.id === "carry-pin:carry:selected" && block.text.includes("Exact selected working context.")));
+  assert.ok(plan.blocks.some((block) => block.id === "carry-pin:carry:future"));
+});
+
 test("context keeps user pins and warns about stale evidence without old text", () => {
   let brain = createEmptyBrain();
   brain = decide(brain, {

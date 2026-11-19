@@ -1,4 +1,3 @@
-import { access } from "node:fs/promises";
 import { parseArgs } from "node:util";
 
 import { ConfigError, loadGlobalConfig } from "./runtime/config.js";
@@ -6,10 +5,11 @@ import { brainDatabasePath, projectRoot } from "./runtime/paths.js";
 
 function usage(): string {
   return [
-    "Usage: carto [project-path] [--model provider/model] [--help]",
+    "Usage: carto [project-path] [--model provider/model] [--import-legacy] [--help]",
     "",
     "Mini reads its global configuration from ~/.carto/config.json.",
     "The first --model value creates that file.",
+    "--import-legacy copies old plain JSON Atlas and Ledger records from <project>/.brain/ and then exits.",
   ].join("\n");
 }
 
@@ -19,6 +19,7 @@ async function main(): Promise<void> {
     options: {
       help: { type: "boolean", short: "h" },
       model: { type: "string", short: "m" },
+      "import-legacy": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -28,23 +29,40 @@ async function main(): Promise<void> {
     return;
   }
   if (parsed.positionals.length > 1) throw new ConfigError("Use zero or one project path.");
+  const root = projectRoot(parsed.positionals[0]);
+
+  if (parsed.values["import-legacy"]) {
+    if (parsed.values.model !== undefined) throw new ConfigError("Use --import-legacy and --model in separate starts.");
+    const { readLegacyBrain, importLegacyBrain } = await import("./runtime/legacy-import.js");
+    const legacy = await readLegacyBrain(root);
+    const { BrainStore } = await import("./runtime/brain-store.js");
+    const brain = await BrainStore.open(brainDatabasePath(root));
+    try {
+      const result = await importLegacyBrain(brain, legacy);
+      process.stdout.write(`Imported ${result.ledger} Ledger record(s) and ${result.atlas} Atlas record(s).\n`);
+      for (const warning of result.warnings) process.stdout.write(`Warning: ${warning}\n`);
+    } finally {
+      await brain.close();
+    }
+    return;
+  }
 
   const config = await loadGlobalConfig(
     parsed.values.model === undefined ? {} : { modelOverride: parsed.values.model },
   );
-  const root = projectRoot(parsed.positionals[0]);
-  let initialized = true;
-  try {
-    await access(brainDatabasePath(root));
-  } catch {
-    initialized = false;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new ConfigError("carto needs an interactive terminal for the Shared Brain UI.");
   }
-
-  process.stdout.write("Cartographer Mini\n");
-  process.stdout.write(`Project: ${root}\n`);
-  process.stdout.write(`Model: ${config.model}\n`);
-  process.stdout.write(`Collapse mode: ${config.collapseMode}\n`);
-  process.stdout.write(initialized ? "Brain: ready\n" : "Brain: not initialized\n");
+  const [{ MiniProject }, { runMiniUi }] = await Promise.all([
+    import("./runtime/project.js"),
+    import("./runtime/ui.js"),
+  ]);
+  const project = await MiniProject.open(root, config);
+  try {
+    await runMiniUi(project);
+  } finally {
+    await project.close();
+  }
 }
 
 void main().catch((error: unknown) => {

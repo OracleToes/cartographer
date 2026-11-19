@@ -15,10 +15,12 @@ test("a model override creates the global configuration and later loads it", asy
   const home = await temporaryDirectory("carto-home-");
   try {
     const first = await loadGlobalConfig({ home, modelOverride: "faux/faux-1" });
+    const override = await loadGlobalConfig({ home, modelOverride: "faux/faux-2" });
     const later = await loadGlobalConfig({ home });
     const written = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
 
     assert.deepEqual(first, { version: 1, model: "faux/faux-1", collapseMode: "request" });
+    assert.deepEqual(override, { ...first, model: "faux/faux-2" });
     assert.deepEqual(later, first);
     assert.deepEqual(written, first);
   } finally {

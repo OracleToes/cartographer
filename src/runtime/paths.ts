@@ -26,7 +26,14 @@ export function contextDirectory(root: string): string {
 }
 
 export function contextDatabasePath(root: string, generation: string): string {
+  if (!isContextGenerationName(generation)) {
+    throw new Error("A Mini context generation has an unsafe file name.");
+  }
   return join(contextDirectory(root), `${generation}.sqlite`);
+}
+
+export function isContextGenerationName(generation: string): boolean {
+  return /^[A-Za-z0-9-]{1,128}$/.test(generation);
 }
 
 export function isInsideRoot(root: string, candidate: string): boolean {

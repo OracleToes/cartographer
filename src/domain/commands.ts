@@ -38,6 +38,7 @@ export type MiniCommand =
   | { kind: "handoff.set"; handoff: Handoff | null }
   | { kind: "wake.upsert"; wake: WakeEntry }
   | { kind: "change.upsert"; change: ChangeProposal }
+  | { kind: "legacy.import"; ledger: LedgerEntry[]; atlas: AtlasNode[] }
   | { kind: "deletion.mark"; mark: DeletionMark }
   | { kind: "deletion.unmark"; target: DeletionTarget }
   | { kind: "activity.set"; activity: Activity }
@@ -80,6 +81,15 @@ export function decide(brain: MiniBrain, command: MiniCommand): Decision {
         brain: { ...brain, changes: replaceById(brain.changes, command.change) },
         effects: changeEffect(command.change),
       };
+    case "legacy.import":
+      return {
+        brain: {
+          ...brain,
+          ledger: mergeImportedRecords(brain.ledger, command.ledger),
+          atlas: mergeImportedRecords(brain.atlas, command.atlas),
+        },
+        effects: [],
+      };
     case "deletion.mark":
       return { brain: addDeletionMark(brain, command.mark), effects: [] };
     case "deletion.unmark":
@@ -107,6 +117,15 @@ export function decide(brain: MiniBrain, command: MiniCommand): Decision {
     default:
       return assertNever(command);
   }
+}
+
+function mergeImportedRecords<T extends { id: string; createdAt: number }>(existing: T[], imported: T[]): T[] {
+  let merged = existing;
+  for (const entry of imported) {
+    const previous = merged.find((candidate) => candidate.id === entry.id);
+    merged = replaceById(merged, previous === undefined ? entry : { ...entry, createdAt: previous.createdAt });
+  }
+  return merged;
 }
 
 function rotateGeneration(brain: MiniBrain, newLiveGeneration: GenerationId): Decision {
