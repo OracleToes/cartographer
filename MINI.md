@@ -1,101 +1,269 @@
 # Mini
 
-## Decision
+## Purpose
 
-Mini is a new durable-agent kernel, not a smaller skin over the existing control plane.
+Mini is a new, small Cartographer.
 
-It serves one person working in one project. It keeps a shared, inspectable brain; compiles bounded context from that brain and the project; converses; observes files; proposes changes; and can sleep until relevant work arrives.
+It serves one person in one project.
 
-The five retained concepts are the product:
+It has five core parts:
 
-- **Atlas** — concise, source-backed project knowledge.
-- **Ledger** — durable goals, notes, and unanswered questions.
-- **Context gardening** — selecting, refreshing, and showing the evidence supplied to the model.
-- **Chat** — the visible working thread between person and agent.
-- **Wake and sleep** — durable pauses and relevant resumptions.
+- Atlas: short, source-backed project knowledge.
+- Ledger: goals, notes, and questions.
+- Context gardening: choose what stays in context.
+- Chat: deliberate messages between the person and the agent.
+- Wake and sleep: stop safely and resume later.
 
-Everything else must earn its way back as a small attachment. Mini does not preserve legacy behaviour merely because it already exists.
+Mini does not keep old features because they already exist.
 
-## Clean-slate repository
+## Clean start
 
-This repository retains this plan, the license, and Git history until Mini implementation begins. The existing runtime, test suite, package metadata, command wrapper, logs, and build scaffolding are removed rather than carried forward.
+This repository keeps this plan, the license, and Git history.
 
-No existing implementation module has a contract close enough to Mini to preserve unchanged. In particular, the harness, prompt/context stack, plan and task tower, Screen/application layers, terminal runner, project setup, and SQLite adapters encode the control plane Mini is removing. Their useful ideas belong in this plan, not in Mini imports.
+It does not keep the old runtime, user interface, tests, package files, or command wrapper.
 
-A historic `.brain` may later be treated as an external, read-only import source for Atlas and Ledger data. Mini must not require a legacy source module, dependency, or test fixture to start.
+The old code has useful ideas. It has no module that Mini must keep.
 
-## Product boundary
+An old Cartographer brain can later be an import source for Atlas and Ledger. Mini does not need old Cartographer code to run.
 
-Mini v1 has one active thread and one shared brain per project.
+## Use Pi
 
-It can:
+Mini uses Pi. It does not make a second version of Pi.
 
-1. hold a conversation;
-2. record and update Atlas and Ledger entries;
-3. inspect project files through a bounded read capability;
-4. pin exact evidence into the next model context;
-5. propose a patch without changing a file;
-6. apply only an explicitly approved proposal;
-7. sleep on a time or file/folder condition; and
-8. resume with a compact, visible handoff.
+- [pi-durable](https://github.com/earendil-works/pi/tree/main/packages/durable) stores work before Mini shows it. It runs durable model turns, tools, tasks, sleeps, wakes, retries, and SQLite commits.
+- [pi-ai](https://github.com/earendil-works/pi/tree/main/packages/ai) provides models, providers, login, tool schemas, tool-call parsing, streaming, token use, cost data, and model errors.
+- [pi-tui](https://github.com/earendil-works/pi/tree/main/packages/tui) provides terminal input, rendering, scrolling, focus, keys, mouse input, Markdown, and basic controls.
 
-Mini v1 does not have plans, task forks, approval envelopes, autonomous file writes, arbitrary shell access, terminal windows, process jobs, sandboxing, checkpoints, conferences, catalogs, reports, shelves, assessments, settings screens, action palettes, or debug tabs.
+Mini only adds product rules that Pi does not provide:
 
-Those are not hidden. They are absent from the Mini path.
+- the Mini Brain data;
+- Atlas and Ledger rules;
+- Chat rules;
+- context pins, archive, and collapse rules;
+- Mini tools;
+- one Shared Brain screen.
 
-## Non-negotiable architecture
+Mini does not make its own:
 
-The domain is functional and deterministic. Side effects live at a narrow outer boundary.
+- model provider layer;
+- model stream parser;
+- tool schema validator;
+- task scheduler;
+- retry system;
+- timer or wake queue;
+- SQLite storage adapter;
+- terminal framework;
+- generic terminal editor;
+- generic transcript compactor.
 
-```text
-command -> validate and decide -> domain events + requested effects
-events  -> reduce              -> next brain state
-state   -> compileContext      -> model request projection
-effect  -> run at the boundary -> result event
-events  -> reduce              -> next brain state
-```
+Pin exact Pi package versions. Test every Pi upgrade as a separate change.
 
-The core exposes only pure functions:
+## An important Pi limit
 
-```text
-decide(state, command) -> { events, effects }
-reduce(state, event) -> state
-compileContext(state, evidence, budget) -> context
-projectScreen(state, context) -> screen model
-```
+Pi Durable transcript entries are immutable.
 
-The composition root alone may use the filesystem, SQLite, model API, clock, IDs, file watcher, timer, or patch applier. Time, IDs, file digests, and external results enter the core as command or result-event data. Reducers never mutate an input or reach outside their arguments.
+Pi Durable `reset()` and `compact()` stop old entries from going to the model. They do not delete old entries from storage.
 
-An effect may not change durable state directly. It returns a result event; the reducer is the only writer of brain state.
+Mini collapse is not Pi compaction.
 
-## Durable shape
+Mini turns off Pi automatic compaction. A Pi Durable compaction hook declines a compaction and asks for a Mini collapse. Mini uses Pi Durable for safe work and storage. Mini uses its own product rule for the life of context data.
 
-Mini stores its own data at `.brain/mini.sqlite` so it can coexist with a legacy brain during migration. The database holds only two durable streams:
+## One project, one Brain
 
-1. an append-only event and conversation log; and
-2. periodically written, versioned brain snapshots for fast startup.
+Mini has one durable Brain for each project.
 
-A snapshot is a cache of replayable events, not a second source of truth. There are no parallel JSON stores for atlas, ledger, context, wakes, top state, plans, reports, or assessments.
+The Brain is a Pi Durable document with `history: "latest"`.
 
-The initial snapshot shape is:
+This means Mini keeps the current Brain value. It does not keep a long list of old Brain values.
+
+The Brain contains:
 
 ```js
 {
   version: 1,
-  ledger: { entries: [] },
-  atlas: { nodes: [] },
-  context: { pins: [], handoff: null },
-  wakes: { entries: [] },
-  changes: { proposals: [] },
-  activity: { kind: "idle", detail: null, since: null }
+  chat: [],
+  ledger: [],
+  atlas: [],
+  userPins: [],
+  carryPins: [],
+  handoff: null,
+  wakes: [],
+  changes: [],
+  deletionMarks: [],
+  context: { liveGeneration: null, archiveGeneration: null },
+  activity: { kind: "idle", detail: null }
 }
 ```
 
-The event log also contains user messages, model messages, model-tool requests, effect results, approvals, rejections, errors, and lifecycle transitions. Conversation history is not copied into the snapshot.
+Mini uses Pi Durable SQLite storage. It does not make a new storage engine.
 
-### Ledger
+Mini has three small storage files:
 
-A ledger entry is deliberately small:
+```text
+.brain/brain.sqlite     the Mini Brain document
+.brain/live.sqlite      the current Pi Durable model session
+.brain/archive.sqlite   the previous model session, if one exists
+```
+
+The live and archive files are context files. They are not the Brain.
+
+The Brain names the current live generation and archive generation. It is the source of truth.
+
+## Two rules for keeping data
+
+Mini has two different rules.
+
+### Working context uses the keep rule
+
+Working context includes:
+
+- file reads;
+- source excerpts;
+- tool results;
+- temporary model text;
+- the current model transcript.
+
+Working context is temporary.
+
+The agent must pin an item to carry it into the next live session.
+
+If the agent does not pin an item, Mini moves it to the archive at collapse.
+
+The archive lasts for one collapse period.
+
+Before the next collapse, the person can pin an archive item.
+
+Mini deletes every archive item that the person does not pin at that next collapse.
+
+### Deliberate records use the delete rule
+
+These records stay by default:
+
+- Chat;
+- Atlas;
+- Ledger.
+
+They do not need a pin.
+
+Mini deletes one only after it has a deletion mark.
+
+A deletion mark hides the record from normal use. The person can cancel the mark before the next confirmed collapse. The next confirmed collapse deletes the marked record.
+
+This is product deletion. It is not a secure disk-wipe promise.
+
+## Pins
+
+There are two kinds of pin.
+
+### Carry pin
+
+The agent makes a carry pin.
+
+It keeps one working-context item for the next live session.
+
+A carry pin lasts for one collapse period. The agent must make it again if the item still matters at the next collapse.
+
+A carry pin has:
+
+```js
+{
+  id,
+  item,
+  reason,
+  source: { path, range, digest } | { contextId },
+  createdAt
+}
+```
+
+### User pin
+
+The person makes a user pin.
+
+It rescues an item from the archive, or keeps an item from the active context.
+
+A user pin stays until the person removes it.
+
+A user pin has the same source and reason fields as a carry pin.
+
+A changed file makes a source pin stale. Mini shows the stale state. Mini does not use the old source text as a current fact.
+
+## Collapse
+
+Collapse is a visible, user-confirmed action.
+
+The agent can request a collapse when the live context is too large. The agent cannot delete an archive in the background.
+
+A collapse does this:
+
+1. The agent writes its carry pins for the current live session.
+2. The person can add user pins from the old archive.
+3. Mini stores the new pins in the Brain.
+4. Mini starts a new live Pi Durable session from the Brain projection.
+5. Mini marks the current live session as the new archive.
+6. Mini removes the old archive.
+
+The new live session receives:
+
+- Mini rules;
+- the handoff;
+- user pins;
+- current carry pins;
+- useful Atlas and Ledger records;
+- active wakes, changes, and deletion marks.
+
+It does not receive unpinned material from an old live session.
+
+A collapse must survive a crash.
+
+Mini first saves the new Brain generation state. It deletes an old archive file only after that save succeeds. A restart uses the Brain generation state. It keeps referenced files and later removes unused files.
+
+A crash can leave an extra old file. A crash must not lose a saved user pin or a saved carry pin.
+
+## Chat
+
+Chat is a deliberate record.
+
+- A person message writes one user Chat record.
+- The agent writes an agent Chat record only with the `chat` tool.
+- Ordinary model text is not a Chat record.
+- Mini does not treat an idle model answer as a message to the person.
+
+If the model sends text without a `chat` tool call, Mini does not add it to Chat. Mini treats it as temporary output or a tool-protocol fault.
+
+A Chat record has:
+
+```js
+{
+  id,
+  author: "user" | "agent",
+  text,
+  createdAt
+}
+```
+
+Chat stays until it has a deletion mark.
+
+## Atlas and Ledger
+
+Atlas is project knowledge.
+
+An Atlas item has a short claim and its evidence.
+
+```js
+{
+  id,
+  title,
+  claim,
+  evidence: [{ path, range, digest }],
+  links: [],
+  createdAt,
+  updatedAt
+}
+```
+
+A changed evidence digest makes an Atlas item stale.
+
+Ledger is a list of goals, notes, and questions.
 
 ```js
 {
@@ -104,266 +272,177 @@ A ledger entry is deliberately small:
   text,
   status: "open" | "answered" | "closed",
   answer: null | { text, evidenceIds },
-  pinned: false,
   createdAt,
   updatedAt
 }
 ```
 
-A question is the normal way to make uncertainty visible. It replaces most request, ask, task, and approval machinery. A goal may be closed with an outcome; a note may be pinned when it belongs in every useful context.
+Atlas and Ledger stay until they have a deletion mark.
 
-### Atlas
-
-An Atlas node is a concise claim, not a second codebase:
-
-```js
-{
-  id,
-  title,
-  claim,
-  evidence: [{ path, range, digest }],
-  links: [nodeId],
-  createdAt,
-  updatedAt
-}
-```
-
-Freshness is derived by comparing stored evidence digests with observed file digests. Focus, attention, recency, stale state, and graph views are projections, not competing durable records. An Atlas claim without evidence is visibly unverified rather than silently trusted.
-
-### Context
-
-A pin preserves exact material and why it matters:
-
-```js
-{
-  id,
-  source: { path, range, digest } | { eventId },
-  excerpt,
-  reason,
-  priority,
-  createdAt
-}
-```
-
-`handoff` is one compact, editable summary written when the agent sleeps or when the user asks for a reset. It states current intent, open questions, active evidence, and the next useful action.
-
-### Changes
-
-A change proposal is an immutable candidate until it is superseded or resolved:
-
-```js
-{
-  id,
-  rationale,
-  patch,
-  base: [{ path, digest }],
-  status: "proposed" | "approved" | "rejected" | "applied" | "conflicted",
-  createdAt,
-  resolvedAt: null
-}
-```
-
-A proposal never edits the workspace. Approval is a user event, not a model capability. The apply effect rechecks every base digest, writes only the approved patch, and emits either `change-applied` or `change-conflicted`.
-
-### Wakes and activity
-
-A wake is durable state, not a timer hidden in a process:
-
-```js
-{
-  id,
-  kind: "time" | "path",
-  condition,
-  status: "armed" | "ready" | "consumed" | "cancelled",
-  reason,
-  createdAt
-}
-```
-
-`activity` is one visible current state: `idle`, `thinking`, `reading`, `waiting-for-approval`, `applying-change`, `sleeping`, `woken`, or `error`. It is derived from lifecycle events and never becomes a parallel workflow system.
-
-## Commands, events, and effects
-
-Commands express intent. Validation either rejects the command with a visible event or produces domain events and requested effects.
-
-| Command family | Typical events | Possible effect |
-| --- | --- | --- |
-| Send a message | `message-recorded`, `activity-set` | request a model turn |
-| Edit Ledger or Atlas | `ledger-recorded`, `atlas-recorded` | none |
-| Inspect a path or range | `inspection-requested` | read only the requested material |
-| Pin or unpin evidence | `context-pin-recorded` | none |
-| Propose a change | `change-proposed` | none |
-| Approve a proposal | `change-approved` | apply its patch |
-| Reject a proposal | `change-rejected` | none |
-| Arm or cancel a wake | `wake-armed`, `wake-cancelled` | arm timer or file observation |
-| Sleep | `handoff-recorded`, `sleep-entered` | wait for user, timer, or path event |
-| Observe external work | `file-observed`, `wake-ready` | optionally request a model turn |
-
-Effect runners are capabilities with small, typed inputs and outputs:
-
-- `readPaths` can return only requested paths/ranges and their digests.
-- `requestModel` receives the compiled context and returns visible messages/tool calls.
-- `applyPatch` receives an approved proposal and returns checked file-change results.
-- `armWake` and `disarmWake` manage timers and file/folder observation.
-- `persist` atomically appends events and snapshots.
-
-There is no generic shell, command execution, mutable file-book API, network access, or runner/window capability in v1.
-
-## Model contract
-
-The model receives a compact static policy plus compiled project context. The static policy says only what cannot be represented as data:
-
-- work from supplied evidence and inspect before making a claim;
-- make durable commitments in the Ledger and durable project knowledge in the Atlas;
-- keep pins and handoff useful and bounded;
-- propose changes instead of making them;
-- respect explicit approval; and
-- sleep when useful work is blocked or complete.
-
-The model tool surface is fixed and small:
-
-| Tool | Meaning |
-| --- | --- |
-| `chat` | emit a visible message to the shared thread |
-| `ledger` | create, update, answer, close, or pin a ledger entry |
-| `atlas` | create or revise a source-backed Atlas claim |
-| `inspect` | request a bounded file or range read |
-| `pin` | add or remove exact context evidence with a reason |
-| `propose_change` | persist a patch and rationale for review |
-| `wake` | arm, cancel, or inspect a durable wake |
-| `sleep` | record a handoff and enter the sleeping state |
-
-Tool calls become commands and are validated by the same domain rules as user actions. The model cannot call an effect runner directly.
+A closed goal is still a record. It is not deleted just because it is closed.
 
 ## Context gardening
 
-Context gardening is a compiler, not a hidden prompt accumulator.
+Context gardening chooses what enters a new live session.
 
-For each model turn it selects, in order:
-
-1. stable Mini rules;
-2. the current handoff and open pinned Ledger entries;
-3. relevant Atlas claims and their freshness state;
-4. exact pinned excerpts with reasons and digests;
-5. recent thread messages; and
-6. the minimal new inspection results needed for the current turn.
-
-Selection has an explicit token budget. When material does not fit, the compiler records what was omitted and why; it never silently stuffs arbitrary state into the prompt. The exact resulting context, budget allocation, evidence list, and omissions are visible in the UI.
-
-Pins whose file digest changes become stale. Stale pins and Atlas evidence are shown before they are used again. The agent may refresh them by inspection, but it may not claim they still describe the file without new evidence.
-
-There are no shelves, reports, read-ahead batches, generated top snapshots, task-local prompt blocks, or invisible state sections.
-
-## Conversation and lifecycle
-
-A user message is durable before a model request starts. A model reply or tool call is durable before the next step begins. This makes restart, replay, and debugging straightforward.
-
-Sleep is a real transition:
-
-1. record or revise the handoff;
-2. arm the requested time or path wakes;
-3. set activity to `sleeping`;
-4. stop requesting model turns; and
-5. resume only when a user message or a ready wake creates a `woken` event.
-
-Initial wake sources are a timestamp and a file or folder change. A path wake observes a declared scope only; it is not a general project watcher. Window output, process completion, cron-like scheduling, and autonomous polling are deferred.
-
-Quiet wakes may add a compact lifecycle item without forcing a long conversational exchange. A wake with meaningful evidence can request the next model turn using the ordinary context compiler.
-
-## The single workspace
-
-Mini has one screen: **Shared Brain**. It is the conversation and context-engineering surface, not a control center with modes.
+It is a pure projection. It does not read files, call a model, change the Brain, or delete data.
 
 ```text
-Mini · project name                              sleeping until src/ changes
-
-Conversation
-  visible thread and composer
-
-Now
-  one activity line; current goal; next wake or pending approval
-
-Ledger
-  open goals, notes, and questions; answer/close/pin controls
-
-Atlas
-  source-backed claims; stale evidence is obvious; inspect/refresh controls
-
-Context
-  pins, handoff, compiled budget, included evidence, and omissions
-
-When needed
-  proposed change review and approve/reject controls
-  armed wake cards and cancel controls
+projectContext(brain, generation, budget) -> context plan
 ```
 
-On a wide screen, conversation is the main column and the shared brain is a compact adjacent rail. On a narrow terminal, the same sections stack as collapsible blocks below the conversation. The screen has no permanent tabs, command palette, settings product, job drawer, raw payload page, or separate planning surface.
+The context plan lists each item, its source, its reason, its freshness, and its estimated size.
 
-Every displayed item is either a durable record, a pure projection, or a current effect status. Nothing material to the model is hidden behind a different mode.
+Mini shows the context plan in the Shared Brain screen.
 
-## Project setup and migration
+The context plan uses this order:
 
-`carto` creates or opens `.brain/mini.sqlite`. Project-local configuration is intentionally tiny and file-based if it is needed at all; it does not receive a settings UI in v1.
+1. Mini rules.
+2. The current user message.
+3. The handoff.
+4. User pins.
+5. Carry pins.
+6. Open Ledger goals and questions.
+7. Relevant, fresh Atlas records.
+8. Active wakes, changes, and deletion marks.
 
-Migration is additive and explicit:
+Mini does not use hidden context blocks.
 
-1. leave the existing legacy brain untouched;
-2. create a new Mini database;
-3. import only compatible Atlas claims and Ledger entries;
-4. retain source paths, evidence, timestamps, and provenance where valid;
-5. mark imported unsupported or stale evidence as unverified; and
-6. write an import event for every migrated record.
+Mini does not use a vector store in version one.
 
-Plans, tasks, focus forks, shelves, reports, assessment text, catalog/index records, windows, checkpoints, conferences, and legacy prompt state are not translated. Their absence is intentional, not a migration failure.
+Mini uses links, paths, exact words, freshness, and direct user pins to choose records.
 
-Mini starts as the only runtime in this repository. Historical brains remain external import inputs until Mini meets its acceptance criteria; no legacy source tree, entry point, or runtime adapter is retained for a cutover.
+When an item does not fit, Mini says why. For example: `too large`, `stale`, `duplicate`, or `not used for this session`.
 
-## Delivery sequence
+Mini does not silently cut a claim in half.
 
-### 1. Establish the kernel
+## Functional design
 
-Create a `mini/domain` package with immutable data constructors, schema validation, command deciders, reducers, context compiler, and screen projections. Write fixture-driven tests for replay, invalid commands, stale evidence, context budgeting, changes, and wake transitions. This phase imports no legacy runtime modules.
+Mini keeps product decisions pure.
 
-### 2. Add durable adapters
+```text
+user or model command
+  -> pure Mini decision
+  -> Pi Durable commit and task
+  -> new Brain value or result
+```
 
-Implement the event store and snapshot adapter for `.brain/mini.sqlite`, then the typed effect runner. Prove that replaying the log produces the same snapshot, that a restart resumes safely, and that an interrupted effect cannot silently change domain state.
+Mini pure functions include:
 
-### 3. Add the model loop and file observation
+```text
+decide(brain, command) -> next Brain change and requested work
+projectContext(brain, generation, budget) -> context plan
+projectScreen(brain, context plan) -> screen data
+```
 
-Connect the context compiler, model request adapter, bounded inspector, timer, and path watcher. Add the small static policy and the eight-tool protocol. Use a stand-in model in tests.
+These functions do not use the filesystem, clock, model, terminal, or database.
 
-### 4. Build the Shared Brain screen
+Pi Durable performs stored commits, durable task steps, retries, sleeps, and wakes.
 
-Render the pure screen projection in one terminal workspace. Add only direct controls for messages, Ledger, Atlas, pins, changes, wakes, and sleep. Make compiled context inspectable before tuning visual polish.
+Pi AI performs model calls and tool validation.
 
-### 5. Add explicit patch application and import
+Pi TUI performs terminal input and rendering.
 
-Implement approve/reject/apply flow with digest conflict handling. Add the one-way Atlas/Ledger importer and show imported provenance. Test it against representative legacy brains without making the Mini runtime depend on legacy modules.
+## Model tools
 
-### 6. Prove the new runtime deliberately
+Mini has a small tool set.
 
-Run Mini in real projects and close only the remaining gaps that belong to the stated core. Historic brains may be imported through the one-way importer, but no legacy entry point is restored to make adoption feel safer.
+- `chat`: write one deliberate agent Chat record.
+- `ledger`: add or change a Ledger record.
+- `atlas`: add or change an Atlas record with evidence.
+- `inspect`: request a bounded file read.
+- `pin`: make or remove an agent carry pin.
+- `propose_change`: store a patch for review.
+- `wake`: arm, cancel, or view a wake.
+- `sleep`: write a handoff and sleep.
 
-Each phase is a small pushed change with pure-domain tests first. The full suite remains deterministic and within its existing time budget.
+Pi Durable defines and runs these tools. Pi AI validates their arguments and reads their tool calls.
 
-## Acceptance criteria
+The person makes and removes user pins in the Shared Brain screen.
 
-Mini v1 is ready when all of the following are true:
+The model cannot write files with a Mini tool.
 
-- A new project can create, reload, and replay one durable shared brain.
-- A conversation survives restart without duplicate model turns or lost visible messages.
-- Ledger questions, goals, and notes can be created, answered, closed, and pinned.
-- Atlas claims retain evidence and accurately show stale or unverified status after files change.
-- The context panel shows exactly what the model receives, its budget, and why each item was selected or omitted.
-- Inspection is bounded, read-only, and visible in the event history.
-- The agent can store a patch proposal but cannot edit a workspace before user approval.
-- Approved patches either apply against their recorded base or report a conflict without partial silent mutation.
-- A time or path wake persists across restart, wakes the agent once, and leaves a compact handoff trail.
-- The UI is one shared-brain workspace with no legacy menus, plan state, jobs, terminal windows, or hidden context modes.
-- Domain tests exercise the reducer and context compiler without filesystem, clock, model, or process access; integration tests exercise adapters through deterministic fakes.
+The model cannot apply a patch. The person approves a change. Mini then runs one limited apply task.
 
-## Deferred attachments
+## Wake and sleep
 
-After v1, any addition must fit the same command/event/effect boundary. Plausible later attachments are bounded read-only checks, history and undo derived from events, a text configuration file, an inspector/export command, and audited network access.
+Wake and sleep are durable states.
 
-None is needed to make Mini a durable agent. The core remains Atlas, Ledger, context gardening, chat, wake, and sleep.
+Mini uses Pi Durable tasks for them.
+
+- A time wake uses a Pi Durable sleep.
+- A file or folder watcher sends a Pi Durable signal.
+- A user message wakes the active work.
+
+Mini does not make a second timer system or a second task queue.
+
+The handoff is short. It says the intent, open questions, useful records, and next action.
+
+## Shared Brain screen
+
+Mini has one screen.
+
+It uses Pi TUI components. Mini does not make a second terminal framework.
+
+The screen has these parts:
+
+- Chat and a message editor.
+- Current activity.
+- Ledger.
+- Atlas.
+- Context pins and handoff.
+- Archive status: `This archive will be deleted at the next collapse.`
+- A change review when a change exists.
+- A wake card when a wake exists.
+
+On a wide terminal, Chat is the main area. The Brain is a small side area.
+
+On a narrow terminal, the parts appear one after another.
+
+There are no permanent tabs, command palette, settings product, job drawer, raw model page, or plan page.
+
+## Not in version one
+
+Mini does not include:
+
+- plans or task forks;
+- approval envelopes;
+- arbitrary shell commands;
+- terminal windows;
+- process jobs;
+- sandboxing;
+- checkpoints;
+- conferences;
+- reports or shelves;
+- assessment files;
+- catalog screens;
+- a vector store;
+- automatic transcript summaries.
+
+## Build order
+
+1. Add the Pi packages and pin their versions.
+2. Define the current-only Mini Brain document.
+3. Build live and archive session rotation.
+4. Test collapse, user rescue, deletion, and crash recovery.
+5. Add Atlas, Ledger, Chat, pins, and the small tool set.
+6. Add model calls and bounded file inspection.
+7. Add wake and sleep with Pi Durable tasks and signals.
+8. Build the one Pi TUI Shared Brain screen.
+9. Add approved patch apply and an optional old-brain importer.
+
+## Done means
+
+Mini version one is ready when all of these are true:
+
+- A restart does not lose the current Brain, a pending tool, or a pending wake.
+- A collapse moves unpinned current context into one archive.
+- At the next confirmed collapse, Mini deletes unpinned archive data.
+- A user pin saves an archive item before that deletion.
+- A carry pin lasts one collapse period and must be selected again.
+- Chat, Atlas, and Ledger stay without pins.
+- Chat, Atlas, and Ledger are deleted only after a deletion mark and a confirmed collapse.
+- Agent Chat exists only after a `chat` tool call.
+- The next live session contains only the Brain projection and selected pins. It does not contain unpinned old context.
+- A crash during collapse leaves a usable old or new generation. It does not lose a saved pin.
+- Mini uses Pi Durable, Pi AI, and Pi TUI instead of duplicate framework code.
