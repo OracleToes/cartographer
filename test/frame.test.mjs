@@ -267,7 +267,8 @@ test("a menu is inset like the chrome, and it opens at its title", async () => {
       const frame = renderFrame(stateOf(project, { view, detail }), 100);
       assertFrameWidth(frame, 100);
       const menu = plain(frame.body.slice(-6).join("\n"));
-      // The menu starts inside the gutter and the pad, not in column 1.
+      // A menu row starts inside the gutter (1) and the pad (2), so its first
+      // glyph is at column 3, where the chrome's own content starts.
       for (const row of frame.body.slice(-4)) {
         assert.equal(plain(row)[0], " ", `a menu row touches the left edge: ${JSON.stringify(plain(row))}`);
       }

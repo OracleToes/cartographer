@@ -4,13 +4,11 @@ import {
   matchesKey,
   ProcessTerminal,
   ScrollView,
-  sliceByColumn,
   Spacer,
   Text,
   TuiAltScreen,
   VStack,
-  type Component,
-  type StackEntryOptions,
+  type StackEntry,
 } from "@earendil-works/pi-tui";
 
 import { visibleChat } from "../domain/brain.js";
@@ -19,7 +17,9 @@ import { handleOf } from "../domain/handles.js";
 import type { CartoProject, ProjectView, SendMode } from "./project.js";
 import type { LiveActivity } from "./live-session.js";
 import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
-import { actionContextOf, clampSelection, helpLines, renderFrame, type Detail, type FrameState, type Tab } from "../ui/frame.js";
+import { selectedLabel } from "../ui/body.js";
+import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
+import { BlankRow } from "../ui/chrome.js";
 import { inputBoxRows, inputTextCells, INPUT_TITLE } from "../ui/input-box.js";
 import { margin } from "../ui/text.js";
 import { SPINNER_INTERVAL_MS } from "../ui/spinner.js";
@@ -46,13 +46,14 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("carto needs an interactive terminal for the Carto UI.");
 
   const terminal = new ProcessTerminal();
-  const tui = new TuiAltScreen(terminal, true, undefined, { mouse: true });
-  // The chrome and the footer are one row each. The default `Text` pads above
-  // and below, which would move the footer off the bottom row.
-  const gap = new Spacer(1);
-  const chrome = new Text("", 0, 0);
-  const body = new Text("", 0, 0);
-  const footer = new Text("", 0, 0);
+  const tui = new TuiAltScreen(terminal, true, undefined, {
+    mouse: true,
+    // Pi TUI draws the jump-to-end label when a follow-end view is scrolled
+    // away from its end, and makes it clickable. That is the "you are not at
+    // the bottom" affordance; Carto does not draw its own.
+    scrollToEndIndicator: () => token.muted("↓ end · Ctrl+End"),
+  });
+
   let tab: Tab = "chat";
   let mode: Mode = "navigate";
   let detail: Detail = null;
@@ -78,22 +79,26 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
 
   const clock = (): number => Date.now();
 
-  // The editor is a real layout child, not a focused widget off screen: a
-  // component draws only when a parent renders it. With `paddingX: 2` it
-  // draws its text two cells in and no border of its own; the box draws the
-  // frame, so the box and the footer cannot disagree about the border colour.
-  // `paddingX: 0` is required for two reasons. `Editor` draws its padding
-  // inside its own width and reserves one column for the cursor when the
-  // padding is zero, so a zero-padded editor wraps at exactly the width it is
-  // given: the box's inside width. Its rows can then be used as they are, and
-  // its cursor marker stays on the character it marked.
-  const editor = new Editor(tui, editorTheme(), { paddingX: 0 });
-  // The box is chrome, so it is inset like the chrome. Its rows carry the
-  // gutter and the pad themselves, exactly as `renderFrame`'s rows do, so its
-  // edges line up with the rules above and below the body.
-  const input = new Text("", 0, 0);
-  const scroll = new ScrollView(body, { primary: true, follow: "end", scrollbar: "auto" });
-
+  /**
+   * The screen is a Pi TUI component tree:
+   *
+   *   blank
+   *   title row          one fixed row
+   *   rule               one fixed row
+   *   tabs + state       one fixed row
+   *   token bar          one fixed row
+   *   body               the only child that grows; it scrolls
+   *   input box          `basis: "auto"`, present only in insert mode
+   *   blank
+   *   rule               one fixed row
+   *   footer             one fixed row
+   *
+   * Every fixed row declares `basis: 1`. Without it, `VStack` falls back to
+   * measuring the row's rendered height, and a `Text` whose content is empty
+   * renders zero rows. That is exactly how the header used to scroll away: all
+   * four chrome rows measured 0, `grow: 1` gave the body the whole viewport,
+   * and there was no header row left on screen to scroll back to.
+   */
   /**
    * The editor's own rows for the box's text width. The box never re-wraps
    * them and never re-places the cursor, so the hardware cursor lands on the
@@ -110,31 +115,6 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     const rows = editor.render(inputTextCells(columns, margin(columns)));
     return rows.length <= 2 ? [] : rows.slice(1, -1);
   };
-
-  /**
-   * The box is measured, not declared: `basis: "auto"` asks the layout to use
-   * the rows the box draws, so the box can never be allocated one row and draw
-   * three. `visible` is a predicate the layout calls on every pass, so the box
-   * appears and disappears with the mode. The box is the only child whose
-   * height changes while the person types, and the body above it is the only
-   * child that absorbs that change.
-   */
-  const inputEntry: StackEntryOptions = {
-    basis: "auto",
-    grow: 0,
-    shrink: 0,
-    visible: () => mode === "insert",
-  };
-
-  // One blank row above the frame and one below it, so the chrome never
-  // touches the terminal's own edge. The body is the only child that grows,
-  // so it is the only child a resize or a wrapped prompt moves.
-  tui.setLayoutRoot(
-    new VStack(
-      [gap, chrome, { component: scroll, grow: 1 }, { component: input, ...inputEntry }, footer, gap],
-      { gap: 0 },
-    ),
-  );
 
   /** One state value, built from what the last reads produced. */
   const currentState = (): FrameState => ({
@@ -159,14 +139,60 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     startedAt,
   });
 
-  /** Draw the frame. The only function that writes to the terminal. */
+  /**
+   * The fixed rows and the one scrolling region.
+   *
+   * `basis: 1` on every chrome row is load-bearing: a `VStack` otherwise sizes
+   * a child by its rendered height, and an empty `Text` renders zero rows. With
+   * all four chrome rows at height 0, `grow: 1` gave the body every row of the
+   * viewport and the header scrolled away with the transcript.
+   */
+  const parts = frameParts(currentState(), terminal.columns);
+  const scroll = new ScrollView(parts.body, { primary: true, follow: "end", scrollbar: "auto" });
+  const editor = new Editor(tui, editorTheme(), { paddingX: 0 });
+  const input = new Text("", 0, 0);
+  const fixed = (component: object): StackEntry => ({
+    component: component as never,
+    basis: 1,
+    grow: 0,
+    shrink: 0,
+  });
+  const inputEntry: StackEntry = {
+    component: input,
+    basis: "auto",
+    grow: 0,
+    shrink: 0,
+    visible: () => mode === "insert",
+  };
+  tui.setLayoutRoot(
+    new VStack(
+      [
+        fixed(new BlankRow()),
+        fixed(parts.title),
+        fixed(parts.rule),
+        fixed(parts.status),
+        fixed(parts.bar),
+        { component: scroll, grow: 1, basis: 0, minSize: 1 },
+        inputEntry,
+        fixed(new BlankRow()),
+        fixed(parts.footerRule),
+        fixed(parts.footer),
+      ],
+      { gap: 0 },
+    ),
+  );
+
+  /** Draw the screen. Fills the components; Pi TUI does the layout. */
   const paint = (force = false): void => {
     if (quitting) return;
     const state = currentState();
-    const frame = renderFrame(state, width);
-    chrome.setText(frame.top.join("\n"));
-    body.setText(frame.body.join("\n"));
-    footer.setText(frame.bottom.join("\n"));
+    const next = frameParts(state, width);
+    parts.title.left = next.title.left;
+    parts.title.right = next.title.right;
+    parts.status.left = next.status.left;
+    parts.bar.left = next.bar.left;
+    parts.footer.left = next.footer.left;
+    parts.body.setText(next.bodyText);
     paintInput();
     spinnerPaintAt = state.now;
     dirty = false;
@@ -387,6 +413,36 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     paint();
     tui.requestRender();
   };
+  /**
+   * Enter in Navigate mode: open the selected item.
+   *
+   * A Chat item opens its edit detail; a live disclosure expands or folds; a
+   * Brain or Context record opens the same detail the person can act on. Enter
+   * never opens the input: that is `i`, so one key has one meaning per mode.
+   */
+  const openSelected = (): void => {
+    const index = clampSelection({ tab, view, selected });
+    if (tab === "chat") {
+      const entry = selectedChat(view, index);
+      if (entry !== undefined) {
+        showDetail(detail === "chat" ? null : "chat");
+        return;
+      }
+      const item = selectedActivity(view, index);
+      if (item !== undefined) {
+        if (expandedActivity.has(item.id)) expandedActivity.delete(item.id);
+        else expandedActivity.add(item.id);
+        wake();
+        return;
+      }
+      return;
+    }
+    // Brain and Context records have no separate detail view yet; announce the
+    // selection in the footer rather than pretending to open something.
+    notice = { text: `${selectedLabel(tab, view, index) ?? "Nothing"} is selected. Enter opens items on the Chat tab.`, kind: "info" };
+    wake();
+  };
+
   const navigate = (): void => {
     mode = "navigate";
     tui.setFocus(null);
@@ -445,12 +501,16 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       wake();
       return { consume: true };
     }
-    if (data === "i" || matchesKey(data, Key.enter)) {
-      if (tab === "chat" && selectedChat(view, clampSelection({ tab, view, selected })) !== undefined && detail === "chat") {
-        enterInsert(selectedChat(view, clampSelection({ tab, view, selected }))!.text, "edit-chat");
-      } else {
-        enterInsert();
-      }
+    // `i` opens the input and nothing else.
+    if (data === "i") {
+      enterInsert();
+      return { consume: true };
+    }
+    // Enter opens the selected item. It used to be an alias for `i`, so Enter
+    // opened the input in Navigate mode and never opened anything; that was a
+    // port artefact with no line in the spec.
+    if (matchesKey(data, Key.enter)) {
+      openSelected();
       return { consume: true };
     }
     if (data === "a") {
@@ -643,5 +703,4 @@ function allPins(view: ProjectView) {
   return [...view.brain.userPins, ...mergeCarryPins(view.liveCarryPins, view.brain.carryPins)];
 }
 
-// Keep Component in the import surface for host extensions that type-check UI adapters.
-void (null as Component | null);
+

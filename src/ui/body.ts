@@ -5,7 +5,8 @@ import { mergeCarryPins } from "../domain/context.js";
 import { deletionHandleId, handleOf } from "../domain/handles.js";
 import type { ProjectView } from "../runtime/project.js";
 import type { LiveActivity } from "../runtime/live-session.js";
-import { clock, fit, oneLine, short, split, width } from "./text.js";
+import { clock, oneLine, short, width, wrap } from "./text.js";
+import { row } from "./chrome.js";
 import { token } from "./tokens.js";
 
 /**
@@ -51,7 +52,7 @@ export function chatBody(input: BodyInput): BodyRow[] {
     if (!input.folds.has(entry.id)) {
       // The text aligns under the handle, not under the rail, so a record
       // reads as one block: mark, name, words.
-      for (const line of paragraph(entry.text, columns - 4)) rows.push({ text: `${rail(selected)}    ${line}`, selectable: index });
+      for (const line of wrap(entry.text, columns - 4)) rows.push({ text: `${rail(selected)}    ${line}`, selectable: index });
     }
   });
   rows.push({ text: "" });
@@ -88,10 +89,10 @@ export function brainBody(input: BodyInput): BodyRow[] {
   for (const [index, record] of records.entries()) {
     const selected = index === input.selected;
     rows.push({
-      text: split(`${rail(selected)} ${token.accent(record.handle)}  ${token.muted(`${record.kind} · ${clock(record.at)}`)}  ${record.title}`, record.detail, columns),
+      text: row(`${rail(selected)} ${token.accent(record.handle)}  ${token.muted(`${record.kind} · ${clock(record.at)}`)}  ${record.title}`, record.detail, columns),
       selectable: index,
     });
-    if (record.text !== "") for (const line of paragraph(record.text, columns - 4)) rows.push({ text: `${rail(false)}    ${line}`, selectable: index });
+    if (record.text !== "") for (const line of wrap(record.text, columns - 4)) rows.push({ text: `${rail(false)}    ${line}`, selectable: index });
   }
   if (view.brain.deletionMarks.length > 0) {
     rows.push({ text: "" });
@@ -116,7 +117,7 @@ export function contextBody(input: BodyInput): BodyRow[] {
     // start of the text is not printed twice.
     const body = summarizeBlock(view, block, columns);
     rows.push({
-      text: split(
+      text: row(
         `${rail(selected)} ${token.accent(block.handle)}  ${token.muted(sectionLabel(block.section))}  ${body}`,
         token.faint(`${short(block.estimatedTokens)} tok`),
         columns,
@@ -170,13 +171,13 @@ function chatRow(view: ProjectView, entry: ChatRecord, selected: boolean, folded
   const who = entry.author === "user" ? token.person("Person") : token.agent("Agent");
   const edited = entry.updatedAt !== entry.createdAt ? token.faint(`edited ${clock(entry.updatedAt)}`) : "";
   const foldedMark = folded ? token.faint(" · folded") : "";
-  return split(`${rail(selected)}${token.accent(handle)}  ${who} · ${token.muted(clock(entry.createdAt))}${foldedMark}`, edited, columns);
+  return row(`${rail(selected)}${token.accent(handle)}  ${who} · ${token.muted(clock(entry.createdAt))}${foldedMark}`, edited, columns);
 }
 
 function activityHead(item: LiveActivity, selected: boolean, columns: number): string {
   const label = styleActivity(item.kind, item.label);
   const state = item.streaming ? token.busy("streaming") : token.faint("complete");
-  return split(`${rail(selected)} ${label}`, state, columns);
+  return row(`${rail(selected)} ${label}`, state, columns);
 }
 
 function brainRecords(view: ProjectView): Array<{ handle: string; kind: string; at: number; title: string; detail: string; text: string }> {
@@ -239,38 +240,19 @@ function brainRecords(view: ProjectView): Array<{ handle: string; kind: string; 
 
 /** The body's disclosure projection, kept here so a test can call it directly. */
 export function disclosureLines(item: LiveActivity, rows = 5, expanded = false, columns = 80): string[] {
-  const lines = paragraph(item.text, columns).map((line) => line.replace(/^ {0,2}/, ""));
+  const lines = wrap(item.text, columns).map((line) => line.replace(/^ {0,2}/, ""));
   if (item.completed && !expanded) return [summaryLine(lines)];
   if (expanded || lines.length <= rows) return lines;
   return lines.slice(-rows);
 }
 
 function visualRowCount(text: string, columns: number): number {
-  return paragraph(text, columns).length;
+  return wrap(text, columns).length;
 }
 
 function summaryLine(lines: readonly string[]): string {
   const value = lines.find((line) => line.trim() !== "") ?? "";
   return value.length <= 160 ? value : `${value.slice(0, 157)}…`;
-}
-
-/** Wrap a paragraph at `columns`, keeping a blank line as a blank line. */
-export function paragraph(text: string, columns: number): string[] {
-  const limit = Math.max(8, columns);
-  const rows: string[] = [];
-  for (const logical of text.split("\n")) {
-    if (logical === "") {
-      rows.push("");
-      continue;
-    }
-    let rest = logical;
-    while (rest.length > limit) {
-      rows.push(rest.slice(0, limit));
-      rest = rest.slice(limit);
-    }
-    rows.push(rest);
-  }
-  return rows.length === 0 ? [""] : rows;
 }
 
 /** Drop the `L1 ` that agent context puts at the start of a block's text. */
@@ -351,7 +333,7 @@ function rail(selected: boolean): string {
  */
 function head(title: string, count: string, columns: number, active: boolean): string {
   const left = `  ${active ? token.sectionActive(title) : token.section(title)}`;
-  return split(left, token.faint(count), columns, 1);
+  return row(left, token.faint(count), columns, 1);
 }
 
 function emptyState(lines: readonly string[], columns: number): BodyRow[] {

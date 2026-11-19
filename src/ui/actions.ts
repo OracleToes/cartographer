@@ -82,6 +82,7 @@ export const ACTIONS: readonly Action[] = [
   { id: "follow-up", keys: ["F"], label: "follow-up", help: "Queue a message to start after the active run.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "escape", keys: ["Esc"], label: "back", help: "Return to Navigate mode and close a detail.", group: "view", when: (context) => context.mode === "insert" || context.detailOpen },
   { id: "close-detail", keys: ["Backspace"], label: "close", help: "Close a detail, or clear the selection.", group: "view", when: (context) => context.detailOpen, hidden: true },
+  { id: "open", keys: ["Enter"], label: "open", help: "Open the selected item. In the input box, Enter sends instead.", group: "view", when: (context) => context.mode === "navigate" },
   { id: "send", keys: ["Enter"], label: "send", help: "Send with the chosen mode, or run a command that starts with `/`.", group: "turn", when: (context) => context.mode === "insert" },
   { id: "quit", keys: ["Ctrl+C"], label: "quit", help: "Close Carto.", group: "view", when: () => true, hidden: true },
 ];

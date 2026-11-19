@@ -140,6 +140,15 @@ Three things cost time here and are worth remembering:
 - **`basis` is read from the tree entry, not from the component.** A stack allocates by the `basis` written on its entry, so `basis: "auto"` is the only honest way to size something whose height comes from its content. A captured number is a number that is wrong one keystroke later.
 - **`visible` is a predicate.** A boolean captured when the tree was built hides the box forever, whatever the mode does afterwards.
 
+### 4.2 Superseded
+
+The frame in this document was a set of pre-joined strings painted into three
+`Text` components. That is what let the header scroll away: Pi TUI sizes a
+`VStack` child by its rendered height, and an empty `Text` renders no rows, so
+every chrome row measured zero. `docs/intent.md` records the replacement: the
+screen is a component tree with an explicit `basis` on every fixed row. The
+input box described here survives that change; the frame around it does not.
+
 One coupling is worth naming. `Editor` with `paddingX: 0` reserves one column for the cursor, so it wraps at `width - 1`. The box must give it exactly the cells it will draw, and `inputTextCells()` is that number in one place. If the two ever disagree, the editor wraps one line and the box cuts it on another, and the tail of a long line silently disappears.
 
 ## 5. Not in this step

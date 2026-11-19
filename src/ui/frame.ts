@@ -1,27 +1,30 @@
 import { visibleChat } from "../domain/brain.js";
 import type { ContextMeter } from "../domain/meter.js";
 import { contextMeter } from "../domain/meter.js";
+import type { Text } from "@earendil-works/pi-tui";
+
 import type { ProjectView } from "../runtime/project.js";
 import type { PrefillState } from "../runtime/prefill.js";
 import { ACTIONS, available, footerHints, hintText, type ActionContext, type Mode } from "./actions.js";
 import { brainBody, chatBody, contextBody, selectableCount, type BodyRow } from "./body.js";
 import { barCells, meterRow } from "./meter-bar.js";
-import { cell, clockSeconds, fit, margin, rule, split, splitStyled, width } from "./text.js";
+import { clockSeconds, margin, width } from "./text.js";
+import { BlankRow, padLine, row, RuleRow, SplitRow, textRow, TitleRow } from "./chrome.js";
 import { spinnerFrame } from "./spinner.js";
 import { statusLine } from "./state.js";
 import { token } from "./tokens.js";
 
 /**
- * The frame: everything the person sees, as rows for one terminal width.
+ * The frame: the components the screen is made of, and the pure functions that
+ * decide what they say.
  *
- * This function is pure. It is given a state value and a width, and it returns
- * strings; it does not read storage, start a timer, or call the terminal. The
- * runtime calls it at most ten times a second and asks Pi TUI to draw only
- * when a row changed.
+ * The layout is Pi TUI's: a `VStack` of fixed-height rows and one `ScrollView`
+ * that takes the remaining space. Carto does not join rows into one string and
+ * does not measure its own layout; it fills in the text of rows whose height it
+ * declares, which is why the header can never be scrolled away.
  *
- * The frame has five parts, in this order: the title row, a rule, the tabs
- * with the state line, the token bar, and the footer. The body sits between
- * the bar and the footer and is the only part that scrolls.
+ * Everything here is pure. A component is handed strings; it does not read
+ * storage, start a timer, or call the terminal.
  */
 
 export type Tab = "chat" | "brain" | "context";
@@ -55,37 +58,53 @@ export interface FrameState {
 }
 
 export interface Frame {
-  /** The chrome above the body. */
-  top: string[];
-  /** The body itself. */
-  body: string[];
-  /** The footer, the last row on screen. */
-  bottom: string[];
+  /** The fixed rows above the body: title, rule, tabs, bar. */
+  top: readonly string[];
+  /** The body: the only part that scrolls. */
+  body: readonly string[];
+  /** The fixed rows below the body: rule, footer. */
+  bottom: readonly string[];
+}
+
+/**
+ * The frame as components. `rows` is what a test reads; `layout` is what the
+ * runtime hands to `TuiAltScreen.setLayoutRoot`.
+ */
+export interface FrameParts {
+  title: TitleRow;
+  rule: RuleRow;
+  status: SplitRow;
+  bar: SplitRow;
+  /** The scrolling body's text, and the text the test reads. */
+  body: Text;
+  bodyText: string;
+  footerRule: RuleRow;
+  footer: SplitRow;
 }
 
 export const CHROME = { header: 1, rule: 1, tabs: 1, bar: 1, footer: 1 } as const;
 
-export function renderFrame(state: FrameState, columns: number): Frame {
+/**
+ * Build the screen's parts for one state. Pure: `rows` is what a test reads and
+ * what the runtime could render into any terminal; the components are handed to
+ * the `VStack` that lays them out.
+ *
+ * The gutter and the pad are real cells of the rows, not a wrapper: a row that
+ * is already `columns` wide cannot wrap, and a `VStack` measures it as one row.
+ */
+export function frameParts(state: FrameState, columns: number): FrameParts {
   const widthNow = Math.max(20, columns);
-  // The gutter is the terminal's background, not a drawn border, so a
-  // terminal that already draws a border is not given a second one. The body
-  // keeps the full frame width because a scrollbar belongs at the page edge,
-  // not in the gutter; only the chrome is inset.
+  // The gutter is the terminal's background, not a drawn border, so a terminal
+  // that already draws a border is not given a second one.
   const gutter = margin(widthNow);
-  const frameWidth = Math.max(4, widthNow - gutter * 2);
   const edge = " ".repeat(gutter);
-  const pad = 2;
-  const inner = Math.max(1, frameWidth - pad * 2);
-  const strip = " ".repeat(pad);
-  // `inner` is what the row draws between the two pads, so a full row is
-  // `pad + inner + pad` cells wide. The pad is literal spaces, not part of
-  // the measured text, which is why `fit` gets `inner` and not `cell`.
-  const full = (text: string): string => `${edge}${strip}${fit(text, inner)}${strip}${edge}`;
-  const edgeRule = (): string => `${edge}${strip}${token.rule(rule(inner))}${strip}${edge}`;
+  const pad = "  ";
+  const inner = Math.max(1, widthNow - gutter * 2 - pad.length * 2);
+  /** A chrome row: gutter, pad, the row at `inner` cells, pad, gutter. */
+  const chrome = (left: string, right: string, gap = 2): string =>
+    `${edge}${pad}${row(left, right, inner, gap)}${pad}${edge}`;
+  const barText = (): string => `${edge}${pad}${padLine(meterRow(frameMeter(state), barCells(widthNow)), inner)}${pad}${edge}`;
 
-  const top: string[] = [];
-  top.push(full(splitStyled(`${token.accent("Carto")} · ${token.ink(projectName(state.root))}`, token.ink, token.muted(state.model), inner)));
-  top.push(edgeRule());
   const status = statusLine({
     view: state.view,
     ...(state.live === undefined ? {} : { live: state.live }),
@@ -96,52 +115,110 @@ export function renderFrame(state: FrameState, columns: number): Frame {
     applying: state.applying,
     ...(state.error === undefined ? {} : { error: state.error }),
   });
-  const spinning = status.spinning;
-  const mark = spinning ? spinnerFrame(state.now - state.startedAt) : status.mark;
+  const mark = status.spinning ? spinnerFrame(state.now - state.startedAt) : status.mark;
   const tabs = ([["chat", "Chat"], ["brain", "Brain"], ["context", "Context"]] as const)
-    .map(([key, label], index) => (state.tab === key ? token.accent(`${index + 1} ${label}`) : token.muted(`${index + 1} ${label}`)))
+    .map(([key, label], index) =>
+      state.tab === key ? token.accent(`${index + 1} ${label}`) : token.muted(`${index + 1} ${label}`),
+    )
     .join("  ");
-  top.push(full(splitStyled(`  ${tabs}`, token.ink, status.style(`${mark} ${status.text}`), inner)));
 
-  // The bar is always visible. Before the first server report it is drawn
-  // from the projection's estimate, with its own glyph, style and `~`.
-  const meter = frameMeter(state);
-  const cells = barCells(widthNow);
-  const row = meterRow(meter, cells);
-  const meterWidth = width(row);
-  top.push(full(cell(meterWidth > inner ? fit(row, inner) : row, inner)));
+  const title = new TitleRow();
+  title.left = `${token.accent("Carto")} · ${token.ink(projectName(state.root))}`;
+  title.right = token.muted(state.model);
 
-  const bottom: string[] = [];
-  bottom.push(edgeRule());
-  // The footer keeps its row in both modes. The box is a separate component
-  // above it, so the keys have one source (the action table) and are never
-  // printed twice.
-  bottom.push(full(footerRow(state, inner)));
+  const statusRow = new SplitRow();
+  statusRow.left = chrome(`${pad}${tabs}`, status.style(`${mark} ${status.text}`), 0);
+  statusRow.right = "";
 
+  const bar = new SplitRow();
+  bar.left = barText();
+
+  const footer = new SplitRow();
   const selection = clampSelection(state);
-  const body = bodyRows({ ...state, selected: selection }, Math.max(4, inner));
-  // A detail is drawn under the body, so the tab keeps its place and the
-  // person can look at both. The body never moves to make room for it.
-  const detailRows = detailLines(state, inner);
+  footer.left = chrome(footerRow(state, inner), "", 0);
+  const body = bodyText(state, selection, widthNow);
+
+  return {
+    title,
+    rule: new RuleRow(gutter + 2),
+    status: statusRow,
+    bar,
+    body: textRow(body),
+    bodyText: body,
+    footerRule: new RuleRow(gutter + 2),
+    footer,
+  };
+}
+
+/**
+ * The frame's rows as strings, for a test or a host that renders elsewhere.
+ * The runtime uses `frameParts` and never this.
+ */
+export function renderFrame(state: FrameState, columns: number): Frame {
+  const widthNow = Math.max(20, columns);
+  const gutter = margin(widthNow);
+  const edge = " ".repeat(gutter);
+  const pad = "  ";
+  const inner = Math.max(1, widthNow - gutter * 2 - pad.length * 2);
+  const chrome = (left: string, right: string, gap = 2): string =>
+    `${edge}${pad}${row(left, right, inner, gap)}${pad}${edge}`;
+  const ruleRow = (): string => `${edge}${pad}${token.rule("─".repeat(inner))}${pad}${edge}`;
+
+  const status = statusLine({
+    view: state.view,
+    ...(state.live === undefined ? {} : { live: state.live }),
+    ...(state.prefill === undefined ? {} : { prefill: state.prefill }),
+    ...(state.lastReading === undefined ? {} : { lastReading: state.lastReading }),
+    ...(state.runStartedAt === undefined ? {} : { runStartedAt: state.runStartedAt }),
+    now: state.now,
+    applying: state.applying,
+    ...(state.error === undefined ? {} : { error: state.error }),
+  });
+  const mark = status.spinning ? spinnerFrame(state.now - state.startedAt) : status.mark;
+  const tabs = ([["chat", "Chat"], ["brain", "Brain"], ["context", "Context"]] as const)
+    .map(([key, label], index) =>
+      state.tab === key ? token.accent(`${index + 1} ${label}`) : token.muted(`${index + 1} ${label}`),
+    )
+    .join("  ");
+
+  const top = [
+    chrome(`${token.accent("Carto")} · ${token.ink(projectName(state.root))}`, token.muted(state.model)),
+    ruleRow(),
+    `${edge}${pad}${row(`  ${tabs}`, status.style(`${mark} ${status.text}`), inner)}${pad}${edge}`,
+    `${edge}${pad}${padLine(meterRow(frameMeter(state), barCells(widthNow)), inner)}${pad}${edge}`,
+  ];
+  const bottom = [ruleRow(), chrome(footerRow(state, inner), "", 0)];
   return {
     top,
-    // The body's rows are built for `inner`, which includes no pad; the two
-    // cells of page inset live inside that width, so a body row is a full
-    // frame row.
-    // The body runs the full frame width: it is the page. Its own two cells
-    // of inset are inside the text, so a scrollbar lands on the terminal's
-    // last column rather than in the gutter that keeps the chrome off the edge.
-    //
-    // A menu is not the page. The `?` and `a` references are read like the
-    // chrome and sit where the chrome sits, inside the gutter and the pad, so
-    // they do not scrape the terminal border.
-    body: [
-      ...body.map((row) => cell(row.text, widthNow)),
-      ...(detailRows.length === 0 ? [] : [cell("", widthNow)]),
-      ...detailRows.map((row) => `${edge}${strip}${cell(row, inner)}${strip}${edge}`),
-    ],
+    // A flat frame is what a test and a non-alt-screen host read, so each row
+    // is padded to the terminal width here. In the component tree the
+    // `ScrollView` supplies that width and the rows stay unpadded.
+    body: bodyText(state, clampSelection(state), widthNow)
+      .split("\n")
+      .map((line) => padLine(line, widthNow)),
     bottom,
   };
+}
+
+/**
+ * The body's text. It is the page, so it runs the full frame width: its
+ * scrollbar belongs at the terminal's edge, not in the gutter. Its own two
+ * cells of inset are part of the text.
+ *
+ * A menu (`?`, `a`) is not the page; it is inset like the chrome so it is read
+ * in the same place every time.
+ */
+function bodyText(state: FrameState, selection: number, widthNow: number): string {
+  const gutter = margin(widthNow);
+  const inner = Math.max(1, widthNow - gutter * 2 - 4);
+  const body = bodyRows({ ...state, selected: selection }, widthNow);
+  const detail = detailLines(state, inner);
+  const lines = body.map((entry) => entry.text);
+  if (detail.length > 0) {
+    lines.push("");
+    for (const line of detail) lines.push(`${" ".repeat(gutter + 2)}${line}`);
+  }
+  return lines.join("\n");
 }
 
 /** The overlay for `?`, `a`, and the Chat edit detail. */
@@ -205,8 +282,9 @@ function footerRow(state: FrameState, inner: number): string {
   const rightWidth = width(right);
   const hintRoom = Math.max(0, inner - rightWidth - 2);
   const hints = footerHints(actionContext, hintRoom, width);
-  if (hints === "") return split(modeLine(state), right, inner);
-  return split(hints, right, inner);
+  const text = hints === "" ? modeLine(state) : hints;
+  if (right === "") return padLine(text, inner);
+  return row(text, right, inner);
 }
 
 function footerRight(state: FrameState): string {
@@ -275,7 +353,7 @@ export function helpLines(state: FrameState, columns: number): string[] {
       const key = token.accent(keys);
       const pad = Math.max(1, 14 - width(keys));
       const label = `${action.label}${" ".repeat(Math.max(1, 18 - (width(action.label) + 2)))}`;
-      lines.push(fit(`  ${key}${" ".repeat(pad)}${label}${token.muted(action.help)}`, columns));
+      lines.push(padLine(`  ${key}${" ".repeat(pad)}${label}${token.muted(action.help)}`, columns));
     }
   }
   lines.push("");

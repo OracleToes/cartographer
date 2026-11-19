@@ -1,4 +1,4 @@
-import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sliceByColumn, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 /**
  * Cell-exact text helpers for the screen.
@@ -97,45 +97,21 @@ export function padEnd(text: string, cells: number): string {
 }
 
 /**
- * Lay a left part and a right part in one `cells`-wide row. The right part
- * keeps its space; the left part is cut with `…` when the two would touch.
- *
- * The gap is padded with spaces, and Pi TUI's wrap breaks a line at a run of
- * spaces, so an unbroken run would wrap onto a second line and push every row
- * below it down by one. A reset-and-restore pair around the space run stops the
- * wrap from seeing one run: the row stays one logical line and the frame keeps
- * the height it reported. The pair writes no visible character and costs no
- * cell, so the row is still exactly `cells` wide.
+ * Wrap a paragraph at `cells`, using Pi TUI's own wrapper so word breaks and
+ * ANSI styles behave the way the rest of the screen does. A blank line stays a
+ * blank line.
  */
-export function split(left: string, right: string, cells: number, gap = 2): string {
-  if (cells <= 0) return "";
-  const safeRight = fit(right, Math.max(0, cells - gap));
-  const rightWidth = width(safeRight);
-  if (rightWidth === 0) return cell(left, cells);
-  const leftRoom = Math.max(0, cells - rightWidth - gap);
-  const safeLeft = fit(left, leftRoom);
-  const fill = cells - width(safeLeft) - rightWidth;
-  if (fill <= 0) return `${safeLeft}${safeRight}`;
-  // See the note above: a reset pair around the fill keeps the wrap from
-  // treating it as one long break point. `\x1b[39m` resets only the colour.
-  return `${safeLeft}\x1b[39m${" ".repeat(fill)}\x1b[39m${safeRight}`;
-}
-
-/**
- * The same row, for a caller that composed `styledLeft` with a style that must
- * survive the gap (a cyan handle that runs to the end of the row). The fill is
- * kept inside the left style and the right part restores it afterwards.
- */
-export function splitStyled(styledLeft: string, style: (text: string) => string, right: string, cells: number, gap = 2): string {
-  if (cells <= 0) return "";
-  const safeRight = fit(right, Math.max(0, cells - gap));
-  const rightWidth = width(safeRight);
-  if (rightWidth === 0) return cell(styledLeft, cells);
-  const leftRoom = Math.max(0, cells - rightWidth - gap);
-  const safeLeft = fit(styledLeft, leftRoom);
-  const fill = cells - width(safeLeft) - rightWidth;
-  if (fill <= 0) return `${safeLeft}${safeRight}`;
-  return `${safeLeft}\x1b[39m${style(" ".repeat(fill))}\x1b[39m${safeRight}`;
+export function wrap(text: string, cells: number): string[] {
+  const limit = Math.max(8, cells);
+  const lines: string[] = [];
+  for (const logical of text.split("\n")) {
+    if (logical.trim() === "") {
+      lines.push("");
+      continue;
+    }
+    lines.push(...wrapTextWithAnsi(logical, limit));
+  }
+  return lines;
 }
 
 /** A horizontal rule of `cells` cells. */

@@ -7,7 +7,8 @@ import { createPrefillMonitor, parseProgress } from "../dist/runtime/prefill.js"
 import { meterRow, meterRowWidth } from "../dist/ui/meter-bar.js";
 import { spinnerChanged, spinnerFrame } from "../dist/ui/spinner.js";
 import { statusLine } from "../dist/ui/state.js";
-import { duration, clock, rate, short, split, width } from "../dist/ui/text.js";
+import { duration, clock, rate, short, width } from "../dist/ui/text.js";
+import { row } from "../dist/ui/chrome.js";
 
 const plain = (text) => text.replace(/\x1b\[[0-9;]*m/g, "");
 const WINDOW = 32_768;
@@ -32,12 +33,16 @@ test("a clock, a pause, and a rate use the shortest form that stays exact", () =
 });
 
 test("a two-part row fills its width exactly, and the right part survives", () => {
-  const row = split("left side of the row", "right", 20);
-  assert.equal(width(row), 20);
-  assert.ok(plain(row).endsWith("right"));
-  const narrow = split("a very long left part", "right", 10);
+  const wide = row("left side of the row", "right", 20);
+  assert.equal(width(wide), 20);
+  assert.ok(plain(wide).endsWith("right"));
+  const narrow = row("a very long left part", "right", 10);
   assert.equal(width(narrow), 10);
   assert.ok(plain(narrow).endsWith("right"));
+  // The right part is the state, so it survives even with no room left.
+  const none = row("left", "right", 5);
+  assert.equal(width(none), 5);
+  assert.ok(plain(none).endsWith("right"));
 });
 
 test("the meter uses the real window and marks the budget inside it", () => {

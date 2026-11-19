@@ -68,7 +68,7 @@ Carto uses fixed versions of Pi packages.
 
 - **Pi Durable** stores commits before Carto shows them. It runs durable conversations, tasks, tool calls, sleeps, wakes, retries, streaming state, and SQLite storage.
 - **Pi AI** provides models, providers, tool validation, model streams, usage, and provider errors.
-- **Pi TUI** provides alternate-screen terminal rendering, focus, editors, scrolling, input, and mouse support.
+- **Pi TUI** provides alternate-screen terminal rendering, focus, editors, scrolling, input, and mouse support. The screen's layout is a Pi TUI component tree: `VStack` regions with an explicit `basis`, one `ScrollView` for the body, and `Loader`-style animated indicators. Carto does not join rows into strings and paint them into a `Text`, and it does not re-implement wrapping, truncation, paging, or scrolling.
 
 Carto adds only product rules that Pi does not provide:
 
@@ -359,7 +359,8 @@ Carto has Navigate and Insert modes. It has no Visual mode.
 - `1`, `2`, and `3` select Chat, Brain, and Context.
 - `j` and `k` move selection. `g` and `G` move to the start or end.
 - `Backspace` closes a detail or action view in Navigate mode.
-- `i` opens input. In Chat edit detail, it replaces the selected Chat text.
+- `i` opens input. It does nothing else.
+- `Enter` opens the selected item in Navigate mode: a Chat item shows its edit detail, and a live item expands or folds. In the input box, `Enter` sends. No key has two meanings in one mode.
 - `f` folds or unfolds selected durable Chat.
 - `o` expands or folds selected live disclosure.
 - `e` opens selected Chat edit detail.
