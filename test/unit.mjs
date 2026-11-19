@@ -18,6 +18,8 @@ import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
+import { LIFECYCLE_ACTION, LIFECYCLE_ACTION_SPECS, createLifecycleApplication, createLifecycleBridge } from "../src/application/lifecycle.mjs";
+import { uiSuccess } from "../src/application/result.mjs";
 import { ACTION_SPECS, ACTION_TARGET_KIND, assertActionSpecParity, createActionSpecRegistry } from "../src/application/action-specs.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
@@ -489,6 +491,85 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	assert.equal(jobs.get(cancelled.id)?.state, "cancelled");
 	assert.equal(cancelled.cancel(), false, "settled jobs cannot be cancelled again");
 	off();
+});
+
+test("application: terminal lifecycle bridge exposes named controls, disabled reasons, and fresh-context acknowledgement without leaking a terminal closure", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const bridge = createLifecycleBridge();
+	const app = createApplication({ brainDir, root, now: () => Date.parse(NOW), runtime: { lifecycle: bridge } });
+	assert.deepEqual(Object.keys(bridge).sort(), ["attach", "attached", "availability", "execute"], "the application gets only a narrow typed lifecycle bridge");
+	assert.equal(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.enabled, false);
+	assert.match(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.reason ?? "", /not attached/i);
+	const detached = await app.lifecycle.execute(LIFECYCLE_ACTION.collapse);
+	assert.equal(detached.ok, false);
+	if (detached.ok) throw new Error("an unattached lifecycle control must be blocked");
+	assert.equal(detached.error.code, UI_ERROR_CODE.policyBlocked);
+
+	const calls = [];
+	bridge.attach({
+		availability(action) {
+			return action === LIFECYCLE_ACTION.collapse
+				? { enabled: false, reason: "The agent is working. Stop it first, then collapse the context." }
+				: { enabled: true };
+		},
+		execute: async (action, input, options) => {
+			calls.push({ action, input, options: { requestId: options.requestId, acknowledged: options.confirmation?.acknowledged } });
+			return uiSuccess({ action, line: `completed ${action}` }, { meta: { at: NOW, requestId: options.requestId } });
+		},
+	});
+	assert.equal(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.enabled, false, "the owner supplies a concrete safety reason");
+	assert.match(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.reason ?? "", /agent is working/i);
+	const blocked = await app.lifecycle.execute(LIFECYCLE_ACTION.collapse);
+	assert.equal(blocked.ok, false);
+	if (blocked.ok) throw new Error("an owner-blocked lifecycle control must stay blocked");
+	assert.equal(calls.length, 0, "application does not invoke a lifecycle owner after its availability blocks execution");
+	const refreshed = await app.lifecycle.execute(LIFECYCLE_ACTION.refreshTop, { reason: "The assessment changed." }, { requestId: "top-1" });
+	assert.equal(refreshed.ok, true);
+	assert.deepEqual(calls, [{
+		action: LIFECYCLE_ACTION.refreshTop,
+		input: { reason: "The assessment changed." },
+		options: { requestId: "top-1", acknowledged: undefined },
+	}], "refreshing the context top is also guarded by the terminal lifecycle owner");
+	calls.splice(0);
+
+	const asked = await app.lifecycle.execute(LIFECYCLE_ACTION.freshContext, {}, { requestId: "fresh-1" });
+	assert.equal(asked.ok, false);
+	if (asked.ok) throw new Error("fresh context must require acknowledgement");
+	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.deepEqual(asked.confirmation, {
+		actionId: LIFECYCLE_ACTION.freshContext,
+		target: "current context",
+		summary: "Start a fresh context and clear kept talk, task records, shelf placements, and the collapse marker. Stored session history remains available.",
+		strength: "acknowledge",
+	});
+	const completed = await app.lifecycle.execute(LIFECYCLE_ACTION.freshContext, {}, {
+		requestId: "fresh-2",
+		confirmation: { ...asked.confirmation, acknowledged: true },
+	});
+	assert.equal(completed.ok, true);
+	assert.deepEqual(calls, [{
+		action: LIFECYCLE_ACTION.freshContext,
+		input: {},
+		options: { requestId: "fresh-2", acknowledged: true },
+	}], "only an acknowledged typed action crosses the terminal port");
+	assert.deepEqual(new Set(LIFECYCLE_ACTION_SPECS.map((spec) => spec.id)), new Set(Object.values(LIFECYCLE_ACTION)), "every terminal lifecycle capability has the same launcher schema contract as Screen actions");
+
+	const malformed = createLifecycleApplication({ port: { availability: () => true, execute: () => ({ ok: true }) }, now: () => Date.parse(NOW) });
+	const invalid = await malformed.execute(LIFECYCLE_ACTION.stop);
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("a malformed terminal result must be contained");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.internal);
+	const malformedMeta = createLifecycleApplication({ port: { availability: () => true, execute: () => ({ ok: true, data: {}, meta: null }) }, now: () => Date.parse(NOW) });
+	const invalidMeta = await malformedMeta.execute(LIFECYCLE_ACTION.stop);
+	assert.equal(invalidMeta.ok, false);
+	if (invalidMeta.ok) throw new Error("a terminal result with malformed metadata must be contained");
+	assert.equal(invalidMeta.error.code, UI_ERROR_CODE.internal);
+	let unsafeCalls = 0;
+	const unsafeAvailability = createLifecycleApplication({ port: { availability: () => undefined, execute: () => { unsafeCalls++; return uiSuccess({}); } }, now: () => Date.parse(NOW) });
+	assert.equal(unsafeAvailability.capabilities.availability(LIFECYCLE_ACTION.stop)?.enabled, false, "an invalid terminal availability state fails closed");
+	const unsafe = await unsafeAvailability.execute(LIFECYCLE_ACTION.stop);
+	assert.equal(unsafe.ok, false);
+	assert.equal(unsafeCalls, 0, "an invalid availability state cannot open a dispatch path");
 });
 
 test("screen: deferred projection scheduling keeps cached data through stale, cancelled, failed, and invalidated reads", async () => {
@@ -2300,9 +2381,32 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(taskRouted.data.routed, true);
 	assert.deepEqual(taskMessages, ["Follow the narrower contract."]);
 	const noTask = await taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Continue." });
-	assert.equal(noTask.ok, true);
-	if (!noTask.ok) throw new Error(noTask.error.message);
-	assert.equal(noTask.data.routed, false, "a task that ended between keypress and deferred routing falls back to the main agent");
+	assert.equal(noTask.ok, false);
+	if (noTask.ok) throw new Error("a task that ended during deferred routing must not make a false delivery claim");
+	assert.equal(noTask.error.code, UI_ERROR_CODE.notFound);
+	assert.match(noTask.error.message, /active task ended/i);
+	let activeTask;
+	let guardedCalls = 0;
+	const guardedTaskApp = createRuntimeApplication({
+		activeTask: () => activeTask,
+		work: { tell: () => { guardedCalls++; return true; } },
+	});
+	assert.deepEqual(guardedTaskApp.capabilities.availability(RUNTIME_ACTION.routeTaskMessage), {
+		enabled: false,
+		reason: "No active task is running to receive a message.",
+	}, "the task-message capability exposes a visible unavailable state before a form can be opened");
+	const inactiveTask = await guardedTaskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Do not send this." });
+	assert.equal(inactiveTask.ok, false);
+	if (inactiveTask.ok) throw new Error("a task message without an active task must be blocked before its router runs");
+	assert.equal(inactiveTask.error.code, UI_ERROR_CODE.policyBlocked);
+	assert.equal(guardedCalls, 0);
+	activeTask = "t7";
+	assert.equal(guardedTaskApp.capabilities.availability(RUNTIME_ACTION.routeTaskMessage)?.enabled, true);
+	const activeTaskMessage = await guardedTaskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Proceed with the narrow plan." });
+	assert.equal(activeTaskMessage.ok, true);
+	if (!activeTaskMessage.ok) throw new Error(activeTaskMessage.error.message);
+	assert.match(activeTaskMessage.data.line, /will reach the running task/i);
+	assert.equal(guardedCalls, 1);
 	const stoppedTaskRoute = new AbortController();
 	const cancelledTaskRoute = taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Do not deliver this." }, { signal: stoppedTaskRoute.signal });
 	stoppedTaskRoute.abort();
@@ -2685,6 +2789,17 @@ test("application: Settings & Safety is a deferred, fail-closed configuration an
 	const safety = settingsSafetyView({ settings: result.data, presentation: presentation.overview });
 	assert.match(JSON.stringify(safety), /Saved policy defaults take effect only in a future session/);
 	assert.doesNotMatch(JSON.stringify(safety), /── Active configuration ──/, "Safety keeps session policy and provider readiness separate from the editable configuration collection");
+	const safetyControls = settingsSafetyView({
+		settings: result.data,
+		presentation: presentation.overview,
+		lifecycle: [
+			{ id: LIFECYCLE_ACTION.toggleApproval, label: "Toggle session approval", availability: { enabled: true } },
+			{ id: LIFECYCLE_ACTION.toggleSandbox, label: "Toggle session sandbox", availability: { enabled: false, reason: "The agent is working. Stop it first." } },
+		],
+	});
+	const sandboxControl = safetyControls.items.find((item) => item.lifecycleAction === LIFECYCLE_ACTION.toggleSandbox);
+	assert.match(JSON.stringify(safetyControls), /Terminal lifecycle controls/);
+	assert.equal(sandboxControl?.body, "The agent is working. Stop it first.", "Safety renders the terminal's settled disabled reason instead of reading a runner");
 	const loading = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
 	assert.match(loading.header[0][0][0], /Settings & Safety is loading/);
 	const stale = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { data: result.data, loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });

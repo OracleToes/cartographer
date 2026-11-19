@@ -54,7 +54,7 @@ export function wakeTool({ wakes, config }) {
 			"Be woken later: after a time, when a file changes, or when a shell window prints something.",
 			'For example {"action":"set","note":"see whether the build is through","every":300} wakes me once in five minutes, and with "times":0 every five minutes.',
 			"A wake does not make me wait. I set it and go on working, or end my turn: when it fires while I rest, a turn starts for me with my note; when it fires while I work, the state block shows it.",
-			`My wakes are listed in the state block. Each firing costs a whole turn, so long intervals are better: ${least} is the least. Several wakes can be set at once, ${config.wakesMax} at most.`,
+			`My wakes are listed in the state block. Each firing costs a whole turn, so long intervals are better: ${least} is the least. Several wakes can be set at once, ${config.wakesMax} at most. For a changed file or shell output, make the note say what result to inspect and what decision it should inform.`,
 			"With `times` 0 a wake repeats until I remove it, which is how I watch over something that keeps running. When a wake finds nothing to do, I call `sleep`.",
 		].join(" "),
 		parameters: Parameters,

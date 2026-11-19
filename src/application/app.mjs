@@ -8,6 +8,7 @@ import { ACTION_SPECS, assertActionSpecParity, createActionSpecRegistry } from "
 import { CONTEXT_ACTION, CONTEXT_CAPABILITY_DEFINITIONS, createContextApplication } from "./context.mjs";
 import { createApplicationEvents } from "./events.mjs";
 import { createJobManager } from "./jobs.mjs";
+import { createLifecycleApplication } from "./lifecycle.mjs";
 import { createWorkspaceQueries } from "./queries.mjs";
 import { createRuntimeActivityReader, createRuntimeContextReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "./runtime.mjs";
 import { createSettingsReader } from "./settings.mjs";
@@ -78,7 +79,7 @@ const metadata = (options, now) => ({
  *   runtimeActions?: Parameters<typeof createRuntimeApplication>[0],
  *   talk?: Parameters<typeof createTalkApplication>[0],
  *   queries?: Parameters<typeof createWorkspaceQueries>[0],
- *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, asks?: any, activeTask?: () => unknown, work?: any, model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, models?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, gate?: { yolo?: boolean }, initiation?: { on?: boolean }, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, statusReader?: ReturnType<typeof createRuntimeStatusReader>, activityReader?: ReturnType<typeof createRuntimeActivityReader>, modelReader?: ReturnType<typeof createRuntimeModelsReader>, settingsReader?: ReturnType<typeof createSettingsReader>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
+ *   runtime?: { main?: any, context?: any, engine?: any, windows?: any, wakes?: any, asks?: any, activeTask?: () => unknown, work?: any, model?: () => Promise<{ modelId?: string } | undefined> | { modelId?: string } | undefined, models?: any, preview?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, runner?: any, gate?: { yolo?: boolean }, initiation?: { on?: boolean }, lifecycle?: { availability?: Function, execute?: Function }, contextWindow?: number | (() => number), reader?: (options?: { signal?: AbortSignal }) => Promise<object | undefined>, statusReader?: ReturnType<typeof createRuntimeStatusReader>, activityReader?: ReturnType<typeof createRuntimeActivityReader>, modelReader?: ReturnType<typeof createRuntimeModelsReader>, settingsReader?: ReturnType<typeof createSettingsReader>, viewReader?: ReturnType<typeof createRuntimeViewReader> },
  * }} options
  */
 export function createApplication({ brainDir, root, config = {}, configuration: configurationOptions = {}, now = () => Date.now(), events = createApplicationEvents({ now }), jobs, workspace: workspaceOptions = {}, context: contextOptions = {}, requests: requestOptions = {}, review: reviewOptions = {}, runtimeActions: runtimeActionOptions = {}, talk: talkOptions = {}, queries: queryOptions = {}, runtime: runtimeOptions = {} }) {
@@ -98,8 +99,9 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 	const context = createContextApplication({ ...contextOptions, brainDir, now });
 	const requests = createRequestApplication({ ...requestOptions, brainDir, now });
 	const review = createReviewApplication({ windows: runtimeOptions.windows, ...reviewOptions, brainDir, root, now });
-	const runtimeActionContext = { windows: runtimeOptions.windows, wakes: runtimeOptions.wakes, work: runtimeOptions.work, models: runtimeOptions.models, ...runtimeActionOptions, now };
+	const runtimeActionContext = { windows: runtimeOptions.windows, wakes: runtimeOptions.wakes, work: runtimeOptions.work, activeTask: runtimeOptions.activeTask, models: runtimeOptions.models, ...runtimeActionOptions, now };
 	const runtimeActions = createRuntimeApplication(runtimeActionContext);
+	const lifecycleService = createLifecycleApplication({ port: runtimeOptions.lifecycle, now });
 	const talk = createTalkApplication({ ...talkOptions, brainDir, now });
 	const runtimeContextReader = runtimeOptions.reader ?? queryOptions.runtimeContextReader ?? createRuntimeContextReader({
 		main: runtimeOptions.main,
@@ -151,7 +153,7 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 	]);
 	const actionSpecs = createActionSpecRegistry(ACTION_SPECS);
 	assertActionSpecParity(capabilityRegistry, actionSpecs);
-	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes, work: runtimeActionContext.work, models: runtimeActionContext.models });
+	const capabilityContext = Object.freeze({ windows: runtimeActionContext.windows, wakes: runtimeActionContext.wakes, work: runtimeActionContext.work, activeTask: runtimeActionContext.activeTask, models: runtimeActionContext.models });
 	// `get` deliberately exposes the same availability snapshot that `list` gives the palette. ActionLauncher uses
 	// identity lookup after a palette has closed, so it must not accidentally treat a raw capability definition with
 	// an `available` callback as enabled merely because that callback has not been projected yet.
@@ -201,6 +203,17 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		if (result.ok) eventStream.publish("projection.invalidated", { action, scopes: ACTION_SCOPES[action] ?? [] });
 		return result;
 	};
+	const executeLifecycle = async (action, input = {}, options = {}) => {
+		const result = await lifecycleService.execute(action, input, options);
+		eventStream.publish(result.ok ? "lifecycle.completed" : "lifecycle.failed", {
+			action,
+			ok: result.ok,
+			...(result.meta.requestId === undefined ? {} : { requestId: result.meta.requestId }),
+		});
+		if (result.ok) eventStream.publish("projection.invalidated", { action, scopes: ["runtime", "context"] });
+		return result;
+	};
+	const lifecycle = Object.freeze({ capabilities: lifecycleService.capabilities, execute: executeLifecycle });
 
 	return Object.freeze({
 		capabilities,
@@ -209,6 +222,8 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		events: eventStream,
 		jobs: jobManager,
 		queries,
+		/** Terminal-owned session controls exposed through typed availability and UiResult dispatch only. */
+		lifecycle,
 		execute,
 		/** The add-template seam has no mutation and stays explicit until it becomes regular form metadata. */
 		workspace: Object.freeze({ template: workspace.template }),

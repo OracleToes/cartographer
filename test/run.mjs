@@ -2553,7 +2553,7 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 
 test("screen: registry, palette, and help retain six-tab control parity", async () => {
 	const [
-		{ TABS, VIEWS, KEYS_HELP, COMMANDS, paletteDestinationFor, paletteItemForCapability },
+		{ TABS, VIEWS, KEYS_HELP, COMMANDS, paletteDestinationFor, paletteItemForCapability, taskMessageAvailabilityFor },
 		{ CONTEXT_ACTION },
 		{ REQUEST_ACTION },
 		{ REVIEW_ACTION },
@@ -2588,7 +2588,21 @@ test("screen: registry, palette, and help retain six-tab control parity", async 
 	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
 	assert.equal(registered.length, 34, "the application registry includes Settings plus complete wake create/replace/remove actions");
 	const unavailable = { enabled: false, reason: "Unavailable in this fixture." };
+	assert.deepEqual(taskMessageAvailabilityFor({ data: { taskActive: false } }, { enabled: true }), {
+		enabled: false,
+		reason: "No active task is running to receive a message.",
+	}, "Work retains a visible settled unavailable state instead of opening a task-message form with no active task");
+	assert.deepEqual(taskMessageAvailabilityFor({ data: { taskActive: true } }, { enabled: false, reason: "No active task is running to receive a message." }), { enabled: true }, "a fresh settled task activity fact enables the Work message form");
+	assert.deepEqual(taskMessageAvailabilityFor({ loading: true }, { enabled: true }), {
+		enabled: false,
+		reason: "Task activity is still loading. Refresh Work and try again.",
+	}, "a pending activity refresh fails closed with a visible reason");
+	assert.deepEqual(taskMessageAvailabilityFor({ data: { taskActive: true } }, { enabled: false, reason: "This session has no active-task message router." }), {
+		enabled: false,
+		reason: "This session has no active-task message router.",
+	}, "a missing message port stays unavailable even if a stale task projection names a task");
 	const entries = registered.map((action) => ({
+
 		action,
 		destination: paletteDestinationFor(action),
 		item: paletteItemForCapability({ id: action, label: `Label for ${action}`, category: "test", availability: unavailable }),

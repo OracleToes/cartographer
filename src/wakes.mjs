@@ -234,7 +234,7 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = POL
 		if (note.length > NOTE_MAX) {
 			const original = note;
 			note = note.slice(0, NOTE_MAX);
-			warn(clipNote("`note`", original, note, NOTE_MAX, { remedy: "`wake` with remove and the wake's id, then set it again with the shorter note (a wake is not edited)" }));
+			warn(clipNote("`note`", original, note, NOTE_MAX, { remedy: "replace the wake with its id and a complete shorter trigger, or remove it and set a new one" }));
 		}
 		if (enforceLimit && wakes.length >= most) throw new WakeError(`${plural(most, "wake")} are set, which is the limit: ${wakes.map((wake) => wake.id).join(", ")}. Remove one first.`);
 		const hasPath = typeof asked.path === "string" && asked.path.trim() !== "";
