@@ -1,0 +1,30 @@
+{
+  "name": "cartographer-mini",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A small, durable shared brain for one project.",
+  "engines": {
+    "node": ">=22.15.0"
+  },
+  "bin": {
+    "carto": "./bin/carto.mjs"
+  },
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "start": "npm run build && node bin/carto.mjs",
+    "install:home": "npm run build && node scripts/install-home.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.5.2",
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2",
+    "@earendil-works/pi-schema": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.9.3"
+  }
+}
