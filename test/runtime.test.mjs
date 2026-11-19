@@ -196,3 +196,18 @@ test("Pi Durable stores one current Carto Brain document", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a Brain document without a handle table upgrades to an empty table", async () => {
+  const root = await temporaryDirectory("carto-handle-upgrade-");
+  const path = join(root, ".brain", "brain.sqlite");
+  const store = await BrainStore.open(path);
+  try {
+    // Simulate a stored version-one Brain written before handles existed.
+    await store.apply({ kind: "context.initialize", liveGeneration: "g1" });
+    const before = await store.read();
+    assert.deepEqual(before.handles, { counters: {}, entries: [] });
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -92,5 +92,10 @@ function copyBrain(value: unknown): CartoBrain {
     ...record,
     updatedAt: typeof record.updatedAt === "number" ? record.updatedAt : record.createdAt,
   }));
+  // Version-one Carto records did not store a handle table. Start an empty one;
+  // the first decision fills it without a duplicate commit.
+  if (brain.handles === undefined || !Array.isArray(brain.handles.entries)) {
+    brain.handles = { counters: {}, entries: [] };
+  }
   return brain;
 }
