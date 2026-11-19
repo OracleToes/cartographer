@@ -51,6 +51,25 @@ test("agent collapse mode rotates without a person confirmation", async () => {
   }
 });
 
+test("a llama-swap model opens and rotates durable local sessions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-llama-swap-project-"));
+  const project = await MiniProject.open(root, {
+    version: 1,
+    model: "llama-swap/Flint",
+    llamaSwapEndpoint: "http://localhost:8888/v1",
+    collapseMode: "agent",
+  });
+  try {
+    const before = await project.view();
+    await project.requestCollapse("Rotate the local model session.");
+    const after = await project.view();
+    assert.notEqual(after.brain.context.liveGeneration, before.brain.context.liveGeneration);
+  } finally {
+    await project.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a pending requested collapse blocks new messages until the person confirms or cancels it", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-collapse-request-"));
   const project = await MiniProject.open(root, config);

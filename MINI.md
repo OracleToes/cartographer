@@ -46,6 +46,25 @@ The global configuration starts with:
 
 `carto --model provider/model` overrides the saved model for one start.
 
+Mini supports `llama-swap`, a local OpenAI-compatible provider. Use a stable model ID and store its endpoint in the global configuration:
+
+```js
+{
+  version: 1,
+  model: "llama-swap/Flint",
+  llamaSwapEndpoint: "http://localhost:8888/v1",
+  collapseMode: "request"
+}
+```
+
+For the first llama-swap start, use:
+
+```sh
+carto --model llama-swap/Flint --endpoint http://localhost:8888/v1
+```
+
+`--endpoint` is a one-start override after configuration exists. It must be an `http` or `https` endpoint. Mini registers `llama-swap/Flint` with Pi as an OpenAI-compatible completions model. It sends no `Authorization` header and stores no API key. This is correct for a keyless llama-swap or llama-server endpoint. If your local server needs authentication, use a provider supported by Pi instead; Mini does not store provider secrets.
+
 Pi manages provider login and credentials. Mini does not store provider secrets in its configuration.
 
 The default collapse mode is `request`. The agent asks for a collapse. The person confirms it.

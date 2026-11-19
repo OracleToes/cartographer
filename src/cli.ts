@@ -5,10 +5,12 @@ import { brainDatabasePath, projectRoot } from "./runtime/paths.js";
 
 function usage(): string {
   return [
-    "Usage: carto [project-path] [--model provider/model] [--import-legacy] [--help]",
+    "Usage: carto [project-path] [--model provider/model] [--endpoint http://host:port/v1] [--import-legacy] [--help]",
     "",
     "Mini reads its global configuration from ~/.carto/config.json.",
     "The first --model value creates that file.",
+    "Use --model llama-swap/Flint --endpoint http://localhost:8888/v1 for llama-swap or llama-server.",
+    "--endpoint is valid only with a llama-swap/model model. It does not store an API key.",
     "--import-legacy copies old plain JSON Atlas and Ledger records from <project>/.brain/ and then exits.",
   ].join("\n");
 }
@@ -19,6 +21,7 @@ async function main(): Promise<void> {
     options: {
       help: { type: "boolean", short: "h" },
       model: { type: "string", short: "m" },
+      endpoint: { type: "string", short: "e" },
       "import-legacy": { type: "boolean" },
     },
     allowPositionals: true,
@@ -32,7 +35,9 @@ async function main(): Promise<void> {
   const root = projectRoot(parsed.positionals[0]);
 
   if (parsed.values["import-legacy"]) {
-    if (parsed.values.model !== undefined) throw new ConfigError("Use --import-legacy and --model in separate starts.");
+    if (parsed.values.model !== undefined || parsed.values.endpoint !== undefined) {
+      throw new ConfigError("Use --import-legacy, --model, and --endpoint in separate starts.");
+    }
     const { readLegacyBrain, importLegacyBrain } = await import("./runtime/legacy-import.js");
     const legacy = await readLegacyBrain(root);
     const { BrainStore } = await import("./runtime/brain-store.js");
@@ -47,9 +52,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  const config = await loadGlobalConfig(
-    parsed.values.model === undefined ? {} : { modelOverride: parsed.values.model },
-  );
+  const config = await loadGlobalConfig({
+    ...(parsed.values.model === undefined ? {} : { modelOverride: parsed.values.model }),
+    ...(parsed.values.endpoint === undefined ? {} : { llamaSwapEndpointOverride: parsed.values.endpoint }),
+  });
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new ConfigError("carto needs an interactive terminal for the Shared Brain UI.");
   }

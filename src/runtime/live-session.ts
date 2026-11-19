@@ -11,7 +11,8 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import type { CarryPin, SourceRef } from "../domain/types.js";
 import { BrainStore } from "./brain-store.js";
 import { createPatchApplyTask, PATCH_APPLY_TASK_NAME } from "./change-task.js";
-import type { ModelRef } from "./config.js";
+import type { GlobalConfig, ModelRef } from "./config.js";
+import { modelsForConfig } from "./llama-swap-model.js";
 import { LiveCarryDocument, readLiveCarry } from "./live-carry.js";
 import { createMiniExtension } from "./mini-extension.js";
 import { createPathWakeTask, PATH_WAKE_TASK_NAME, pathFingerprint } from "./path-wake-task.js";
@@ -32,6 +33,8 @@ const MINI_INSTRUCTIONS = [
 export interface LiveSessionOptions {
   path: string;
   model: ModelRef;
+  /** Global configuration is needed only when a llama-swap model is selected. */
+  config?: GlobalConfig;
   projectRoot: string;
   brain: BrainStore;
   /** Test or host-provided Pi model catalog. Normal starts use the built-in catalog. */
@@ -58,7 +61,9 @@ export class LiveSession {
     try {
       await database.exec("PRAGMA secure_delete = ON");
       const storage = await SqliteStorage.open(database, { prefix: "live_" });
-      const models = options.models ?? builtinModels();
+      const models =
+        options.models ??
+        (options.config === undefined ? builtinModels() : modelsForConfig(options.config, options.model) ?? builtinModels());
       if (models.getModel(options.model.provider, options.model.modelId) === undefined) {
         throw new Error(`Pi does not know the model ${options.model.provider}/${options.model.modelId}.`);
       }

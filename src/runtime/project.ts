@@ -46,6 +46,7 @@ export class MiniProject {
       live = await LiveSession.open({
         path: contextDatabasePath(root, generation),
         model,
+        config,
         projectRoot: root,
         brain: brainStore,
         contextBudget: CONTEXT_BUDGET,
@@ -285,6 +286,7 @@ export class MiniProject {
     const next = await LiveSession.open({
       path: contextDatabasePath(this.root, generation),
       model: parseModelRef(this.config.model),
+      config: this.config,
       projectRoot: this.root,
       brain: this.brainStore,
       contextBudget: CONTEXT_BUDGET,
