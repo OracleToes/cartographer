@@ -328,7 +328,9 @@ test("Enter opens the selected Brain and Context record whole, not a footer mess
     for (const line of rules.lines.filter((value) => value.trim() !== "")) {
       assert.ok(page.includes(line.slice(0, 40)), `the page dropped a line: ${JSON.stringify(line.slice(0, 40))}`);
     }
-    assert.match(page, /Esc or Backspace returns to the list/);
+    // The page holds the record, not a copy of the key list: the footer under
+    // the body already names the keys, and a second copy is how one goes stale.
+    assert.doesNotMatch(page, /Esc (or Backspace )?returns to the list/);
     // A Brain row opens too, and its handle matches the list's.
     const brain = recordDetail("brain", view, 0);
     assert.ok(brain === undefined || /^[LXAWH]/.test(brain.handle));
