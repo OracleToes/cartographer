@@ -267,7 +267,7 @@ export function requestsView({ requests: provided, error, presentation } = {}) {
 /**
  * Render the project tree with query-owned root and mark projection.
  * @param {{
- *   tree?: { root?: string, files?: ({ path: string, bytes?: number } | string)[], marks?: Record<string, string[]> },
+ *   tree?: { root?: string, files?: ({ path: string, bytes?: number } | string)[], marks?: Record<string, string[]>, filtersGitIgnored?: boolean },
  *   presentation: { size: (bytes: number) => string, target: (root: string, path: string, folder?: boolean) => object },
  * }} input
  * @param {(key: string) => boolean} isOpen
@@ -317,7 +317,10 @@ export function treeView({ tree: provided, presentation } = {}, isOpen = () => f
 	};
 	walk(top, "", 0);
 	if (items.length === 0) items.push(note("  The project folder is empty."));
-	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root ?? "the project"}`, "bold"], ["  (without what git ignores and the brain folder; ← names the graph's nodes about a file)", "muted"]]], items };
+	const filtering = provided.filtersGitIgnored === true
+		? "without what git ignores and the brain folder"
+		: "without .git, the brain folder, and dependency folders";
+	return { header: [[[`${files.length === 1 ? "1 file" : `${files.length} files`} in ${root ?? "the project"}`, "bold"], [`  (${filtering}; ← names the graph's nodes about a file)`, "muted"]]], items };
 }
 
 /**

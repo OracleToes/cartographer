@@ -5,7 +5,7 @@
 // malformed local state becomes a typed unavailable outcome rather than display-text parsing.
 import { assessmentPath, loadAssessment } from "../assessment.mjs";
 import { createHash } from "node:crypto";
-import { activeMoveOverlays, atlasPath, attentionSnapshot, fileMarks, loadAtlas } from "../atlas.mjs";
+import { activeMoveOverlays, atlasPath, attentionSnapshot, loadAtlas } from "../atlas.mjs";
 import { changeSince, lastChange, uncommitted } from "../checkpoints.mjs";
 import { listConferences } from "../conference.mjs";
 import { composedRows, contextPath, loadContext, loadReport, shelfText } from "../context.mjs";
@@ -14,9 +14,8 @@ import { isAuthorized, itemLine, loadPlan, planPath, waiting } from "../plan.mjs
 import { CONFIGURATION_SCHEMA, ConfigError, POLICY } from "../config.mjs";
 import { ConfigurationRepositoryError } from "../configuration/repository.mjs";
 import { loadTop, sinceTop } from "../top.mjs";
-import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { projectFiles } from "../tools/look.mjs";
+import { isFilesystemAbort, listProjectFiles, readText } from "../infrastructure/filesystem.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
 import { yieldToUi } from "./defer.mjs";
 import { uiCancelled, uiError, uiErrorFrom, uiFailure, uiSuccess } from "./result.mjs";
@@ -119,6 +118,7 @@ const missing = (message, meta) => uiFailure(uiError({
 	message,
 	retryable: false,
 }), { meta });
+const cancelledBy = (signal, error) => signal?.aborted === true || isFilesystemAbort(error);
 
 const configurationValue = (value) => value === undefined || typeof value === "string" || typeof value === "boolean" || Number.isFinite(value)
 	? value
@@ -258,20 +258,23 @@ const settingsSnapshot = (snapshot) => {
 	};
 };
 
-/** Source positions are presentation metadata, read only after this facade has yielded out of the UI stack. */
-const jsonLines = (file, field, values) => {
+/** Source positions are presentation metadata, read through an abort-aware filesystem port after the facade yielded. */
+const jsonLines = async (file, field, values, { signal, filesystem } = {}) => {
 	try {
-		const text = readFileSync(file, "utf8");
+		const source = await filesystem.readText(file, { signal });
+		if (signal?.aborted === true) throw new Error("cancelled");
 		return Object.fromEntries(values.map((value) => {
-			const at = text.indexOf(`"${field}": ${JSON.stringify(value)}`);
-			return [value, at < 0 ? undefined : text.slice(0, at).split("\n").length];
+			const at = source.indexOf(`"${field}": ${JSON.stringify(value)}`);
+			return [value, at < 0 ? undefined : source.slice(0, at).split("\n").length];
 		}));
-	} catch {
+	} catch (error) {
+		if (signal?.aborted === true || isFilesystemAbort(error)) throw error;
 		return {};
 	}
 };
 
 const DEFAULT_READERS = Object.freeze({ loadAtlas, loadAssessment, loadLedger, loadPlan, loadContext });
+const DEFAULT_FILESYSTEM = Object.freeze({ listProjectFiles, readText });
 const DEFAULT_REVIEW_READERS = Object.freeze({ lastChange, changeSince, uncommitted });
 const DEFAULT_CONSULT_READERS = Object.freeze({ listConferences });
 const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtlas, sinceTop });
@@ -290,11 +293,13 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], ready?: boolean, limits?: object, diagnostic?: { kind?: string, message?: string }, issue?: { message?: string } } | undefined>,
  *   settingsReader?: (options?: { signal?: AbortSignal }) => Promise<{ configuration?: object, policy?: object, provider?: object } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
+ *   filesystem?: { listProjectFiles?: (root: string, options?: { signal?: AbortSignal }) => Promise<{ path: string, bytes?: number }[]>, readText?: (file: string, options?: { signal?: AbortSignal }) => Promise<string> },
  *   now?: () => number,
  * }} options
  */
-export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, settingsReader, runtimeViewReader, now = () => Date.now() }) {
+export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READERS, reviewReaders = DEFAULT_REVIEW_READERS, consultReaders = DEFAULT_CONSULT_READERS, runtimeReaders = DEFAULT_RUNTIME_READERS, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, settingsReader, runtimeViewReader, filesystem = DEFAULT_FILESYSTEM, now = () => Date.now() }) {
 	if (nonEmpty(brainDir) === undefined) throw new TypeError("Workspace queries need a brain directory.");
+	if (typeof filesystem?.listProjectFiles !== "function" || typeof filesystem?.readText !== "function") throw new TypeError("Workspace queries need asynchronous filesystem ports.");
 	const paths = Object.freeze({
 		atlas: atlasPath(brainDir),
 		ledger: join(brainDir, "carto-ledger.json"),
@@ -314,10 +319,15 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		const ready = await prepare(options);
 		if (ready.result !== undefined) return ready.result;
 		try {
+			// Legacy book readers remain deliberately synchronous until they have a real async port. Only the optional
+			// projection enrichment below may await a migrated filesystem operation.
 			const loaded = loader(brainDir);
 			if (loaded?.[key] === undefined) return unavailable(name, loaded?.error, ready.meta);
-			return uiSuccess({ [key]: loaded[key], file: paths[key], ...(typeof projection === "function" ? projection(loaded[key]) : {}) }, { meta: ready.meta });
+			const extra = typeof projection === "function" ? await projection(loaded[key], { signal: options.signal }) : {};
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			return uiSuccess({ [key]: loaded[key], file: paths[key], ...extra }, { meta: ready.meta });
 		} catch (error) {
+			if (cancelledBy(options.signal, error)) return uiCancelled({ meta: ready.meta });
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,
@@ -336,14 +346,17 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			const loadedPlan = readers.loadPlan(brainDir);
 			const active = activeMoveOverlays(loadedPlan.plan);
 			const issues = loadedPlan.plan === undefined ? [{ source: "plan", message: loadedPlan.error ?? "The plan cannot be read." }] : [];
+			const lines = await jsonLines(paths.atlas, "name", loadedAtlas.atlas.nodes.map((node) => node.name), { signal: options.signal, filesystem });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
 			return uiSuccess({
 				atlas: loadedAtlas.atlas,
 				attention: attentionSnapshot(root, loadedAtlas.atlas, { active }),
-				lines: jsonLines(paths.atlas, "name", loadedAtlas.atlas.nodes.map((node) => node.name)),
+				lines,
 				file: paths.atlas,
 				issues,
 			}, { meta: ready.meta });
 		} catch (error) {
+			if (cancelledBy(options.signal, error)) return uiCancelled({ meta: ready.meta });
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,
@@ -359,19 +372,13 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		if (ready.result !== undefined) return ready.result;
 		if (nonEmpty(root) === undefined) return invalid("A project root is needed before listing its files.", "root", ready.meta);
 		try {
-			const loadedAtlas = readers.loadAtlas(brainDir);
-			const issues = loadedAtlas.atlas === undefined ? [{ source: "atlas", message: loadedAtlas.error ?? "The graph cannot be read." }] : [];
-			const files = projectFiles(root).map((path) => {
-				try { return { path, bytes: statSync(join(root, path)).size }; }
-				catch { return { path }; }
-			});
-			return uiSuccess({
-				root,
-				files,
-				marks: loadedAtlas.atlas === undefined ? {} : Object.fromEntries(fileMarks(loadedAtlas.atlas)),
-				issues,
-			}, { meta: ready.meta });
+			const files = await filesystem.listProjectFiles(root, { signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			// The tree is now wholly a filesystem projection. Screen composition adds graph marks from an already-settled
+			// Atlas projection, rather than using a synchronous atlas reader after the async directory traversal.
+			return uiSuccess({ root, files, filtersGitIgnored: false }, { meta: ready.meta });
 		} catch (error) {
+			if (cancelledBy(options.signal, error)) return uiCancelled({ meta: ready.meta });
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,
@@ -380,11 +387,11 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			}), { meta: ready.meta });
 		}
 	};
-	const ledger = (options = {}) => read("ledger", "ledger", readers.loadLedger, options, (loaded) => ({
-		lines: jsonLines(paths.ledger, "id", loaded.items.map((item) => item.id)),
+	const ledger = (options = {}) => read("ledger", "ledger", readers.loadLedger, options, async (loaded, { signal } = {}) => ({
+		lines: await jsonLines(paths.ledger, "id", loaded.items.map((item) => item.id), { signal, filesystem }),
 	}));
-	const plan = (options = {}) => read("plan", "plan", readers.loadPlan, options, (loaded) => ({
-		lines: jsonLines(paths.plan, "id", [...loaded.items, ...loaded.moves].map((item) => item.id)),
+	const plan = (options = {}) => read("plan", "plan", readers.loadPlan, options, async (loaded, { signal } = {}) => ({
+		lines: await jsonLines(paths.plan, "id", [...loaded.items, ...loaded.moves].map((item) => item.id), { signal, filesystem }),
 	}));
 
 	const status = async ({ yolo = false, ...options } = {}) => {
@@ -434,16 +441,18 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 			const items = [];
 			if (loadedPlan.plan === undefined) issues.push({ source: "plan", message: loadedPlan.error ?? "The plan cannot be read." });
 			else {
-				const lines = jsonLines(paths.plan, "id", [...loadedPlan.plan.items, ...loadedPlan.plan.moves].map((item) => item.id));
+				const lines = await jsonLines(paths.plan, "id", [...loadedPlan.plan.items, ...loadedPlan.plan.moves].map((item) => item.id), { signal: options.signal, filesystem });
 				if (!yolo) for (const move of waiting(loadedPlan.plan)) items.push({ id: move.id, kind: "approval", text: itemLine(move), file: paths.plan, line: lines[move.id] });
 			}
 			if (loadedLedger.ledger === undefined) issues.push({ source: "ledger", message: loadedLedger.error ?? "The ledger cannot be read." });
 			else {
-				const lines = jsonLines(paths.ledger, "id", loadedLedger.ledger.items.map((item) => item.id));
+				const lines = await jsonLines(paths.ledger, "id", loadedLedger.ledger.items.map((item) => item.id), { signal: options.signal, filesystem });
 				for (const item of loadedLedger.ledger.items) if (item.kind === POLICY.enums.ledgerKind.question && item.status === POLICY.enums.entryStatus.open && item.archived !== true) items.push({ id: item.id, kind: POLICY.enums.ledgerKind.question, text: `${item.id}  ${item.text}`, file: paths.ledger, line: lines[item.id] });
 			}
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
 			return uiSuccess({ items, issues }, { meta: ready.meta });
 		} catch (error) {
+			if (cancelledBy(options.signal, error)) return uiCancelled({ meta: ready.meta });
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,
@@ -501,11 +510,14 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		if (ready.result !== undefined) return ready.result;
 		const target = nonEmpty(id);
 		if (target === undefined) return invalid("Choose a report before reading it.", "id", ready.meta);
+		const file = join(brainDir, "reports", `${target}.md`);
 		try {
-			const text = loadReport(brainDir, target);
-			if (text === undefined) return missing(`There is no report ${target}.`, ready.meta);
-			return uiSuccess({ id: target, text, file: join(brainDir, "reports", `${target}.md`) }, { meta: ready.meta });
+			const body = await filesystem.readText(file, { signal: options.signal });
+			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
+			return uiSuccess({ id: target, text: body.trimEnd(), file }, { meta: ready.meta });
 		} catch (error) {
+			if (cancelledBy(options.signal, error)) return uiCancelled({ meta: ready.meta });
+			if (error?.code === "ENOENT") return missing(`There is no report ${target}.`, ready.meta);
 			return uiFailure(uiErrorFrom(error, {
 				code: UI_ERROR_CODE.internal,
 				kind: UI_ERROR_KIND.internal,

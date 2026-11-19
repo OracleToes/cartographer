@@ -34,7 +34,7 @@ import { REQUEST_ACTION, createRequestApplication } from "../src/application/req
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
-import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
+import { findTextSource, listProjectFiles, pathExists, readText, writeScratch } from "../src/infrastructure/filesystem.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
@@ -1851,7 +1851,7 @@ test("screen: one modal owner restores focus, and confirmation dialogs gate ackn
 });
 
 test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
-	const { brainDir } = fresh(t);
+	const { root, brainDir } = fresh(t);
 	const scratch = await writeScratch(brainDir, "message.md", "A draft from the editor");
 	assert.equal(await pathExists(scratch), true);
 	assert.equal(await pathExists(join(brainDir, "missing.md")), false);
@@ -1861,6 +1861,20 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	writeFileSync(join(sources, "b.mjs"), "first\nname: \"kept\"\n");
 	assert.deepEqual(await findTextSource(sources, "name: \"kept\"", { suffix: ".mjs" }), { file: join(sources, "b.mjs"), line: 2 });
 	assert.equal(await findTextSource(sources, "not here", { suffix: ".mjs" }), undefined);
+	mkdirSync(join(root, "src"));
+	mkdirSync(join(root, "node_modules", "ignored"), { recursive: true });
+	mkdirSync(join(root, ".git"));
+	writeFileSync(join(root, "src", "entry.mjs"), "export const asyncPort = true;\n");
+	writeFileSync(join(root, "node_modules", "ignored", "index.mjs"), "ignored\n");
+	writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+	const progress = [];
+	const listed = await listProjectFiles(root, { reportProgress: (entry) => progress.push(entry) });
+	assert.deepEqual(listed, [{ path: "src/entry.mjs", bytes: Buffer.byteLength("export const asyncPort = true;\n") }], "the async tree port skips brain, Git, and dependency folders without a synchronous project walk");
+	assert.ok(progress.some((entry) => /Found 1 project files/.test(entry.message)));
+	assert.equal(await readText(join(root, "src", "entry.mjs")), "export const asyncPort = true;\n");
+	const stoppedList = new AbortController();
+	stoppedList.abort();
+	await assert.rejects(listProjectFiles(root, { signal: stoppedList.signal }), /cancelled/i, "an aborted tree request performs no directory batch");
 	const writes = [];
 	const calls = [];
 	const ways = await toClipboard("copied words", {
@@ -1893,6 +1907,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	let planReads = 0;
 	let assessmentReads = 0;
 	let contextReads = 0;
+	let atlasReads = 0;
 	mkdirSync(join(brainDir, "reports"), { recursive: true });
 	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
 	writeFileSync(join(root, "tree.txt"), "abc");
@@ -1908,7 +1923,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 		root,
 		now: () => Date.parse(NOW),
 		readers: {
-			loadAtlas: () => ({ atlas: { nodes: [] } }),
+			loadAtlas: () => { atlasReads++; return { atlas: { nodes: [] } }; },
 			loadAssessment: () => {
 				assessmentReads++;
 				return { text: "A deferred assessment.", written: Date.parse(NOW) };
@@ -1964,7 +1979,42 @@ test("application: workspace queries defer readers and return typed empty, unava
 	if (!listed.ok) throw new Error(listed.error.message);
 	assert.equal(listed.data.root, root, "the settled tree projection owns the target root");
 	assert.deepEqual(listed.data.files.find((file) => file.path === "tree.txt"), { path: "tree.txt", bytes: 3 });
+	assert.equal(atlasReads, 0, "the migrated tree query does not resume a synchronous atlas reader after its async traversal");
 	assert.equal(listed.meta.requestId, "tree-query");
+	let beganTree;
+	let releaseTree;
+	const treeBegan = new Promise((resolve) => { beganTree = resolve; });
+	const treeRelease = new Promise((resolve) => { releaseTree = resolve; });
+	let atlasAfterAbort = 0;
+	const cancellableTree = createWorkspaceQueries({
+		brainDir,
+		root,
+		readers: {
+			loadAtlas: () => { atlasAfterAbort++; return { atlas: { nodes: [] } }; },
+			loadLedger: () => ({ ledger: { items: [] } }),
+			loadPlan: () => ({ plan: { items: [], moves: [] } }),
+			loadContext: () => contextStore,
+		},
+		filesystem: {
+			listProjectFiles: async (_root, { signal }) => {
+				beganTree();
+				await treeRelease;
+				if (signal.aborted) throw new Error("cancelled tree batch");
+				return [];
+			},
+			readText: async () => "",
+		},
+	});
+	const treeController = new AbortController();
+	const pendingTree = cancellableTree.tree({ signal: treeController.signal });
+	await treeBegan;
+	treeController.abort();
+	releaseTree();
+	const cancelledTree = await pendingTree;
+	assert.equal(cancelledTree.ok, false);
+	if (cancelledTree.ok) throw new Error("a cancelled tree projection must not settle a stale listing");
+	assert.equal(cancelledTree.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(atlasAfterAbort, 0, "the query checks cancellation after its async filesystem batch before any legacy mark reader");
 	const current = queries.context({ requestId: "context-query" });
 	assert.equal(contextReads, 0, "the shared-brain reader also waits until after the current UI stack");
 	const shared = await current;
