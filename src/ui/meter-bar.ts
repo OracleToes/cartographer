@@ -36,7 +36,7 @@ export function meterBar(meter: ContextMeter, cells: number): string {
       : parts.overCap
         ? token.barOverCap
         : token.barFilled;
-  const end = parts.filled + parts.changing;
+  const end = parts.small ? 1 : parts.filled + parts.changing;
   // Group equal cells into runs: one escape pair per colour change rather than
   // one per cell, which keeps a 10 Hz frame cheap.
   const runs: Array<{ style: (text: string) => string; text: string }> = [];
@@ -46,7 +46,8 @@ export function meterBar(meter: ContextMeter, cells: number): string {
     else runs.push({ style: styleOf, text: glyph });
   };
   for (let index = 0; index < parts.cells; index += 1) {
-    if (index < parts.filled) push(bodyStyle, GLYPH.filled);
+    if (parts.small && index === 0) push(bodyStyle, estimate ? GLYPH.estimate : GLYPH.filled);
+    else if (index < parts.filled) push(bodyStyle, GLYPH.filled);
     else if (index < end) push(estimate ? token.barEstimate : token.barChanging, estimate ? GLYPH.estimate : GLYPH.changing);
     else if (parts.capShown && index === parts.capIndex) push(token.barCap, GLYPH.cap);
     else push(token.barFree, GLYPH.free);

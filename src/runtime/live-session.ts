@@ -241,6 +241,19 @@ export class LiveSession {
   }
 
   /**
+   * Mark a callback dirty on every stored commit, for a screen that must not
+   * render inside a watch. The callback runs one microtask after a commit is
+   * stored, so it can read, but it must not write or wait.
+   */
+  onCommit(listener: () => void): () => void {
+    const observation = this.harness.observeCommits({
+      advance: () => listener(),
+      end: () => undefined,
+    });
+    return () => observation.detach();
+  }
+
+  /**
    * The live documents only, for a frame that must be cheap. It never reads
    * the transcript, so it is safe at ten frames a second on a long run.
    */

@@ -147,6 +147,11 @@ export class CartoProject {
     return this.live.prefill.subscribe(listener);
   }
 
+  /** Every stored commit, for a screen that must redraw without a key press. */
+  watchLive(listener: () => void): () => void {
+    return this.live.onCommit(listener);
+  }
+
   async syncHandles(): Promise<void> {
     const [brain, liveCarryPins] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins()]);
     const carryPins = mergeCarryPins(liveCarryPins, brain.carryPins);

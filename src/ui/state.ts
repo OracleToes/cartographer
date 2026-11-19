@@ -1,7 +1,7 @@
 import type { ProjectView } from "../runtime/project.js";
 import type { LiveSessionView } from "../runtime/live-session.js";
 import type { PrefillState } from "../runtime/prefill.js";
-import { duration } from "./text.js";
+import { duration, rate } from "./text.js";
 import { token } from "./tokens.js";
 
 /**
@@ -103,7 +103,7 @@ function readProgressStatus(prefill: PrefillState): StatusText | undefined {
   if (fresh <= 0) return undefined;
   const done = Math.max(0, Math.min(prefill.processed - prefill.cache, fresh));
   const percent = Math.round((done / fresh) * 100);
-  const speed = prefill.ms !== undefined && prefill.ms > 0 ? ` · ${Math.round((done * 1_000) / prefill.ms)} tok/s` : "";
+  const speed = prefill.ms !== undefined && prefill.ms > 0 ? ` · ${rate(done, prefill.ms)}` : "";
   return { mark: "⠹", text: `reading ${percent}%${speed}`, spinning: true, style: token.busy };
 }
 

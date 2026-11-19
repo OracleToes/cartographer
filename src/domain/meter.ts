@@ -102,6 +102,12 @@ export interface MeterCells {
   capShown: boolean;
   /** True when any part of the bar is past the budget. */
   overCap: boolean;
+  /**
+   * True for a small prompt that would take no cell at this width. The first
+   * cell is filled then, because a bar that shows nothing reads as a bug; the
+   * numbers stay exact, and `estimate` still says the number is a guess.
+   */
+  small: boolean;
 }
 
 /**
@@ -117,6 +123,7 @@ export function meterCells(meter: ContextMeter, cells: number): MeterCells {
   const filled = filledEnd;
   const changing = changeEnd - filledEnd;
   const free = count - changeEnd;
+  const small = count > 0 && changeEnd === 0 && meter.filled + meter.changing > 0;
   const capIndex = clamp(Math.floor((meter.cap / window) * count), 0, Math.max(0, count - 1));
   return {
     cells: count,
@@ -126,6 +133,7 @@ export function meterCells(meter: ContextMeter, cells: number): MeterCells {
     capIndex,
     capShown: count > 0 && capIndex >= changeEnd && free > 0,
     overCap: meter.overCap,
+    small,
   };
 }
 
