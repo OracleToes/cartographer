@@ -26,6 +26,32 @@ The old code has useful ideas. It has no module that Mini must keep.
 
 An old Cartographer brain can later be an import source for Atlas and Ledger. Mini does not need old Cartographer code to run.
 
+## Runtime home and configuration
+
+Mini installs its source, built files, and `carto` command in `~/.carto/`.
+
+Its global configuration is `~/.carto/config.json`.
+
+Project data stays in `<project>/.brain/`.
+
+The global configuration starts with:
+
+```js
+{
+  version: 1,
+  model: "provider/model",
+  collapseMode: "request" | "agent"
+}
+```
+
+`carto --model provider/model` overrides the saved model for one start.
+
+Pi manages provider login and credentials. Mini does not store provider secrets in its configuration.
+
+The default collapse mode is `request`. The agent asks for a collapse. The person confirms it.
+
+In `agent` mode, the agent can run a collapse when it needs one. It can also expire the previous archive.
+
 ## Use Pi
 
 Mini uses Pi. It does not make a second version of Pi.
@@ -149,7 +175,11 @@ Mini deletes one only after it has a deletion mark.
 
 A deletion mark hides the record from normal use. The person can cancel the mark before the next confirmed collapse. The next confirmed collapse deletes the marked record.
 
-This is product deletion. It is not a secure disk-wipe promise.
+After every confirmed collapse, Mini uses SQLite secure-delete, checkpoints and removes its write-ahead log, and runs `VACUUM` on each retained Mini database.
+
+Mini removes an expired archive file after the Brain commit succeeds.
+
+This gives best-effort local cleanup. It is not a secure disk-wipe promise for an SSD, backup, or filesystem snapshot.
 
 ## Pins
 
@@ -189,9 +219,11 @@ A changed file makes a source pin stale. Mini shows the stale state. Mini does n
 
 ## Collapse
 
-Collapse is a visible, user-confirmed action.
+The default collapse mode is a visible, user-confirmed action.
 
-The agent can request a collapse when the live context is too large. The agent cannot delete an archive in the background.
+In `request` mode, the agent can request a collapse when the live context is too large. The person confirms it. The agent cannot delete an archive in the background.
+
+In `agent` mode, the agent can run the same collapse without a confirmation. The mode is a global configuration choice.
 
 A collapse does this:
 
@@ -343,6 +375,16 @@ Pi AI performs model calls and tool validation.
 
 Pi TUI performs terminal input and rendering.
 
+## Project boundary
+
+Mini can inspect any file that resolves inside the selected project root.
+
+Mini does not inspect or patch `<project>/.brain/`.
+
+A path through a symbolic link must still resolve inside the project root.
+
+Mini applies an approved patch only to files inside the project root.
+
 ## Model tools
 
 Mini has a small tool set.
@@ -382,7 +424,7 @@ The handoff is short. It says the intent, open questions, useful records, and ne
 
 Mini has one screen.
 
-It uses Pi TUI components. Mini does not make a second terminal framework.
+It uses Pi TUI alternate-screen components. Mini owns one compact, full-screen workspace. Mini does not make a second terminal framework.
 
 The screen has these parts:
 
@@ -422,27 +464,33 @@ Mini does not include:
 ## Build order
 
 1. Add the Pi packages and pin their versions.
-2. Define the current-only Mini Brain document.
-3. Build live and archive session rotation.
-4. Test collapse, user rescue, deletion, and crash recovery.
-5. Add Atlas, Ledger, Chat, pins, and the small tool set.
-6. Add model calls and bounded file inspection.
-7. Add wake and sleep with Pi Durable tasks and signals.
-8. Build the one Pi TUI Shared Brain screen.
-9. Add approved patch apply and an optional old-brain importer.
+2. Add `~/.carto/`, its global configuration, and the `carto` command.
+3. Define the current-only Mini Brain document.
+4. Build live and archive session rotation.
+5. Test collapse, user rescue, deletion, SQLite cleanup, and crash recovery.
+6. Add Atlas, Ledger, Chat, pins, and the small tool set.
+7. Add model calls and bounded file inspection.
+8. Add wake and sleep with Pi Durable tasks and signals.
+9. Build the Pi TUI alternate-screen Shared Brain screen.
+10. Add approved patch apply and an optional old-brain importer.
 
 ## Done means
 
 Mini version one is ready when all of these are true:
 
+- `carto` reads its global configuration from `~/.carto/config.json`.
+- `carto --model` overrides the saved model for one start.
+- The default collapse mode asks the person for confirmation.
 - A restart does not lose the current Brain, a pending tool, or a pending wake.
 - A collapse moves unpinned current context into one archive.
 - At the next confirmed collapse, Mini deletes unpinned archive data.
+- A confirmed collapse runs SQLite secure-delete, write-ahead-log cleanup, and `VACUUM` for retained Mini databases.
 - A user pin saves an archive item before that deletion.
 - A carry pin lasts one collapse period and must be selected again.
 - Chat, Atlas, and Ledger stay without pins.
 - Chat, Atlas, and Ledger are deleted only after a deletion mark and a confirmed collapse.
 - Agent Chat exists only after a `chat` tool call.
 - The next live session contains only the Brain projection and selected pins. It does not contain unpinned old context.
+- Mini can inspect and apply approved patches to any resolved path inside the project root, except `.brain`.
 - A crash during collapse leaves a usable old or new generation. It does not lose a saved pin.
 - Mini uses Pi Durable, Pi AI, and Pi TUI instead of duplicate framework code.
