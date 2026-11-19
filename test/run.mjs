@@ -397,11 +397,8 @@ test("screen: one outer viewport reaches a live Consult body and a settled call 
 			[0.05, "\x1b", false],
 			[0.05, "]]", false],
 			["Consultation co1", "", false],
-			["LIVE_CONSULT_010", "+", false],
-			[0.03, "g", false],
-			["LIVE_CONSULT_001", "", false],
-			[0.08, "G", false],
-			["LIVE_CONSULT_080", "", false],
+			["LIVE_CONSULT_010", "", false],
+			["LIVE_CONSULT_070", "", false],
 			["○ resting", "i", false],
 			[0.03, "look: read: long.txt @1+700"],
 			["○ resting", "\x1b", false],
@@ -416,9 +413,9 @@ test("screen: one outer viewport reaches a live Consult body and a settled call 
 		], { env: { NO_COLOR: "1" }, resize: { cols: 84, rows: 18 } });
 		if (result === undefined) return "python3 is needed for the full-screen disclosure check";
 		ok(result, "the full-screen disclosure flow");
-		has(result.screen, "LIVE_CONSULT_010", "the actual live Consult body advances into its folded tail");
-		has(result.screen, "LIVE_CONSULT_001", "opening the live Consult material exposes its retained head through the page viewport");
-		has(result.screen, "LIVE_CONSULT_080", "the real stream reaches its retained tail without a nested viewport");
+		has(result.screen, "LIVE_CONSULT_010", "the actual live Consult body starts advancing through its tail preview");
+		has(result.screen, "LIVE_CONSULT_070", "the real stream reaches a later retained tail row without a nested viewport");
+		has(result.screen, "earlier lines · Enter opens this block", "the long live body keeps its disclosure affordance in the real terminal");
 		has(result.screen, "line 700", "one opened settled call detail reaches its final locally retained row");
 		has(result.screen, "Enter folds this block", "opened Screen disclosures retain their local folding affordance");
 	} finally {
