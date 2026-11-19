@@ -6,7 +6,7 @@ import type { PrefillState } from "../runtime/prefill.js";
 import { ACTIONS, available, footerHints, hintText, type ActionContext, type Mode } from "./actions.js";
 import { brainBody, chatBody, contextBody, selectableCount, type BodyRow } from "./body.js";
 import { barCells, meterRow } from "./meter-bar.js";
-import { clockSeconds, fit, rule, split, width } from "./text.js";
+import { cell, clockSeconds, fit, rule, split, splitStyled, width } from "./text.js";
 import { spinnerFrame } from "./spinner.js";
 import { statusLine } from "./state.js";
 import { token } from "./tokens.js";
@@ -70,12 +70,14 @@ export function renderFrame(state: FrameState, columns: number): Frame {
   const pad = 2;
   const inner = Math.max(1, widthNow - pad * 2);
   const strip = " ".repeat(pad);
-  const chrome = (text: string): string => `${strip}${fit(text, inner)}`;
-  const full = (text: string, cells = inner): string => `${strip}${fit(text, cells)}`;
+  // `inner` is what the row draws between the two pads, so a full row is
+  // `pad + inner + pad` cells wide. The pad is literal spaces, not part of
+  // the measured text, which is why `fit` gets `inner` and not `cell`.
+  const full = (text: string): string => `${strip}${fit(text, inner)}${strip}`;
 
   const top: string[] = [];
-  top.push(full(split(`${token.accent("Carto")} · ${token.ink(projectName(state.root))}`, token.muted(state.model), inner)));
-  top.push(`${strip}${token.rule(rule(inner))}`);
+  top.push(full(splitStyled(`${token.accent("Carto")} · ${token.ink(projectName(state.root))}`, token.ink, token.muted(state.model), inner)));
+  top.push(`${strip}${token.rule(rule(inner))}${strip}`);
   const status = statusLine({
     view: state.view,
     ...(state.live === undefined ? {} : { live: state.live }),
@@ -91,18 +93,18 @@ export function renderFrame(state: FrameState, columns: number): Frame {
   const tabs = ([["chat", "Chat"], ["brain", "Brain"], ["context", "Context"]] as const)
     .map(([key, label], index) => (state.tab === key ? token.accent(`${index + 1} ${label}`) : token.muted(`${index + 1} ${label}`)))
     .join("  ");
-  top.push(full(split(`  ${tabs}`, `${status.style(`${mark} ${status.text}`)}`, inner)));
+  top.push(full(splitStyled(`  ${tabs}`, token.ink, status.style(`${mark} ${status.text}`), inner)));
 
   // The bar is always visible. Before the first server report it is drawn
   // from the projection's estimate, with its own glyph, style and `~`.
   const meter = frameMeter(state);
   const cells = barCells(widthNow);
   const row = meterRow(meter, cells);
-  const meterCellsWidth = width(row);
-  top.push(full(meterCellsWidth > inner ? fit(row, inner) : row));
+  const meterWidth = width(row);
+  top.push(full(cell(meterWidth > inner ? fit(row, inner) : row, inner)));
 
   const bottom: string[] = [];
-  bottom.push(`${strip}${token.rule(rule(inner))}`);
+  bottom.push(`${strip}${token.rule(rule(inner))}${strip}`);
   bottom.push(full(footerRow(state, inner)));
 
   const selection = clampSelection(state);
@@ -112,10 +114,13 @@ export function renderFrame(state: FrameState, columns: number): Frame {
   const detailRows = detailLines(state, inner);
   return {
     top,
+    // The body's rows are built for `inner`, which includes no pad; the two
+    // cells of page inset live inside that width, so a body row is a full
+    // frame row.
     body: [
-      ...body.map((row) => `${strip}  ${row.text}`),
-      ...(detailRows.length === 0 ? [] : [""]),
-      ...detailRows.map((row) => `${strip}  ${row}`),
+      ...body.map((row) => `${strip}${cell(row.text, inner)}${strip}`),
+      ...(detailRows.length === 0 ? [] : [cell("", widthNow)]),
+      ...detailRows.map((row) => `${strip}${cell(row, inner)}${strip}`),
     ],
     bottom,
   };

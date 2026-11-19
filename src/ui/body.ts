@@ -344,12 +344,13 @@ function rail(selected: boolean): string {
 }
 
 /**
- * A section head: two cells of inset, so it lines up with the page's pad and
- * the tab's own title row. The head of the section that holds the selection is
- * bright: that is how the person knows where the keys act.
+ * A section head: two cells of inset (the rail's cell and the gap before the
+ * first column), so it lines up with a record's handle rather than with its
+ * mark. The head of the section that holds the selection is bright: that is
+ * how the person knows where the keys act.
  */
 function head(title: string, count: string, columns: number, active: boolean): string {
-  const left = active ? token.sectionActive(title) : token.section(title);
+  const left = `  ${active ? token.sectionActive(title) : token.section(title)}`;
   return split(left, token.faint(count), columns, 1);
 }
 

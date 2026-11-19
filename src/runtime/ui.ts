@@ -42,9 +42,11 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
 
   const terminal = new ProcessTerminal();
   const tui = new TuiAltScreen(terminal, true, undefined, { mouse: true });
-  const chrome = new Text();
-  const body = new Text();
-  const footer = new Text();
+  // The chrome and the footer are one row each. The default `Text` pads above
+  // and below, which would move the footer off the bottom row.
+  const chrome = new Text("", 0, 0);
+  const body = new Text("", 0, 0);
+  const footer = new Text("", 0, 0);
   const editor = new Editor(tui, editorTheme());
   const scroll = new ScrollView(body, { primary: true, follow: "end", scrollbar: "auto" });
   // The footer takes the whole bottom row; the bar and the chrome sit above
@@ -66,7 +68,6 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   let error: string | undefined;
   let startedAt = performance.now();
   let runStartedAt: number | undefined;
-  let lastPaintedAt = performance.now();
   let spinnerPaintAt = -1;
   let dirty = true;
   let width = terminal.columns;
@@ -112,7 +113,6 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     dirty = false;
     if (force) tui.requestRender(true);
     else tui.requestRender();
-    lastPaintedAt = performance.now();
   };
 
   /** Read the project again, then draw. A read never writes. */
@@ -123,33 +123,67 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       if (turn === "running" && runStartedAt === undefined) runStartedAt = clock();
       if (turn !== "running") runStartedAt = undefined;
       error = undefined;
-      dirty = true;
+      wake();
     } catch (cause) {
       error = cause instanceof Error ? cause.message : String(cause);
-      dirty = true;
+      wake();
     }
   };
 
   const active = (): boolean => applying || view.turn.state !== "idle" || project.prefill().current?.phase === "reading";
 
   /**
-   * The frame clock. It ticks at 100 ms while something moves, and it stops
-   * when nothing does. While idle it still wakes once a second, so a wake that
-   * fires is seen even if no commit reaches this process.
+   * The frame clock.
+   *
+   * One pending timer, never a repeating one: a tick schedules the next tick,
+   * so a pause between runs costs nothing. While anything moves (a run, a
+   * local action, a server reading) the interval is the spinner's 100 ms.
+   * While the screen is still the interval is one second, which is the
+   * cheapest way to notice a wake that fired without a commit reaching us.
+   *
+   * A tick paints only when something changed: the spinner moved, storage
+   * marked the frame dirty, or a notification asked for it. That is why a
+   * streamed answer appears without a key press and an idle Carto does not
+   * redraw at all.
    */
   let ticker: NodeJS.Timeout | undefined;
+  let ticking = false;
+  const scheduleTick = (delay: number): void => {
+    if (quitting) return;
+    if (ticker !== undefined) clearTimeout(ticker);
+    ticker = setTimeout(() => void tick(), delay);
+    ticker.unref();
+  };
+  /** Ask the next tick to happen now, from input or from a notification. */
+  const wake = (): void => {
+    dirty = true;
+    if (!ticking) scheduleTick(0);
+  };
   const tick = async (): Promise<void> => {
     if (quitting) return;
+    ticking = true;
     const now = clock();
-    if (active() && (dirty || now - spinnerPaintAt >= SPINNER_INTERVAL_MS)) {
+    const moving = active();
+    if (moving && dirty) {
       // A live read is cheap; the transcript is read when a commit says so.
-      if (dirty) await refresh(true);
-      paint();
-    } else if (dirty) {
-      paint();
+      await refresh(true);
     }
-    ticker = setTimeout(() => void tick(), active() ? SPINNER_INTERVAL_MS : 1_000);
-    ticker.unref();
+    if (dirty || (moving && now - spinnerPaintAt >= SPINNER_INTERVAL_MS)) paint();
+    ticking = false;
+    scheduleTick(active() ? SPINNER_INTERVAL_MS : 1_000);
+  };
+
+  /**
+   * A terminal resize changes every row, and Pi TUI tells the layout but not
+   * this frame. Checking the width is the cheapest correct signal.
+   */
+  const checkWidth = (): void => {
+    if (quitting) return;
+    const next = terminal.columns;
+    if (next !== width) {
+      width = next;
+      wake();
+    }
   };
 
   const stop = (): void => {
@@ -169,17 +203,17 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   const work = async (task: () => Promise<void>): Promise<void> => {
     if (applying) {
       notice = { text: "Carto is already applying a local action.", kind: "info" };
-      dirty = true;
+      wake();
       return;
     }
     applying = true;
-    dirty = true;
+    wake();
     try {
       await task();
       notice = undefined;
     } catch (cause) {
       notice = { text: cause instanceof Error ? cause.message : String(cause), kind: "error" };
-      dirty = true;
+      wake();
     } finally {
       applying = false;
       await refresh();
@@ -215,7 +249,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       command = parseCommand(value);
     } catch (cause) {
       notice = { text: cause instanceof Error ? cause.message : String(cause), kind: "error" };
-      dirty = true;
+      wake();
       paint();
       return;
     }
@@ -236,12 +270,12 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     insertAction = action;
     editor.setText(seed);
     tui.setFocus(editor);
-    dirty = true;
+    wake();
   };
   const navigate = (): void => {
     mode = "navigate";
     tui.setFocus(null);
-    dirty = true;
+    wake();
   };
 
   const signalHandler = (): void => quit();
@@ -266,7 +300,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     if (matchesKey(data, Key.backspace)) {
       if (detail !== null) detail = null;
       else selected = 0;
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "1") return switchTab("chat");
@@ -275,23 +309,23 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     if (data === "j" || matchesKey(data, Key.down)) {
       selected += 1;
       selected = clampSelection({ tab, view, selected });
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "k" || matchesKey(data, Key.up)) {
       selected = Math.max(0, selected - 1);
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "g" || matchesKey(data, Key.home)) {
       selected = 0;
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "G" || matchesKey(data, Key.end)) {
       selected = 9_999;
       selected = clampSelection({ tab, view, selected });
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "i" || matchesKey(data, Key.enter)) {
@@ -304,12 +338,12 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     }
     if (data === "a") {
       detail = detail === "actions" ? null : "actions";
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "?") {
       detail = detail === "help" ? null : "help";
-      dirty = true;
+      wake();
       return { consume: true };
     }
     if (data === "f" && tab === "chat") {
@@ -317,14 +351,14 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       if (entry !== undefined) {
         if (folds.has(entry.id)) folds.delete(entry.id);
         else folds.add(entry.id);
-        dirty = true;
+        wake();
       }
       return { consume: true };
     }
     if (data === "e" && tab === "chat") {
       if (selectedChat(view, clampSelection({ tab, view, selected })) !== undefined) {
         detail = "chat";
-        dirty = true;
+        wake();
       }
       return { consume: true };
     }
@@ -333,7 +367,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       if (item !== undefined) {
         if (expandedActivity.has(item.id)) expandedActivity.delete(item.id);
         else expandedActivity.add(item.id);
-        dirty = true;
+        wake();
       }
       return { consume: true };
     }
@@ -387,7 +421,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       tab = next;
       selected = 0;
       detail = null;
-      dirty = true;
+      wake();
       return { consume: true };
     }
   });
@@ -397,10 +431,10 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   let detach = (): void => undefined;
   try {
     const liveWatch = await project.watchLive(() => {
-      dirty = true;
+      wake();
     });
     const prefillOff = project.onPrefill(() => {
-      dirty = true;
+      wake();
     });
     detach = () => {
       liveWatch();
@@ -417,9 +451,11 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   tui.setFocus(null);
   tui.start();
   startedAt = performance.now();
-  ticker = setTimeout(() => void tick(), SPINNER_INTERVAL_MS);
-  ticker.unref();
+  scheduleTick(SPINNER_INTERVAL_MS);
+  const widthTimer = setInterval(checkWidth, 250);
+  widthTimer.unref();
   await exit;
+  clearInterval(widthTimer);
   removeInput();
   process.off("SIGINT", signalHandler);
 }
