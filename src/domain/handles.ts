@@ -64,7 +64,8 @@ export function assignHandles(previous: HandleTable | undefined, records: readon
     if (seen.has(key)) continue;
     seen.add(key);
     const existing = known.get(key);
-    entries.push({ ...record, handle: existing ?? nextHandle(counters, record.kind) });
+    // Keep one key order so an unchanged table compares equal to its stored form.
+    entries.push({ kind: record.kind, id: record.id, handle: existing ?? nextHandle(counters, record.kind), timestamp: record.timestamp });
   }
   return { counters, entries };
 }

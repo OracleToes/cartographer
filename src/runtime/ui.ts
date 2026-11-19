@@ -486,7 +486,7 @@ function styleActivity(kind: LiveActivity["kind"], text: string): string {
   }
 }
 
-type UiCommand =
+export type UiCommand =
   | { kind: "collapse" }
   | { kind: "confirm-collapse" }
   | { kind: "cancel-collapse" }
@@ -509,7 +509,7 @@ function isHandle(value: string): boolean {
   return /^[LCAPHWXD]\d+$/i.test(value.trim());
 }
 
-function parseCommand(text: string): UiCommand | undefined {
+export function parseCommand(text: string): UiCommand | undefined {
   if (!text.startsWith("/")) return undefined;
   const [name, rest] = splitFirst(text.slice(1).trim());
   if (name === "collapse" && rest === "") return { kind: "collapse" };
@@ -532,71 +532,43 @@ function parseCommand(text: string): UiCommand | undefined {
     if (parsed !== undefined && item !== undefined && reason !== undefined) return { kind: "pin-file", ...parsed, item, reason };
   }
   if (name === "ledger") {
-    const [first, kindName, status, value, answer, evidence] = splitBars(rest, 6) ?? [];
-    const handle = first !== undefined && isHandle(first) ? first : null;
-    const kindValue = handle === null ? first : kindName;
-    const statusValue = handle === null ? kindName : status;
-    const textValue = handle === null ? status : value;
-    const answerValue = handle === null ? value : answer;
-    const evidenceValue = handle === null ? answer : evidence;
+    const parts = splitParts(rest);
+    const handle = isHandle(parts[0] ?? "") ? (parts.shift() as string) : null;
+    const [kindName, status, value, answer] = parts;
     if (
-      (kindValue === "goal" || kindValue === "note" || kindValue === "question") &&
-      (statusValue === "open" || statusValue === "answered" || statusValue === "closed") &&
-      textValue !== undefined
+      (kindName === "goal" || kindName === "note" || kindName === "question") &&
+      (status === "open" || status === "answered" || status === "closed") &&
+      value !== undefined
     ) {
-      return {
-        kind: "ledger",
-        handle,
-        kindName: kindValue,
-        status: statusValue,
-        text: textValue,
-        answer: answerValue ?? null,
-        evidence: evidenceValue === undefined ? [] : evidenceValue.split(",").map((item) => item.trim()).filter(Boolean),
-      };
+      return { kind: "ledger", handle, kindName, status, text: value, answer: answer ?? null, evidence: [] };
     }
+    throw new Error("Use /ledger [L#] | goal|note|question | open|answered|closed | TEXT [| ANSWER].");
   }
   if (name === "atlas") {
-    const [first, title, claim, range, links] = splitBars(rest, 5) ?? [];
-    const handle = first !== undefined && isHandle(first) ? first : null;
-    const titleValue = handle === null ? first : title;
-    const claimValue = handle === null ? title : claim;
-    const rangeValue = handle === null ? claim : range;
-    const linksValue = handle === null ? range : links;
-    const parsed = rangeValue === undefined ? undefined : parseLineRange(rangeValue);
-    if (titleValue !== undefined && claimValue !== undefined && parsed !== undefined) {
-      return {
-        kind: "atlas",
-        handle,
-        title: titleValue,
-        claim: claimValue,
-        ...parsed,
-        links: linksValue === undefined ? [] : linksValue.split(",").map((link) => link.trim()).filter(Boolean),
-      };
+    const parts = splitParts(rest);
+    const handle = isHandle(parts[0] ?? "") ? (parts.shift() as string) : null;
+    const [title, claim, range, links] = parts;
+    const parsed = range === undefined ? undefined : parseLineRange(range);
+    if (title !== undefined && claim !== undefined && parsed !== undefined) {
+      return { kind: "atlas", handle, title, claim, ...parsed, links: links === undefined ? [] : links.split(",").map((link) => link.trim()).filter(Boolean) };
     }
+    throw new Error("Use /atlas [A#] | TITLE | CLAIM | path:start-end [| link-handle,link-handle].");
   }
   if (name === "handoff") {
     const [intent, nextAction, note] = splitBars(rest, 3) ?? [];
     if (intent !== undefined && nextAction !== undefined) return { kind: "handoff", intent, nextAction, note: note ?? "" };
   }
   if (name === "wake") {
-    const [first, second, third, fourth] = splitBars(rest, 4) ?? [];
-    const handle = first !== undefined && isHandle(first) && (second === "time" || second === "path") ? first : null;
-    const wakeKind = handle === null ? second : third;
-    const condition = handle === null ? third : fourth;
-    const reasonValue = handle === null ? fourth : undefined;
+    const parts = splitParts(rest);
+    const handle = isHandle(parts[0] ?? "") && (parts[0] ?? "") !== "time" && (parts[0] ?? "") !== "path" ? (parts.shift() as string) : null;
+    const [wakeKind, condition, reason] = parts;
     if (wakeKind !== "time" && wakeKind !== "path") {
-      throw new Error(`A wake needs the kind time or path: /wake [W#] | time|path | CONDITION | REASON.`);
+      throw new Error("A wake needs the kind time or path: /wake [W#] | time|path | CONDITION | REASON.");
     }
-    if (condition === undefined || condition === "") {
+    if (condition === undefined) {
       throw new Error("A wake needs a condition: /wake [W#] | time|path | CONDITION | REASON.");
     }
-    return {
-      kind: "wake",
-      handle,
-      wakeKind,
-      condition,
-      reason: reasonValue === undefined || reasonValue === "" ? "The person armed this wake." : reasonValue,
-    };
+    return { kind: "wake", handle, wakeKind, condition, reason: reason ?? "The person armed this wake." };
   }
   if (name === "cancel-wake") {
     const [handle, reason] = splitBars(rest, 2) ?? [];
@@ -681,6 +653,10 @@ async function runCommand(project: CartoProject, command: UiCommand): Promise<vo
 function splitFirst(text: string): [string, string] {
   const index = text.search(/\s/);
   return index === -1 ? [text, ""] : [text.slice(0, index), text.slice(index).trim()];
+}
+
+function splitParts(text: string): string[] {
+  return text.split("|").map((part) => part.trim()).filter((part) => part !== "");
 }
 
 function splitBars(text: string, minimum: number): string[] | undefined {
