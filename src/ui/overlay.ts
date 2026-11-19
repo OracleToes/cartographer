@@ -32,12 +32,24 @@ import { token } from "./tokens.js";
  * overlay and the test cannot drift.
  */
 
+/**
+ * The chrome a reference must not cover: blank, title, rule, status, and the
+ * token bar above it; the rule and the footer below it.
+ *
+ * The token bar is the case that matters. The person's rule is that the bar is
+ * always visible, and a reference centred on the screen covers it. A reference
+ * therefore opens in the body's own band, between the bar and the footer rule,
+ * which is the only part of the screen it is allowed to own.
+ */
+export const CHROME_ABOVE = 5;
+export const CHROME_BELOW = 2;
+
 /** How many rows a reference may take from a terminal of `rows` rows. */
 export function referenceMaxHeight(rows: number): number {
-  // The chrome is fixed and must stay visible above and below, so a reference
-  // never covers more than about two thirds of the screen, and never fewer than
-  // four rows when the terminal is too short to be generous.
-  return Math.max(4, Math.min(Math.max(1, rows - 8), Math.floor(rows * 0.66)));
+  const band = rows - CHROME_ABOVE - CHROME_BELOW;
+  // No fewer than four rows, so a short terminal still shows the summary and a
+  // little of the reference; the band wins when it is generous.
+  return Math.max(4, band);
 }
 
 /**

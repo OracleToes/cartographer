@@ -21,7 +21,7 @@ import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
 import { selectedLabel } from "../ui/body.js";
 import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
 import { BlankRow } from "../ui/chrome.js";
-import { ReferenceOverlay, referenceMaxHeight } from "../ui/overlay.js";
+import { CHROME_ABOVE, ReferenceOverlay, referenceMaxHeight } from "../ui/overlay.js";
 import { inputBoxRows, inputTextCells, INPUT_TITLE } from "../ui/input-box.js";
 import { margin } from "../ui/text.js";
 import { SPINNER_INTERVAL_MS } from "../ui/spinner.js";
@@ -226,12 +226,19 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       tui.requestRender();
       return;
     }
-    const overlay = new ReferenceOverlay(currentState(), referenceMaxHeight(terminal.rows));
+    const maxHeight = referenceMaxHeight(terminal.rows);
+    const overlay = new ReferenceOverlay(currentState(), maxHeight);
+    // The reference opens in the body's band, not over the whole screen: the
+    // token bar above and the footer below stay visible (see
+    // `docs/reference-overlay.md`). It is full-bleed across that band, like the
+    // body: an inset overlay leaves a column of transcript showing down each
+    // side, and a column of "0" and "t" at the edge reads as corruption.
     reference = tui.showOverlay(overlay, {
-      width: Math.max(20, Math.min(width, 96)),
-      maxHeight: referenceMaxHeight(tui.terminal.rows),
-      anchor: "center",
-      margin: 1,
+      row: CHROME_ABOVE,
+      col: 0,
+      width: terminal.columns,
+      maxHeight,
+      margin: 0,
     });
     paint();
     tui.requestRender();

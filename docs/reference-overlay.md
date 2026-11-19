@@ -43,6 +43,20 @@ Both were read out of `@earendil-works/pi-tui` 1.5.2, not assumed.
    how many rows it did not show, and the key that closes it — is the **first**
    row. A footer would be the first thing a short terminal lost.
 
+## Where it opens
+
+Not centred. A centred overlay covers the token bar, and the person's rule is
+that the bar is always visible. A reference opens in the **body's band**: from
+`CHROME_ABOVE` (blank, title, rule, status, bar) to the footer rule, full-bleed
+across the terminal width. Two defects were seen on a real terminal and fixed
+before this was written down:
+
+- Centred, it covered the bar. The bar is not negotiable, so the reference moved
+  into the body's band instead.
+- Inset by one column, it left a column of transcript showing down each side, and
+  the right-hand scroll column read as corruption at the edge. The body runs
+  full width, so the reference does too.
+
 ## What owns the keyboard
 
 While a reference page (`?`, `a`) is open it owns the keyboard. `?`/`a` close
@@ -60,5 +74,8 @@ own text false. It closes on the first key, and that key then does its job.
   text being replaced, which is what the person asked to see.
 - `scrollToEndIndicator` is passed to `TuiAltScreen` but has not been seen on
   screen yet.
-- The overlay has not been eyeballed in a real terminal; only its rows are
-  asserted.
+- The overlay has been eyeballed in a real terminal at 22×100: the bar stays
+  visible, `j` does not move the body, and `Esc` restores the body exactly.
+- The body still repaints underneath a covering reference. It is invisible, and
+  removing it would mean teaching `paint()` to skip the body, which is not worth
+  a branch yet.

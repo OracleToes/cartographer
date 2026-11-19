@@ -299,8 +299,17 @@ test("a reference overlay is one row per line, summary first, and never taller t
   });
 });
 
-test("a reference budget leaves the chrome room on a short terminal", async () => {
-  const { referenceMaxHeight } = await import("../dist/ui/overlay.js");
-  assert.ok(referenceMaxHeight(24) <= 16);
-  assert.ok(referenceMaxHeight(10) >= 4);
+test("a reference opens in the body band, so the token bar and footer stay visible", async () => {
+  const { CHROME_ABOVE, CHROME_BELOW, referenceMaxHeight } = await import("../dist/ui/overlay.js");
+  // The bar is always visible, in the person's words, so a reference must not
+  // cover it. It opens below the bar and ends above the footer rule.
+  for (const rows of [10, 20, 24, 40, 60]) {
+    const budget = referenceMaxHeight(rows);
+    assert.ok(budget >= 4, `a reference needs a few rows at ${rows}`);
+    assert.ok(
+      CHROME_ABOVE + budget + CHROME_BELOW <= Math.max(rows, CHROME_ABOVE + CHROME_BELOW + 4),
+      `a reference covers the chrome at ${rows} rows`,
+    );
+  }
+  assert.ok(referenceMaxHeight(24) >= 17, "a 24-row terminal should show most of the key list");
 });
