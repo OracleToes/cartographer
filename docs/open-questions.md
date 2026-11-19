@@ -166,16 +166,14 @@ Open in it:
   the agent's own uncertainty. The draft uses "I trust nothing I have not read"
   and "we make small changes". Whether that reads as one voice or two is a judgement
   about the prose, not the rule.
-- **Q7c.2 — Does the tool list belong in the prompt at all?** The draft repeats
-  each tool's purpose in a `tools` section, and each tool also carries a
-  description in its schema. Duplication costs tokens and can disagree. Open:
-  whether the prompt describes tools or defers to their descriptions.
+- **Q7c.2 — Resolved.** The tool descriptions are the authority. The system
+  prompt does not repeat what a tool does; it carries only what no single
+  description can say.
 - **Q7c.3 — How is "small atomic changes" taught?** The `working` section
   currently asserts it and gives a self-check ("when we notice ourselves
   organising..."). Open: whether that is enough to change behaviour, since the
   person suspects prompting is the lever but has not seen it work.
-- **Q7c.4 — What is the agent's name?** The draft says "Carto". The old prompt
-  said "Cartographer". Open.
+- **Q7c.4 — Resolved.** The agent is called Carto.
 - **Q7c.5 — Length.** The draft is roughly 900 words. The old prompt was longer,
   but carried a larger product. Open: whether this is the right size.
 
