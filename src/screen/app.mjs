@@ -1003,7 +1003,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ file: data.file, ledger: data.ledger, lines: data.lines, presentation: workspacePresentation.ledger }));
 		if (id === "carto.plan") return projectionView(id, (data) => planView({ file: data.file, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, presentation: workspacePresentation.plan }));
 		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ requests: data.items, presentation: workspacePresentation.requests }));
-		if (id === "carto.tree") return projectionView(id, (data) => treeView({ tree: data, presentation: workspacePresentation.tree }, isOpen));
+		if (id === "carto.tree") return projectionView(id, (data) => treeView({
+			tree: { ...data, marks: workspacePresentation.tree.marks(projectionFor("carto.atlas").data?.atlas) },
+			presentation: workspacePresentation.tree,
+		}, isOpen));
 		if (id === "carto.hands") return projectionView(id, (data) => handsView({ context: data, presentation: workspacePresentation.hands }));
 		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ review: data, presentation: reviewPresentation }, id.slice(5)));
 		if (id === "shells.list") return projectionView(id, (data) => shellsView({ ...data, presentation: runtimePresentation.shells }));
@@ -1044,7 +1047,10 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		if (id === RUNTIME_STATUS_PROJECTION) return void draw();
 		rebuild(id);
-		if (viewId() === id) {
+		// Tree marks are a pure presentation derivation of the cached Atlas. Refresh the tree rows when that settled
+		// Atlas changes, without having its filesystem query touch an atlas reader of its own.
+		if (id === "carto.atlas") rebuild("carto.tree");
+		if (viewId() === id || id === "carto.atlas" && viewId() === "carto.tree") {
 			draw();
 			// A palette launch waits for this already-settled projection instead of asking a live manager for targets.
 			// The launcher ignores unrelated routes and any currently-open dialog/picker.

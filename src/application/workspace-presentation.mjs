@@ -2,7 +2,7 @@
 //
 // Durable Workspace readers stay behind application queries. Screen renderers receive their settled projection plus
 // this narrow vocabulary, so they never import a domain book merely to describe a Workspace snapshot.
-import { atlasSummary, renderAttention } from "../atlas.mjs";
+import { atlasSummary, fileMarks, renderAttention } from "../atlas.mjs";
 import { POLICY } from "../config.mjs";
 import { estimate, recordLine, shelfLabel } from "../context.mjs";
 import { join } from "node:path";
@@ -78,6 +78,8 @@ export function createWorkspacePresentation() {
 		tree: Object.freeze({
 			size: treeSize,
 			target: treeTarget,
+			/** Graph links come only from an already-settled Atlas projection; tree traversal never reads it live. */
+			marks: (atlas) => atlas?.nodes === undefined ? {} : Object.fromEntries(fileMarks(atlas)),
 		}),
 		hands: Object.freeze({
 			shelfLabel,
