@@ -16,6 +16,14 @@ The five retained concepts are the product:
 
 Everything else must earn its way back as a small attachment. Mini does not preserve legacy behaviour merely because it already exists.
 
+## Clean-slate repository
+
+This repository retains this plan, the license, and Git history until Mini implementation begins. The existing runtime, test suite, package metadata, command wrapper, logs, and build scaffolding are removed rather than carried forward.
+
+No existing implementation module has a contract close enough to Mini to preserve unchanged. In particular, the harness, prompt/context stack, plan and task tower, Screen/application layers, terminal runner, project setup, and SQLite adapters encode the control plane Mini is removing. Their useful ideas belong in this plan, not in Mini imports.
+
+A historic `.brain` may later be treated as an external, read-only import source for Atlas and Ledger data. Mini must not require a legacy source module, dependency, or test fixture to start.
+
 ## Product boundary
 
 Mini v1 has one active thread and one shared brain per project.
@@ -308,7 +316,7 @@ Migration is additive and explicit:
 
 Plans, tasks, focus forks, shelves, reports, assessment text, catalog/index records, windows, checkpoints, conferences, and legacy prompt state are not translated. Their absence is intentional, not a migration failure.
 
-Mini becomes the default only after the new path meets its acceptance criteria. Legacy code stays isolated until then; it is not destructively simplified in place.
+Mini starts as the only runtime in this repository. Historical brains remain external import inputs until Mini meets its acceptance criteria; no legacy source tree, entry point, or runtime adapter is retained for a cutover.
 
 ## Delivery sequence
 
@@ -332,9 +340,9 @@ Render the pure screen projection in one terminal workspace. Add only direct con
 
 Implement approve/reject/apply flow with digest conflict handling. Add the one-way Atlas/Ledger importer and show imported provenance. Test it against representative legacy brains without making the Mini runtime depend on legacy modules.
 
-### 6. Cut over deliberately
+### 6. Prove the new runtime deliberately
 
-Run Mini in real projects, close the remaining behavioural gaps that belong to the stated core, and then remove legacy entry points only when Mini is proven as the default. Do not port deferred systems to make the cutover feel safer.
+Run Mini in real projects and close only the remaining gaps that belong to the stated core. Historic brains may be imported through the one-way importer, but no legacy entry point is restored to make adoption feel safer.
 
 Each phase is a small pushed change with pure-domain tests first. The full suite remains deterministic and within its existing time budget.
 
