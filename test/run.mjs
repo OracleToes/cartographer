@@ -393,7 +393,7 @@ test("screen: one outer viewport reaches a live Consult body and a settled call 
 		const consult = JSON.stringify({ question: "Show the disclosure fixture.", myPersona: "SCREEN DISCLOSURE FIXTURE" });
 		const result = await cartoOnTerminal(root, server, ["--screen"], [
 			["Set one up in", ""],
-			["model stand-in un", `consult: ${consult}`],
+			["[waits] You", `consult: ${consult}`],
 			[0.05, "\x1b", false],
 			[0.05, "]]", false],
 			["Consultation co1", "", false],
