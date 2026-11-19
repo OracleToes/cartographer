@@ -78,11 +78,48 @@ them.
    a parent showed a row per child and none of their content. The actual prompt
    text — the thing the whole tab exists to show — was invisible.
 
+## Why the tool schemas looked absent
+
+They were in the payload the whole time. Two defects stopped the person reaching
+them, and both were the same mistake in different places.
+
+**The renderer clamped the selection with the durable block count.** The Context
+tab has one durable block (`R1`) and six prompt parts, so `j` moved to part two
+and the next paint pulled the selection back to part one. Everything below the
+first row — Tools included — was unreachable. The key handler and the renderer
+were using two different clamps.
+
+The rule that fixes it: **one clamp, read from the rows on screen.** `chosen()`
+is that clamp, and the key handler, the fold keys, `v`, `e`, and the renderer all
+call it. A second clamp is a second opinion about where the cursor is.
+
+## Editing, the record layer
+
+`e` on a Context node opens the input seeded with the text of the durable record
+behind that node, titled `edit C1`. Submitting writes the record, not the prompt:
+
+| Node | Record | Edited by |
+| --- | --- | --- |
+| `Person · you` | Chat | `project.editChat` |
+| A Ledger block | Ledger | `project.upsertLedger` |
+| An Atlas block | Atlas | refused, with the reason: its claim is source-backed, so `/atlas` owns the edit |
+| The instructions, a tool schema, the transcript | none | refused, with the reason |
+
+The person said "both layers". This is the record layer. The literal-prompt layer
+is not built, and the reason is recorded here rather than guessed at: the prompt
+is assembled by Pi from the Brain on every request, so a literal override has
+nowhere to live that would not become a second source of truth.
+
+### A sent message is history
+
+Editing `C1` does not rewrite the message already in the transcript, and it
+should not: what was sent is a fact. So the node keeps its record and is marked
+`· changed since`, and `e` on it says the record lives on the Chat tab. A node
+that looked editable but was not would be worse than one that explains itself.
+
 ## Still open
 
-- **Editing.** The person said "both layers": editing the record behind a node,
-  and editing the literal text that is sent. That is the next stage. It must go
-  through the approved-patch path for records; a direct prompt edit needs a
+- **The literal-prompt layer.** Not built, for the reason above. It needs a
   decision about where a literal override is stored.
 - **The bar's number** still comes from the prefill monitor's server reading,
   not from `usage.input`. Once a provider reports usage, the bar should prefer
