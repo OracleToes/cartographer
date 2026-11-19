@@ -267,7 +267,7 @@ test("configuration jobs: abort before rename cancels, while abort after rename 
 	const install = join(root, "install.json");
 	const project = join(brainDir, "config.json");
 	writeFileSync(install, "{}");
-	writeFileSync(project, JSON.stringify({ colors: "dark" }));
+	writeFileSync(project, JSON.stringify({ theme: "dark" }));
 	let beganWrite;
 	let releaseWrite;
 	const writing = new Promise((resolve) => { releaseWrite = resolve; });
@@ -289,7 +289,7 @@ test("configuration jobs: abort before rename cancels, while abort after rename 
 	const pending = delayed.update({
 		scope: "project",
 		expectedRevision: before.revision,
-		transform: (values) => ({ ...values, colors: "light" }),
+		transform: (values) => ({ ...values, theme: "light" }),
 		signal: controller.signal,
 	});
 	await writeBegan;
@@ -297,7 +297,7 @@ test("configuration jobs: abort before rename cancels, while abort after rename 
 	releaseWrite();
 	await assert.rejects(pending, (error) => error instanceof ConfigurationRepositoryError && error.code === "cancelled");
 	assert.equal(renamed, 0, "an abort before the atomic rename never reaches the durable commit boundary");
-	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "dark" });
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { theme: "dark" });
 
 	const clock = Date.parse(NOW);
 	const events = createApplicationEvents({ now: () => clock });
@@ -318,7 +318,7 @@ test("configuration jobs: abort before rename cancels, while abort after rename 
 	});
 	const revision = (await repository.read("project")).revision;
 	const result = await app.execute(SETTINGS_ACTION.edit, {
-		key: "colors",
+		key: "theme",
 		value: "light",
 		scope: "project",
 		expectedRevision: revision,
@@ -328,7 +328,7 @@ test("configuration jobs: abort before rename cancels, while abort after rename 
 	assert.equal(result.data.committed, true);
 	assert.equal(result.data.refresh, "needed", "post-commit cancellation stops the provenance wait and asks for a normal refresh");
 	assert.equal(result.meta.jobId, "job-1");
-	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" });
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { theme: "light" });
 	assert.ok(seen.some((event) => event.type === "job.queued"));
 	assert.ok(seen.some((event) => event.type === "job.progress"));
 	assert.ok(seen.some((event) => event.type === "job.committed"));
