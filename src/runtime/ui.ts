@@ -4,10 +4,13 @@ import {
   matchesKey,
   ProcessTerminal,
   ScrollView,
+  sliceByColumn,
+  Spacer,
   Text,
   TuiAltScreen,
   VStack,
   type Component,
+  type StackEntryOptions,
 } from "@earendil-works/pi-tui";
 
 import { visibleChat } from "../domain/brain.js";
@@ -17,6 +20,8 @@ import type { CartoProject, ProjectView, SendMode } from "./project.js";
 import type { LiveActivity } from "./live-session.js";
 import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
 import { actionContextOf, clampSelection, helpLines, renderFrame, type Detail, type FrameState, type Tab } from "../ui/frame.js";
+import { inputBoxRows, inputTextCells, INPUT_TITLE } from "../ui/input-box.js";
+import { margin } from "../ui/text.js";
 import { SPINNER_INTERVAL_MS } from "../ui/spinner.js";
 import { token } from "../ui/tokens.js";
 
@@ -44,15 +49,10 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   const tui = new TuiAltScreen(terminal, true, undefined, { mouse: true });
   // The chrome and the footer are one row each. The default `Text` pads above
   // and below, which would move the footer off the bottom row.
+  const gap = new Spacer(1);
   const chrome = new Text("", 0, 0);
   const body = new Text("", 0, 0);
   const footer = new Text("", 0, 0);
-  const editor = new Editor(tui, editorTheme());
-  const scroll = new ScrollView(body, { primary: true, follow: "end", scrollbar: "auto" });
-  // The footer takes the whole bottom row; the bar and the chrome sit above
-  // the body, so the bar never moves when the body scrolls.
-  tui.setLayoutRoot(new VStack([chrome, { component: scroll, grow: 1 }, footer], { gap: 0 }));
-
   let tab: Tab = "chat";
   let mode: Mode = "navigate";
   let detail: Detail = null;
@@ -77,6 +77,64 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   });
 
   const clock = (): number => Date.now();
+
+  // The editor is a real layout child, not a focused widget off screen: a
+  // component draws only when a parent renders it. With `paddingX: 2` it
+  // draws its text two cells in and no border of its own; the box draws the
+  // frame, so the box and the footer cannot disagree about the border colour.
+  // `paddingX: 0` is required for two reasons. `Editor` draws its padding
+  // inside its own width and reserves one column for the cursor when the
+  // padding is zero, so a zero-padded editor wraps at exactly the width it is
+  // given: the box's inside width. Its rows can then be used as they are, and
+  // its cursor marker stays on the character it marked.
+  const editor = new Editor(tui, editorTheme(), { paddingX: 0 });
+  // The box is chrome, so it is inset like the chrome. Its rows carry the
+  // gutter and the pad themselves, exactly as `renderFrame`'s rows do, so its
+  // edges line up with the rules above and below the body.
+  const input = new Text("", 0, 0);
+  const scroll = new ScrollView(body, { primary: true, follow: "end", scrollbar: "auto" });
+
+  /**
+   * The editor's own rows for the box's text width. The box never re-wraps
+   * them and never re-places the cursor, so the hardware cursor lands on the
+   * character Pi TUI marked.
+   *
+   * `Editor` draws a rule above and below its text. In the box those rules
+   * would be a second frame inside the frame, so they are dropped here: the
+   * box owns the border and the editor owns only the text.
+   */
+  const editorRows = (columns: number): string[] => {
+    // The editor must wrap at exactly the cells the box gives a line, or its
+    // own wrap and the box's cut disagree and the tail of a long line
+    // disappears. `inputTextCells` is that number, in one place.
+    const rows = editor.render(inputTextCells(columns, margin(columns)));
+    return rows.length <= 2 ? [] : rows.slice(1, -1);
+  };
+
+  /**
+   * The box is measured, not declared: `basis: "auto"` asks the layout to use
+   * the rows the box draws, so the box can never be allocated one row and draw
+   * three. `visible` is a predicate the layout calls on every pass, so the box
+   * appears and disappears with the mode. The box is the only child whose
+   * height changes while the person types, and the body above it is the only
+   * child that absorbs that change.
+   */
+  const inputEntry: StackEntryOptions = {
+    basis: "auto",
+    grow: 0,
+    shrink: 0,
+    visible: () => mode === "insert",
+  };
+
+  // One blank row above the frame and one below it, so the chrome never
+  // touches the terminal's own edge. The body is the only child that grows,
+  // so it is the only child a resize or a wrapped prompt moves.
+  tui.setLayoutRoot(
+    new VStack(
+      [gap, chrome, { component: scroll, grow: 1 }, { component: input, ...inputEntry }, footer, gap],
+      { gap: 0 },
+    ),
+  );
 
   /** One state value, built from what the last reads produced. */
   const currentState = (): FrameState => ({
@@ -109,10 +167,56 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     chrome.setText(frame.top.join("\n"));
     body.setText(frame.body.join("\n"));
     footer.setText(frame.bottom.join("\n"));
+    paintInput();
     spinnerPaintAt = state.now;
     dirty = false;
     if (force) tui.requestRender(true);
     else tui.requestRender();
+  };
+
+  /**
+   * A reference is read from the top. The body follows its own end so a
+   * streamed answer stays in view, but a `?` or `a` reference longer than the
+   * body would open scrolled to its last line and its title would never be
+   * seen. Opening one therefore leaves follow mode at the top of the body;
+   * closing it returns the body to the end.
+   */
+  const showDetail = (next: Detail): void => {
+    const wasOpen = detail !== null;
+    detail = next;
+    if (next !== null) scroll.scrollTo(0, { disableFollow: true });
+    else if (wasOpen) scroll.scrollToEnd();
+    paint();
+    tui.requestRender();
+  };
+
+  /**
+   * Draw the input box from the editor's own rows, and tell the layout how
+   * many rows it needs. The height is derived from the same render the box is
+   * drawn from, so the box cannot be allocated one row and drawn three: that
+   * mismatch is how a box ends up over the footer.
+   */
+  const paintInput = (): void => {
+    if (mode !== "insert") {
+      input.setText("");
+      return;
+    }
+    const rows = editorRows(width);
+    input.setText(
+      inputBoxRows({ lines: rows, title: inputTitle(), columns: width, gutter: margin(width) }).join("\n"),
+    );
+  };
+
+  /** What Enter will do, said on the box's top edge. */
+  const inputTitle = (): string => {
+    if (insertAction === "edit-chat") {
+      const entry = selectedChat(view, clampSelection({ tab, view, selected }));
+      const handle = entry === undefined ? undefined : handleOf(view.brain.handles, "chat", entry.id);
+      return handle === undefined ? INPUT_TITLE.editChat("C?") : INPUT_TITLE.editChat(handle);
+    }
+    if (insertAction === "agent-chat") return INPUT_TITLE.agentChat();
+    if (insertAction === "resume") return INPUT_TITLE.resume();
+    return INPUT_TITLE.send(sendMode);
   };
 
   /** Read the project again, then draw. A read never writes. */
@@ -264,18 +368,31 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     });
   };
   editor.onSubmit = (text) => void submit(text);
+  // Typing is latency-sensitive: a box drawn on the next clock tick would be
+  // up to 100 ms behind the key. Pi TUI calls this inside the keystroke, so
+  // the box and the cursor move together.
+  editor.onChange = () => {
+    if (mode !== "insert") return;
+    paint();
+    tui.requestRender();
+  };
 
   const enterInsert = (seed = "", action: "send" | "edit-chat" | "agent-chat" | "resume" = "send"): void => {
     mode = "insert";
     insertAction = action;
     editor.setText(seed);
     tui.setFocus(editor);
-    wake();
+    // Paint now, not on the next tick: the person pressed a key and expects
+    // the box in the same frame.
+    paint();
+    tui.requestRender();
   };
   const navigate = (): void => {
     mode = "navigate";
     tui.setFocus(null);
-    wake();
+    input.setText("");
+    paint();
+    tui.requestRender();
   };
 
   const signalHandler = (): void => quit();
@@ -293,12 +410,12 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return undefined;
     }
     if (matchesKey(data, Key.escape)) {
-      detail = null;
+      if (detail !== null) showDetail(null);
       navigate();
       return { consume: true };
     }
     if (matchesKey(data, Key.backspace)) {
-      if (detail !== null) detail = null;
+      if (detail !== null) showDetail(null);
       else selected = 0;
       wake();
       return { consume: true };
@@ -337,13 +454,11 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return { consume: true };
     }
     if (data === "a") {
-      detail = detail === "actions" ? null : "actions";
-      wake();
+      showDetail(detail === "actions" ? null : "actions");
       return { consume: true };
     }
     if (data === "?") {
-      detail = detail === "help" ? null : "help";
-      wake();
+      showDetail(detail === "help" ? null : "help");
       return { consume: true };
     }
     if (data === "f" && tab === "chat") {
@@ -420,7 +535,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     function switchTab(next: Tab): { consume: true } {
       tab = next;
       selected = 0;
-      detail = null;
+      if (detail !== null) showDetail(null);
       wake();
       return { consume: true };
     }

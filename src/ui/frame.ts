@@ -6,7 +6,7 @@ import type { PrefillState } from "../runtime/prefill.js";
 import { ACTIONS, available, footerHints, hintText, type ActionContext, type Mode } from "./actions.js";
 import { brainBody, chatBody, contextBody, selectableCount, type BodyRow } from "./body.js";
 import { barCells, meterRow } from "./meter-bar.js";
-import { cell, clockSeconds, fit, rule, split, splitStyled, width } from "./text.js";
+import { cell, clockSeconds, fit, margin, rule, split, splitStyled, width } from "./text.js";
 import { spinnerFrame } from "./spinner.js";
 import { statusLine } from "./state.js";
 import { token } from "./tokens.js";
@@ -67,17 +67,25 @@ export const CHROME = { header: 1, rule: 1, tabs: 1, bar: 1, footer: 1 } as cons
 
 export function renderFrame(state: FrameState, columns: number): Frame {
   const widthNow = Math.max(20, columns);
+  // The gutter is the terminal's background, not a drawn border, so a
+  // terminal that already draws a border is not given a second one. The body
+  // keeps the full frame width because a scrollbar belongs at the page edge,
+  // not in the gutter; only the chrome is inset.
+  const gutter = margin(widthNow);
+  const frameWidth = Math.max(4, widthNow - gutter * 2);
+  const edge = " ".repeat(gutter);
   const pad = 2;
-  const inner = Math.max(1, widthNow - pad * 2);
+  const inner = Math.max(1, frameWidth - pad * 2);
   const strip = " ".repeat(pad);
   // `inner` is what the row draws between the two pads, so a full row is
   // `pad + inner + pad` cells wide. The pad is literal spaces, not part of
   // the measured text, which is why `fit` gets `inner` and not `cell`.
-  const full = (text: string): string => `${strip}${fit(text, inner)}${strip}`;
+  const full = (text: string): string => `${edge}${strip}${fit(text, inner)}${strip}${edge}`;
+  const edgeRule = (): string => `${edge}${strip}${token.rule(rule(inner))}${strip}${edge}`;
 
   const top: string[] = [];
   top.push(full(splitStyled(`${token.accent("Carto")} · ${token.ink(projectName(state.root))}`, token.ink, token.muted(state.model), inner)));
-  top.push(`${strip}${token.rule(rule(inner))}${strip}`);
+  top.push(edgeRule());
   const status = statusLine({
     view: state.view,
     ...(state.live === undefined ? {} : { live: state.live }),
@@ -104,7 +112,10 @@ export function renderFrame(state: FrameState, columns: number): Frame {
   top.push(full(cell(meterWidth > inner ? fit(row, inner) : row, inner)));
 
   const bottom: string[] = [];
-  bottom.push(`${strip}${token.rule(rule(inner))}${strip}`);
+  bottom.push(edgeRule());
+  // The footer keeps its row in both modes. The box is a separate component
+  // above it, so the keys have one source (the action table) and are never
+  // printed twice.
   bottom.push(full(footerRow(state, inner)));
 
   const selection = clampSelection(state);
@@ -117,10 +128,17 @@ export function renderFrame(state: FrameState, columns: number): Frame {
     // The body's rows are built for `inner`, which includes no pad; the two
     // cells of page inset live inside that width, so a body row is a full
     // frame row.
+    // The body runs the full frame width: it is the page. Its own two cells
+    // of inset are inside the text, so a scrollbar lands on the terminal's
+    // last column rather than in the gutter that keeps the chrome off the edge.
+    //
+    // A menu is not the page. The `?` and `a` references are read like the
+    // chrome and sit where the chrome sits, inside the gutter and the pad, so
+    // they do not scrape the terminal border.
     body: [
-      ...body.map((row) => `${strip}${cell(row.text, inner)}${strip}`),
+      ...body.map((row) => cell(row.text, widthNow)),
       ...(detailRows.length === 0 ? [] : [cell("", widthNow)]),
-      ...detailRows.map((row) => `${strip}${cell(row, inner)}${strip}`),
+      ...detailRows.map((row) => `${edge}${strip}${cell(row, inner)}${strip}${edge}`),
     ],
     bottom,
   };
@@ -196,7 +214,7 @@ function footerRight(state: FrameState): string {
   if (state.notice !== undefined) {
     return state.notice.kind === "error" ? token.danger(state.notice.text) : token.warning(state.notice.text);
   }
-  if (state.mode === "insert") return token.accent(`send ${state.sendMode}`);
+  if (state.mode === "insert") return token.accent("insert");
   return token.faint(`${state.tab} · send ${state.sendMode}`);
 }
 

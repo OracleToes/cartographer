@@ -12,6 +12,16 @@ import { sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi
 /** The visible width of a string in terminal cells. */
 export const width = visibleWidth;
 
+/**
+ * How many cells the frame keeps between its own content and the terminal
+ * edge. A terminal can draw its own border or sit inside a window frame, and
+ * content in column 1 scrapes it. One cell is enough to separate them; below
+ * 40 columns the content needs the cells more than the edge does.
+ */
+export function margin(columns: number): number {
+  return columns >= 40 ? 1 : 0;
+}
+
 /** Fill to `cells` cells, cutting with `…` first if the text is too long. */
 export function fit(text: string, cells: number, ellipsis = "…"): string {
   if (cells <= 0) return "";

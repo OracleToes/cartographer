@@ -243,7 +243,7 @@ The person can do nearly all safe Brain and context operations that the agent ca
 
 ### The frame
 
-The screen has a fixed top block, a scrolling body, and a fixed footer.
+The screen has a fixed top block, a scrolling body, and a fixed footer. One blank row above and one below keep the chrome off the terminal's own edge, and one cell of gutter on each side does the same across. The frame draws no border of its own: the gutter is the terminal's background, so a terminal that already draws a border is not given a second one. The body keeps the full width, so its scrollbar sits at the screen's edge rather than in the gutter.
 
 ```text
   Carto · cartographer                                                llama-swap/Flint
@@ -316,6 +316,25 @@ The third row holds the tabs on the left and the turn state on the right. The st
 | Failed | `! model error: …` |
 
 The spinner is not decoration. The screen must redraw while the agent works, and a moving glyph is the proof that it does.
+
+### The input box
+
+Insert mode opens a box above the footer, and the box is the only place the person types.
+
+```text
+  ╭ send follow-up ────────────────────────────────────────────────────────────╮
+  │ Explain the retry policy.                                                  │
+  ╰────────────────────────────────────────────────────────────────────────────╯
+```
+
+- The box is a box, not one row. A prompt that wraps needs a place to wrap to, and the line under the cursor stays the last line inside the box.
+- The box grows and shrinks with its text. The body above it absorbs the difference, so the footer never moves.
+- The title names what Enter does: `send follow-up`, `send steer`, `send interruption`, `edit Chat C2`, `add Agent Chat`, or `edit the paused draft`.
+- The frame is inset like the rest of the chrome, so its edges line up with the rules above and below it.
+- The cursor is the editor's own, drawn on the character it will change.
+- The footer under the box keeps its keys, and it names the mode as `insert`.
+
+A reference opened with `?` or `a` is chrome, not content. It is inset like the chrome, and it opens at its first row even when it is taller than the body.
 
 ### The footer
 

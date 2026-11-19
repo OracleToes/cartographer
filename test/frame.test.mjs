@@ -226,3 +226,55 @@ test("a failed frame shows the error in the status row and keeps drawing", async
     assert.match(plain(frame.top.join("\n")), /! storage is locked/);
   });
 });
+
+test("the frame keeps a gutter from the terminal edge, and the body keeps the full width", async () => {
+  await withProject(async (project) => {
+    const view = await project.view();
+    for (const columns of [58, 96]) {
+      const frame = renderFrame(stateOf(project, { view }), columns);
+      assertFrameWidth(frame, columns);
+      // Every chrome row starts with the gutter: nothing in the chrome may sit
+      // in the terminal's first column, where a window border is drawn.
+      for (const row of [...frame.top, ...frame.bottom]) {
+        assert.equal(plain(row)[0], " ", `chrome row touches the left edge: ${JSON.stringify(plain(row))}`);
+        assert.equal(plain(row).at(-1), " ", `chrome row touches the right edge: ${JSON.stringify(plain(row))}`);
+      }
+      // The body is the page, not the chrome: its scrollbar belongs in the
+      // terminal's last column, not in the gutter. A body row may still start
+      // with a space of its own, so the check is that the body widths are the
+      // terminal's, not the frame's smaller inner width.
+      for (const row of frame.body) assert.equal(width(row), columns);
+    }
+    // At a very narrow width the gutter goes, because the text needs the cells.
+    const narrow = renderFrame(stateOf(project, { view }), 30);
+    assertFrameWidth(narrow, 30);
+  });
+});
+
+test("the footer keeps one row in insert mode and names the mode", async () => {
+  await withProject(async (project) => {
+    const frame = renderFrame(stateOf(project, { view: await project.view(), mode: "insert" }), 96);
+    assertFrameWidth(frame, 96);
+    assert.match(plain(frame.bottom.at(-1)), /insert/);
+    assert.equal(frame.bottom.length, 2);
+  });
+});
+
+test("a menu is inset like the chrome, and it opens at its title", async () => {
+  await withProject(async (project) => {
+    const view = await project.view();
+    for (const detail of ["help", "actions"]) {
+      const frame = renderFrame(stateOf(project, { view, detail }), 100);
+      assertFrameWidth(frame, 100);
+      const menu = plain(frame.body.slice(-6).join("\n"));
+      // The menu starts inside the gutter and the pad, not in column 1.
+      for (const row of frame.body.slice(-4)) {
+        assert.equal(plain(row)[0], " ", `a menu row touches the left edge: ${JSON.stringify(plain(row))}`);
+      }
+      assert.match(menu, /^ {3}\S/m);
+    }
+    // A menu must not be scrolled to its own end by the body's follow mode.
+    const help = renderFrame(stateOf(project, { view, detail: "help" }), 100);
+    assert.match(plain(help.body[0]), /DURABLE CHAT/);
+  });
+});
