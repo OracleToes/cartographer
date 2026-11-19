@@ -152,6 +152,7 @@ substitute for reading the code.
 | `MINI.md` | The specification of record. | A changelog. |
 | `AGENTS.md` | How to work here. | Product specification. |
 | `docs/intent.md` | Confirmed intent, one decision at a time, each with the confirmation that established it. | A quote log. A transcript. A plan. |
+| `docs/open-questions.md` | Every unresolved question, assumption, and unverified number, as the agenda for the next discussion. | A backlog to be worked without the person. |
 | `docs/tests.md` | The test policy for this repository. | A generic brief from elsewhere. |
 | `docs/*-plan.md` | A proposal for how to do a stage. | Authority. |
 

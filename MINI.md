@@ -1,467 +1,317 @@
-# Carto
+# MINI.md — the specification of record
 
-## Purpose
+Carto is a durable agent for one person and one project. It is lightweight,
+informative, and novel in a useful way.
 
-Carto is a small, durable project memory and terminal agent for one person and one project.
+This document holds only what the person has confirmed. Every line either states
+confirmed intent, or is marked with the section that records it as open. The
+record of who confirmed what is `docs/intent.md`. The list of everything still
+unresolved is `docs/open-questions.md`.
 
-Carto keeps five product parts:
+The file name is `MINI.md` for compatibility with the repository task. The
+product name is Carto and the command is `carto`.
 
-- **Atlas**: short project claims with checked evidence.
-- **Ledger**: goals, notes, and questions.
-- **Context gardening**: a clear choice of what enters a new model context.
-- **Chat**: deliberate Person Chat and Agent Chat records.
-- **Wake and sleep**: durable wait and resume work.
+## 1. What Carto is
 
-Carto does not keep old product systems only because they existed before. It keeps Atlas, Ledger, context gardening, Chat, and wake/sleep.
+Carto is a durable agent with three properties the person named:
 
-The command is `carto`. The product name is Carto. The file name of this plan remains `MINI.md` for compatibility with this repository task.
+- **robust context gardening**, as a full suite of context engineering and
+  surgery for the agent's own working context;
+- **ephemeral context** around a durable brain;
+- **scoped tasking**, so the agent works in small, atomic steps.
 
-## Runtime home and configuration
+It is built on three Pi packages and does not rebuild what they provide.
 
-Carto installs its files and launcher below `~/.carto/`.
+## 2. The Brain
 
-Its global configuration is `~/.carto/config.json`.
+The Brain is the durable thing. It persists across restarts and collapses. It
+holds the agent's map of the project and its own state, standing in for memory.
 
-Project data stays below the selected project root:
+The Brain holds:
 
-```text
-<project>/.brain/brain.sqlite
-<project>/.brain/context/<generation>.sqlite
-```
+- **Atlas** — source-backed claims about the project, with checked evidence.
+  Atlas represents the project's current state as the agent understands it.
+- **Ledger** — goals, notes, questions, instructions, and progress through a
+  particular problem.
+- **Chat** — deliberate Person Chat and Agent Chat records.
+- **Pins, handoff, wakes, and deletion marks** — as the agent and person use
+  them.
+- **The context generation records.**
 
-A configuration has this form:
+> Open: the exact Brain record set after removing the approval machinery.
+> See `docs/open-questions.md` §2.
 
-```json
-{
-  "version": 1,
-  "model": "provider/model",
-  "collapseMode": "request"
-}
-```
+The Brain is the only durable storage. Nothing else in Carto is durable.
 
-`carto --model provider/model` overrides the saved model for one start. A first `--model` value creates the configuration file. It does not replace the saved model on later starts.
+### 2.1 The agent owns its Brain
 
-Carto supports a keyless local llama-swap or llama-server endpoint:
+The agent modifies everything in its Brain without approval. The Brain is its own
+garden. There is no approval queue, no change-request record type, and no state
+machine that mediates the agent's own housekeeping.
 
-```sh
-carto --model llama-swap/Flint --endpoint http://localhost:8888/v1
-```
+The person can do the same operations. Neither party needs the other's consent to
+tend the Brain.
 
-It saves this configuration:
+> Confirmed by the person: "the agent should be able to modify everything in its
+> brain without approval, that is its own garden."
 
-```json
-{
-  "version": 1,
-  "model": "llama-swap/Flint",
-  "llamaSwapEndpoint": "http://localhost:8888/v1",
-  "collapseMode": "request"
-}
-```
+### 2.2 The agent does not see `.brain`
 
-The endpoint must use `http` or `https`. Carto registers `llama-swap/Flint` as a Pi OpenAI-compatible completions model. It sends no `Authorization` header and stores no provider secret. A local server that needs a secret must use a Pi-supported provider login path instead.
+The agent does not read or write `.brain` directly. This is not a permission
+gate; it is a scoping decision. Direct access would let curiosity fill the
+agent's context with duplicated or stale copies of its own state.
 
-`collapseMode` is `request` by default. In this mode the agent requests a collapse and the person confirms it. In `agent` mode, Carto can perform the same collapse without a confirmation and can expire the prior archive.
+> The person named this explicitly as a case where their trust of the agent
+> scopes its capability, rather than a rule the agent must obey.
 
-## Use Pi, do not duplicate Pi
+### 2.3 Deletion is cheap and unpoliced
 
-Carto uses fixed versions of Pi packages.
+Deleting a Brain record costs nothing and needs no approval. The prompt asks the
+agent to size its own entries; the runtime does not enforce a limit the agent
+must budget against.
 
-- **Pi Durable** stores commits before Carto shows them. It runs durable conversations, tasks, tool calls, sleeps, wakes, retries, streaming state, and SQLite storage.
-- **Pi AI** provides models, providers, tool validation, model streams, usage, and provider errors.
-- **Pi TUI** provides alternate-screen terminal rendering, focus, editors, scrolling, input, and mouse support. The screen's layout is a Pi TUI component tree: `VStack` regions with an explicit `basis`, one `ScrollView` for the body, and `Loader`-style animated indicators. Carto does not join rows into strings and paint them into a `Text`, and it does not re-implement wrapping, truncation, paging, or scrolling.
+A limit the agent can see and cannot measure is worse than no limit. The agent
+sees `maxLength` in a tool schema, overshoots it, retries, overshoots, and gives
+up on making the entry at all. That friction teaches the agent to skip its own
+memory.
 
-Carto adds only product rules that Pi does not provide:
+> Confirmed by the person, from observed behaviour. The mechanism: schema limits
+> are model-visible, and the model cannot count characters reliably.
 
-- the Carto Brain data;
-- Atlas, Ledger, Chat, pin, archive, and deletion rules;
-- the Carto context projection and short handles;
-- product tools and bounded project operations;
-- the three-tab Carto workspace.
+## 3. Ephemeral context
 
-Carto does not implement a second provider layer, model stream parser, tool schema validator, scheduler, timer queue, SQLite adapter, generic terminal editor, or generic transcript compactor.
+Most of what the agent works with is ephemeral: tool work, reasoning, read calls,
+and the model transcript. It is not kept.
 
-Pi Durable transcript entries are immutable. Pi `reset()` and Pi compaction can remove old entries from model context, but they do not delete them from storage. Carto collapse is a product retention operation, not Pi compaction. Carto disables automatic Pi compaction and requests Carto collapse when a new context is needed.
+The agent keeps what it needs by pinning it and by writing it into the Brain
+through Ledger, Atlas, and Chat. Everything else is expected to be lost.
 
-## One project, one Brain
+"Ephemeral daemon" means the context is disposable, not the Brain. The Brain is
+the durable property.
 
-Each project has one durable Carto Brain document with `history: "latest"`. It stores the current state, not an audit history of every old Brain value.
+> Confirmed by the person.
 
-```text
-{
-  version: 1,
-  chat: [],
-  ledger: [],
-  atlas: [],
-  userPins: [],
-  carryPins: [],
-  handoff: null,
-  wakes: [],
-  changes: [],
-  deletionMarks: [],
-  context: { liveGeneration: null, archiveGeneration: null },
-  activity: { kind: "idle", detail: null }
-}
-```
+## 4. Retention and the archive
 
-Stable Brain IDs are private storage IDs. They do not go to the agent.
+There are two retentions, and they meet at the archive.
 
-The Brain names one live generation and, after an ordinary collapse, at most one archive generation. Carto creates a new generation file before it commits the new Brain generation state. It removes an unreferenced file only after that commit succeeds. A restart uses the Brain as the source of truth.
+**Brain records are sticky.** Atlas, Ledger, and Chat survive collapse by
+existing. Nothing moves them to the archive unless the agent deletes them.
 
-## Short context handles
+**Ephemeral material is disposable.** At collapse, the old live context becomes
+the archive. It is not the agent's decision and it is not stored as a second
+Brain tier.
 
-Carto gives the person and agent short, type-prefixed references such as:
+**The archive is a one-collapse grace period on forgetting.** Everything in the
+archive that is not explicitly pinned there or recovered is deleted at the next
+collapse. The archive is never the source of truth; the Brain is. A crash during
+collapse cannot lose Brain state, because the Brain does not reference the
+archive.
 
-```text
-L1    Ledger
-C10   Chat
-A1    Atlas
-P1    pin
-H1    handoff
-```
+### 4.1 Pin and recover are different
 
-Other active typed records use the same rule, for example `W1` for a wake, `X1` for a change, and `D1` for a deferred removal.
+- **Pin** means "keep it here." Applied in the Brain, it pins to the Brain.
+  Applied to the archive, it pins to the archive. Each pin survives the purge it
+  is attached to, until removed.
+- **Recover** exists only for the archive. It means "put it back in the Brain."
+  It does not also pin; a pin is a separate action that either party can take.
 
-A handle is local to one live context generation. The Brain stores the handle table, so a handle does not change when the person edits a record or when another record arrives. A new record receives the next free number for its type. A hidden record that has a deletion mark keeps its handle until the collapse removes it. Carto rebuilds and renumbers all handles when it creates a fresh live context; the new generation starts again at 1 with no gaps.
+**The agent does not know the archive exists.** Recovery is a person action.
 
-The agent sees only handles and typed content. It never sees a Brain database key, Pi entry ID, generation file name, or another private storage value. A tool parameter that names a record takes a handle. Carto resolves the handle below the presentation layer. An unknown handle is an explicit error; it never falls back to a private ID.
+> Confirmed by the person. Open: whether recovery restores the record to its
+> original type or to a neutral form. See `docs/open-questions.md` §4.
 
-A fresh Carto projection uses this structural order:
+### 4.2 Deleted text is really gone
 
-1. Carto rules.
-2. All Ledger entries together, in stable creation order, oldest first.
-3. All visible Chat records together, in chronological order.
-4. Atlas records.
-5. User pins and carry pins.
-6. Handoff.
-7. Other active typed records, such as wakes, changes, and deferred removals.
-8. A transient current input, when a preview needs one.
+Deleted material is deleted. A deleted Brain record does not become an archive
+entry, because the agent's deletion is a decision, not an accident.
 
-Editing a Ledger entry does not move it. Its timestamp shows the edit time.
+Pi Durable is designed to retain history. Carto is an ephemeral daemon and does
+not keep that history for its own sake. The Brain document uses
+`history: "latest"` and stores current state, not an audit trail of every old
+value.
 
-Every durable item ID line has an ISO 8601 UTC timestamp. The agent can therefore see both the type and the time of a change. Links in Atlas and Handoff use short handles, never private IDs.
+Carto requests SQLite secure-delete, WAL checkpoint and truncation, and `VACUUM`
+after a collapse and after an immediate restart where the storage engine allows
+it. This is best-effort local cleanup, not a guarantee against SSD wear
+levelling, backups, or snapshots.
 
-A stale Atlas record or stale pin does not send its old evidence text as a current fact. Carto sends a short stale warning with its public handle and timestamp instead.
+> Confirmed by the person: "i want deleted text really gone". Open: Pi Durable
+> transcript immutability is in tension with this. See `docs/open-questions.md`
+> §3.
 
-Context gardening is a pure projection:
+## 5. Collapse
 
-```text
-projectContext(brain, generation input, budget) -> context plan
-```
+Collapse is the gardening operation. It ends the current live context, writes a
+new one from the Brain, and moves the old one to the archive.
 
-It does not read files, call a model, write the Brain, or delete data. Its result gives each item a source, freshness state, reason, estimate, public handle, and omission state. The agent renderer receives only safe public text.
+**Collapse needs no approval.** Either the person or the agent can trigger it.
 
-## Retention, archive, and deletion
+The person's expectation is that the agent will rarely trigger a collapse on its
+own, because it does not want to forget. Knowing the person can collapse at any
+time is meant to keep the agent's representation of its intent, progress, and
+understanding current in the Brain.
 
-Carto has two retention rules.
+> Confirmed by the person. Open: whether the agent gets an explicit "collapse is
+> available" signal or a firm warning before a person-triggered collapse. See
+> `docs/open-questions.md` §5.
 
-### Working context uses keep-first retention
+Collapse does not delete Brain records. Only a deletion mark or a delete can.
 
-Working context includes file reads, source excerpts, tool output, temporary model output, and the Pi transcript.
+## 6. The projection
 
-It is temporary. The agent can make a carry pin for material that must enter the next live generation. A carry pin lasts one collapse period. The agent must select it again if it still matters later.
+The agent sees a projection built from the Brain plus its live context.
 
-At ordinary collapse, Carto moves the old live session to the archive. The person can rescue needed archive material with a user pin before the next collapse. At the next collapse, Carto permanently deletes the unpinned archive.
+**The projection carries structure, not a second copy of the dialogue.** A Person
+message is already in the transcript; its text is not repeated in the projection.
+Agent Chat text reaches the model as a tool result from the `chat` tool, not
+through the projection.
 
-The person can remove a carry pin at the next collapse. A carry pin that came from the current live generation naturally expires at that collapse. Carto shows a deferred removal while it is pending.
+> Confirmed by the person, choosing tool result over projection.
 
-### Deliberate records use delete-at-collapse
+**Short handles.** The agent and the person refer to records by short,
+type-prefixed, generation-local handles such as `L1`, `C10`, `A1`, `P1`, `H1`,
+`W1`. A handle is stable within one live generation and is rebuilt at collapse.
+The agent never sees a database key, a Pi entry ID, or a generation file name. A
+tool parameter that names a record takes a handle; an unknown handle is an
+explicit error.
 
-Chat, Atlas, and Ledger stay by default. They are removed only after a deletion mark, unless the person selects **Delete now**.
+**Order is a caching concern, not a product concern.** Volatile content belongs
+where it does not invalidate a stable prefix. The exact order is open.
 
-**Delete at collapse** is the normal low-cost path. It marks a record. The mark hides the record from ordinary use and can be cancelled before collapse. Carto removes marked records at the next confirmed collapse.
+> Open: whether structural order is a requirement at all, and where the
+> timestamps go. See `docs/open-questions.md` §6.
 
-**Delete now** removes the Brain record immediately. Carto stops active work, starts a fresh live generation from the new Brain projection, and discards both the old live context and any archive context. This is more expensive, but it prevents the removed material from entering the next model prefill.
+**Every durable ID line carries an ISO 8601 UTC timestamp**, so the agent can see
+when something changed.
 
-**Remove now** for a pin uses the same fresh-generation path. **Remove at collapse** is the default pin path.
+> Confirmed by the person. Open: whether the timestamp belongs on the same line
+> as the record text, which costs prefix stability. See
+> `docs/open-questions.md` §6.
 
-Carto does not ask for a reason for ordinary deletion. It does not create a lasting audit record for ordinary lost memory.
+### 6.1 The state block
 
-After an ordinary collapse and after an immediate restart, Carto requests SQLite secure-delete, WAL checkpoint/truncation, and `VACUUM` for applicable retained or discarded Carto databases. This is best-effort local cleanup. It is not a secure erase guarantee for SSD wear leveling, backups, snapshots, or a remote filesystem.
+The projection ends with a **state block**: a short section at the very end of
+the context, after everything the agent reads.
 
-“Durable” means that state survives a restart or crash. It does not mean that state stays forever.
+It tells the agent:
 
-## Collapse
+- what is stale in the Brain;
+- the state of the context;
+- what is taking up space, broken down by Brain part — Ledger, Atlas, Chat — and
+  by tool calls, separately from the stable parts.
 
-A normal collapse does this:
+It is the part of the context expected to change often. Its items carry
+structured IDs.
 
-1. Save carry pins for the current live generation.
-2. Save any user pins that rescue archive material.
-3. Create a new live Pi Durable session from the Carto context projection.
-4. Commit the new Brain generation state.
-5. Make the prior live session the archive.
-6. Remove the prior archive only after the Brain commit succeeds.
-7. Run database cleanup.
+> Confirmed by the person. Open: the exact fields and the ID scheme. See
+> `docs/open-questions.md` §7.
 
-The new live session receives the fresh structured Carto projection. It does not receive arbitrary unpinned material from old context files.
+## 7. Project files and the edit boundary
 
-A crash can leave an extra old context file. It must not lose a saved user pin or carry pin. On open, Carto preserves referenced files and removes only unreferenced context files.
+Carto inspects and edits paths that resolve inside the selected project root. A
+symlink that resolves outside the root is rejected. `.brain` is not readable or
+writable by the agent.
 
-## Chat
+> Confirmed as a scoping and safety boundary, not a trust gate.
 
-Chat is a deliberate durable record. It is separate from raw model output.
+The person's ideal is that the agent **only wants** to make small, atomic,
+scoped edits: one boilerplate creation, or one atomic step toward the project
+goal. It forgets the details of making changes and remembers the report it wrote
+and the current state of the project.
 
-- A person message creates Person Chat.
-- The `chat` model tool creates Agent Chat.
-- A person can also add Agent Chat for retroactive or corrective steering.
-- A person can edit Person Chat and Agent Chat.
-- A person can delete either type at collapse or delete it now.
-- Raw model text never silently becomes Agent Chat.
+**The gate is on the capability, not on the change.** Either the edit tool is
+offered, or it is not. When it is not, the agent can still read and reason and
+use the shell, and it is instructed not to make edits. There is no propose /
+approve / apply queue, and `changes` is not a Brain record type.
 
-Chat starts expanded in the Chat tab and is never folded by default. The person may manually fold an individual Chat item with `f`. A folded item stays in fresh context. Chat remains in context unless it has a deletion mark or is deleted now.
+> Confirmed as the person's direction, with the caveat that the appetite
+> constraint is unsolved. See `docs/open-questions.md` §8.
 
-If a model writes ordinary text without the `chat` tool, Carto keeps it as visible transient model activity. It is not a deliberate Agent Chat record.
+## 8. The workspace
 
-## Live disclosure
+Carto uses the Pi TUI alternate screen. It has three tabs: **Chat**, **Brain**,
+and **Context**. There is no permanent palette, settings screen, or drawer.
 
-Carto shows all agent-generated content to the person.
+**The Context tab is the real prompt**, in the order the model sees it, with a
+fold tree. Functions, schemas, and records are collapsible; a leaf is never
+folded. Tools get one collapsible entry per tool in their own sub-tree. Schema-
+shaped content has a human-readable view and a real view. The fold rule applies
+everywhere it makes sense. A row that trails off is readable in full somewhere.
 
-This includes reasoning, ordinary model text, tool calls, tool arguments, tool output, warnings, errors, and deliberate Agent Chat tool activity.
+**The frame** is a fixed header, a scrolling body, and a fixed footer, with one
+row and one cell of padding so the chrome never touches the terminal edge. The
+header is never pushed off screen. The bottom bar takes the whole bottom row.
 
-Each streamed item that exceeds five visual rows receives its own five-row scrolling disclosure window. The live window follows the newest text. When the person expands it, the view grows upward and keeps the newest text visible. Older completed transient items fold to one summary line by default. They remain expandable; Carto does not silently drop them because they are old.
+**The token bar** is always visible. It uses the server's real window as the
+denominator, marks the budget inside the bar, and shows an estimate in a
+different glyph and colour before the first measured request.
 
-Carto uses semantic ANSI terminal styles. It uses the terminal theme and does not hard-code an RGB palette. Reasoning, model text, Chat, tool calls, tool output, warnings, and errors have distinct styles.
+> Open: the bar's source of measurement. The `prompt_progress` field shape in the
+> old spec was asserted, never verified. See `docs/open-questions.md` §9.
 
-## Terminal workspace
+## 9. Turn control
 
-Carto uses Pi TUI alternate-screen full-screen mode first.
+Interruption, Steer, and Follow-up are delivery modes: interrupt now, queue at
+the next safe boundary, or queue after the run. The person can pause, edit the
+paused draft, resume, cancel, or start work while idle.
 
-It has exactly three initial tabs:
+Pause aborts at a Pi Durable boundary and continues in a fresh request; a
+provider stream cannot be frozen and resumed.
 
-```text
-1 Chat
-2 Brain
-3 Context
-```
+> Confirmed in the old spec and not contradicted. Open: whether all of it is
+> still wanted after the gate removal. See `docs/open-questions.md` §10.
 
-The workspace is compact. It has no permanent command palette, settings screen, job drawer, raw-model page, or oversized menu system.
+## 10. Wake and sleep
 
-- **Chat** shows expanded durable Chat and live disclosure.
-- **Brain** shows Ledger, Atlas, changes, wakes, and deferred removals.
-- **Context** shows the current handle projection, pins, archive state, and omissions.
+The agent can sleep with a handoff and wake on a time or a project path. Wakes
+use Pi Durable tasks. A folder wake is bounded.
 
-The person can do nearly all safe Brain and context operations that the agent can do. Compact input commands cover Ledger, Atlas, pins, handoff, wakes, deletion marks, deletion cancellation, immediate deletion, and approval or rejection of changes. Commands name records by their short handle, for example `/delete C2`, `/unpin P3`, `/approve X1`, or `/wake W1 | time | ...`. A raw durable ID is never a command argument.
+> Confirmed as a product part the person named. Open: the bounds and the wake
+> record's shape. See `docs/open-questions.md` §11.
 
-### The frame
+## 11. Use Pi, do not duplicate Pi
 
-The screen has a fixed top block, a scrolling body, and a fixed footer. One blank row above and one below keep the chrome off the terminal's own edge, and one cell of gutter on each side does the same across. The frame draws no border of its own: the gutter is the terminal's background, so a terminal that already draws a border is not given a second one. The body keeps the full width, so its scrollbar sits at the screen's edge rather than in the gutter.
+Fixed versions. Pi Durable stores commits, tasks, tool calls, sleeps, wakes,
+retries, and SQLite. Pi AI provides models, providers, tool validation, streams,
+usage, and errors. Pi TUI provides rendering, focus, editors, scrolling, input,
+and mouse.
 
-```text
-  Carto · cartographer                                                llama-swap/Flint
-  ────────────────────────────────────────────────────────────────────────────────────
-  1 Chat   2 Brain   3 Context                                   ⠹ reading 64% · 1.4k tok/s
-  ▰▰▰▰▰▰▰▰▰▰▨▨▱▱▱▱▱▱▱▱  9.4k + 1.2k new / 33k · cap 16k · 32%
-  DURABLE CHAT                                                                      3
-  ▌C1  Person · 14:32
-  ▌    Explain the retry policy.
-  LIVE                                                                     1 item · streaming
-    Model output                                                                streaming
-       The retry policy is one scheduler with two backoffs.
-  ────────────────────────────────────────────────────────────────────────────────────
-  j k move · g G ends · 1 2 3 tabs · i input · a actions · ? help    chat · send follow-up
-```
+Carto adds only what Pi does not: the Brain, its records and rules, the
+projection and handles, the product tools, and the workspace.
 
-| Row | Content | Job |
-|---|---|---|
-| 1 | Product, project directory, model | Where you are and what answers |
-| 2 | One rule | Separates the chrome from the content |
-| 3 | Tabs, and the turn state | What you see, and what the agent does |
-| 4 | The token bar | Token pressure, always |
-| 5 | The body | Scrolls. It is the only part that moves |
-| last | The footer | Keys that work now, and the last notice |
+Carto does not implement a provider layer, stream parser, tool validator,
+scheduler, timer queue, SQLite adapter, terminal editor, or transcript compactor.
 
-Every row is exactly the terminal width. Chrome has two cells of padding. The body is never wider than the frame, so a long line wraps inside the body rather than outside it.
+## 12. Functional design
 
-The screen repaints on a clock, not on input alone. Carto asks for a frame at 100 ms while the agent works, and at 1 000 ms when it is idle. This is why streamed text appears without a key press. Carto reads the terminal width on an interval, because Pi TUI announces a resize to the layout and not to this frame.
-
-The frame is one pure function of a state value. The renderer does no I/O. Tests call the same function that the terminal calls.
-
-### The token bar
-
-The bar is one bar with three segments, and it is always visible.
-
-```text
-▰▰▰▰▰▰▰▰▰▰▨▨▱▱▱▱▱▱▱▱  9.4k + 1.2k new / 33k · cap 16k · 32%
-└ filled ┘└change┘└ free ┘
-```
-
-| Part | Glyph | Meaning |
-|---|---|---|
-| filled | `▰` | Tokens the server keeps and has already read |
-| changing | `▨` | Tokens the server must read now, not yet read |
-| free | `▱` | Room left in the window |
-| cap | `┊` | The 16 000 budget, drawn in the first free cell at that boundary |
-| estimate | `▤` | A number Carto estimated, not measured |
-
-The denominator is the real window the server reports, not the budget. The budget is a mark inside the bar, so the person sees the two limits together. A prompt that fits one cell fills that cell, so the bar never shows nothing.
-
-Before the first request, the bar shows an estimate. The estimate uses `▤` cells, a muted style, the word `estimate`, and `~` before the number. Four independent marks, so a terminal without colour still shows the difference. Once the server sends progress, the bar shows measured numbers and no estimate.
-
-The server reports `prompt_progress` with `{total, cache, processed}`. Carto draws fresh work as `total - cache`, what is done as `processed - cache`, and the rest as `total - processed`. When a provider sends no progress, Carto stops the bar at the estimate. Carto never invents numbers.
-
-### The status row
-
-The third row holds the tabs on the left and the turn state on the right. The state uses a word, a glyph, and a spinner where time passes.
-
-| State | Text |
-|---|---|
-| Idle | `○ idle` |
-| Waiting for the model | `⠋ waiting for the model` |
-| A local action runs | `● applying` |
-| Reading the prompt | `⠹ reading 64% · 1.4k tok/s` |
-| Writing the answer | `⠸ writing · 12s` |
-| A tool runs | `⠼ tool inspect src/retry.ts · 3s` |
-| Paused | `⏸ paused · r edits the draft · x cancels` |
-| Collapse is requested | `● collapse requested · a shows the commands` |
-| Recently read | `· read 4.2k new in 1.8s` |
-| Failed | `! model error: …` |
-
-The spinner is not decoration. The screen must redraw while the agent works, and a moving glyph is the proof that it does.
-
-### The input box
-
-Insert mode opens a box above the footer, and the box is the only place the person types.
-
-```text
-  ╭ send follow-up ────────────────────────────────────────────────────────────╮
-  │ Explain the retry policy.                                                  │
-  ╰────────────────────────────────────────────────────────────────────────────╯
-```
-
-- The box is a box, not one row. A prompt that wraps needs a place to wrap to, and the line under the cursor stays the last line inside the box.
-- The box grows and shrinks with its text. The body above it absorbs the difference, so the footer never moves.
-- The title names what Enter does: `send follow-up`, `send steer`, `send interruption`, `edit Chat C2`, `add Agent Chat`, or `edit the paused draft`.
-- The frame is inset like the rest of the chrome, so its edges line up with the rules above and below it.
-- The cursor is the editor's own, drawn on the character it will change.
-- The footer under the box keeps its keys, and it names the mode as `insert`.
-
-A reference opened with `?` or `a` is chrome, not content. It is inset like the chrome, and it opens at its first row even when it is taller than the body.
-
-### The footer
-
-The footer takes the whole bottom row. The keys sit at the left, and the tab with a send mode, the insert state, or the last notice sits at the right.
-
-Carto shows only the keys that work here. When the row is short, the hints drop from the right, one at a time. The footer never truncates a hint that it shows.
-
-| Mode | Hints |
-|---|---|
-| Navigate | `j k move · g G ends · 1 2 3 tabs · i input · a actions · ? help` |
-| A Chat item is selected | `… · f fold · e edit · d delete at collapse · D delete now` |
-| A live item is selected | `… · o open` |
-| A pin is selected | `… · u remove at collapse · U remove now` |
-| Insert | `Esc back · Enter send` |
-| While the agent works | `… · p pause · x cancel` |
-
-### Modal controls
-
-Carto has Navigate and Insert modes. It has no Visual mode.
-
-- `Esc` always returns to Navigate mode and closes detail state.
-- `1`, `2`, and `3` select Chat, Brain, and Context.
-- `j` and `k` move selection. `g` and `G` move to the start or end.
-- `Backspace` closes a detail or action view in Navigate mode.
-- `i` opens input. It does nothing else.
-- `Enter` opens the selected item in Navigate mode: a Chat item shows its edit detail, and a live item expands or folds. In the input box, `Enter` sends. No key has two meanings in one mode.
-- `f` folds or unfolds selected durable Chat.
-- `o` expands or folds selected live disclosure.
-- `e` opens selected Chat edit detail.
-- `A` opens input for person-authored Agent Chat.
-- `d` marks selected Chat for deletion at collapse. `D` deletes it now.
-- `u` removes a selected pin at collapse. `U` removes it now.
-- `a` opens the compact action reference. `?` opens the key reference.
-- `p` pauses the active turn. `r` edits a paused draft, or starts useful work while idle. `x` cancels the turn.
-- `I`, `S`, and `F` open the input with Interruption, Steer, or Follow-up as the delivery mode.
-- `Enter` sends. A line that starts with `/` runs a person command instead, such as `/undelete C2` to cancel a deletion mark.
-
-## Turn control
-
-The input supports three delivery modes:
-
-- **Interruption** stops the active stream, then sends now.
-- **Steer** queues at the next safe Pi Durable boundary. It does not interrupt an active tool. Pi finishes an emitted tool-call batch, then Carto delivers the steer before the next model request.
-- **Follow-up** queues after the active run and starts a later run.
-
-The person can:
-
-- pause an active stream;
-- edit the preserved paused draft;
-- resume after editing;
-- cancel an active or paused turn;
-- send an Interruption, Steer, or Follow-up;
-- continue an unfinished agent turn without a new person message;
-- start useful agent work while idle without creating Person Chat.
-
-A provider stream cannot be frozen and resumed in the same socket after arbitrary edits. Pause therefore aborts at a Pi Durable boundary, saves an editable partial draft, and starts a fresh continuation request when the person resumes. Carto labels that request as turn-control data, not Person Chat.
-
-## Atlas, Ledger, pins, handoff, wake, and changes
-
-Atlas stores source-backed project claims:
-
-```text
-{
-  id, title, claim, evidence, links, createdAt, updatedAt
-}
-```
-
-Ledger stores goals, notes, and questions:
-
-```text
-{
-  id, kind, text, status, answer, createdAt, updatedAt
-}
-```
-
-A changed evidence digest makes an Atlas item or pin stale. Carto shows stale state and requires a new inspection before it uses old source text as a fact.
-
-A user pin can preserve selected archive or live material until the person removes it. A carry pin preserves selected agent working context for one collapse period.
-
-A handoff stores intent, open references, a next action, and a short note. Wakes use Pi Durable tasks. Time wakes use durable sleep. Path wakes recheck a bounded project path. A folder wake checks direct entries and has a 10,000-entry limit. A root wake ignores `.brain`.
-
-The model can propose a patch. It cannot write project files through a Carto tool. The person approves a stored patch before Carto runs the limited apply task.
-
-## Project boundary
-
-Carto can inspect paths that resolve inside the selected project root. It does not inspect or patch `.brain`.
-
-A symbolic-link destination and an approved patch destination must resolve inside the selected project root. Carto rejects a path that escapes the root through a link.
-
-## Functional design
-
-Product decisions use pure transformations:
-
-```text
-user or model command
-  -> pure Carto decision
-  -> Pi Durable commit and task
-  -> next Brain state and requested effects
-```
-
-Core pure functions include:
+Product decisions are pure transformations over explicit records:
 
 ```text
 decide(brain, command) -> decision
-projectContext(brain, generation input, budget) -> context plan
+projectContext(brain, liveInput) -> projection
 ```
 
-They do not read the filesystem, use a clock, call a model, render a terminal, or write a database. Runtime adapters supply time, Pi Durable commits, file inspection, cleanup, and UI effects.
+Neither reads the filesystem, reads a clock, calls a model, renders, or writes
+storage. Runtime adapters supply time, Pi Durable commits, file inspection,
+cleanup, and UI effects.
 
-## Completion criteria
+**Procedural first.** Modules of functions that take what they need and return
+what they produce. No object owns state and exposes methods over it. State is one
+explicit value; behaviour is functions over that value.
 
-Carto is ready when all of these are true:
+> Confirmed by the person: "B leading to A" — named procedures over explicit
+> records, then a single state → update → render flow.
 
-- `carto` reads `~/.carto/config.json` and supports one-start `--model` overrides.
-- `llama-swap/Flint` uses `http://localhost:8888/v1` without a stored secret or an Authorization header.
-- Carto uses Pi Durable, Pi AI, and Pi TUI instead of duplicate infrastructure.
-- The UI starts with Chat, Brain, and Context only.
-- Context uses fresh type-prefixed generation-local handles and hides private IDs from the agent.
-- Fresh context keeps Ledger together, keeps Chat chronological, and puts an ISO UTC timestamp on each durable item ID line.
-- Chat is expanded by default and is manually foldable.
-- Person Chat and Agent Chat are distinct and editable.
-- Raw model content stays visible but does not silently become Agent Chat.
-- Every long live item has an independent five-row newest-text disclosure window.
-- Pause, edit, resume, cancel, continue, Interruption, Steer, Follow-up, and idle start work are available.
-- Deferred deletion and deferred pin removal are normal paths.
-- Delete now and Remove now create a fresh prefill and clean up old context files.
-- At ordinary collapse, unpinned working context moves to one archive, and unpinned archive material expires at the next collapse.
-- Chat, Atlas, and Ledger stay until a deletion mark or an immediate deletion.
-- A confirmed collapse runs secure-delete, WAL cleanup, and `VACUUM` where applicable.
-- A crash during collapse leaves a usable referenced generation and does not lose a saved pin.
+## 13. What is not in this specification
+
+Removed because the person identified them as assumptions rather than intent:
+approval queues, change-request records, `approve X1`, collapse confirmation,
+gated deletion, and model-visible length limits on Brain entries.
+
+Removed because the person did not confirm them: any retention or ordering
+requirement not restated above.
+
+Everything in this section is either gone or is tracked in
+`docs/open-questions.md` as an open question. Nothing is silently dropped: the
+questions file lists each one and what it would take to settle it.
