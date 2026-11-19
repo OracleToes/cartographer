@@ -81,6 +81,7 @@ import { RECORD } from "../src/voice.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
+import { disclosureRows } from "../src/screen/disclosure.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat as createChatModel } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
@@ -1918,6 +1919,50 @@ test("screen: shared selection retains identity across projection rebuilds and f
 	assert.equal(list.selected()?.key, "b", "the list consumes the same stable selection model across a projection rebuild");
 	list.set({ items: [{ key: "a", head: [["A only", ""]] }] });
 	assert.equal(list.selected()?.key, "a");
+});
+
+test("screen: a disclosure selects folded heads or live tails, opens all retained rows, and preserves clipping facts", () => {
+	const rows = ["one", "two", "three", "four", "five"];
+	assert.deepEqual(disclosureRows({ rows, previewRows: 2 }), {
+		visibleRows: ["one", "two"],
+		totalRows: 5,
+		omittedRows: 3,
+		expandable: true,
+		mode: "folded",
+	}, "settled material starts with a bounded head preview");
+	assert.deepEqual(disclosureRows({ rows, previewRows: 2, preview: "tail" }), {
+		visibleRows: ["four", "five"],
+		totalRows: 5,
+		omittedRows: 3,
+		expandable: true,
+		mode: "folded",
+	}, "live material keeps its newest rows visible while folded");
+	assert.deepEqual(disclosureRows({ rows, previewRows: 2, open: true }), {
+		visibleRows: rows,
+		totalRows: 5,
+		omittedRows: 0,
+		expandable: true,
+		mode: "open",
+	}, "opening sends every locally retained row to the parent viewport while retaining its fold control");
+	assert.deepEqual(disclosureRows({ rows: ["short"], previewRows: 2 }), {
+		visibleRows: ["short"],
+		totalRows: 1,
+		omittedRows: 0,
+		expandable: false,
+		mode: "folded",
+	}, "a short body has no needless disclosure affordance");
+	assert.deepEqual(disclosureRows({ rows, previewRows: 0, preview: "tail", retained: { clipped: true, originalChars: 47, reason: "runner tail" } }), {
+		visibleRows: [],
+		totalRows: 5,
+		omittedRows: 5,
+		expandable: true,
+		mode: "folded",
+		retainedNotice: { clipped: true, originalChars: 47, reason: "runner tail" },
+	}, "zero-row tails remain folded and a retention boundary survives the display plan");
+	assert.equal(disclosureRows({ rows, previewRows: 2, retained: { clipped: false } }).retainedNotice, undefined, "an intact value does not invent a clipping notice");
+	assert.throws(() => disclosureRows({ rows: "not rows", previewRows: 1 }), /wrapped rows/);
+	assert.throws(() => disclosureRows({ rows, previewRows: -1 }), /non-negative whole row/);
+	assert.throws(() => disclosureRows({ rows, previewRows: 1, preview: "middle" }), /"head" or "tail"/);
 });
 
 test("screen: shared focus restores the last viable shell region after temporary overlays and handoffs", () => {
