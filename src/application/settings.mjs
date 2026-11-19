@@ -94,11 +94,18 @@ const displayValue = (value) => {
  * Settings query and Settings action owners so their source, revision, and cross-setting validation facts cannot
  * drift apart.
  */
-export async function readConfigurationState({ repository, schema = CONFIGURATION_SCHEMA, defaults = DEFAULTS, env = process.env, flags = {}, signal } = {}) {
+export async function readConfigurationState({ repository, schema = CONFIGURATION_SCHEMA, defaults = DEFAULTS, env = process.env, flags = {}, signal, reportProgress } = {}) {
 	if (repository === undefined || typeof repository.read !== "function") throw new TypeError("A configuration state reader needs an asynchronous configuration repository.");
 	if (signal?.aborted === true) return undefined;
-	const [install, project] = await Promise.all([repository.read(CONFIGURATION_SOURCE.install), repository.read(CONFIGURATION_SOURCE.project)]);
+	// Reads remain sequential here so an abort prevents opening the second source and progress has an honest order.
+	// Both source reads are Promise-based repository operations, never synchronous launch-path compatibility reads.
+	reportProgress?.({ current: 1, total: 6, message: "Reading install configuration." });
+	const install = await repository.read(CONFIGURATION_SOURCE.install, { signal });
 	if (signal?.aborted === true) return undefined;
+	reportProgress?.({ current: 2, total: 6, message: "Reading project configuration." });
+	const project = await repository.read(CONFIGURATION_SOURCE.project, { signal });
+	if (signal?.aborted === true) return undefined;
+	reportProgress?.({ current: 3, total: 6, message: "Resolving configuration sources." });
 	schema.assertSources({
 		install: install.values,
 		project: project.values,

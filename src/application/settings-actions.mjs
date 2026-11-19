@@ -82,8 +82,10 @@ const sourceValues = (state, scope, replacement) => ({
 	install: scope === CONFIGURATION_SOURCE.install ? replacement : state.sources.install.values,
 	project: scope === CONFIGURATION_SOURCE.project ? replacement : state.sources.project.values,
 });
+const repositoryCancelled = (error) => error instanceof ConfigurationRepositoryError && error.code === "cancelled";
 
 const repositoryFailure = (error, meta) => {
+	if (repositoryCancelled(error)) return uiCancelled({ meta });
 	if (error instanceof ConfigurationRepositoryError) {
 		if (error.code === "revision-conflict") return conflict(error.message, meta);
 		if (error.code === "source-read-only" || error.code === "invalid-source") return policy(error.message, meta);
@@ -105,16 +107,21 @@ const repositoryFailure = (error, meta) => {
  *   defaults?: object,
  *   env?: object,
  *   flags?: object,
+ *   jobs?: { start?: Function },
  *   now?: () => number,
  * }} options
  */
-export function createSettingsApplication({ repository, schema = CONFIGURATION_SCHEMA, defaults = DEFAULTS, env = process.env, flags = {}, now = () => Date.now() } = {}) {
+export function createSettingsApplication({ repository, schema = CONFIGURATION_SCHEMA, defaults = DEFAULTS, env = process.env, flags = {}, jobs, now = () => Date.now() } = {}) {
 	const stateOptions = { repository, schema, defaults, env, flags };
-	const execute = async (action, input = {}, options = {}) => {
+	const perform = async (action, input = {}, options = {}, { defer = true } = {}) => {
 		const meta = metadata(options, now);
+		const progress = (current, message) => options.reportProgress?.({ current, total: 6, message });
 		if (options.signal?.aborted === true) return uiCancelled({ meta });
-		await yieldToUi();
-		if (options.signal?.aborted === true) return uiCancelled({ meta });
+		if (defer) {
+			await yieldToUi();
+			if (options.signal?.aborted === true) return uiCancelled({ meta });
+		}
+		progress(0, "Checking Settings change.");
 		if (SETTINGS_CAPABILITIES.get(action) === undefined) return uiFailure(uiError({
 			code: UI_ERROR_CODE.unknownAction,
 			kind: UI_ERROR_KIND.validation,
@@ -147,7 +154,8 @@ export function createSettingsApplication({ repository, schema = CONFIGURATION_S
 		}), { meta, confirmation });
 		let before;
 		try {
-			before = await readConfigurationState({ ...stateOptions, signal: options.signal });
+			progress(1, "Reading saved configuration.");
+			before = await readConfigurationState({ ...stateOptions, signal: options.signal, reportProgress: options.reportProgress });
 		} catch (error) {
 			return repositoryFailure(error, meta) ?? unavailable("Cartographer could not read configuration before saving this change.", meta);
 		}
@@ -160,6 +168,7 @@ export function createSettingsApplication({ repository, schema = CONFIGURATION_S
 		if (action === SETTINGS_ACTION.edit) nextValues[key] = value;
 		else delete nextValues[key];
 		try {
+			progress(3, "Validating Settings change.");
 			const sources = sourceValues(before, scope, nextValues);
 			schema.assertSources({
 				install: sources.install,
@@ -185,14 +194,50 @@ export function createSettingsApplication({ repository, schema = CONFIGURATION_S
 			return invalid(error instanceof Error ? error.message : "That setting value is invalid.", "value", meta);
 		}
 		const existed = Object.hasOwn(selected.values, key);
+		const changed = action === SETTINGS_ACTION.edit || existed;
 		let written = selected;
-		if (action === SETTINGS_ACTION.edit || existed) {
+		let committed = false;
+		const markCommitted = (effect = {}) => {
+			if (committed) return;
+			committed = true;
+			options.markCommitted?.({
+				kind: "configuration.write",
+				target: `${scope}:${key}`,
+				scope,
+				key,
+				...effect,
+			});
+		};
+		const committedAfterCancellation = () => {
+			const detail = schema.detail(key);
+			const line = `Saved ${detail?.label ?? key} in ${scope} configuration; cancellation stopped the follow-up refresh. Refresh Settings to see current provenance.`;
+			return uiSuccess({
+				action,
+				key,
+				scope,
+				changed: true,
+				committed: true,
+				refresh: "needed",
+				revision: written.revision,
+				line,
+			}, {
+				meta: { ...meta, revision: written.revision },
+				notices: [{ level: "warning", message: line }],
+			});
+		};
+		if (changed) {
 			try {
+				progress(4, `Saving ${scope} configuration.`);
 				written = await repository.update({
 					scope,
 					expectedRevision,
 					transform: () => nextValues,
+					signal: options.signal,
+					reportProgress: (entry) => progress(4, entry?.message ?? `Saving ${scope} configuration.`),
+					onCommitted: markCommitted,
 				});
+				// Test seams and third-party repositories may predate `onCommitted`; a fulfilled update is still a commit.
+				markCommitted({ revision: written.revision });
 			} catch (error) {
 				return repositoryFailure(error, meta) ?? uiFailure(uiErrorFrom(error, {
 					code: UI_ERROR_CODE.internal,
@@ -202,14 +247,20 @@ export function createSettingsApplication({ repository, schema = CONFIGURATION_S
 				}), { meta });
 			}
 		}
-		const changed = action === SETTINGS_ACTION.edit || existed;
 		// Once the atomic rename has completed, cancellation can only stop waiting. Never report a committed setting
 		// as cancelled or undone merely because a caller left while the refreshed projection was being assembled.
+		if (committed && options.signal?.aborted === true) return committedAfterCancellation();
 		if (!changed && options.signal?.aborted === true) return uiCancelled({ meta });
 		let after;
 		try {
-			after = await readConfigurationState(stateOptions);
+			progress(5, "Refreshing Settings provenance.");
+			after = await readConfigurationState({
+				...stateOptions,
+				signal: options.signal,
+				reportProgress: () => progress(5, "Refreshing Settings provenance."),
+			});
 		} catch (error) {
+			if (committed && (options.signal?.aborted === true || repositoryCancelled(error))) return committedAfterCancellation();
 			if (changed) {
 				const detail = schema.detail(key);
 				const line = `Saved ${detail?.label ?? key} in ${scope} configuration, but Settings could not refresh its provenance yet.`;
@@ -220,17 +271,21 @@ export function createSettingsApplication({ repository, schema = CONFIGURATION_S
 			}
 			return repositoryFailure(error, meta) ?? unavailable("Cartographer could not refresh its Settings snapshot.", meta);
 		}
+		if (committed && (options.signal?.aborted === true || after === undefined)) return committedAfterCancellation();
+		if (after === undefined) return uiCancelled({ meta });
 		const row = configurationProvenance(after, { schema }).rows.find((entry) => entry.key === key);
 		const shadowed = row?.source.layer !== scope;
 		const verb = action === SETTINGS_ACTION.reset ? (changed ? "Reset" : "No saved override existed for") : "Saved";
 		const line = shadowed
 			? `${verb} ${row?.label ?? key} in ${scope} configuration, but ${row?.source.layer ?? "a higher-precedence source"} currently overrides it.`
 			: `${verb} ${row?.label ?? key} in ${scope} configuration; it takes effect ${applyLine(row?.apply)}.`;
+		progress(6, "Settings change complete.");
 		return uiSuccess({
 			action,
 			key,
 			scope,
 			changed,
+			...(committed ? { committed: true } : {}),
 			revision: written.revision,
 			configuration: configurationProvenance(after, { schema }),
 			row,
@@ -239,6 +294,34 @@ export function createSettingsApplication({ repository, schema = CONFIGURATION_S
 			meta: { ...meta, revision: written.revision },
 			notices: [{ level: changed ? "success" : "info", message: line }],
 		});
+	};
+	const execute = async (action, input = {}, options = {}) => {
+		if (typeof jobs?.start !== "function") return perform(action, input, options, { defer: true });
+		if (options.signal?.aborted === true) return uiCancelled({ meta: metadata(options, now) });
+		const scope = scopeOf(input?.scope) ?? CONFIGURATION_SOURCE.project;
+		const key = text(input?.key) ?? "setting";
+		const job = jobs.start({
+			kind: "settings.write",
+			target: `${scope}:${key}`,
+			meta: { ...metadata(options, now), action },
+			run: ({ signal, reportProgress, markCommitted }) => perform(action, input, {
+				...options,
+				signal,
+				reportProgress,
+				markCommitted,
+			}, { defer: false }),
+		});
+		let detach;
+		if (options.signal !== undefined) {
+			const stop = () => job.cancel();
+			options.signal.addEventListener("abort", stop, { once: true });
+			detach = () => options.signal.removeEventListener("abort", stop);
+		}
+		try {
+			return await job.promise;
+		} finally {
+			detach?.();
+		}
 	};
 	return Object.freeze({ capabilities: SETTINGS_CAPABILITIES, execute });
 }

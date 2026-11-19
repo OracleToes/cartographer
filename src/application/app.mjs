@@ -134,7 +134,9 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		modelReader: runtimeModelReader,
 		...configurationContext,
 	});
-	const settings = createSettingsApplication({ ...configurationContext, now });
+	// Persisted Settings edits are the first job-backed operation: the repository is genuinely asynchronous and
+	// abort-aware through its atomic rename boundary, so this is not a promise wrapper around a legacy mutation.
+	const settings = createSettingsApplication({ ...configurationContext, jobs: jobManager, now });
 	const runtimeViewReader = runtimeOptions.viewReader ?? queryOptions.runtimeViewReader ?? createRuntimeViewReader({
 		engine: runtimeOptions.engine,
 		windows: runtimeOptions.windows,
