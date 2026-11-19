@@ -388,7 +388,7 @@ test("screen: a compact no-color full Screen keeps disabled action text, Setting
 test("screen: one outer viewport reaches a live Consult body and a settled call detail", async () => {
 	const root = makeProject("screen-disclosure-scroll", { git: false });
 	configure(root, { initiate: false, colors: "none" });
-	const server = await startStandIn({ tokenDelayMs: 6, consultLongRows: 48 });
+	const server = await startStandIn({ tokenDelayMs: 12, consultLongRows: 80 });
 	try {
 		const consult = JSON.stringify({ question: "Show the disclosure fixture.", myPersona: "SCREEN DISCLOSURE FIXTURE" });
 		const result = await cartoOnTerminal(root, server, ["--screen"], [
@@ -397,9 +397,11 @@ test("screen: one outer viewport reaches a live Consult body and a settled call 
 			[0.05, "\x1b", false],
 			[0.05, "]]", false],
 			["Consultation co1", "", false],
-			["LIVE_CONSULT_010", "G", false],
-			[0.03, "\r", false],
-			["LIVE_CONSULT_048", "", false],
+			["LIVE_CONSULT_010", "+", false],
+			[0.03, "g", false],
+			["LIVE_CONSULT_001", "", false],
+			[0.08, "G", false],
+			["LIVE_CONSULT_080", "", false],
 			["○ resting", "i", false],
 			[0.03, "look: read: long.txt @1+700"],
 			["○ resting", "\x1b", false],
@@ -415,8 +417,8 @@ test("screen: one outer viewport reaches a live Consult body and a settled call 
 		if (result === undefined) return "python3 is needed for the full-screen disclosure check";
 		ok(result, "the full-screen disclosure flow");
 		has(result.screen, "LIVE_CONSULT_010", "the actual live Consult body advances into its folded tail");
-		has(result.screen, "LIVE_CONSULT_001", "opening the live Consult event exposes its retained head through the page viewport");
-		has(result.screen, "LIVE_CONSULT_048", "the real stream reaches its retained tail without a nested viewport");
+		has(result.screen, "LIVE_CONSULT_001", "opening the live Consult material exposes its retained head through the page viewport");
+		has(result.screen, "LIVE_CONSULT_080", "the real stream reaches its retained tail without a nested viewport");
 		has(result.screen, "line 700", "one opened settled call detail reaches its final locally retained row");
 		has(result.screen, "Enter folds this block", "opened Screen disclosures retain their local folding affordance");
 	} finally {
