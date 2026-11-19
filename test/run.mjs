@@ -2123,9 +2123,9 @@ test("screen: Talk binds an admitted Durable source by lifecycle, not matching w
 	assert.deepEqual(speech.source, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }, "a delivered-speech candidate carries the assistant entry id and its call boundary");
 });
 
-test("screen: long live reasoning names its compact tail, opens in Work, and resets when it finishes", async () => {
+test("screen: long reasoning stays compact after completion and folds in Work", async () => {
 	const chat = createChat();
-	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const text = (cols = 40, projection = "all") => chat.lines(cols, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const previewRows = POLICY.limits.screen.notePreviewLines;
 	const thoughtLines = previewRows + 8;
 	const thought = Array.from({ length: thoughtLines }, (_entry, index) => `thought ${index + 1}`).join("\n");
@@ -2153,8 +2153,23 @@ test("screen: long live reasoning names its compact tail, opens in Work, and res
 	chat.setThinking(true);
 	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds\nthought 1`, "showing thinking again keeps the deliberate open state");
 	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] }] });
-	hasNot(text(), "Enter folds", "the completed reply has no live expansion control");
-	has(text(), "thought 1", "the completed reasoning stands as its saved message");
+	const completedLines = nextThoughtLine;
+	const omitted = completedLines - previewRows;
+	const compactCompleted = text(40, "work");
+	has(compactCompleted, `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens all`, "completed long reasoning stays compact in Work");
+	has(compactCompleted, "thought 1", "the compact completed reasoning keeps its start visible");
+	hasNot(compactCompleted, `thought ${completedLines}`, "the compact completed reasoning leaves its tail folded");
+	const completed = chat.lines(40, "work").find((line) => line.kind === "reasoning");
+	assert.ok(completed, "the completed reasoning is selectable in Work");
+	chat.toggleRow(completed.item, completed.row, true);
+	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds`, "Enter opens the completed reasoning in Work");
+	has(text(40, "work"), `thought ${completedLines}`, "the opened reasoning restores its full tail");
+	chat.toggleRow(completed.item, completed.row, false);
+	hasNot(text(40, "work"), `thought ${completedLines}`, "h or Enter can fold the completed reasoning again");
+	chat.setAll(true);
+	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds`, "open all opens completed private reasoning too");
+	chat.setAll(false);
+	has(text(40, "work"), `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens all`, "fold all returns completed private reasoning to its compact preview");
 	assert.equal(chat.lines(40).find((line) => line.kind === "reasoning")?.bg, "bgNote", "completed private reasoning keeps its own quiet block instead of blending into tool work");
 	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
 	const nextLines = previewRows + 3;

@@ -923,17 +923,24 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 			if (consultation !== undefined) consultation.open = to ?? !consultation.open;
 			else {
 				const item = items.find((entry) => entry.key === key);
-				if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
+				if (item?.type === "group" || item?.type === "block" || item?.type === "note" || item?.type === "reasoning") {
+					item.open = to ?? !item.open;
+					item.rev = (item.rev ?? 0) + 1;
+				}
 			}
 			touch();
 		},
-		/** Open every run of calls and the live reasoning stream, or fold them all with what was opened inside them. */
+		/** Open every run and private response, including live reasoning, or fold them all with what was opened inside them. */
 		setAll(open) {
 			for (const item of items) {
-				if (item.type !== "group") continue;
-				item.open = open;
-				if (!open) for (const row of item.rows) row.open = false;
-				item.rev = (item.rev ?? 0) + 1;
+				if (item.type === "group") {
+					item.open = open;
+					if (!open) for (const row of item.rows) row.open = false;
+					item.rev = (item.rev ?? 0) + 1;
+				} else if (item.type === "note" || item.type === "reasoning") {
+					item.open = open;
+					item.rev = (item.rev ?? 0) + 1;
+				}
 			}
 			for (const entry of live.values()) entry.open = open;
 			for (const consultation of consultations.values()) {
@@ -1003,10 +1010,15 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 				if (event !== undefined) event.open = next;
 			} else {
 				const item = items.find((entry) => entry.key === key);
-				const row = item?.rows?.[index];
-				if (row !== undefined) {
-					row.open = to ?? !row.open;
+				if (item?.type === "note" || item?.type === "reasoning") {
+					item.open = to ?? !item.open;
 					item.rev = (item.rev ?? 0) + 1;
+				} else {
+					const row = item?.rows?.[index];
+					if (row !== undefined) {
+						row.open = to ?? !row.open;
+						item.rev = (item.rev ?? 0) + 1;
+					}
 				}
 			}
 			touch();
@@ -1121,8 +1133,19 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 					// Private material is its own quiet block, rather than borrowing the tools' cyan. Its rail and faint
 					// violet surface make it easy to keep separate from both speech and work without elevating its weight.
 					const ref = { item: item.key, kind: item.type, bg: "bgNote" };
-					if (projection === "work") add([[`Main · ${privateLabel(item.type)}`, "faint"]], ref);
-					for (const piece of wrap(item.text, cols - 2)) add([[piece, "note italic"]], ref);
+					const text = wrap(item.text, cols - 2);
+					const previewRows = POLICY.limits.screen.notePreviewLines;
+					const omitted = Math.max(0, text.length - previewRows);
+					const expandable = omitted > 0;
+					const open = item.open === true;
+					const scope = projection === "work" ? "Main · " : "";
+					if (expandable) {
+						const summary = open
+							? `${text.length} ${text.length === 1 ? "line" : "lines"} · Enter folds`
+							: `${omitted} more ${omitted === 1 ? "line" : "lines"} · Enter opens all`;
+						add([[open ? "▾ " : "▸ ", "faint"], [`${scope}${privateLabel(item.type)} · ${summary}`, "faint"]], ref);
+					} else if (projection === "work") add([[`${scope}${privateLabel(item.type)}`, "faint"]], ref);
+					for (const piece of (open ? text : text.slice(0, previewRows))) add([[piece, "note italic"]], ref);
 				} else if (item.type === "console") {
 					if (projection === "work") add([["Harness · notice", "faint"]], { item: item.key, kind: "console" });
 					const question = /^\? /.test(item.text);
