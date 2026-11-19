@@ -67,6 +67,7 @@ import { createNoticeStore, NOTICE_LEVEL } from "./notices.mjs";
 import { createOverlayManager } from "./overlays.mjs";
 import { renderStatusBar } from "./status.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
+import { JobDrawer, jobDrawerNeeded } from "./job-drawer.mjs";
 import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
@@ -315,6 +316,7 @@ export const KEYS_HELP = [
 	"  s                in Settings → Configuration, choose the writable project or install source that an edit/reset affects; environment and command-line overrides stay read-only",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
+	"  J                when several jobs run, or a job stopped or failed, inspect Background work; Enter or c asks to cancel the selected live job",
 	"  r                read the tab again",
 	"  :                type a command",
 	"  i, a, Esc        type",
@@ -671,6 +673,7 @@ export async function runScreen(session, options, runTerminal) {
 		activity: currentRuntimeActivity(),
 		brain: readBrain(),
 		runtime: runtimeStatusForStrip(),
+		jobs: jobSnapshots,
 		notice: notices.latest({ live: true }),
 		legend: legend(),
 		config,
@@ -684,6 +687,7 @@ export async function runScreen(session, options, runTerminal) {
 		global: [
 			{ text: "Ctrl-X stop", capability: LIFECYCLE_ACTION.stop },
 			{ text: "Ctrl-V pause/resume", capability: LIFECYCLE_ACTION.togglePause },
+			{ text: "J jobs", when: (context) => context?.jobs === true },
 			"Ctrl-K palette",
 			"? all keys",
 		],
@@ -779,7 +783,12 @@ export async function runScreen(session, options, runTerminal) {
 			"settings.assessment": ["j k move", "Enter open", "e edit", "y copy"],
 		},
 	});
-	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: [...paletteCapabilities, ...lifecycleCapabilities] });
+	const legend = () => keyHints.text({
+		mode: state.mode,
+		route: viewId(),
+		capabilities: [...paletteCapabilities, ...lifecycleCapabilities],
+		context: { jobs: jobDrawerNeeded(jobSnapshots) },
+	});
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = () => routes.id();
 	/** The file a view comes from, for `e` when no item names one. */
@@ -819,6 +828,18 @@ export async function runScreen(session, options, runTerminal) {
 	});
 	assertActionPlacementParity(application.capabilities);
 	const queries = application.queries;
+	// Job facts enter Screen as immutable snapshots. Rendering only reads this cache; job events below own replacement
+	// reads, so no renderer can reach a manager/controller while it paints.
+	let jobSnapshots = Object.freeze([]);
+	const refreshJobSnapshots = () => {
+		const listed = typeof application.jobSnapshots === "function" ? application.jobSnapshots() : [];
+		jobSnapshots = Object.freeze(Array.isArray(listed) ? [...listed] : []);
+		return jobSnapshots;
+	};
+	const cancelJob = (id) => typeof application.cancelJob === "function"
+		? application.cancelJob(id)
+		: { ok: false, error: { message: "Background job cancellation is unavailable in this session." } };
+	refreshJobSnapshots();
 	// Capability presentation is a settled Screen snapshot. Most registered availability is static composition state;
 	// task messaging additionally follows the deferred Runtime activity fact, so Work visibly says why there is no
 	// message form instead of asking the live task owner from a key handler or render pass.
@@ -874,16 +895,22 @@ export async function runScreen(session, options, runTerminal) {
 		return cancelled;
 	};
 	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
+	// These four routes use real abort-aware filesystem/Git ports, so their application-owned job closures can report
+	// progress and receive cancellation. The other deferred readers remain direct projections until they gain a real
+	// asynchronous port; they are not dressed up as jobs merely because the scheduler defers their stack.
+	const startProjectionJob = (id, projectionOptions) => typeof application.projections?.start === "function"
+		? application.projections.start(id, projectionOptions)
+		: undefined;
 	const DEFERRED_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
 		"carto.ledger": ({ signal }) => queries.ledger({ signal }),
 		"carto.plan": ({ signal }) => queries.plan({ signal }),
 		"carto.requests": ({ signal }) => queries.requests({ yolo: options.gate?.yolo === true, signal }),
-		"carto.tree": ({ signal }) => queries.tree({ signal }),
+		"carto.tree": ({ signal }) => startProjectionJob("carto.tree", { signal }) ?? queries.tree({ signal }),
 		"carto.hands": ({ signal }) => queries.context({ signal }),
-		"diff.last": ({ signal }) => queries.review.last({ signal }),
-		"diff.session": ({ signal }) => queries.review.session({ started, signal }),
-		"diff.git": ({ signal }) => queries.review.git({ signal }),
+		"diff.last": ({ signal }) => startProjectionJob("diff.last", { signal }) ?? queries.review.last({ signal }),
+		"diff.session": ({ signal }) => startProjectionJob("diff.session", { started, signal }) ?? queries.review.session({ started, signal }),
+		"diff.git": ({ signal }) => startProjectionJob("diff.git", { signal }) ?? queries.review.git({ signal }),
 		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
 		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
 		"shells.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
@@ -979,6 +1006,11 @@ export async function runScreen(session, options, runTerminal) {
 	const invalidateProjections = () => projections.invalidate();
 	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
 	const stopApplicationEvents = application.events.subscribe((event) => {
+		if (event.type.startsWith("job.")) {
+			refreshJobSnapshots();
+			if (!state.closed) draw();
+			return;
+		}
 		if (event.type !== "projection.invalidated") return;
 		const scopes = event.payload.scopes ?? [];
 		const brainChanged = scopes.some((scope) => ["workspace", "context", "requests"].includes(scope));
@@ -2050,6 +2082,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "/") return void terminal.press?.(SEARCH_KEY);
 		if (/^[1-6]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
 		if (key === "?") return void showKeys();
+		if (key === "J") return void showJobs();
 		if (key === "]" || key === "L") return void stepView(1);
 		if (key === "[" || key === "H") return void stepView(-1);
 		if (key === "y") return void copySelected();
@@ -2291,6 +2324,21 @@ export async function runScreen(session, options, runTerminal) {
 		const opened = overlays.open(create, overlayOptions);
 		if (opened === undefined) flash("finish or cancel the open dialog first");
 		return opened;
+	};
+	/** The detailed drawer is reserved for competing live work or a failed/cancelled result that needs inspection. */
+	const showJobs = () => {
+		if (!jobDrawerNeeded(jobSnapshots)) {
+			const live = jobSnapshots.filter((job) => job?.state === "queued" || job?.state === "running");
+			return flash(live.length === 1 ? "the one background job is shown in the status strip" : "no background job needs inspection");
+		}
+		return openModal(({ close }) => new JobDrawer({
+			jobs: () => jobSnapshots,
+			keyOf,
+			close,
+			cancel: cancelJob,
+			flash,
+			redraw: draw,
+		}), { width: Math.max(34, Math.min(78, terminal.columns - 4)), anchor: "center" });
 	};
 	const openConfirmation = (confirmation, confirm, { title, cancel } = {}) => openModal(({ close }) => new ConfirmDialog({
 		title,

@@ -97,6 +97,7 @@ import { createRouteManager } from "../src/screen/routes.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
+import { JobDrawer, jobDrawerNeeded, jobsForDrawer } from "../src/screen/job-drawer.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
@@ -573,6 +574,73 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	off();
 });
 
+test("application: projection jobs expose safe snapshots and only wrap real abort-aware ports", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const now = () => Date.parse(NOW);
+	const events = createApplicationEvents({ now });
+	const jobs = createJobManager({ events, now, nextId: (() => { let id = 0; return () => `projection-${++id}`; })() });
+	let beginTree;
+	const treeBegan = new Promise((resolve) => { beginTree = resolve; });
+	const app = createApplication({
+		brainDir,
+		root,
+		now,
+		events,
+		jobs,
+		queries: {
+			gitReader: {
+				projectFiles: async (_project, { signal, reportProgress }) => {
+					reportProgress({ current: 1, total: 2, message: "Reading tracked project files." });
+					beginTree(signal);
+					await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+					return [];
+				},
+			},
+			filesystem: {
+				listProjectFiles: async () => [],
+				describeProjectFiles: async () => [],
+				readText: async () => "",
+			},
+		},
+	});
+	assert.equal("jobs" in app, false, "the composed facade no longer leaks a mutable job manager to Screen");
+	assert.deepEqual(app.jobSnapshots(), []);
+	const operation = app.projections.start("carto.tree");
+	assert.equal(operation.jobId, "projection-1");
+	await treeBegan;
+	const running = app.jobSnapshots();
+	assert.equal(Object.isFrozen(running), true);
+	assert.equal(Object.isFrozen(running[0]), true);
+	assert.equal(running[0].kind, "workspace.tree");
+	assert.deepEqual(running[0].progress, { current: 1, total: 2, message: "Reading tracked project files." });
+	assert.equal(Object.hasOwn(running[0], "controller"), false, "a snapshot cannot reveal a cancellation controller");
+	assert.equal(Object.hasOwn(running[0], "run"), false, "a snapshot cannot reveal an operation closure");
+	const asked = app.cancelJob(operation.jobId);
+	assert.equal(asked.ok, true);
+	if (!asked.ok) throw new Error(asked.error.message);
+	assert.equal(asked.data.accepted, true);
+	const cancelled = await operation.promise;
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("the cancelled tree read must not be reported as a success");
+	assert.equal(cancelled.error.kind, UI_ERROR_KIND.cancelled);
+	const settled = app.jobSnapshots()[0];
+	assert.equal(settled.state, "cancelled");
+	assert.equal(settled.result?.ok, false);
+	assert.equal(Object.hasOwn(settled.result ?? {}, "data"), false, "job presentation gets a compact outcome, not a projection payload");
+
+	const unsupported = app.projections.start("carto.atlas");
+	assert.equal(unsupported.jobId, undefined, "a legacy synchronous reader is not manufactured into a job");
+	const rejected = await unsupported.promise;
+	assert.equal(rejected.ok, false);
+	if (rejected.ok) throw new Error("an unmigrated projection must be refused");
+	assert.equal(rejected.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(app.jobSnapshots().length, 1, "refusing an unmigrated reader starts no fake job");
+	const missing = app.cancelJob("not-a-job");
+	assert.equal(missing.ok, false);
+	if (missing.ok) throw new Error("an unknown cancellation target must be explicit");
+	assert.equal(missing.error.code, UI_ERROR_CODE.invalidInput);
+});
+
 test("application: terminal lifecycle bridge exposes named controls, disabled reasons, and fresh-context acknowledgement without leaking a terminal closure", async (t) => {
 	const { root, brainDir } = fresh(t);
 	const bridge = createLifecycleBridge();
@@ -730,6 +798,48 @@ test("screen: deferred projection scheduling keeps cached data through stale, ca
 	await flush();
 	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
 	assert.equal(settled.length, 4, "only current success, failure, retry, and typed cancellation notify a render; stale settlements do not");
+});
+
+test("screen: a job-backed projection links only its current job and rejects its stale settlement", async () => {
+	const scheduler = createProjectionScheduler();
+	const deferred = () => {
+		let resolve;
+		const promise = new Promise((done) => { resolve = done; });
+		return { promise, resolve };
+	};
+	const flush = () => new Promise((resolve) => setImmediate(resolve));
+	const first = deferred();
+	let firstSignal;
+	assert.equal(scheduler.refresh("carto.tree", ({ signal }) => {
+		firstSignal = signal;
+		return { jobId: "tree-1", promise: first.promise };
+	}), true);
+	await flush();
+	assert.equal(scheduler.get("carto.tree").jobId, "tree-1", "the cache retains the application-owned job identity, not a controller");
+	const second = deferred();
+	let secondSignal;
+	assert.equal(scheduler.refresh("carto.tree", ({ signal }) => {
+		secondSignal = signal;
+		return { jobId: "tree-2", promise: second.promise };
+	}, { force: true }), true);
+	await flush();
+	assert.equal(firstSignal.aborted, true, "a replacement read aborts the scheduler signal that dispatches cancellation to the first job");
+	assert.equal(scheduler.get("carto.tree").jobId, "tree-2");
+	first.resolve({ ok: true, data: { stale: true } });
+	await flush();
+	assert.equal(scheduler.get("carto.tree").data, undefined, "the superseded job may settle but cannot paint its old data");
+	second.resolve({ ok: true, data: { fresh: true } });
+	await flush();
+	assert.equal(secondSignal.aborted, false);
+	assert.deepEqual(scheduler.get("carto.tree").data, { fresh: true });
+	assert.equal(scheduler.get("carto.tree").jobId, "tree-2");
+
+	assert.equal(scheduler.refresh("diff.git", () => ({
+		jobId: undefined,
+		promise: Promise.resolve({ ok: false, error: { kind: "cancelled", message: "Already cancelled." } }),
+	})), true);
+	await flush();
+	assert.equal(scheduler.get("diff.git").error, undefined, "a cancelled envelope without a job id remains a typed cancellation rather than an invalid result");
 });
 
 test("screen: the shared async boundary keeps loading, stale, error, issue, and empty data states outside feature renderers", () => {
@@ -1278,6 +1388,87 @@ test("screen: status bar paints settled activity, status, notice, and footer sna
 	assert.match(failedRuntime.diagnostic?.text ?? "", /unavailable.*status reader failed/);
 	assert.match(failedRuntime.transport.text, /unavailable.*model server failed/);
 	assert.throws(() => renderStatusBar({ state }), /terminal activity/);
+});
+
+test("screen: job status and drawer inspect snapshots and dispatch only typed cancellation", () => {
+	const jobs = [
+		{
+			id: "active-1",
+			kind: "workspace.tree",
+			state: "running",
+			target: { label: "Project tree" },
+			progress: { current: 3, total: 9, message: "Scanning project files." },
+			cancellation: { mode: "abort", requested: false, meaningful: true },
+			cancellable: true,
+		},
+		{
+			id: "review-1",
+			kind: "review.git",
+			state: "queued",
+			target: { label: "Git changes" },
+			cancellation: { mode: "abort", requested: false, meaningful: true },
+			cancellable: true,
+		},
+		{
+			id: "cancelled-1",
+			kind: "review.last",
+			state: "cancelled",
+			target: { label: "Last checkpoint change" },
+			cancellation: { mode: "settled", requested: true, meaningful: false },
+			cancellable: false,
+			result: { ok: false, data: { never: "shown" }, error: { message: "The job was cancelled." } },
+		},
+		{
+			id: "failed-1",
+			kind: "review.session",
+			state: "failed",
+			target: { label: "Session changes" },
+			cancellation: { mode: "settled", requested: false, meaningful: false },
+			cancellable: false,
+			result: { ok: false, error: { message: "Git could not read the checkpoint history." } },
+		},
+		{ id: "done-1", kind: "settings.write", state: "succeeded", cancellation: { mode: "settled", requested: false, meaningful: false }, cancellable: false, result: { ok: true, data: { never: "shown" } } },
+	];
+	assert.equal(jobDrawerNeeded([jobs[0]]), false, "one ordinary live job stays compact in the status strip");
+	assert.equal(jobDrawerNeeded(jobs), true, "competing live work and a failed/cancelled outcome make the drawer available");
+	const visible = jobsForDrawer(jobs);
+	assert.deepEqual(visible.map((job) => job.id), ["active-1", "review-1", "cancelled-1", "failed-1"]);
+	assert.equal(Object.isFrozen(visible[0]), true);
+	assert.equal(Object.hasOwn(visible.find((job) => job.id === "cancelled-1").result, "data"), false, "the drawer keeps outcomes compact even if a malformed caller supplied data");
+
+	const calls = [];
+	const flashes = [];
+	let closed = 0;
+	const drawer = new JobDrawer({
+		jobs: () => jobs,
+		keyOf: (data) => data,
+		close: () => { closed++; },
+		cancel: (id) => {
+			calls.push(id);
+			return { ok: true, data: { accepted: true } };
+		},
+		flash: (text) => flashes.push(text),
+	});
+	const plain = drawer.render(68).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+	assert.match(plain, /Background work/);
+	assert.match(plain, /Project tree.*running/);
+	assert.match(plain, /Scanning project files\. · 3\/9/);
+	drawer.handleInput("c");
+	assert.deepEqual(calls, ["active-1"], "the drawer sends only the selected id through its cancellation dispatcher");
+	assert.deepEqual(flashes, ["cancellation requested"]);
+	drawer.handleInput("escape");
+	assert.equal(closed, 1);
+
+	const rows = renderStatusBar({
+		state: { restSince: 0 },
+		core: { busy: () => false, thinking: () => true },
+		chat: { doing: () => undefined },
+		jobs: [{ ...jobs[0], cancellation: { ...jobs[0].cancellation, requested: true } }],
+		options: { contextWindow: 1_000 },
+		now: () => 1_000,
+	});
+	const status = rows.map((row) => row.map(([text]) => text).join("")).join("\n");
+	assert.match(status, /Scanning project files\. 3\/9 · cancelling/, "the persistent strip names progress and a pending cancellation without opening the drawer");
 });
 
 test("screen: shared key hints keep shell navigation while hiding unavailable capability actions", () => {

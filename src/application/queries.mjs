@@ -287,8 +287,8 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   brainDir: string,
  *   root?: string,
  *   readers?: typeof DEFAULT_READERS,
- *   reviewReaders?: { lastChange?: (root: string, brainDir: string, options?: { signal?: AbortSignal }) => Promise<object | undefined> | object | undefined, changeSince?: (root: string, brainDir: string, started: number, options?: { signal?: AbortSignal }) => Promise<object | undefined> | object | undefined, uncommitted?: (root: string, options?: { signal?: AbortSignal }) => Promise<object | undefined> | object | undefined },
- *   gitReader?: { projectFiles?: (root: string, options?: { signal?: AbortSignal }) => Promise<string[] | undefined> },
+ *   reviewReaders?: { lastChange?: (root: string, brainDir: string, options?: { signal?: AbortSignal, reportProgress?: Function }) => Promise<object | undefined> | object | undefined, changeSince?: (root: string, brainDir: string, started: number, options?: { signal?: AbortSignal, reportProgress?: Function }) => Promise<object | undefined> | object | undefined, uncommitted?: (root: string, options?: { signal?: AbortSignal, reportProgress?: Function }) => Promise<object | undefined> | object | undefined },
+ *   gitReader?: { projectFiles?: (root: string, options?: { signal?: AbortSignal, reportProgress?: Function }) => Promise<string[] | undefined> },
  *   consultReaders?: typeof DEFAULT_CONSULT_READERS,
  *   runtimeReaders?: typeof DEFAULT_RUNTIME_READERS,
  *   runtimeContextReader?: (options?: { signal?: AbortSignal }) => Promise<{ messages: readonly any[], sizes: object, contextWindow?: number } | undefined>,
@@ -297,7 +297,7 @@ const DEFAULT_RUNTIME_READERS = Object.freeze({ loadAssessment, loadTop, loadAtl
  *   runtimeModelReader?: (options?: { signal?: AbortSignal }) => Promise<{ currentId?: string, models?: { id?: string, contextWindow?: number }[], ready?: boolean, limits?: object, diagnostic?: { kind?: string, message?: string }, issue?: { message?: string } } | undefined>,
  *   settingsReader?: (options?: { signal?: AbortSignal }) => Promise<{ configuration?: object, policy?: object, provider?: object } | undefined>,
  *   runtimeViewReader?: { sent?: (scope: "main" | "newest", options?: { signal?: AbortSignal }) => any, shells?: (options?: { tail?: number, signal?: AbortSignal }) => { windows?: any[] } | any[], shellOutput?: (options?: { name?: string, tail?: number, signal?: AbortSignal }) => { window?: any, lines?: string[] }, wakes?: (options?: { signal?: AbortSignal }) => { wakes?: any[], lines?: string[] } | any[], preview?: (options?: { signal?: AbortSignal }) => Promise<any> | any },
- *   filesystem?: { listProjectFiles?: (root: string, options?: { signal?: AbortSignal }) => Promise<{ path: string, bytes?: number }[]>, describeProjectFiles?: (root: string, paths: string[], options?: { signal?: AbortSignal }) => Promise<{ path: string, bytes?: number }[]>, readText?: (file: string, options?: { signal?: AbortSignal }) => Promise<string> },
+ *   filesystem?: { listProjectFiles?: (root: string, options?: { signal?: AbortSignal, reportProgress?: Function }) => Promise<{ path: string, bytes?: number }[]>, describeProjectFiles?: (root: string, paths: string[], options?: { signal?: AbortSignal, reportProgress?: Function }) => Promise<{ path: string, bytes?: number }[]>, readText?: (file: string, options?: { signal?: AbortSignal }) => Promise<string> },
  *   now?: () => number,
  * }} options
  */
@@ -377,11 +377,11 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 		if (ready.result !== undefined) return ready.result;
 		if (nonEmpty(root) === undefined) return invalid("A project root is needed before listing its files.", "root", ready.meta);
 		try {
-			const gitPaths = await gitReader.projectFiles(root, { signal: options.signal });
+			const gitPaths = await gitReader.projectFiles(root, { signal: options.signal, reportProgress: options.reportProgress });
 			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
 			const files = gitPaths === undefined
-				? await filesystem.listProjectFiles(root, { signal: options.signal })
-				: await filesystem.describeProjectFiles(root, gitPaths, { signal: options.signal });
+				? await filesystem.listProjectFiles(root, { signal: options.signal, reportProgress: options.reportProgress })
+				: await filesystem.describeProjectFiles(root, gitPaths, { signal: options.signal, reportProgress: options.reportProgress });
 			if (options.signal?.aborted === true) return uiCancelled({ meta: ready.meta });
 			// The tree is wholly async: Git supplies ignore-aware paths when available, filesystem supplies current sizes,
 			// and Screen composition adds graph marks only from an already-settled Atlas projection.
@@ -560,18 +560,18 @@ export function createWorkspaceQueries({ brainDir, root, readers = DEFAULT_READE
 	const reviewLast = async (options = {}) => {
 		const ready = await prepareReview(options);
 		if (ready.result !== undefined) return ready.result;
-		return reviewResult("the last checkpoint change", "last", ({ signal }) => reviewReaders.lastChange(root, brainDir, { signal }), { meta: ready.meta, signal: options.signal });
+		return reviewResult("the last checkpoint change", "last", ({ signal }) => reviewReaders.lastChange(root, brainDir, { signal, reportProgress: options.reportProgress }), { meta: ready.meta, signal: options.signal });
 	};
 	const reviewSession = async ({ started, ...options } = {}) => {
 		const ready = await prepareReview(options);
 		if (ready.result !== undefined) return ready.result;
 		if (!Number.isFinite(started)) return invalid("A session start time is needed before reading session changes.", "started", ready.meta);
-		return reviewResult("the session changes", "change", ({ signal }) => reviewReaders.changeSince(root, brainDir, started, { signal }), { meta: ready.meta, signal: options.signal });
+		return reviewResult("the session changes", "change", ({ signal }) => reviewReaders.changeSince(root, brainDir, started, { signal, reportProgress: options.reportProgress }), { meta: ready.meta, signal: options.signal });
 	};
 	const reviewGit = async (options = {}) => {
 		const ready = await prepareReview(options);
 		if (ready.result !== undefined) return ready.result;
-		return reviewResult("the project's Git changes", "own", ({ signal }) => reviewReaders.uncommitted(root, { signal }), { meta: ready.meta, signal: options.signal });
+		return reviewResult("the project's Git changes", "own", ({ signal }) => reviewReaders.uncommitted(root, { signal, reportProgress: options.reportProgress }), { meta: ready.meta, signal: options.signal });
 	};
 	const review = Object.freeze({ last: reviewLast, session: reviewSession, git: reviewGit });
 

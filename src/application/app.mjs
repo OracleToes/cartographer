@@ -18,7 +18,7 @@ import { REQUEST_ACTION, REQUEST_CAPABILITY_DEFINITIONS, createRequestApplicatio
 import { REVIEW_ACTION, REVIEW_CAPABILITY_DEFINITIONS, createReviewApplication } from "./review.mjs";
 import { TALK_ACTION, TALK_CAPABILITY_DEFINITIONS, createTalkApplication } from "./talk.mjs";
 import { WORKSPACE_ACTION, WORKSPACE_CAPABILITY_DEFINITIONS, createWorkspaceApplication } from "./workspace.mjs";
-import { uiError, uiFailure } from "./result.mjs";
+import { uiCancelled, uiError, uiFailure } from "./result.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "./contracts.mjs";
 
 const ACTION_SCOPES = Object.freeze({
@@ -144,6 +144,43 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		preview: runtimeOptions.preview,
 	});
 	const queries = createWorkspaceQueries({ ...queryOptions, brainDir, root, now, runtimeContextReader, runtimeStatusReader, runtimeActivityReader, runtimeModelReader, settingsReader, runtimeViewReader });
+	// Only these projections have genuine abort-aware infrastructure ports. The application—not Screen—owns the job
+	// closure that joins a projection's scheduler signal to its JobManager lifecycle. Durable book readers deliberately
+	// remain outside this map until they have a real asynchronous port of their own.
+	const ASYNC_PROJECTIONS = Object.freeze({
+		"carto.tree": Object.freeze({ kind: "workspace.tree", label: "Project tree", read: (options) => queries.tree(options) }),
+		"diff.last": Object.freeze({ kind: "review.last", label: "Last checkpoint change", read: (options) => queries.review.last(options) }),
+		"diff.session": Object.freeze({ kind: "review.session", label: "Session changes", read: (options) => queries.review.session(options) }),
+		"diff.git": Object.freeze({ kind: "review.git", label: "Git changes", read: (options) => queries.review.git(options) }),
+	});
+	const startProjection = (id, options = {}) => {
+		const projectionOptions = options !== null && typeof options === "object" ? options : {};
+		const definition = ASYNC_PROJECTIONS[id];
+		if (definition === undefined) return Object.freeze({
+			jobId: undefined,
+			promise: Promise.resolve(uiFailure(uiError({
+				code: UI_ERROR_CODE.invalidInput,
+				kind: UI_ERROR_KIND.validation,
+				message: "That projection does not have an asynchronous job port.",
+				retryable: false,
+			}), { meta: metadata(projectionOptions, now) })),
+		});
+		if (projectionOptions.signal?.aborted === true) return Object.freeze({
+			jobId: undefined,
+			promise: Promise.resolve(uiCancelled({ meta: metadata(projectionOptions, now), message: "The projection was cancelled before its job started." })),
+		});
+		const job = jobManager.start({
+			kind: definition.kind,
+			target: { projection: id, label: definition.label, ...(typeof root === "string" && root !== "" ? { root } : {}) },
+			meta: { projection: id },
+			run: ({ signal, reportProgress }) => definition.read({ ...projectionOptions, signal, reportProgress }),
+		});
+		const cancel = () => jobManager.cancel(job.id);
+		if (projectionOptions.signal !== undefined) projectionOptions.signal.addEventListener?.("abort", cancel, { once: true });
+		const promise = job.promise.finally(() => projectionOptions.signal?.removeEventListener?.("abort", cancel));
+		return Object.freeze({ jobId: job.id, promise });
+	};
+	const projections = Object.freeze({ start: startProjection });
 	const capabilityRegistry = createCapabilityRegistry([
 		...WORKSPACE_CAPABILITY_DEFINITIONS,
 		...CONTEXT_CAPABILITY_DEFINITIONS,
@@ -216,13 +253,28 @@ export function createApplication({ brainDir, root, config = {}, configuration: 
 		return result;
 	};
 	const lifecycle = Object.freeze({ capabilities: lifecycleService.capabilities, execute: executeLifecycle });
+	// Job cancellation is deliberately a typed application dispatch. Screen can ask to stop a named settled-read job,
+	// but cannot acquire its controller, child-process handle, or implementation closure.
+	const cancelJob = (id) => {
+		const result = jobManager.cancelResult(id);
+		eventStream.publish(result.ok ? "job.cancel-dispatched" : "job.cancel-rejected", {
+			jobId: String(id),
+			ok: result.ok,
+			...(result.ok ? { accepted: result.data.accepted } : {}),
+		});
+		return result;
+	};
 
 	return Object.freeze({
 		capabilities,
 		/** Pure presentation metadata paired by id with every registered capability. */
 		actionSpecs,
 		events: eventStream,
-		jobs: jobManager,
+		/** Safe immutable facts for Screen's job presentation; no controller, result payload, or job closure crosses this boundary. */
+		jobSnapshots: () => Object.freeze(jobManager.list()),
+		cancelJob,
+		/** Starts only named asynchronous projection ports and returns a job id plus its typed result promise. */
+		projections,
 		queries,
 		/** Terminal-owned session controls exposed through typed availability and UiResult dispatch only. */
 		lifecycle,

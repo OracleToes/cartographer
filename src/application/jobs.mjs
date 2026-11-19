@@ -29,6 +29,20 @@ const targetSnapshot = (target) => {
 	if (!record(target)) return undefined;
 	return Object.freeze({ ...target });
 };
+/** A job list is presentation metadata, not a second channel for a projection's potentially large payload. */
+const resultSnapshot = (result) => {
+	if (!isResult(result)) return undefined;
+	if (result.ok) return Object.freeze({ ok: true });
+	return Object.freeze({
+		ok: false,
+		error: Object.freeze({
+			code: result.error?.code,
+			kind: result.error?.kind,
+			message: result.error?.message,
+			retryable: result.error?.retryable === true,
+		}),
+	});
+};
 
 const withJobMeta = (result, job, fallbackMeta = {}) => {
 	if (!isResult(result)) return uiSuccess(result, { meta: { ...fallbackMeta, jobId: job.id } });
@@ -52,7 +66,7 @@ const withJobMeta = (result, job, fallbackMeta = {}) => {
  *   progress?: { current?: number, total?: number, message?: string },
  *   cancellation: { mode: "abort" | "stop-waiting" | "settled", requested: boolean, meaningful: boolean },
  *   effect?: object,
- *   result?: import("./contracts.mjs").UiResult<any>,
+ *   result?: { ok: boolean, error?: { code?: string, kind?: string, message?: string, retryable: boolean } },
  * }} UiJob
  */
 
@@ -85,7 +99,7 @@ export function createJobManager({ events, now = () => Date.now(), nextId } = {}
 		// cancellation aborts an uncommitted operation or merely stops waiting after a committed effect.
 		cancellable: !done(job.state),
 		...(job.effect === undefined ? {} : { effect: Object.freeze({ ...job.effect }) }),
-		...(job.result === undefined ? {} : { result: job.result }),
+		...(job.result === undefined ? {} : { result: resultSnapshot(job.result) }),
 	});
 	const emit = (type, job) => events?.publish(type, { job: snapshot(job) });
 
@@ -101,6 +115,25 @@ export function createJobManager({ events, now = () => Date.now(), nextId } = {}
 		job.controller.abort();
 		emit("job.cancel-requested", job);
 		return true;
+	};
+	/** Screen receives this typed dispatch point, never a raw controller or an operation closure. */
+	const cancelResult = (id) => {
+		const job = jobs.get(String(id));
+		if (job === undefined) return uiFailure(uiErrorFrom(new Error("That job no longer exists."), {
+			code: UI_ERROR_CODE.invalidInput,
+			kind: UI_ERROR_KIND.validation,
+			message: "That job is no longer available to cancel.",
+			retryable: false,
+		}), { meta: { jobId: String(id) } });
+		if (done(job.state)) return uiFailure(uiErrorFrom(new Error("That job already settled."), {
+			code: UI_ERROR_CODE.invalidInput,
+			kind: UI_ERROR_KIND.validation,
+			message: "That job has already settled.",
+			retryable: false,
+		}), { meta: { jobId: job.id } });
+		if (job.cancelRequested === true) return uiSuccess({ job: snapshot(job), accepted: false }, { meta: { jobId: job.id } });
+		cancel(job.id);
+		return uiSuccess({ job: snapshot(job), accepted: true }, { meta: { jobId: job.id } });
 	};
 
 	const start = ({ kind, target, run, meta = {} } = {}) => {
@@ -183,7 +216,8 @@ export function createJobManager({ events, now = () => Date.now(), nextId } = {}
 	return Object.freeze({
 		start,
 		cancel,
+		cancelResult,
 		get,
-		list: () => [...jobs.values()].map(snapshot),
+		list: () => Object.freeze([...jobs.values()].map(snapshot)),
 	});
 }

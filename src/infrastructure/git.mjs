@@ -83,7 +83,7 @@ const parseBefore = (label) => {
 export function createGitReviewReader({ run = runProcess, env = process.env, fs = {}, temporaryDir = tmpdir() } = {}) {
 	if (typeof run !== "function") throw new TypeError("Git review reads need an asynchronous process runner.");
 	const io = { mkdtemp: fs.mkdtemp ?? mkdtemp, rm: fs.rm ?? rm };
-	const invoke = async (args, { cwd, environment, signal, quiet = false, reportProgress, message } = {}) => {
+	const invoke = async (args, { cwd, environment, signal, quiet = false, missingOk = false, reportProgress, message, maxOutputBytes = POLICY.limits.git.maxBufferBytes } = {}) => {
 		throwIfAborted(signal);
 		report(reportProgress, { message });
 		let result;
@@ -92,7 +92,7 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 				cwd,
 				env: environment,
 				signal,
-				maxOutputBytes: POLICY.limits.git.maxBufferBytes,
+				maxOutputBytes,
 			});
 		} catch (error) {
 			if (signal?.aborted === true || isProcessAbort(error)) throw new GitAbortError();
@@ -100,10 +100,11 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 			throw new GitReadError(`Git could not ${message?.toLowerCase() ?? "complete the review read"}: ${text(error?.message) || "an unknown process error"}.`, { cause: error });
 		}
 		if (signal?.aborted === true || result?.aborted === true) throw new GitAbortError();
-		if (result?.outputLimit === true) throw new GitReadError(`Git produced more than ${POLICY.limits.git.maxBufferBytes} bytes while it tried to ${message?.toLowerCase() ?? "read review data"}.`);
+		if (result?.outputLimit === true) throw new GitReadError(`Git produced more than ${maxOutputBytes} bytes while it tried to ${message?.toLowerCase() ?? "read review data"}.`);
 		if (result?.error !== undefined || result?.status !== 0) {
-			if (quiet) return undefined;
+			// A missing repository is an ordinary empty Git projection; a missing Git executable is not.
 			if (result?.error?.code === "ENOENT") throw new GitReadError("Git is not installed, so this review projection is unavailable.", { cause: result.error });
+			if (quiet || missingOk) return undefined;
 			throw new GitReadError(`Git could not ${message?.toLowerCase() ?? "complete the review read"}: ${detail(result).slice(0, POLICY.limits.git.errorChars)}.`);
 		}
 		return String(result.stdout ?? "");
@@ -121,6 +122,7 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 	const project = (root, args, options = {}) => invoke(args, {
 		cwd: root,
 		environment: projectEnv(env),
+		maxOutputBytes: POLICY.limits.git.checkpointBufferBytes,
 		...options,
 	});
 	const history = async (root, brainDir, { signal, reportProgress } = {}) => {
@@ -242,6 +244,7 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 		const inside = await project(root, ["rev-parse", "--is-inside-work-tree"], {
 			signal,
 			quiet: true,
+			missingOk: true,
 			reportProgress,
 			message: "Check project Git repository",
 		});
@@ -249,18 +252,21 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 		const status = await project(root, ["status", "--short", "--untracked-files=all"], {
 			signal,
 			quiet: true,
+			missingOk: true,
 			reportProgress,
 			message: "Read project Git status",
 		}) ?? "";
 		let patch = await project(root, ["diff", "--no-color", "HEAD"], {
 			signal,
 			quiet: true,
+			missingOk: true,
 			reportProgress,
 			message: "Read project Git patch",
 		});
 		if (patch === undefined) patch = await project(root, ["diff", "--no-color"], {
 			signal,
 			quiet: true,
+			missingOk: true,
 			reportProgress,
 			message: "Read project Git patch",
 		});
@@ -272,6 +278,7 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 		const inside = await project(root, ["rev-parse", "--is-inside-work-tree"], {
 			signal,
 			quiet: true,
+			missingOk: true,
 			reportProgress,
 			message: "Check project Git repository",
 		});
@@ -279,6 +286,7 @@ export function createGitReviewReader({ run = runProcess, env = process.env, fs 
 		const listed = await project(root, ["ls-files", "-co", "--exclude-standard", "-z"], {
 			signal,
 			quiet: true,
+			missingOk: true,
 			reportProgress,
 			message: "List project Git files",
 		});

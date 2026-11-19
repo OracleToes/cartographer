@@ -1,12 +1,15 @@
 // The small async cache behind durable screen projections.
 //
 // A renderer only reads its last settled value. This scheduler owns the async edge: one request per cache key,
-// AbortController cancellation, stale-settlement rejection, cached-error retry, and invalidation after an action.
+// AbortController cancellation, stale-settlement rejection, job-id linkage, cached-error retry, and invalidation after an action.
 // It deliberately knows nothing about a view or a durable reader, so the full screen can keep those concerns apart.
 
 const cancelled = (result) => result?.ok === false && result.error?.kind === "cancelled";
 const failure = (result) => result?.error ?? { message: "Cartographer returned an invalid projection result." };
 const thrown = (error) => ({ message: error?.message ?? String(error) });
+// A facade may report an already-aborted request without creating a job. It is still an operation envelope, but it
+// deliberately carries no job id for presentation.
+const jobOperation = (value) => value !== null && typeof value === "object" && value.promise !== null && typeof value.promise?.then === "function" && (value.jobId === undefined || typeof value.jobId === "string" && value.jobId !== "");
 
 /**
  * @param {{ now?: () => number, onSettled?: (id: string, state: object) => void }} options
@@ -23,7 +26,7 @@ export function createProjectionScheduler({ now = () => Date.now(), onSettled = 
 		if (current?.generation !== generation) return false;
 		let next;
 		if (result?.ok === true) {
-			next = { generation, loading: false, data: result.data, requestedAt: current.requestedAt, updatedAt: now() };
+			next = { generation, loading: false, data: result.data, requestedAt: current.requestedAt, updatedAt: now(), ...(current.jobId === undefined ? {} : { jobId: current.jobId }) };
 		} else if (cancelled(result)) {
 			next = { ...current, loading: false, controller: undefined };
 		} else {
@@ -49,9 +52,18 @@ export function createProjectionScheduler({ now = () => Date.now(), onSettled = 
 		prior.controller?.abort();
 		const generation = prior.generation + 1;
 		const controller = new AbortController();
-		entries.set(id, { ...prior, generation, loading: true, error: undefined, controller, requestedAt: now() });
+		// A new generation must not display a completed/superseded job as if it owned this read.
+		const { controller: _priorController, jobId: _priorJobId, ...cache } = prior;
+		const next = { ...cache, generation, loading: true, error: undefined, controller, requestedAt: now() };
+		entries.set(id, next);
 		Promise.resolve()
 			.then(() => request({ signal: controller.signal }))
+			.then((outcome) => {
+				if (!jobOperation(outcome)) return outcome;
+				const current = entries.get(id);
+				if (typeof outcome.jobId === "string" && current?.generation === generation) entries.set(id, { ...current, jobId: outcome.jobId });
+				return outcome.promise;
+			})
 			.then((result) => settle(id, generation, result), (error) => settleThrown(id, generation, error));
 		return true;
 	};
