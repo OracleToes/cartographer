@@ -380,6 +380,35 @@ Each step is a commit on `arena/c8108dc4-cartographer`. A commit is a rollback p
 
 If a step is wrong, `git revert` it; the next step does not depend on its internals, only on the interfaces named above.
 
+### 8.1 What each step landed as
+
+| Step | Commit | Notes |
+|---|---|---|
+| 0 | `259dfe0` | This document |
+| 1–3 | `73b322a` | The meter, the prefill monitor, and the read-only view |
+| 4–6 | `581468b` | `renderFrame` is one pure function; one clock drives it |
+| 4–6 | `42e0823` | Every row is exactly `columns` wide, and `test/frame.test.mjs` holds it |
+| 7 | `7d4f2fc` | The frame, bar, status row, and footer, in the spec |
+
+Two defects found by the probe are worth remembering, because both look like something else:
+
+- A full-width row padded with plain spaces wraps to two lines inside Pi TUI's `Text`, because `wrapTextWithAnsi` breaks a long run of spaces. The frame then looks three rows too tall and the footer leaves the bottom row. A style reset pair around the fill keeps the row on one line; `split` and `splitStyled` in `src/ui/text.ts` do that.
+- `new Text()` pads one row above and below and one column each side. The chrome, the body, and the footer need `new Text("", 0, 0)`, or the footer is not on the last row.
+
+### 8.2 The clock at step 4
+
+One pending timer, not a fixed interval:
+
+```text
+wake():            dirty = true; if (not ticking) schedule 0 ms
+tick():            ticking = true
+                   if moving and dirty: await refresh()   // a full read
+                   if dirty or spinner is due: paint()
+                   schedule 100 ms while active, 1000 ms when idle
+```
+
+`wake()` is what a watch, a key, and a width check call. It never paints from a callback, so a render cannot run inside a writer. `checkWidth` runs on its own 250 ms interval: Pi TUI tells the layout about a resize, not this frame.
+
 ## 9. Tests
 
 1. `contextMeter` with a reading, a settled reading, an estimate, over cap, and over window.
