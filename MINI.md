@@ -241,6 +241,97 @@ The workspace is compact. It has no permanent command palette, settings screen, 
 
 The person can do nearly all safe Brain and context operations that the agent can do. Compact input commands cover Ledger, Atlas, pins, handoff, wakes, deletion marks, deletion cancellation, immediate deletion, and approval or rejection of changes. Commands name records by their short handle, for example `/delete C2`, `/unpin P3`, `/approve X1`, or `/wake W1 | time | ...`. A raw durable ID is never a command argument.
 
+### The frame
+
+The screen has a fixed top block, a scrolling body, and a fixed footer.
+
+```text
+  Carto · cartographer                                                llama-swap/Flint
+  ────────────────────────────────────────────────────────────────────────────────────
+  1 Chat   2 Brain   3 Context                                   ⠹ reading 64% · 1.4k tok/s
+  ▰▰▰▰▰▰▰▰▰▰▨▨▱▱▱▱▱▱▱▱  9.4k + 1.2k new / 33k · cap 16k · 32%
+  DURABLE CHAT                                                                      3
+  ▌C1  Person · 14:32
+  ▌    Explain the retry policy.
+  LIVE                                                                     1 item · streaming
+    Model output                                                                streaming
+       The retry policy is one scheduler with two backoffs.
+  ────────────────────────────────────────────────────────────────────────────────────
+  j k move · g G ends · 1 2 3 tabs · i input · a actions · ? help    chat · send follow-up
+```
+
+| Row | Content | Job |
+|---|---|---|
+| 1 | Product, project directory, model | Where you are and what answers |
+| 2 | One rule | Separates the chrome from the content |
+| 3 | Tabs, and the turn state | What you see, and what the agent does |
+| 4 | The token bar | Token pressure, always |
+| 5 | The body | Scrolls. It is the only part that moves |
+| last | The footer | Keys that work now, and the last notice |
+
+Every row is exactly the terminal width. Chrome has two cells of padding. The body is never wider than the frame, so a long line wraps inside the body rather than outside it.
+
+The screen repaints on a clock, not on input alone. Carto asks for a frame at 100 ms while the agent works, and at 1 000 ms when it is idle. This is why streamed text appears without a key press. Carto reads the terminal width on an interval, because Pi TUI announces a resize to the layout and not to this frame.
+
+The frame is one pure function of a state value. The renderer does no I/O. Tests call the same function that the terminal calls.
+
+### The token bar
+
+The bar is one bar with three segments, and it is always visible.
+
+```text
+▰▰▰▰▰▰▰▰▰▰▨▨▱▱▱▱▱▱▱▱  9.4k + 1.2k new / 33k · cap 16k · 32%
+└ filled ┘└change┘└ free ┘
+```
+
+| Part | Glyph | Meaning |
+|---|---|---|
+| filled | `▰` | Tokens the server keeps and has already read |
+| changing | `▨` | Tokens the server must read now, not yet read |
+| free | `▱` | Room left in the window |
+| cap | `┊` | The 16 000 budget, drawn in the first free cell at that boundary |
+| estimate | `▤` | A number Carto estimated, not measured |
+
+The denominator is the real window the server reports, not the budget. The budget is a mark inside the bar, so the person sees the two limits together. A prompt that fits one cell fills that cell, so the bar never shows nothing.
+
+Before the first request, the bar shows an estimate. The estimate uses `▤` cells, a muted style, the word `estimate`, and `~` before the number. Four independent marks, so a terminal without colour still shows the difference. Once the server sends progress, the bar shows measured numbers and no estimate.
+
+The server reports `prompt_progress` with `{total, cache, processed}`. Carto draws fresh work as `total - cache`, what is done as `processed - cache`, and the rest as `total - processed`. When a provider sends no progress, Carto stops the bar at the estimate. Carto never invents numbers.
+
+### The status row
+
+The third row holds the tabs on the left and the turn state on the right. The state uses a word, a glyph, and a spinner where time passes.
+
+| State | Text |
+|---|---|
+| Idle | `○ idle` |
+| Waiting for the model | `⠋ waiting for the model` |
+| A local action runs | `● applying` |
+| Reading the prompt | `⠹ reading 64% · 1.4k tok/s` |
+| Writing the answer | `⠸ writing · 12s` |
+| A tool runs | `⠼ tool inspect src/retry.ts · 3s` |
+| Paused | `⏸ paused · r edits the draft · x cancels` |
+| Collapse is requested | `● collapse requested · a shows the commands` |
+| Recently read | `· read 4.2k new in 1.8s` |
+| Failed | `! model error: …` |
+
+The spinner is not decoration. The screen must redraw while the agent works, and a moving glyph is the proof that it does.
+
+### The footer
+
+The footer takes the whole bottom row. The keys sit at the left, and the tab with a send mode, the insert state, or the last notice sits at the right.
+
+Carto shows only the keys that work here. When the row is short, the hints drop from the right, one at a time. The footer never truncates a hint that it shows.
+
+| Mode | Hints |
+|---|---|
+| Navigate | `j k move · g G ends · 1 2 3 tabs · i input · a actions · ? help` |
+| A Chat item is selected | `… · f fold · e edit · d delete at collapse · D delete now` |
+| A live item is selected | `… · o open` |
+| A pin is selected | `… · u remove at collapse · U remove now` |
+| Insert | `Esc back · Enter send` |
+| While the agent works | `… · p pause · x cancel` |
+
 ### Modal controls
 
 Carto has Navigate and Insert modes. It has no Visual mode.
@@ -257,6 +348,9 @@ Carto has Navigate and Insert modes. It has no Visual mode.
 - `d` marks selected Chat for deletion at collapse. `D` deletes it now.
 - `u` removes a selected pin at collapse. `U` removes it now.
 - `a` opens the compact action reference. `?` opens the key reference.
+- `p` pauses the active turn. `r` edits a paused draft, or starts useful work while idle. `x` cancels the turn.
+- `I`, `S`, and `F` open the input with Interruption, Steer, or Follow-up as the delivery mode.
+- `Enter` sends. A line that starts with `/` runs a person command instead, such as `/undelete C2` to cancel a deletion mark.
 
 ## Turn control
 
