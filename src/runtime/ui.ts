@@ -22,6 +22,7 @@ import { selectedLabel } from "../ui/body.js";
 import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
 import { BlankRow } from "../ui/chrome.js";
 import { contextTree } from "../domain/prompt-tree.js";
+import { selectableCount } from "../ui/body.js";
 import { selectableOf, treeRows, unconfirmedRows, type TreeRow } from "../ui/context-tree.js";
 import { recordDetail, recordDetailRows } from "../ui/detail.js";
 import { CHROME_ABOVE, ReferenceOverlay, referenceMaxHeight } from "../ui/overlay.js";
@@ -238,7 +239,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
    * is longer than the screen cannot hide the bar.
    */
   const recordPage = (state: FrameState): string => {
-    const record = recordDetail(tab, state.view, clampSelection({ tab, view: state.view, selected }));
+    const record = recordDetail(tab, state.view, chosen());
     if (record === undefined) return "  Nothing is selected.";
     return recordDetailRows(record, width).join("\n");
   };
@@ -277,15 +278,19 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
    * first column would be a second renderer.
    */
   const contextPage = (state: FrameState, fallback: string): string => {
-    const chosen = clampSelection({ tab, view: state.view, selected });
+    // `chosen()` is the same clamp the key handler uses. A second clamp with the durable block
+    // count silently pulled the selection back to the first row on every paint,
+    // so `j` moved and the screen undid it: the renderer was fighting the
+    // handler, and the whole tree below row one was unreachable.
+    const mark = chosen();
     const snapshot = project.prompts.current();
     if (snapshot === undefined) {
-      return unconfirmedRows(state.view, treeFolds, chosen, width)
+      return unconfirmedRows(state.view, treeFolds, mark, width)
         .map((entry) => entry.text)
         .join("\n");
     }
     const tree = contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input);
-    const rows = treeRows(tree, treeFolds, treeReal, chosen, width);
+    const rows = treeRows(tree, treeFolds, treeReal, mark, width);
     if (selectableOf(rows).length === 0) return fallback;
     return rows.map((entry) => entry.text).join("\n");
   };
@@ -540,7 +545,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
    * never opens the input: that is `i`, so one key has one meaning per mode.
    */
   const openSelected = (): void => {
-    const index = clampSelection({ tab, view, selected });
+    const index = chosen();
     if (tab === "chat") {
       const entry = selectedChat(view, index);
       if (entry !== undefined) {
@@ -559,18 +564,33 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     // A Brain or Context row is a summary, so Enter opens the record whole. This
     // is what the person asked for: a row that ends in `…` must be readable, and
     // a footer message saying it is selected is not a view of anything.
+    // On Context the rows are prompt nodes, not durable records, so Enter opens
+    // nothing there: a prompt part has no record behind it. `v` is the way to see
+    // a node in full, and it swaps view in place instead of replacing the body.
+    if (tab === "context") return;
     if (recordDetail(tab, view, index) === undefined) return;
     showDetail("record");
   };
 
-  /** The selection index, clamped by the tab that is showing. */
-  const chosen = (): number =>
-    clampSelection({
-      tab,
-      view,
-      selected,
-      ...(tab === "context" ? { contextCount: currentTree(currentState()).ids.length } : {}),
-    });
+  /**
+   * The number of rows the current tab lets you select.
+   *
+   * Read from the rows actually drawn, not from the durable record count: on
+   * Context the rows are the prompt tree, so a block count would clamp the
+   * selection short of `Tools` and leave most of the prompt unreachable.
+   */
+  const selectableNow = (): number => {
+    if (tab === "context") {
+      const snapshot = project.prompts.current();
+      if (snapshot === undefined) return Math.max(1, unconfirmedRows(view, treeFolds, 0, width).filter((entry) => entry.selectable).length);
+      const tree = contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input);
+      return Math.max(1, selectableOf(treeRows(tree, treeFolds, treeReal, 0, width)).length);
+    }
+    return Math.max(1, selectableCount(tab, view));
+  };
+
+  /** The selection index, clamped by what is on screen. */
+  const chosen = (): number => Math.min(Math.max(selected, 0), selectableNow() - 1);
 
   const navigate = (): void => {
     mode = "navigate";
@@ -654,8 +674,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       }
     }
     if (data === "j" || matchesKey(data, Key.down)) {
-      selected = Math.min(9_999, chosen() + 1);
-      selected = chosen();
+      selected = Math.min(selectableNow() - 1, chosen() + 1);
       wake();
       return { consume: true };
     }
@@ -670,8 +689,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return { consume: true };
     }
     if (data === "G" || matchesKey(data, Key.end)) {
-      selected = 9_999;
-      selected = chosen();
+      selected = selectableNow() - 1;
       wake();
       return { consume: true };
     }
@@ -699,9 +717,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     // swaps that node between the human view and the provider's own JSON. These
     // run before the generic movement keys so `h`/`l` stay free for later.
     if (tab === "context" && (data === "h" || matchesKey(data, Key.left) || data === "l" || matchesKey(data, Key.right))) {
-      const state = currentState();
-      const index = clampSelection({ tab, view, selected });
-      const id = currentTree(state).ids[index];
+      const id = currentTree(currentState()).ids[chosen()];
       if (id !== undefined) {
         const opening = data === "l" || matchesKey(data, Key.right);
         if (opening) treeFolds.add(id);
@@ -711,9 +727,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return { consume: true };
     }
     if (tab === "context" && data === "v") {
-      const state = currentState();
-      const index = clampSelection({ tab, view, selected });
-      const id = currentTree(state).ids[index];
+      const id = currentTree(currentState()).ids[chosen()];
       if (id !== undefined) {
         if (treeReal.has(id)) treeReal.delete(id);
         else treeReal.add(id);

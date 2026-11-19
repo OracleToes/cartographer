@@ -73,7 +73,9 @@ const onContext = (context: ActionContext): boolean => navigating(context) && co
 export const ACTIONS: readonly Action[] = [
   { id: "move", keys: ["j", "k"], label: "move", help: "Move the selection down or up. The arrow keys do the same.", group: "move", when: listing },
   { id: "ends", keys: ["g", "G"], label: "ends", help: "Move the selection to the first or the last row.", group: "move", when: listing },
-  { id: "tabs", keys: ["1", "2", "3"], label: "tabs", help: "Show Chat, Brain, or Context.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen },
+  { id: "tabs", keys: ["1", "2", "3"], label: "tabs", help: "Show Chat, Brain, or Context.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen && context.tab !== "context" },
+  { id: "prompt-fold", keys: ["←", "→"], label: "fold", help: "Fold or unfold the selected part of the prompt.", group: "move", when: (context) => context.mode === "navigate" && context.tab === "context" },
+  { id: "prompt-view", keys: ["v"], label: "human/real", help: "Swap the selected part between readable text and the provider's own JSON.", group: "view", when: (context) => context.mode === "navigate" && context.tab === "context" },
   { id: "input", keys: ["i"], label: "input", help: "Open the input. In Chat edit detail it replaces the selected Chat text.", group: "turn", when: (context) => listing(context) && !context.busy },
   // A reference describes the list, and a record page covers the list, so both
   // references belong to the list view only.
@@ -98,7 +100,7 @@ export const ACTIONS: readonly Action[] = [
   { id: "page-scroll", keys: ["j k"], label: "scroll", help: "Move the record page one line. g and G jump to the ends.", group: "move", when: (context) => context.recordOpen },
   { id: "page-back", keys: ["Esc"], label: "back", help: "Return to the list; the record stays selected.", group: "view", when: (context) => context.recordOpen },
   { id: "page-ends", keys: ["g", "G"], label: "ends", help: "Jump the record page to its first or last line.", group: "move", when: (context) => context.recordOpen },
-  { id: "open", keys: ["Enter"], label: "open", help: "Open the selected record whole. In the input box, Enter sends instead.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen },
+  { id: "open", keys: ["Enter"], label: "open", help: "Open the selected record whole. In the input box, Enter sends instead.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen && context.tab !== "context" },
   { id: "send", keys: ["Enter"], label: "send", help: "Send with the chosen mode, or run a command that starts with `/`.", group: "turn", when: (context) => context.mode === "insert" },
   { id: "quit", keys: ["Ctrl+C"], label: "quit", help: "Close Carto.", group: "view", when: () => true, hidden: true },
 ];

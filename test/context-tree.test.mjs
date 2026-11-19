@@ -84,3 +84,28 @@ test("a zero usage count is not treated as an exact measurement", () => {
   // nothing.
   assert.ok(flatten(real.roots).length >= real.roots.length);
 });
+
+test("every root in the tree is reachable and shows its content once unfolded", () => {
+  // The defect: the render clamped the selection with the durable block count,
+  // so `j` moved and the next paint undid it. Everything below row one — Tools
+  // included — was unreachable, and the schemas that ARE in the payload looked
+  // absent.
+  const tree = contextTree(payload(), 1_000);
+  const folds = new Set(tree.roots.map((root) => root.id).filter((id) => id.startsWith("tools-")));
+  const rows = treeRows(tree, folds, new Set(), 0, 100);
+  const ids = selectableOf(rows);
+  // An open Tools node contributes itself and one selectable row per tool.
+  assert.deepEqual(ids, ["message-0", "message-1", "message-2", "message-3", "tools-4", "tools-4-0-chat", "tools-4-1-ledger", "settings"]);
+  // Tools is reachable by index, and unfolding it lists one row per tool.
+  const toolsIndex = ids.indexOf("tools-4");
+  const marked = treeRows(tree, folds, new Set(), toolsIndex, 100);
+  assert.match(plain(marked.find((row) => row.text.includes("Tools")).text), /▌/);
+  const text = marked.map((row) => plain(row.text)).join("\n");
+  assert.match(text, /chat$/m);
+  assert.match(text, /ledger$/m);
+  // Unfolding one tool shows its description and its schema.
+  const toolRows = treeRows(tree, new Set([...folds, "tools-4-0-chat"]), new Set(), toolsIndex, 100);
+  const shown = toolRows.map((row) => plain(row.text)).join("\n");
+  assert.match(shown, /Send one message\./);
+  assert.match(shown, /text: string/);
+});
