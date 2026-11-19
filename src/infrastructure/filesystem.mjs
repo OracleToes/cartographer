@@ -1,8 +1,8 @@
 // Promise-based filesystem seams for interactive presentation code. These ports check AbortSignal between bounded
 // directory and file operations; they are the only filesystem work a migrated Screen query may await.
-import { access, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { delimiter, join, sep } from "node:path";
+import { delimiter, join, resolve, sep } from "node:path";
 import { POLICY } from "../config.mjs";
 import { BRAIN } from "../project.mjs";
 
@@ -200,6 +200,71 @@ export async function listProjectFiles(root, { signal, reportProgress, maxFiles 
 	}
 	throwIfFilesystemAborted(signal);
 	files.sort((left, right) => left.path.localeCompare(right.path));
+	report(reportProgress, { current: files.length, total: files.length, message: `Found ${files.length} project files.` });
+	return files;
+}
+
+/**
+ * Add current byte sizes to a Git-provided project path list without returning to a synchronous stat walk. Paths are
+ * still confined to `root`, and symlinks may resolve only to regular files inside that root. Git filtering and file
+ * metadata therefore stay independently abortable, so a superseded Screen tree never has to finish either batch.
+ */
+export async function describeProjectFiles(root, paths, { signal, reportProgress, maxFiles = POLICY.limits.look.walkFiles, fs = {} } = {}) {
+	const project = text(root);
+	if (project === undefined) throw new TypeError("A project file description needs a root directory.");
+	if (!Array.isArray(paths)) throw new TypeError("A project file description needs a path array.");
+	if (!Number.isInteger(maxFiles) || maxFiles < 1) throw new TypeError("A project file description needs a positive maximum.");
+	const io = {
+		lstat: fs.lstat ?? lstat,
+		stat: fs.stat ?? stat,
+		realpath: fs.realpath ?? realpath,
+	};
+	throwIfFilesystemAborted(signal);
+	let realRoot;
+	try {
+		realRoot = await io.realpath(project);
+		throwIfFilesystemAborted(signal);
+	} catch (error) {
+		if (isFilesystemAbort(error) || signal?.aborted === true) throw new FilesystemAbortError();
+		return [];
+	}
+	const lexicalRoot = resolve(project);
+	const wanted = [...new Set(paths.filter((path) => typeof path === "string" && path !== ""))]
+		.filter((path) => path !== BRAIN && !path.startsWith(`${BRAIN}/`))
+		.filter((path) => {
+			const candidate = resolve(project, path);
+			return inside(lexicalRoot, candidate);
+		})
+		.sort((left, right) => left.localeCompare(right))
+		.slice(0, maxFiles);
+	const files = [];
+	for (const [index, relativePath] of wanted.entries()) {
+		throwIfFilesystemAborted(signal);
+		const absolute = resolve(project, relativePath);
+		try {
+			const entry = await io.lstat(absolute);
+			throwIfFilesystemAborted(signal);
+			let details;
+			if (entry.isSymbolicLink()) {
+				const target = await io.realpath(absolute);
+				throwIfFilesystemAborted(signal);
+				if (!inside(realRoot, target)) continue;
+				details = await io.stat(target);
+			} else {
+				if (!entry.isFile()) continue;
+				details = await io.stat(absolute);
+			}
+			throwIfFilesystemAborted(signal);
+			if (!details.isFile()) continue;
+			files.push({ path: relativePath, bytes: details.size });
+		} catch (error) {
+			if (isFilesystemAbort(error) || signal?.aborted === true) throw new FilesystemAbortError();
+			continue;
+		} finally {
+			report(reportProgress, { current: index + 1, total: wanted.length, message: `Checking project files · ${files.length} found.` });
+		}
+	}
+	throwIfFilesystemAborted(signal);
 	report(reportProgress, { current: files.length, total: files.length, message: `Found ${files.length} project files.` });
 	return files;
 }

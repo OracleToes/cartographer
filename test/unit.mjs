@@ -12,7 +12,7 @@ import { CONFIGURATION_SCHEMA, DEFAULTS, contextWindowLimits, loadConfig, modelC
 import { ConfigurationRepositoryError, createConfigurationRepository } from "../src/configuration/repository.mjs";
 import { CONFIGURATION_SOURCE, resolveConfigurationSources } from "../src/configuration/sources.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
-import { CheckpointError } from "../src/checkpoints.mjs";
+import { CheckpointError, checkpoint } from "../src/checkpoints.mjs";
 import { WakeError, createWakes } from "../src/wakes.mjs";
 import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
@@ -35,6 +35,8 @@ import { REVIEW_ACTION, createReviewApplication } from "../src/application/revie
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
 import { findTextSource, listProjectFiles, pathExists, readText, writeScratch } from "../src/infrastructure/filesystem.mjs";
+import { createGitReviewReader } from "../src/infrastructure/git.mjs";
+import { runProcess } from "../src/infrastructure/process.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
@@ -1901,6 +1903,62 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	assert.equal(readFileSync(exported.file, "utf8"), "exported words\n");
 });
 
+test("infrastructure: spawned Git review reads preserve project filtering and stop on cancellation", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const childController = new AbortController();
+	const child = runProcess(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { signal: childController.signal });
+	await new Promise((done) => setImmediate(done));
+	childController.abort();
+	const stopped = await child;
+	assert.equal(stopped.aborted, true, "aborting a projection-owned process terminates its child before it settles");
+
+	const git = async (args) => {
+		const result = await runProcess("git", args, { cwd: root });
+		assert.equal(result.status, 0, result.stderr || `git ${args[0]} failed`);
+	};
+	writeFileSync(join(root, ".gitignore"), "ignored.txt\n");
+	writeFileSync(join(root, "review.txt"), "before checkpoint\n");
+	await git(["init", "-q"]);
+	await git(["add", ".gitignore", "review.txt"]);
+	await git(["-c", "user.name=Cartographer tests", "-c", "user.email=tests@example.test", "commit", "-qm", "initial"]);
+	const reader = createGitReviewReader();
+	const tracked = await reader.projectFiles(root);
+	assert.ok(tracked?.includes("review.txt"));
+	writeFileSync(join(root, "ignored.txt"), "left out\n");
+	writeFileSync(join(root, "visible.txt"), "shown\n");
+	const listed = await reader.projectFiles(root);
+	assert.ok(listed?.includes("visible.txt"));
+	assert.equal(listed?.includes("ignored.txt"), false, "the async Git tree port retains the existing ignore contract");
+	const treeProjection = await createWorkspaceQueries({ brainDir, root }).tree();
+	assert.equal(treeProjection.ok, true);
+	if (!treeProjection.ok) throw new Error(treeProjection.error.message);
+	assert.equal(treeProjection.data.filtersGitIgnored, true);
+	assert.ok(treeProjection.data.files.some((file) => file.path === "visible.txt"));
+	assert.equal(treeProjection.data.files.some((file) => file.path === "ignored.txt"), false);
+
+	checkpoint(root, brainDir, "before m1: revise the review file");
+	writeFileSync(join(root, "review.txt"), "after checkpoint\n");
+	checkpoint(root, brainDir, "after m1");
+	const progress = [];
+	const last = await reader.lastChange(root, brainDir, { reportProgress: (entry) => progress.push(entry) });
+	assert.equal(last?.item, "m1");
+	assert.equal(last?.finished, true);
+	assert.deepEqual(last?.changes.map((change) => change.path), ["review.txt"]);
+	assert.match(last?.patch ?? "", /after checkpoint/);
+	assert.ok(progress.some((entry) => /checkpoint history/i.test(entry.message)), "the port reports real Git-read progress while its child work runs");
+	const projection = await createWorkspaceQueries({ brainDir, root }).review.last();
+	assert.equal(projection.ok, true, "the default Review query consumes the spawned Git port rather than a synchronous checkpoint reader");
+	if (!projection.ok) throw new Error(projection.error.message);
+	assert.equal(projection.data.last?.item, "m1");
+	const own = await reader.uncommitted(root);
+	assert.match(own?.status ?? "", /review\.txt/);
+	assert.match(own?.status ?? "", /visible\.txt/);
+	assert.doesNotMatch(own?.status ?? "", /ignored\.txt/);
+	const stoppedReader = new AbortController();
+	stoppedReader.abort();
+	await assert.rejects(reader.lastChange(root, brainDir, { signal: stoppedReader.signal }), /cancelled/i, "an already-aborted review never starts a Git read");
+});
+
 test("application: workspace queries defer readers and return typed empty, unavailable, and cancelled outcomes", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let ledgerReads = 0;
@@ -1995,6 +2053,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 			loadPlan: () => ({ plan: { items: [], moves: [] } }),
 			loadContext: () => contextStore,
 		},
+		gitReader: { projectFiles: async () => undefined },
 		filesystem: {
 			listProjectFiles: async (_root, { signal }) => {
 				beganTree();
@@ -2002,6 +2061,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 				if (signal.aborted) throw new Error("cancelled tree batch");
 				return [];
 			},
+			describeProjectFiles: async () => [],
 			readText: async () => "",
 		},
 	});
@@ -2116,13 +2176,13 @@ test("application: review queries defer checkpoint and Git projections", async (
 		root,
 		now: () => Date.parse(NOW),
 		reviewReaders: {
-			lastChange: () => { reads.last++; return lastChange; },
-			changeSince: () => { reads.session++; return { steps: 2, changes: [], patch: "" }; },
-			uncommitted: () => { reads.git++; return undefined; },
+			lastChange: async () => { reads.last++; return lastChange; },
+			changeSince: async () => { reads.session++; return { steps: 2, changes: [], patch: "" }; },
+			uncommitted: async () => { reads.git++; return undefined; },
 		},
 	});
 	const pending = queries.review.last({ requestId: "review-last" });
-	assert.equal(reads.last, 0, "checkpoint inspection leaves the render/key stack before its synchronous legacy reader runs");
+	assert.equal(reads.last, 0, "checkpoint inspection leaves the render/key stack before its asynchronous review port starts");
 	const last = await pending;
 	assert.equal(last.ok, true);
 	if (!last.ok) throw new Error(last.error.message);
