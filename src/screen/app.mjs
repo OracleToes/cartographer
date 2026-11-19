@@ -1939,17 +1939,25 @@ export async function runScreen(session, options, runTerminal) {
 	const chatProjection = () => (state.view.chat === "work" ? "work" : state.view.chat === "consult" ? "consult" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
-		if (all.length === 0) return;
-		let at = all.findIndex(({ stop }) => stop === state.selected);
-		// Scrolled away from the selection, the keys start from what is in view.
+		if (all.length === 0) return void chatScroll.scrollBy(by);
+		const at = all.findIndex(({ stop }) => stop === state.selected);
 		const row = at === -1 ? -1 : all[at].index;
 		const [top, rows] = [chatScroll.scrollTop - chatBody.leadNow(), chatScroll.viewportHeight];
-		if (rows > 0 && (row < top || row >= top + rows)) {
-			const inView = all.filter(({ index }) => index >= top && index < top + rows);
+		const inView = rows > 0 ? all.filter(({ index }) => index >= top && index < top + rows) : [];
+		// Scrolled away from the selection, the keys start from a header in view. A long body can fill the whole
+		// viewport, though; in that case j/k remain ordinary outer-viewport scrolling rather than warping back to a
+		// distant selected header.
+		if (at === -1 || (rows > 0 && (row < top || row >= top + rows))) {
 			if (inView.length > 0) return void showStop(by > 0 ? inView[0] : inView.at(-1));
-			at = -1;
+			return void chatScroll.scrollBy(by);
 		}
-		showStop(at === -1 ? all.at(-1) : all[Math.max(0, Math.min(all.length - 1, at + by))]);
+		const next = by > 0
+			? inView.find(({ index }) => index > row)
+			: inView.findLast(({ index }) => index < row);
+		// A disclosure can fill the viewport between its own header and the next one. Keep that content in the one
+		// outer document: j/k take one row through it until another selectable header is actually in view.
+		if (next === undefined) return void chatScroll.scrollBy(by);
+		showStop(next);
 	};
 	/** Open or fold what is selected in Chat; `to` forces one of the two. With `jump`, a call goes to its tab. */
 	const activate = ({ to, jump = false } = {}) => {

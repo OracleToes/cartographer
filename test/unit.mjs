@@ -3471,6 +3471,76 @@ test("application: Settings provenance and persisted actions share revisions wit
 	assert.equal(failed.error.code, UI_ERROR_CODE.internal);
 });
 
+test("screen Chat: disclosures preserve retained bodies and Consult preview direction", () => {
+	const text = (chat, projection) => chat.lines(120, projection).map((line) => line.spans.map(([piece]) => piece).join("")).join("\n");
+	const long = Array.from({ length: POLICY.limits.screen.chatDetailRows + 5 }, (_unused, index) => `settled detail row ${index + 1}`).join("\n");
+	const chat = createChat();
+	chat.entry(0, { id: "detail-entry", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "detail-call", name: "shell", arguments: { command: "printf detail" } }] },
+		{ role: "toolResult", toolCallId: "detail-call", toolName: "shell", isError: false, content: [{ type: "text", text: long }] },
+	] });
+	const group = chat.items.find((item) => item.type === "group");
+	assert.ok(group, "the completed call is retained in its chat group");
+	chat.toggleRow(group.key, 0, true);
+	const openDetail = text(chat, "work");
+	assert.match(openDetail, /settled detail row 1/);
+	assert.match(openDetail, new RegExp(`settled detail row ${POLICY.limits.screen.chatDetailRows + 5}`), "an open detail exposes every locally retained wrapped row");
+	assert.doesNotMatch(openDetail, /more lines/, "an open detail no longer applies a display cap");
+	assert.match(openDetail, /Enter folds this block/, "an open retained detail remains explicitly foldable");
+
+	const blockRows = POLICY.limits.screen.chatDetailRows * 2 + 5;
+	const requestBody = Array.from({ length: blockRows }, (_unused, index) => `request block row ${index + 1}`).join("\n");
+	const request = createChat();
+	request.block("Current request", requestBody);
+	const requestLine = request.lines(120, "work").find((line) => line.kind === "block");
+	assert.ok(requestLine, "the request block keeps its stable selection reference");
+	assert.doesNotMatch(text(request, "work"), new RegExp(`request block row ${blockRows}`), "a folded request block uses its bounded head preview");
+	request.toggle(requestLine.item, true);
+	const openRequest = text(request, "work");
+	assert.match(openRequest, new RegExp(`request block row ${blockRows}`), "an open request block exposes every locally retained row");
+	assert.equal(request.textOf(requestLine.item), requestBody, "copying a request block remains independent of its fold state");
+
+	const retained = "z".repeat(POLICY.limits.screen.chatDetailChars + 17);
+	const clipped = createChat();
+	clipped.entry(0, { id: "clipped-entry", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "clipped-call", name: "shell", arguments: { command: "printf clipped" } }] },
+		{ role: "toolResult", toolCallId: "clipped-call", toolName: "shell", isError: false, content: [{ type: "text", text: retained }] },
+	] });
+	const clippedGroup = clipped.items.find((item) => item.type === "group");
+	assert.ok(clippedGroup);
+	clipped.toggleRow(clippedGroup.key, 0, true);
+	const openClipped = text(clipped, "work");
+	assert.match(openClipped, new RegExp(`retained text was clipped from ${retained.length} characters`), "character retention is explicit metadata, not a fabricated source row");
+	assert.doesNotMatch(clipped.textOf(clippedGroup.key, 0), /\(17 more characters\)/, "copy does not present the old synthetic trailing truncation string as source text");
+
+	const consultCount = POLICY.limits.screen.chatDetailRows + 5;
+	const liveBody = Array.from({ length: consultCount }, (_unused, index) => `live consult row ${index + 1}`).join("\n");
+	const settledBody = Array.from({ length: consultCount }, (_unused, index) => `settled consult row ${index + 1}`).join("\n");
+	const consult = createChat();
+	consult.setConsultProjection({ data: { conferences: [{ id: "co-disclosure", conference: {
+		id: "co-disclosure",
+		status: "running",
+		question: "Which preview direction is correct?",
+		active: { kind: "participant", participant: "atlas" },
+		activities: [{ participant: "cartographer", prose: settledBody }],
+	} }] } });
+	consult.live(0, { timestamp: 1, content: [{ type: "text", text: liveBody }] }, { conference: "co-disclosure", participant: "atlas" });
+	const consultText = text(consult, "consult");
+	assert.match(consultText, new RegExp(`live consult row ${consultCount}`), "a live Consult activity uses its newest tail rows");
+	assert.doesNotMatch(consultText, /live consult row 1\n/, "a live Consult activity omits its old head when folded");
+	assert.match(consultText, /settled consult row 1/, "a settled Consult activity retains its head preview");
+	assert.doesNotMatch(consultText, new RegExp(`settled consult row ${consultCount}`), "a settled Consult activity does not switch to a tail preview");
+	const joined = (line) => line.spans.map(([piece]) => piece).join("");
+	const liveHeader = consult.lines(120, "consult").find((line) => line.kind === "consult-event" && /Atlas · chat \/ prose · writing/.test(joined(line)));
+	const settledHeader = consult.lines(120, "consult").find((line) => line.kind === "consult-event" && /Cartographer · chat \/ prose$/.test(joined(line)));
+	assert.ok(liveHeader && settledHeader, "Consult keeps stable event references for each disclosure");
+	consult.toggleRow(liveHeader.item, liveHeader.row, true);
+	consult.toggleRow(settledHeader.item, settledHeader.row, true);
+	const openConsult = text(consult, "consult");
+	assert.match(openConsult, /live consult row 1/, "opening a live Consult event exposes all locally retained rows");
+	assert.match(openConsult, new RegExp(`settled consult row ${consultCount}`), "opening a settled Consult event exposes all locally retained rows");
+});
+
 test("application: consult projection defers its isolated audit list", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let reads = 0;

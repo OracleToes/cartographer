@@ -385,6 +385,45 @@ test("screen: a compact no-color full Screen keeps disabled action text, Setting
 	assert.equal(result.stdout.includes("\x1b[48;"), false, "NO_COLOR suppresses palette backgrounds in the full-screen route");
 });
 
+test("screen: one outer viewport reaches a live Consult body and a settled call detail", async () => {
+	const root = makeProject("screen-disclosure-scroll", { git: false });
+	configure(root, { initiate: false, colors: "none" });
+	const server = await startStandIn({ tokenDelayMs: 6, consultLongRows: 48 });
+	try {
+		const consult = JSON.stringify({ question: "Show the disclosure fixture.", myPersona: "SCREEN DISCLOSURE FIXTURE" });
+		const result = await cartoOnTerminal(root, server, ["--screen"], [
+			["Set one up in", ""],
+			["model stand-in un", `consult: ${consult}`],
+			[0.05, "\x1b", false],
+			[0.05, "]]", false],
+			["Consultation co1", "", false],
+			["LIVE_CONSULT_010", "G", false],
+			[0.03, "\r", false],
+			["LIVE_CONSULT_048", "", false],
+			["○ resting", "i", false],
+			[0.03, "look: read: long.txt @1+700"],
+			["○ resting", "\x1b", false],
+			[0.03, "]", false],
+			["▸ 1 call", "G", false],
+			[0.03, "\r", false],
+			["✓ read long.txt", "j", false],
+			[0.03, "\r", false],
+			[0.03, "G", false],
+			["line 700", "i", false],
+			[0.03, "/quit"],
+		], { env: { NO_COLOR: "1" }, resize: { cols: 84, rows: 18 } });
+		if (result === undefined) return "python3 is needed for the full-screen disclosure check";
+		ok(result, "the full-screen disclosure flow");
+		has(result.screen, "LIVE_CONSULT_010", "the actual live Consult body advances into its folded tail");
+		has(result.screen, "LIVE_CONSULT_001", "opening the live Consult event exposes its retained head through the page viewport");
+		has(result.screen, "LIVE_CONSULT_048", "the real stream reaches its retained tail without a nested viewport");
+		has(result.screen, "line 700", "one opened settled call detail reaches its final locally retained row");
+		has(result.screen, "Enter folds this block", "opened Screen disclosures retain their local folding affordance");
+	} finally {
+		await server.close();
+	}
+});
+
 test("launch: a grammar-ignoring route is refused before its first agent request", async () => {
 	const root = makeProject("native-grammar-required", { git: false });
 	const server = await startStandIn({ ignoreNativeGrammar: true });
@@ -1900,11 +1939,11 @@ test("screen: a collapse of the main context leaves only the marker, and the age
 	chat.user("hello before");
 	chat.entry(0, reply([call("c1", "chat", { text: "Hi." })], 1));
 	chat.block("the state block — the time, the atlas, the ledger, the plan", "Ledger\n- g1 finish the roller\n\nPlan\np1 open");
-	assert.match(out(), /the state block/, "a block folds to one line");
-	assert.equal(out().includes("g1 finish the roller"), false, "and its content is not in view until it is opened");
+	assert.match(out(), /the state block/, "a block keeps its own disclosure label");
+	assert.match(out(), /g1 finish the roller/, "a short folded block has no hidden rows to withhold");
 	const before = chat.lines(80).find((line) => line.kind === "block");
 	chat.toggle(before.item);
-	assert.match(out(), /g1 finish the roller/, "opened, the content stands as the agent sees it");
+	assert.match(out(), /g1 finish the roller/, "opened, the content still stands as the agent sees it");
 	assert.equal(chat.textOf(before.item), "Ledger\n- g1 finish the roller\n\nPlan\np1 open", "and copies as it stands");
 	// The collapse: everything of the conversation is out, the marker stands, the intro survives.
 	chat.entry(0, { model: [{ role: "user", content: [{ type: "text", text: `<context>\n${RECORD} My context was collapsed\n</context>` }] }] }, "◆ context collapsed (you rested): about 9,000 → 800 tokens · kept 1 task record, 0 shelf items, 2 messages of talk  (/context shows it)\n");
@@ -2131,51 +2170,51 @@ test("screen: long reasoning stays compact after completion and folds in Work", 
 	const thought = Array.from({ length: thoughtLines }, (_entry, index) => `thought ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: thought }] });
 	const compact = text();
-	has(compact, "▸ thinking · 8 earlier lines · Enter opens all", "a long stream names what is left out and how to open it");
+	has(compact, "▸ thinking · 8 earlier lines · Enter opens this block", "a long stream names what is left out and how to open it");
 	has(compact, `thought ${thoughtLines}`, "the newest reasoning stays visible");
 	hasNot(compact, "thought 1\n", "the old reasoning does not make the preview grow");
 	const live = chat.lines(40).find((line) => line.kind === "live" && line.liveDepth === 0);
 	assert.ok(live, "the compact stream is selectable in Chat");
 	chat.setAll(true);
-	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds`, "open all opens the live stream too");
+	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds this block`, "open all opens the live stream too");
 	chat.setAll(false);
-	has(text(), "▸ thinking · 8 earlier lines · Enter opens all", "fold all returns it to the compact tail");
+	has(text(), "▸ thinking · 8 earlier lines · Enter opens this block", "fold all returns it to the compact tail");
 	assert.equal(chat.toggleLive(live.liveDepth, true), true, "the selected live stream opens");
-	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds\nthought 1`, "opening shows the beginning as well as the tail");
+	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds this block\nthought 1`, "opening shows the beginning as well as the tail");
 	assert.equal(chat.textOf("live:0"), thought, "copying the live stream takes its whole reasoning");
 	const nextThoughtLine = thoughtLines + 1;
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] });
-	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds`, "an opened stream stays open as it grows");
+	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds this block`, "an opened stream stays open as it grows");
 	has(text(), `thought ${nextThoughtLine}`, "the growing stream includes its new reasoning");
 	chat.setThinking(false);
 	has(text(), "thinking… (Ctrl-T shows it)", "Ctrl-T hides the live reasoning");
 	hasNot(text(), `thought ${nextThoughtLine}`, "the hidden stream does not leave its open text behind");
 	chat.setThinking(true);
-	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds\nthought 1`, "showing thinking again keeps the deliberate open state");
+	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds this block\nthought 1`, "showing thinking again keeps the deliberate open state");
 	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] }] });
 	const completedLines = nextThoughtLine;
 	const omitted = completedLines - previewRows;
 	const compactCompleted = text(40, "work");
-	has(compactCompleted, `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens all`, "completed long reasoning stays compact in Work");
+	has(compactCompleted, `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens this block`, "completed long reasoning stays compact in Work");
 	has(compactCompleted, "thought 1", "the compact completed reasoning keeps its start visible");
 	hasNot(compactCompleted, `thought ${completedLines}`, "the compact completed reasoning leaves its tail folded");
 	const completed = chat.lines(40, "work").find((line) => line.kind === "reasoning");
 	assert.ok(completed, "the completed reasoning is selectable in Work");
 	chat.toggleRow(completed.item, completed.row, true);
-	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds`, "Enter opens the completed reasoning in Work");
+	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds this block`, "Enter opens the completed reasoning in Work");
 	has(text(40, "work"), `thought ${completedLines}`, "the opened reasoning restores its full tail");
 	chat.toggleRow(completed.item, completed.row, false);
 	hasNot(text(40, "work"), `thought ${completedLines}`, "h or Enter can fold the completed reasoning again");
 	chat.setAll(true);
-	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds`, "open all opens completed private reasoning too");
+	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds this block`, "open all opens completed private reasoning too");
 	chat.setAll(false);
-	has(text(40, "work"), `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens all`, "fold all returns completed private reasoning to its compact preview");
+	has(text(40, "work"), `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens this block`, "fold all returns completed private reasoning to its compact preview");
 	assert.equal(chat.lines(40).find((line) => line.kind === "reasoning")?.bg, "bgNote", "completed private reasoning keeps its own quiet block instead of blending into tool work");
 	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
 	const nextLines = previewRows + 3;
 	const next = Array.from({ length: nextLines }, (_entry, index) => `next ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 10, content: [{ type: "thinking", thinking: next }] });
-	has(text(), "▸ thinking · 3 earlier lines · Enter opens all", "the next reply starts folded again");
+	has(text(), "▸ thinking · 3 earlier lines · Enter opens this block", "the next reply starts folded again");
 	chat.live(0, undefined);
 	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
 });
