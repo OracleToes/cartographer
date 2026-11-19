@@ -33,7 +33,7 @@ const BLOCK_RAILS = {
 	[TOKEN.activity.userSurface]: ["▎", TOKEN.activity.user],
 	[TOKEN.activity.shellSurface]: ["│", TOKEN.activity.shell],
 	[TOKEN.activity.noteSurface]: ["┊", TOKEN.activity.note],
-	// Compatibility for feature projections that still name their former surfaces.
+	// Chat has not migrated these three activity blocks yet, so their retained aliases keep its identity rails intact.
 	bgUser: ["▎", TOKEN.activity.user],
 	bgTool: ["│", TOKEN.activity.shell],
 	bgNote: ["┊", TOKEN.activity.note],
@@ -408,16 +408,16 @@ export class Prompt extends Editor {
 		return guarded(width, () => {
 			const { ui } = this;
 			const airy = this.tui.terminal.rows >= AIRY_ROWS;
-			const blank = barRow([], width, "bgInput");
-			if (ui.state.mode === "command") return [barRow(ui.commandLine(), width, "bgInput"), ...(airy ? [blank] : [])];
+			const blank = barRow([], width, TOKEN.surface.input);
+			if (ui.state.mode === "command") return [barRow(ui.commandLine(), width, TOKEN.surface.input), ...(airy ? [blank] : [])];
 			const margin = marginOf(width);
 			const inner = width - 2 * margin;
 			const { text: prompt, style } = ui.prompt();
 			const lead = cells(prompt);
 			const pad = " ".repeat(lead);
-			const bg = sgr("bgInput");
-			const left = `${edge(width, "bgInput")}${bg}`;
-			const right = `\x1b[0m${edge(width, "bgInput")}`;
+			const bg = sgr(TOKEN.surface.input);
+			const left = `${edge(width, TOKEN.surface.input)}${bg}`;
+			const right = `\x1b[0m${edge(width, TOKEN.surface.input)}`;
 			const rows = [];
 			let part = "above"; // above the text, in it, or below it (the completions)
 			let first = true;
@@ -432,14 +432,14 @@ export class Prompt extends Editor {
 					if (part === "above") {
 						part = "text";
 						if (hidden !== "") {
-							rows.push(barRow([[pad, ""], [`↑ ${hidden} more rows`, "faint"]], width, "bgInput"));
+							rows.push(barRow([[pad, ""], [`↑ ${hidden} more rows`, "faint"]], width, TOKEN.surface.input));
 							this.offset.y = 0;
 						}
 					} else {
 						part = "below";
 						const count = this.getLines().length;
-						if (hidden !== "") rows.push(barRow([[pad, ""], [`↓ ${hidden} more rows`, "faint"]], width, "bgInput"));
-						else if (count > 1) rows.push(barRow([[pad, ""], [`${count} lines · Enter sends them as one message · Alt-Enter adds a line`, "faint"]], width, "bgInput"));
+						if (hidden !== "") rows.push(barRow([[pad, ""], [`↓ ${hidden} more rows`, "faint"]], width, TOKEN.surface.input));
+						else if (count > 1) rows.push(barRow([[pad, ""], [`${count} lines · Enter sends them as one message · Alt-Enter adds a line`, "faint"]], width, TOKEN.surface.input));
 						else if (airy) rows.push(blank);
 					}
 					continue;
@@ -448,7 +448,7 @@ export class Prompt extends Editor {
 					// A row of the list of completions, on a panel of its own, in line with what is typed.
 					this.listAt ??= { row: rows.length, editorRow: textRows + 2 };
 					const row = truncateToWidth(line, Math.max(1, inner - 2), "");
-					rows.push(`${edge(width, "bgPanel")}${sgr("bgPanel")}  ${row}${sgr("bgPanel")}${" ".repeat(Math.max(0, inner - 2 - visibleWidth(row)))}\x1b[0m${edge(width, "bgPanel")}`);
+					rows.push(`${edge(width, TOKEN.surface.content)}${sgr(TOKEN.surface.content)}  ${row}${sgr(TOKEN.surface.content)}${" ".repeat(Math.max(0, inner - 2 - visibleWidth(row)))}\x1b[0m${edge(width, TOKEN.surface.content)}`);
 					continue;
 				}
 				const head = first ? `${sgr(style)}${prompt}\x1b[22;39m` : pad;
@@ -512,7 +512,7 @@ export class Sheet {
 			this.page = room;
 			this.most = Math.max(0, lines.length - room);
 			this.top = Math.max(0, Math.min(this.top, this.most));
-			const row = (spans) => paint([["   ", ""], ...spans], width, "bgPanel");
+			const row = (spans) => paint([["   ", ""], ...spans], width, TOKEN.surface.content);
 			const more = lines.length > room ? `   ${this.top + 1}–${Math.min(lines.length, this.top + room)} of ${lines.length} · j k scroll` : "";
 			return [row([]), row([[this.given.title, "user bold"], [`${more}   Esc closes`, "faint"]]), row([]), ...lines.slice(this.top, this.top + room).map(row), row([])];
 		});
@@ -533,7 +533,7 @@ export class Sheet {
 }
 
 /**
- * The small box a field of a book or of the graph is edited in: the field's label, how much of it is used — live,
+ * The shared form a field of a book or of the graph is edited in: the field's label, how much of it is used — live,
  * `n / limit` — and the most it may hold. Nothing past the limit goes in, typed or pasted. `Enter` saves a one-line
  * field; a field that holds a long text lets `Enter` end a line and `Ctrl-Enter` save. `Tab` moves through the fields
  * of the row and the drafts ride along until `Esc`. The screen is one more client of the same operations the
@@ -543,7 +543,7 @@ export class Sheet {
  * `required`, `disabled`, `help`, and a synchronous field `validate(value, drafts)` are optional shared field
  * metadata. They improve local correction only; the application action remains the authority for every durable rule.
  */
-export class Box {
+export class Form {
 	static VISIBLE = 6;
 	/**
 	 * @param {{ title: string, fields: { id: string, label: string, limit: number, multiline?: boolean, value?: string, required?: boolean, disabled?: boolean, help?: string, validate?: (value: string, drafts: Map<string, string>) => string | { message?: string } | boolean | undefined }[],
@@ -680,7 +680,7 @@ export class Box {
 		const rows = rowsOf(this.text, this.inner - 2);
 		const at = this.cursorRow(rows);
 		if (at < this.scrolls[this.index]) this.scrolls[this.index] = at;
-		else if (at >= this.scrolls[this.index] + Box.VISIBLE) this.scrolls[this.index] = at - Box.VISIBLE + 1;
+		else if (at >= this.scrolls[this.index] + Form.VISIBLE) this.scrolls[this.index] = at - Form.VISIBLE + 1;
 	}
 	moveByLine(delta) {
 		if (!this.field.multiline) return;
@@ -752,7 +752,7 @@ export class Box {
 	handleMouse(event) {
 		if (event.type === "wheel" && this.field.multiline) {
 			const rows = rowsOf(this.text, this.inner - 2);
-			const most = Math.max(0, rows.length - Box.VISIBLE);
+			const most = Math.max(0, rows.length - Form.VISIBLE);
 			this.scrolls[this.index] = Math.max(0, Math.min(most, this.scrolls[this.index] + (event.wheelDelta ?? 0)));
 		}
 		return { handled: true };
@@ -815,9 +815,9 @@ export class Box {
 			} else {
 				const rows = rowsOf(this.text, this.inner - 2);
 				const at = this.cursorRow(rows);
-				const scroll = Math.min(this.scrolls[this.index], Math.max(0, rows.length - Box.VISIBLE));
+				const scroll = Math.min(this.scrolls[this.index], Math.max(0, rows.length - Form.VISIBLE));
 				this.scrolls[this.index] = scroll;
-				for (let i = scroll; i < scroll + Box.VISIBLE; i++) {
+				for (let i = scroll; i < scroll + Form.VISIBLE; i++) {
 					const range = rows[i];
 					if (range === undefined) lines.push(row([["▎", TOKEN.activity.user], ["", TOKEN.text.primary]]));
 					else lines.push(row(this.rowSpans(this.text.slice(range.start, range.end), i === at ? this.cursor - range.start : -1)));
@@ -832,12 +832,6 @@ export class Box {
 		});
 	}
 }
-
-/**
- * The shared form name for new component call sites. `Box` remains as a compatibility alias while existing feature
- * forms migrate one at a time; both share focus capture, local validation, disabled fields, and pending-save rules.
- */
-export class Form extends Box {}
 
 /** What is left on the terminal when carto leaves: the conversation as it stood, without the screen around it. */
 export class Farewell {

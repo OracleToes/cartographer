@@ -30,7 +30,16 @@ const DEFAULTS = {
 /** The hues, in degrees of the OKLCH wheel. Blue is the key; teal and violet sit beside it; the signals are warm. */
 export const HUES = { user: 255, tool: 200, note: 305, ok: 150, warn: 80, err: 25 };
 /** The parts of a context: eight hues evenly round the wheel, and two greys. */
-const CATEGORY_HUES = { catSystem: 70, catTools: 205, catTop: 115, catKept: 295, catYou: 250, catAgent: 160, catState: 340, catWindows: 25 };
+const CONTEXT_HUES = {
+	[TOKEN.domain.context.system]: 70,
+	[TOKEN.domain.context.tools]: 205,
+	[TOKEN.domain.context.top]: 115,
+	[TOKEN.domain.context.kept]: 295,
+	[TOKEN.domain.context.user]: 250,
+	[TOKEN.domain.context.agent]: 160,
+	[TOKEN.domain.context.state]: 340,
+	[TOKEN.domain.context.windows]: 25,
+};
 
 /** The nearest of the 256 colours: the grey ramp for greys, the cube for the rest. */
 export function to256(r, g, b) {
@@ -100,6 +109,11 @@ export function makeTheme({ mode = "none", background, foreground, scheme } = {}
 	const accent = (hue, strength = 1) => oklchColor(dark ? 0.8 : 0.5, (dark ? 0.115 : 0.135) * strength, hue);
 	const hue = Object.fromEntries(Object.entries(HUES).map(([name, degrees]) => [name, accent(degrees)]));
 
+	const context = {
+		...Object.fromEntries(Object.entries(CONTEXT_HUES).map(([token, degrees]) => [token, out(accent(degrees, 1.1))])),
+		[TOKEN.domain.context.cartographer]: toward(fg, bg, 0.6),
+		[TOKEN.domain.context.result]: toward(fg, bg, 0.18),
+	};
 	const fgs = {
 		// How much it matters.
 		muted: toward(fg, bg, 0.32),
@@ -123,40 +137,52 @@ export function makeTheme({ mode = "none", background, foreground, scheme } = {}
 		magenta: out(hue.note),
 		cyan: out(hue.tool),
 		grey: toward(fg, bg, 0.54),
-		...Object.fromEntries(Object.entries(CATEGORY_HUES).map(([name, degrees]) => [name, out(accent(degrees, 1.1))])),
-		catCarto: toward(fg, bg, 0.6),
-		catResult: toward(fg, bg, 0.18),
+		...context,
 	};
 	// A theme whose text is not far from its background has less room for blocks between the two: the steps shrink
 	// with it, so that text on a block stays as readable as the theme lets it be anywhere.
 	const luma = ([r, g, b]) => (r * 299 + g * 587 + b * 114) / 1000;
 	const room = Math.max(0.45, Math.min(1, Math.abs(luma(fgRgb) - luma(bgRgb)) / 185));
+	// Whose block it is: the hue, deliberately faint. The rail beside a block carries the identity; the fill only
+	// holds its rows together, so long Work transcripts stay calm.
+	const userSurface = toward(bg, hue.user, (dark ? 0.15 : 0.11) * room);
+	const shellSurface = toward(bg, hue.tool, (dark ? 0.075 : 0.065) * room);
+	const noteSurface = toward(bg, hue.note, 0.035 * room);
+	// Where it is: a restrained neutral step. The closer something is to content, the less it competes with it.
+	const contentSurface = toward(bg, fg, 0.052);
+	const inputSurface = toward(bg, fg, 0.032);
+	const raisedSurface = toward(bg, fg, 0.085);
+	// What is selected, and the tab that shows. These remain the strongest surfaces, but are no longer louder than
+	// the text they are helping someone find.
+	const selectedSurface = toward(bg, hue.user, (dark ? 0.27 : 0.22) * room);
+	const activeSurface = toward(bg, hue.user, (dark ? 0.36 : 0.31) * room);
 	const bgs = {
-		// Whose block it is: the hue, deliberately faint. The rail beside a block carries the identity; the fill
-		// only holds its rows together, so long Work transcripts stay calm.
-		bgUser: toward(bg, hue.user, (dark ? 0.15 : 0.11) * room),
-		bgTool: toward(bg, hue.tool, (dark ? 0.075 : 0.065) * room),
-		bgNote: toward(bg, hue.note, 0.035 * room),
-		// Where it is: a restrained neutral step. The closer something is to content, the less it competes with it.
-		bgPanel: toward(bg, fg, 0.052),
-		bgInput: toward(bg, fg, 0.032),
-		bgBar: toward(bg, fg, 0.085),
-		// What is selected, and the tab that shows. These remain the strongest surfaces, but are no longer louder
-		// than the text they are helping someone find.
-		bgSel: toward(bg, hue.user, (dark ? 0.27 : 0.22) * room),
-		bgTab: toward(bg, hue.user, (dark ? 0.36 : 0.31) * room),
+		// Chat still has proven legacy consumers for these three block names.
+		bgUser: userSurface,
+		bgTool: shellSurface,
+		bgNote: noteSurface,
+		[TOKEN.activity.userSurface]: userSurface,
+		[TOKEN.activity.shellSurface]: shellSurface,
+		[TOKEN.activity.noteSurface]: noteSurface,
+		[TOKEN.surface.content]: contentSurface,
+		[TOKEN.surface.overlay]: contentSurface,
+		[TOKEN.surface.input]: inputSurface,
+		[TOKEN.surface.raised]: raisedSurface,
+		[TOKEN.interaction.focus]: selectedSurface,
+		[TOKEN.interaction.selected]: selectedSurface,
+		[TOKEN.interaction.active]: activeSurface,
 	};
 	const rgb = { bg: bgRgb, fg: fgRgb, ...fgs, ...bgs, chip: out(hue.warn) };
 	if (mode !== "truecolor" && mode !== "256") return { mode: "none", scheme: kind, known, rgb, styles: undefined };
 	const code = (layer, [r, g, b]) => (mode === "truecolor" ? `${layer};2;${r};${g};${b}` : `${layer};5;${to256(r, g, b)}`);
-	// Feature renderers still use the former names. Give the theme one semantic source of truth first, then add
-	// those names as compatibility aliases while each renderer migrates to TOKEN in a later slice.
+	// The semantic map is authoritative. Compatibility aliases are added only for the feature renderers that still
+	// consume one, so completed migrations cannot silently regain a former style name.
 	const semanticRgb = {
 		[TOKEN.surface.canvas]: rgb.bg,
-		[TOKEN.surface.content]: rgb.bgPanel,
-		[TOKEN.surface.raised]: rgb.bgBar,
-		[TOKEN.surface.input]: rgb.bgInput,
-		[TOKEN.surface.overlay]: rgb.bgPanel,
+		[TOKEN.surface.content]: rgb[TOKEN.surface.content],
+		[TOKEN.surface.raised]: rgb[TOKEN.surface.raised],
+		[TOKEN.surface.input]: rgb[TOKEN.surface.input],
+		[TOKEN.surface.overlay]: rgb[TOKEN.surface.overlay],
 		[TOKEN.text.primary]: rgb.fg,
 		[TOKEN.text.secondary]: rgb.muted,
 		[TOKEN.text.muted]: rgb.faint,
@@ -167,9 +193,9 @@ export function makeTheme({ mode = "none", background, foreground, scheme } = {}
 		[TOKEN.border.subtle]: rgb.faint,
 		[TOKEN.border.strong]: rgb.muted,
 		[TOKEN.border.focus]: rgb.user,
-		[TOKEN.interaction.focus]: rgb.bgSel,
-		[TOKEN.interaction.selected]: rgb.bgSel,
-		[TOKEN.interaction.active]: rgb.bgTab,
+		[TOKEN.interaction.focus]: rgb[TOKEN.interaction.focus],
+		[TOKEN.interaction.selected]: rgb[TOKEN.interaction.selected],
+		[TOKEN.interaction.active]: rgb[TOKEN.interaction.active],
 		[TOKEN.interaction.disabled]: rgb.faint,
 		[TOKEN.interaction.loading]: rgb.warn,
 		[TOKEN.interaction.stale]: rgb.muted,
@@ -181,22 +207,22 @@ export function makeTheme({ mode = "none", background, foreground, scheme } = {}
 		[TOKEN.activity.agent]: rgb.carto,
 		[TOKEN.activity.shell]: rgb.tool,
 		[TOKEN.activity.note]: rgb.note,
-		[TOKEN.activity.userSurface]: rgb.bgUser,
-		[TOKEN.activity.shellSurface]: rgb.bgTool,
-		[TOKEN.activity.noteSurface]: rgb.bgNote,
+		[TOKEN.activity.userSurface]: rgb[TOKEN.activity.userSurface],
+		[TOKEN.activity.shellSurface]: rgb[TOKEN.activity.shellSurface],
+		[TOKEN.activity.noteSurface]: rgb[TOKEN.activity.noteSurface],
 		[TOKEN.domain.diff.added]: rgb.green,
 		[TOKEN.domain.diff.removed]: rgb.red,
 		[TOKEN.domain.diff.changed]: rgb.yellow,
-		[TOKEN.domain.context.system]: rgb.catSystem,
-		[TOKEN.domain.context.tools]: rgb.catTools,
-		[TOKEN.domain.context.top]: rgb.catTop,
-		[TOKEN.domain.context.kept]: rgb.catKept,
-		[TOKEN.domain.context.user]: rgb.catYou,
-		[TOKEN.domain.context.cartographer]: rgb.catCarto,
-		[TOKEN.domain.context.agent]: rgb.catAgent,
-		[TOKEN.domain.context.result]: rgb.catResult,
-		[TOKEN.domain.context.state]: rgb.catState,
-		[TOKEN.domain.context.windows]: rgb.catWindows,
+		[TOKEN.domain.context.system]: rgb[TOKEN.domain.context.system],
+		[TOKEN.domain.context.tools]: rgb[TOKEN.domain.context.tools],
+		[TOKEN.domain.context.top]: rgb[TOKEN.domain.context.top],
+		[TOKEN.domain.context.kept]: rgb[TOKEN.domain.context.kept],
+		[TOKEN.domain.context.user]: rgb[TOKEN.domain.context.user],
+		[TOKEN.domain.context.cartographer]: rgb[TOKEN.domain.context.cartographer],
+		[TOKEN.domain.context.agent]: rgb[TOKEN.domain.context.agent],
+		[TOKEN.domain.context.result]: rgb[TOKEN.domain.context.result],
+		[TOKEN.domain.context.state]: rgb[TOKEN.domain.context.state],
+		[TOKEN.domain.context.windows]: rgb[TOKEN.domain.context.windows],
 	};
 	const styles = {};
 	for (const [token, value] of Object.entries(semanticRgb)) {

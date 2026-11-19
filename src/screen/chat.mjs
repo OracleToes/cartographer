@@ -19,6 +19,7 @@
 // belongs to, and `styled` is the line with its escape sequences when a Markdown renderer made it. It draws
 // nothing and knows no terminal (src/screen/app.mjs does).
 import { POLICY } from "../config.mjs";
+import { disclosureRows } from "./disclosure.mjs";
 import { cut, repeats, span, width, wrap } from "./text.mjs";
 
 /** How many of a run's newest calls are shown while it is going on. */
@@ -29,9 +30,9 @@ const LIVE_TEXT_ROWS = POLICY.limits.screen.chatLiveTextRows;
 const LIVE_NOTE_ROWS = POLICY.limits.screen.notePreviewLines;
 /** The most of one result that is kept for opening it in place. */
 const DETAIL_MAX = POLICY.limits.screen.chatDetailChars;
-/** The most rows an opened result shows; the rest is in the tab it leads to, or in /report. */
+/** The rows a folded result previews before its locally retained body is opened. */
 const DETAIL_ROWS = POLICY.limits.screen.chatDetailRows;
-/** The most rows an opened request block shows (the state block and the copy at the top of the context). */
+/** The rows a folded request block previews before its locally retained body is opened. */
 const BLOCK_ROWS = DETAIL_ROWS * 2;
 /** Items kept; older ones leave the tab (they stay in the session and in the export of what is left). */
 const ITEMS_MAX = POLICY.limits.screen.chatItems;
@@ -84,12 +85,24 @@ function bodyOf(call) {
 	return best;
 }
 
-/** The newest rows of a live reply, with how many earlier rows the compact view leaves out. */
-function previewTail(text, cols, rows) {
-	const wrapped = wrap(text, cols);
-	const omitted = Math.max(0, wrapped.length - rows);
-	return { lines: wrapped.slice(omitted), omitted };
-}
+const lineCount = (count) => `${count} ${count === 1 ? "line" : "lines"}`;
+/** The shared wording is about this retained body, never a global open-all control. */
+const disclosureSummary = (plan, { tail = false } = {}) => plan.mode === "open"
+	? `${lineCount(plan.totalRows)} · Enter folds this block`
+	: `${plan.omittedRows} ${tail ? "earlier" : "more"} ${plan.omittedRows === 1 ? "line" : "lines"} · Enter opens this block`;
+const retentionOf = ({ clipped, chars, originalChars, reason } = {}) => {
+	const sourceChars = originalChars ?? chars;
+	return clipped === true
+		? {
+			clipped: true,
+			...(Number.isSafeInteger(sourceChars) && sourceChars >= 0 ? { originalChars: sourceChars } : {}),
+			...(typeof reason === "string" && reason.trim() !== "" ? { reason } : {}),
+		}
+		: undefined;
+};
+const retentionLine = (notice) => notice === undefined
+	? undefined
+	: `… retained text was clipped${notice.originalChars === undefined ? "" : ` from ${notice.originalChars} characters`}${notice.reason === undefined ? "" : ` · ${notice.reason}`}`;
 
 const selectorLabel = (selection) => selection?.decision === "report" ? "Conference host · native final-report decision" : "Conference host · native debate routing";
 const consultCall = (call) => {
@@ -502,7 +515,7 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 			const known = calls.get(callId);
 			const participant = tool.participant ?? known?.participant ?? record?.active?.participant;
 			if (participant === undefined) continue;
-			add({ key: `live:tool:${callId}`, at: now(), participant, type: "tool-result", call: tool.call ?? known?.call, callId, text: tool.text === "" ? "Waiting for the consult-local tool result…" : tool.text, isError: false, clipped: tool.clipped, live: true });
+			add({ key: `live:tool:${callId}`, at: now(), participant, type: "tool-result", call: tool.call ?? known?.call, callId, text: tool.text === "" ? "Waiting for the consult-local tool result…" : tool.text, isError: false, clipped: tool.clipped, reason: tool.reason, live: true });
 		}
 		return events.sort((left, right) => eventTime(left.at, left.order) - eventTime(right.at, right.order) || left.order - right.order);
 	};
@@ -521,18 +534,27 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 	const consultExport = (session, eventKey) => {
 		const record = session.record;
 		const events = consultEvents(session, record);
+		const eventBody = (event, { fenced = false } = {}) => {
+			const body = event.type === "tool-call"
+				? fenced
+					? `${consultCall(event.call)}\n\n\`\`\`json\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}\n\`\`\``
+					: `${consultCall(event.call)}\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}`
+				: event.text ?? "";
+			const notice = retentionLine(retentionOf(event));
+			return notice === undefined ? body : `${body}${body === "" ? "" : "\n\n"}${notice}`;
+		};
 		const heading = `# Consultation ${session.id ?? "starting"}\n\n`;
 		if (eventKey !== undefined) {
 			const event = events.find((candidate) => candidate.key === String(eventKey));
 			if (event === undefined) return "";
 			const label = event.type === "selector" ? selectorLabel(event) : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
-			return `${label}\n\n${event.type === "tool-call" ? `${consultCall(event.call)}\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}` : event.text ?? ""}\n`;
+			return `${label}\n\n${eventBody(event)}\n`;
 		}
 		const rows = [heading, `Status: ${record?.status ?? session.outerState ?? "starting"}`, `Question: ${record?.question ?? session.question ?? "(not available yet)"}`, "", "## Roster", ""];
 		for (const member of consultRoster) rows.push(`- ${member.name}: ${consultMemberStatus(member, record, events)}`);
 		for (const event of events) {
 			const label = event.type === "selector" ? selectorLabel(event) : `${personaName(event.participant)} · ${event.type === "tool-call" ? "tool call" : event.type === "tool-result" ? "tool result" : event.type === "final" ? `final advisory · ${event.outcome}` : event.type}`;
-			rows.push("", `## ${label}`, "", event.type === "tool-call" ? `${consultCall(event.call)}\n\n\`\`\`json\n${JSON.stringify(event.call?.arguments ?? event.call?.args ?? {}, null, 2)}\n\`\`\`` : event.text ?? "");
+			rows.push("", `## ${label}`, "", eventBody(event, { fenced: true }));
 		}
 		return `${rows.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
 	};
@@ -605,11 +627,18 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 				const room = Math.max(8, inner - 4);
 				const body = detail === "" ? [] : wrap(detail, room);
 				const preview = event.type === "reasoning" ? LIVE_NOTE_ROWS : event.type === "tool-result" ? LIVE_TEXT_ROWS : DETAIL_ROWS;
-				const expandable = body.length > preview;
-				add([[expandable ? (open ? "  ▾ " : "  ▸ ") : "  · ", "faint"], [cut(label, inner - 4), event.isError ? "err" : event.type === "final" ? "ok bold" : event.type === "reasoning" ? "faint" : "bold"]], eventRef);
-				for (const piece of (open ? body : body.slice(0, preview))) add([["    ", "faint"], [piece, event.isError ? "err" : event.type === "reasoning" ? "note italic" : "muted"]], eventRef);
-				if (!open && body.length > preview) add([["    ", "faint"], [`… ${body.length - preview} more lines · Enter opens`, "faint"]], eventRef);
-				if (event.clipped) add([["    ", "faint"], [`… retained result was clipped from ${event.chars ?? "a longer"} characters`, "faint"]], eventRef);
+				const plan = disclosureRows({
+					rows: body,
+					open,
+					previewRows: preview,
+					preview: event.live === true ? "tail" : "head",
+					retained: retentionOf(event),
+				});
+				add([[plan.expandable ? (plan.mode === "open" ? "  ▾ " : "  ▸ ") : "  · ", "faint"], [cut(label, inner - 4), event.isError ? "err" : event.type === "final" ? "ok bold" : event.type === "reasoning" ? "faint" : "bold"]], eventRef);
+				for (const piece of plan.visibleRows) add([["    ", "faint"], [piece, event.isError ? "err" : event.type === "reasoning" ? "note italic" : "muted"]], eventRef);
+				if (plan.expandable && plan.mode === "folded") add([["    ", "faint"], [`… ${disclosureSummary(plan, { tail: event.live === true })}`, "faint"]], eventRef);
+				const notice = retentionLine(plan.retainedNotice);
+				if (notice !== undefined) add([["    ", "faint"], [notice, "faint"]], eventRef);
 			}
 			if (session.receipt !== undefined && record?.final === undefined && record?.ended === undefined) {
 				blank();
@@ -748,8 +777,13 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 					row.ended = now();
 					row.result = row.name === "task" ? (message.isError ? cut(plain(text).replace(/\n/g, " "), POLICY.limits.screen.taskErrorChars) : `report ${message.details?.report ?? ""}`.trim()) : describeResult(message) || undefined;
 					// The consult's answer is not in the result (the receipt keeps the session lean); no detail to show.
+					// A retained character ceiling is source provenance, not a fake display row. Opening shows every
+					// character Chat still has and the renderer says explicitly when the original was longer.
 					row.receipt = row.name === "consult" ? text : undefined;
-					row.detail = row.name === "consult" ? undefined : text.length > DETAIL_MAX ? `${text.slice(0, DETAIL_MAX)}\n… (${text.length - DETAIL_MAX} more characters)` : text;
+					row.detail = row.name === "consult" ? undefined : text.slice(0, DETAIL_MAX);
+					row.detailRetention = row.name === "consult" || text.length <= DETAIL_MAX
+						? undefined
+						: { clipped: true, originalChars: text.length, reason: `Screen retained the first ${DETAIL_MAX} characters` };
 					row.details = message.details;
 					if (row.name === "consult") {
 						const conference = ensureConsult({ id: message.details?.conference, callId: row.id, question: row.args?.question, depth: row.depth });
@@ -823,7 +857,8 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 					seen.add(slot.callId);
 					const known = session.calls.get(slot.callId);
 					const participant = known?.participant ?? consult.participant ?? session.record?.active?.participant ?? session.record?.final?.participant;
-					const next = { participant, call: known?.call, text: typeof slot.output === "string" ? slot.output : "", clipped: (slot.droppedBytes ?? 0) > 0, status: slot.status };
+					const dropped = (slot.droppedBytes ?? 0) > 0;
+					const next = { participant, call: known?.call, text: typeof slot.output === "string" ? slot.output : "", clipped: dropped, ...(dropped ? { reason: "earlier runner output was dropped" } : {}), status: slot.status };
 					if (resultSignature(session.liveTools.get(slot.callId)) !== resultSignature(next)) {
 						session.liveTools.set(slot.callId, next);
 						changed = true;
@@ -923,17 +958,24 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 			if (consultation !== undefined) consultation.open = to ?? !consultation.open;
 			else {
 				const item = items.find((entry) => entry.key === key);
-				if (item?.type === "group" || item?.type === "block") item.open = to ?? !item.open;
+				if (item?.type === "group" || item?.type === "block" || item?.type === "note" || item?.type === "reasoning") {
+					item.open = to ?? !item.open;
+					item.rev = (item.rev ?? 0) + 1;
+				}
 			}
 			touch();
 		},
-		/** Open every run of calls and the live reasoning stream, or fold them all with what was opened inside them. */
+		/** Open every run and private response, including live reasoning, or fold them all with what was opened inside them. */
 		setAll(open) {
 			for (const item of items) {
-				if (item.type !== "group") continue;
-				item.open = open;
-				if (!open) for (const row of item.rows) row.open = false;
-				item.rev = (item.rev ?? 0) + 1;
+				if (item.type === "group") {
+					item.open = open;
+					if (!open) for (const row of item.rows) row.open = false;
+					item.rev = (item.rev ?? 0) + 1;
+				} else if (item.type === "note" || item.type === "reasoning") {
+					item.open = open;
+					item.rev = (item.rev ?? 0) + 1;
+				}
 			}
 			for (const entry of live.values()) entry.open = open;
 			for (const consultation of consultations.values()) {
@@ -1003,10 +1045,15 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 				if (event !== undefined) event.open = next;
 			} else {
 				const item = items.find((entry) => entry.key === key);
-				const row = item?.rows?.[index];
-				if (row !== undefined) {
-					row.open = to ?? !row.open;
+				if (item?.type === "note" || item?.type === "reasoning") {
+					item.open = to ?? !item.open;
 					item.rev = (item.rev ?? 0) + 1;
+				} else {
+					const row = item?.rows?.[index];
+					if (row !== undefined) {
+						row.open = to ?? !row.open;
+						item.rev = (item.rev ?? 0) + 1;
+					}
 				}
 			}
 			touch();
@@ -1063,12 +1110,18 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 				if (row.kind === "note" || row.kind === "reasoning") {
 					if (!thinking) return;
 					const indent = row.depth > 0 ? "  │ ┊ " : "  ┊ ";
-					const text = wrap(row.text, inner - width(indent));
+					const plan = disclosureRows({
+						rows: wrap(row.text, inner - width(indent)),
+						open: row.open === true,
+						previewRows: LIVE_NOTE_ROWS,
+					});
 					const source = row.depth > 0 ? "Focus" : "Main";
 					const label = row.kind === "reasoning" ? "Private reasoning · provider response · replay: provider-bound" : "Agent note · provider response · replay: active-context dependent";
-					if (projection === "work" || row.open || text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [projection === "work" ? `${source} · ${label}` : label, "faint"]], { ...ref, kind: row.kind });
-					for (const piece of row.open ? text : text.slice(0, POLICY.limits.screen.notePreviewLines)) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: row.kind });
-					if (!row.open && text.length > POLICY.limits.screen.notePreviewLines) add([[indent, "faint"], [`… ${text.length - POLICY.limits.screen.notePreviewLines} more lines`, "faint"]], { ...ref, kind: row.kind });
+					if (projection === "work" || row.open || plan.expandable) {
+						const heading = `${projection === "work" ? `${source} · ` : ""}${label}${plan.expandable ? ` · ${disclosureSummary(plan)}` : ""}`;
+						add([[indent, "faint"], [heading, "faint"]], { ...ref, kind: row.kind });
+					}
+					for (const piece of plan.visibleRows) add([[indent, "faint"], [piece, "note italic"]], { ...ref, kind: row.kind });
 					return;
 				}
 				if (row.name === "consult") {
@@ -1080,9 +1133,16 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 				add(callLine(row), { ...ref, kind: "call" });
 				if (row.open && row.detail !== undefined) {
 					const indent = row.depth > 0 ? "  │   " : "    ";
-					const text = wrap(plain(row.detail), inner - width(indent));
-					for (const piece of text.slice(0, DETAIL_ROWS)) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : "muted"]], { ...ref, kind: "detail" });
-					if (text.length > DETAIL_ROWS) add([[indent, "faint"], [`… ${text.length - DETAIL_ROWS} more lines${row.name === "task" ? " (/report shows the report)" : ""}`, "faint"]], { ...ref, kind: "detail" });
+					const plan = disclosureRows({
+						rows: wrap(plain(row.detail), inner - width(indent)),
+						open: true,
+						previewRows: DETAIL_ROWS,
+						retained: row.detailRetention,
+					});
+					for (const piece of plan.visibleRows) add([[indent, "faint"], [piece, row.state === "failed" ? "err" : "muted"]], { ...ref, kind: "detail" });
+					const notice = retentionLine(plan.retainedNotice);
+					if (notice !== undefined) add([[indent, "faint"], [notice, "faint"]], { ...ref, kind: "detail" });
+					if (plan.expandable) add([[indent, "faint"], [`${lineCount(plan.totalRows)} · Enter folds this block`, "faint"]], { ...ref, kind: "detail" });
 				}
 			};
 			/** One line that Cartographer printed: its mark picked out, the rest by what the line is. */
@@ -1108,21 +1168,31 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 					if (state === "failed" && item.result !== undefined) add([[`  Failed delivery · ${item.result}`, "err"]], ref);
 				} else if (item.type === "block") {
 					const ref = { item: item.key, kind: "block", bg: "bgTool" };
+					const indent = "  ";
+					const plan = disclosureRows({
+						rows: wrap(item.text, inner - width(indent)),
+						open: item.open === true,
+						previewRows: BLOCK_ROWS,
+					});
 					if (projection === "work") add([["Harness · request block · active context", "faint"]], ref);
-					add([[item.open ? "▾ " : "▸ ", "carto"], [cut(item.label, inner - 2), "muted"]], ref);
-					if (item.open) {
-						const indent = "  ";
-						const pieces = wrap(item.text, inner - width(indent));
-						for (const piece of pieces.slice(0, BLOCK_ROWS)) add([[indent, "faint"], [piece, "muted"]], ref);
-						if (pieces.length > BLOCK_ROWS) add([[indent, "faint"], [`… ${pieces.length - BLOCK_ROWS} more lines (y copies it)`, "faint"]], ref);
-					}
+					const label = `${item.label}${plan.expandable ? ` · ${disclosureSummary(plan)}` : ""}`;
+					add([[plan.expandable ? (plan.mode === "open" ? "▾ " : "▸ ") : "· ", "carto"], [cut(label, inner - 2), "muted"]], ref);
+					for (const piece of plan.visibleRows) add([[indent, "faint"], [piece, "muted"]], ref);
 				} else if (item.type === "note" || item.type === "reasoning") {
 					if (!thinking) return;
 					// Private material is its own quiet block, rather than borrowing the tools' cyan. Its rail and faint
 					// violet surface make it easy to keep separate from both speech and work without elevating its weight.
 					const ref = { item: item.key, kind: item.type, bg: "bgNote" };
-					if (projection === "work") add([[`Main · ${privateLabel(item.type)}`, "faint"]], ref);
-					for (const piece of wrap(item.text, cols - 2)) add([[piece, "note italic"]], ref);
+					const plan = disclosureRows({
+						rows: wrap(item.text, cols - 2),
+						open: item.open === true,
+						previewRows: LIVE_NOTE_ROWS,
+					});
+					const scope = projection === "work" ? "Main · " : "";
+					if (plan.expandable) {
+						add([[plan.mode === "open" ? "▾ " : "▸ ", "faint"], [`${scope}${privateLabel(item.type)} · ${disclosureSummary(plan)}`, "faint"]], ref);
+					} else if (projection === "work") add([[`${scope}${privateLabel(item.type)}`, "faint"]], ref);
+					for (const piece of plan.visibleRows) add([[piece, "note italic"]], ref);
 				} else if (item.type === "console") {
 					if (projection === "work") add([["Harness · notice", "faint"]], { item: item.key, kind: "console" });
 					const question = /^\? /.test(item.text);
@@ -1208,20 +1278,20 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 				const privateResponse = (kind, text) => {
 					if (text.trim() === "" || !thinking) return;
 					const room = inner - width(indent) - 2;
-					const full = current.open ? wrap(text, room) : undefined;
-					const preview = current.open ? undefined : previewTail(text, room, LIVE_NOTE_ROWS);
-					const pieces = full ?? preview.lines;
-					const omitted = preview?.omitted ?? 0;
-					const expandable = current.open || omitted > 0;
-					const ref = expandable ? { item: `live:${depth}`, kind: "live", liveDepth: depth, ...block } : { kind: "live", ...block };
+					const plan = disclosureRows({
+						rows: wrap(text, room),
+						open: current.open === true,
+						previewRows: LIVE_NOTE_ROWS,
+						preview: "tail",
+					});
+					const ref = plan.expandable ? { item: `live:${depth}`, kind: "live", liveDepth: depth, ...block } : { kind: "live", ...block };
 					const label = privateLabel(kind);
 					if (!focused && before !== kind) blank();
-					if (expandable) {
-						const lines = current.open ? `${full.length} ${full.length === 1 ? "line" : "lines"} · Enter folds` : `${omitted} earlier ${omitted === 1 ? "line" : "lines"} · Enter opens all`;
+					if (plan.expandable) {
 						const scope = projection === "work" ? `${source} · ` : "";
-						add([[`${indent}${current.open ? "▾" : "▸"} `, "faint"], [`${scope}${label} · ${lines}`, "faint"]], ref);
+						add([[`${indent}${plan.mode === "open" ? "▾" : "▸"} `, "faint"], [`${scope}${label} · ${disclosureSummary(plan, { tail: true })}`, "faint"]], ref);
 					} else if (projection === "work") add([[noteLead, "faint"], [`${source} · ${label}`, "faint"]], ref);
-					for (const piece of pieces) add([[noteLead, "faint"], [piece, "note italic"]], ref);
+					for (const piece of plan.visibleRows) add([[noteLead, "faint"], [piece, "note italic"]], ref);
 					before = kind;
 				};
 				if (projection === "all") privateResponse(thinkingOf(message).trim() === "" ? "note" : "thinking", noteOf(message));
@@ -1263,8 +1333,12 @@ export function createChat({ now = () => Date.now(), markdown, presentation } = 
 			if (item.type === "group") {
 				const row = rowIndex === undefined ? undefined : item.rows[rowIndex];
 				if (row?.kind === "note" || row?.kind === "reasoning") return row.text;
-						if (row?.name === "consult") return "Private consultation activity is available only in Chat · Consult.";
-				if (row !== undefined) return `${row.label}${row.result ? `  → ${row.result}` : ""}${row.detail ? `\n\n${plain(row.detail)}` : ""}`;
+				if (row?.name === "consult") return "Private consultation activity is available only in Chat · Consult.";
+				if (row !== undefined) {
+					const detail = row.detail ? plain(row.detail) : "";
+					const notice = retentionLine(row.detailRetention);
+					return `${row.label}${row.result ? `  → ${row.result}` : ""}${detail === "" ? "" : `\n\n${detail}`}${notice === undefined ? "" : `\n\n${notice}`}`;
+				}
 				return item.rows.map((entry) => ((entry.kind === "note" || entry.kind === "reasoning") ? `  ┊ ${entry.text.split("\n")[0]}` : `${entry.depth > 0 ? "  │ " : "  "}${entry.label}${entry.result ? `  → ${entry.result}` : ""}`)).join("\n");
 			}
 			return item.text ?? "";

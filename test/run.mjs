@@ -153,17 +153,60 @@ for step in steps:
     elif not pump(wait, 20): break
     # A third entry that is false: the keys alone, without Enter after them.
     os.write(fd, text.encode() + (b"" if len(step) > 2 and not step[2] else b"\\r"))
-pump(None, 20)
+# Every assertion waits for its relevant terminal state before the final action. Drain one last frame rather than
+# idling for the old 20-second diagnostic window after Cartographer has received its quit/interrupt key.
+pump(None, 0.2)
+sys.stdout.write(seen.decode(errors="replace"))
+`;
+
+// Like PTY above, but a step may resize the real terminal before it types. This keeps resize evidence on the actual
+// full-Screen path rather than simulating columns in a component test.
+const PTY_RESIZE = `
+import fcntl, json, os, pty, select, struct, sys, termios, time
+steps = json.loads(sys.argv[1])
+cols, rows = int(sys.argv[2]), int(sys.argv[3])
+os.environ["COLUMNS"] = str(cols)
+os.environ["LINES"] = str(rows)
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(sys.argv[4], sys.argv[4:])
+def resize(cols, rows):
+    size = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, size)
+    os.kill(pid, __import__("signal").SIGWINCH)
+resize(cols, rows)
+seen = b""
+def pump(until, limit, start = 0):
+    global seen
+    end = time.time() + limit
+    while time.time() < end:
+        if until is not None and until.encode() in seen[start:]: return True
+        if select.select([fd], [], [], 0.05)[0]:
+            try: seen += os.read(fd, 65536)
+            except OSError: return until is None
+    return False
+for step in steps:
+    wait, text = step[0], step[1]
+    if isinstance(wait, (int, float)): pump(None, wait)
+    elif not pump(wait, 3, len(seen)): break
+    if isinstance(text, dict) and "resize" in text:
+        resize(int(text["resize"][0]), int(text["resize"][1]))
+        continue
+    os.write(fd, text.encode() + (b"" if len(step) > 2 and not step[2] else b"\\r"))
+pump(None, 0.2)
 sys.stdout.write(seen.decode(errors="replace"))
 `;
 let python;
-async function cartoOnTerminal(cwd, server, args, steps) {
+async function cartoOnTerminal(cwd, server, args, steps, { env, resize } = {}) {
 	python ??= (await run("python3", ["-c", "import pty"])).code === 0;
 	if (!python) return undefined;
 	const serverUrl = typeof server === "string" ? server : server.url;
 	// The line-by-line terminal, unless the test is about the full screen.
 	const command = [process.execPath, CARTO, "--url", serverUrl, "--model", "stand-in", ...(args.includes("--screen") ? args.filter((arg) => arg !== "--screen") : ["--plain", ...args])];
-	const result = await run("python3", ["-c", PTY, JSON.stringify(steps), ...command], { cwd, timeoutMs: 70_000 });
+	const launcher = resize === undefined
+		? ["-c", PTY, JSON.stringify(steps), ...command]
+		: ["-c", PTY_RESIZE, JSON.stringify(steps), String(resize.cols), String(resize.rows), ...command];
+	const result = await run("python3", launcher, { cwd, timeoutMs: 70_000, env });
 	// Colour codes and carriage returns are the terminal's business, not the test's.
 	return { ...result, screen: result.stdout.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "").replace(/\r/g, "") };
 }
@@ -245,8 +288,10 @@ test("terminal: workspace actions share typed outcomes and deletion needs --yes"
 	assert.match(applyAdd(brainDir, "ledger", JSON.stringify({ kind: "note", text: "Keep this only while the command is tested." }), root), /n1 added/);
 	const server = await startStandIn();
 	try {
-		const result = await carto(root, server, [], { input: "/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
+		const result = await carto(root, server, [], { input: "/help\n/archive n1\n/unarchive n1\n/delete n1\n/delete n1 --yes\n/shelve README.md 1-1\n/unshelve README.md\n/focus README.md trace startup\n/unfocus\n/pin\n/new\n/quit\n" });
 		ok(result, "terminal workspace actions");
+		has(result.stdout, "/wait [SECONDS]  with piped input, wait for shell commands and scheduled wakes", "terminal help names the piped-input wait control");
+		has(result.stdout, "/quit, /exit  leave", "terminal help names the exit alias");
 		has(result.stdout, "n1 archived", "archive reaches the shared workspace action");
 		has(result.stdout, "n1 is back in the ledger", "unarchive reaches the shared workspace action");
 		has(result.stdout, "/delete is permanent. To remove n1, run: /delete n1 --yes", "delete asks for an explicit acknowledgement");
@@ -300,13 +345,82 @@ test("launch: an offline interactive terminal renders before it reports the serv
 	assert.ok(result.screen.indexOf("Type a message.") < result.screen.indexOf("Could not connect to the model server"), "the terminal renders before its unavailable-server error");
 });
 
-test("launch: the full-screen terminal keeps an offline server error visible", async () => {
-	const root = makeProject("offline-screen", { git: false });
-	configure(root, { initiate: false });
-	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [["Set one up in", ""], ["Could not connect to the model server", "\x03", false], [0.1, "\x03", false]]);
-	if (result === undefined) return "python3 is needed for the full-screen terminal check";
-	ok(result, "an offline full-screen Cartographer session");
-	has(result.stdout, "Could not connect to the model server at http://127.0.0.1:1/v1", "the full-screen status strip says the server is unavailable");
+test("screen: a compact no-color full Screen keeps disabled action text, Settings confirmation, and resize parity", async () => {
+	const root = makeProject("screen-settings-flow", { git: false });
+	configure(root, { initiate: false, colors: "none" });
+	const result = await cartoOnTerminal(root, "http://127.0.0.1:1/v1", ["--screen"], [
+		["Set one up in", ""],
+		["model stand-in un", "\x1b", false],
+		["COMMAND MODE", "\x0b", false],
+		["Command palette", "stop", false],
+		["The agent is already resting.", "\x1b", false],
+		[0.1, "6", false],
+		["Provider endpoint", "e", false],
+		["Value: text.", "\x1b", false],
+		["Configuration", { resize: [110, 32] }],
+		[0.15, "j".repeat(17), false],
+		["Approval default", "e", false],
+		["Value: true or false.", "\x7f".repeat(5) + "true", false],
+		[0.1, ""],
+		["Type project:yolo", "project:yolo", false],
+		[0.1, ""],
+		["Saved Approval default", { resize: [42, 16] }],
+		[0.15, "i", false],
+		[0.1, "/quit"],
+	], { env: { NO_COLOR: "1" }, resize: { cols: 42, rows: 16 } });
+	if (result === undefined) return "python3 is needed for the full-screen Settings flow check";
+	ok(result, "a compact no-color full-screen Settings flow");
+	has(result.screen, "Could not connect to the model server", "the compact full-screen status strip keeps the offline server error visible rather than relying on colour");
+	has(result.screen, "Configuration", "Settings reaches its Configuration route at compact width and after a real resize");
+	has(result.screen, "Provider endpoint", "the selected saved setting remains identifiable in compact mode");
+	has(result.screen, "Value: text.", "Enter/e opens the schema-derived saved-setting form");
+	has(result.screen, "unavailable", "the no-color palette keeps a disabled lifecycle action discoverable without relying on colour");
+	has(result.screen, "The agent is already resting.", "the disabled lifecycle action keeps its explicit settled reason at compact width");
+	has(result.screen, "Approval default", "the route reaches the settled guarded setting row");
+	has(result.screen, "Type project:yolo", "the backend-owned confirmation presents its fresh target token");
+	has(result.screen, "Saved Approval default", "the typed confirmation dispatches the actual Settings action");
+	has(result.screen, "[ ]", "compact view navigation remains explicit rather than clipping hidden view labels");
+	assert.equal(JSON.parse(readFileSync(join(root, ".brain", "config.json"), "utf8")).yolo, true, "the confirmed Screen form persisted only its selected project setting");
+	assert.equal(result.stdout.includes("\x1b[38;"), false, "NO_COLOR suppresses extended palette foreground escapes in the full-screen route");
+	assert.equal(result.stdout.includes("\x1b[48;"), false, "NO_COLOR suppresses palette backgrounds in the full-screen route");
+});
+
+test("screen: one outer viewport reaches a live Consult body and a settled call detail", async () => {
+	const root = makeProject("screen-disclosure-scroll", { git: false });
+	configure(root, { initiate: false, colors: "none" });
+	const server = await startStandIn({ tokenDelayMs: 12, consultLongRows: 80 });
+	try {
+		const consult = JSON.stringify({ question: "Show the disclosure fixture.", myPersona: "SCREEN DISCLOSURE FIXTURE" });
+		const result = await cartoOnTerminal(root, server, ["--screen"], [
+			["Set one up in", ""],
+			["[waits] You", `consult: ${consult}`],
+			[0.05, "\x1b", false],
+			[0.05, "]]", false],
+			["Consultation co1", "", false],
+			["LIVE_CONSULT_010", "", false],
+			["LIVE_CONSULT_070", "", false],
+			["○ resting", "\x1b[200~look: read: long.txt @1+700\x1b[201~", false],
+			["look: read: long.txt", "\r", false],
+			["○ resting", "\x1b", false],
+			[0.12, "]", false],
+			["▸ 1 call", "G", false],
+			[0.12, "\r", false],
+			["✓ read long.txt", "j", false],
+			[0.12, "\r", false],
+			[0.12, "G", false],
+			["line 700", "i", false],
+			[0.12, "/quit"],
+		], { env: { NO_COLOR: "1" }, resize: { cols: 84, rows: 18 } });
+		if (result === undefined) return "python3 is needed for the full-screen disclosure check";
+		ok(result, "the full-screen disclosure flow");
+		has(result.screen, "LIVE_CONSULT_010", "the actual live Consult body starts advancing through its tail preview");
+		has(result.screen, "LIVE_CONSULT_070", "the real stream reaches a later retained tail row without a nested viewport");
+		has(result.screen, "earlier lines · Enter opens this block", "the long live body keeps its disclosure affordance in the real terminal");
+		has(result.screen, "line 700", "one opened settled call detail reaches its final locally retained row");
+		has(result.screen, "Enter folds this block", "opened Screen disclosures retain their local folding affordance");
+	} finally {
+		await server.close();
+	}
 });
 
 test("launch: a grammar-ignoring route is refused before its first agent request", async () => {
@@ -1824,11 +1938,11 @@ test("screen: a collapse of the main context leaves only the marker, and the age
 	chat.user("hello before");
 	chat.entry(0, reply([call("c1", "chat", { text: "Hi." })], 1));
 	chat.block("the state block — the time, the atlas, the ledger, the plan", "Ledger\n- g1 finish the roller\n\nPlan\np1 open");
-	assert.match(out(), /the state block/, "a block folds to one line");
-	assert.equal(out().includes("g1 finish the roller"), false, "and its content is not in view until it is opened");
+	assert.match(out(), /the state block/, "a block keeps its own disclosure label");
+	assert.match(out(), /g1 finish the roller/, "a short folded block has no hidden rows to withhold");
 	const before = chat.lines(80).find((line) => line.kind === "block");
 	chat.toggle(before.item);
-	assert.match(out(), /g1 finish the roller/, "opened, the content stands as the agent sees it");
+	assert.match(out(), /g1 finish the roller/, "opened, the content still stands as the agent sees it");
 	assert.equal(chat.textOf(before.item), "Ledger\n- g1 finish the roller\n\nPlan\np1 open", "and copies as it stands");
 	// The collapse: everything of the conversation is out, the marker stands, the intro survives.
 	chat.entry(0, { model: [{ role: "user", content: [{ type: "text", text: `<context>\n${RECORD} My context was collapsed\n</context>` }] }] }, "◆ context collapsed (you rested): about 9,000 → 800 tokens · kept 1 task record, 0 shelf items, 2 messages of talk  (/context shows it)\n");
@@ -2047,44 +2161,59 @@ test("screen: Talk binds an admitted Durable source by lifecycle, not matching w
 	assert.deepEqual(speech.source, { kind: "durable-message", conversationId: "main", entryId: "a1", position: 0, callId: "c1" }, "a delivered-speech candidate carries the assistant entry id and its call boundary");
 });
 
-test("screen: long live reasoning names its compact tail, opens in Work, and resets when it finishes", async () => {
+test("screen: long reasoning stays compact after completion and folds in Work", async () => {
 	const chat = createChat();
-	const text = (cols = 40) => chat.lines(cols).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
+	const text = (cols = 40, projection = "all") => chat.lines(cols, projection).map((line) => line.spans.map(([part]) => part).join("")).join("\n");
 	const previewRows = POLICY.limits.screen.notePreviewLines;
 	const thoughtLines = previewRows + 8;
 	const thought = Array.from({ length: thoughtLines }, (_entry, index) => `thought ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: thought }] });
 	const compact = text();
-	has(compact, "▸ thinking · 8 earlier lines · Enter opens all", "a long stream names what is left out and how to open it");
+	has(compact, "▸ thinking · 8 earlier lines · Enter opens this block", "a long stream names what is left out and how to open it");
 	has(compact, `thought ${thoughtLines}`, "the newest reasoning stays visible");
 	hasNot(compact, "thought 1\n", "the old reasoning does not make the preview grow");
 	const live = chat.lines(40).find((line) => line.kind === "live" && line.liveDepth === 0);
 	assert.ok(live, "the compact stream is selectable in Chat");
 	chat.setAll(true);
-	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds`, "open all opens the live stream too");
+	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds this block`, "open all opens the live stream too");
 	chat.setAll(false);
-	has(text(), "▸ thinking · 8 earlier lines · Enter opens all", "fold all returns it to the compact tail");
+	has(text(), "▸ thinking · 8 earlier lines · Enter opens this block", "fold all returns it to the compact tail");
 	assert.equal(chat.toggleLive(live.liveDepth, true), true, "the selected live stream opens");
-	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds\nthought 1`, "opening shows the beginning as well as the tail");
+	has(text(), `▾ thinking · ${thoughtLines} lines · Enter folds this block\nthought 1`, "opening shows the beginning as well as the tail");
 	assert.equal(chat.textOf("live:0"), thought, "copying the live stream takes its whole reasoning");
 	const nextThoughtLine = thoughtLines + 1;
 	chat.live(0, { timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] });
-	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds`, "an opened stream stays open as it grows");
+	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds this block`, "an opened stream stays open as it grows");
 	has(text(), `thought ${nextThoughtLine}`, "the growing stream includes its new reasoning");
 	chat.setThinking(false);
 	has(text(), "thinking… (Ctrl-T shows it)", "Ctrl-T hides the live reasoning");
 	hasNot(text(), `thought ${nextThoughtLine}`, "the hidden stream does not leave its open text behind");
 	chat.setThinking(true);
-	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds\nthought 1`, "showing thinking again keeps the deliberate open state");
+	has(text(), `▾ thinking · ${nextThoughtLine} lines · Enter folds this block\nthought 1`, "showing thinking again keeps the deliberate open state");
 	chat.entry(0, { model: [{ role: "assistant", timestamp: 9, content: [{ type: "thinking", thinking: `${thought}\nthought ${nextThoughtLine}` }] }] });
-	hasNot(text(), "Enter folds", "the completed reply has no live expansion control");
-	has(text(), "thought 1", "the completed reasoning stands as its saved message");
+	const completedLines = nextThoughtLine;
+	const omitted = completedLines - previewRows;
+	const compactCompleted = text(40, "work");
+	has(compactCompleted, `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens this block`, "completed long reasoning stays compact in Work");
+	has(compactCompleted, "thought 1", "the compact completed reasoning keeps its start visible");
+	hasNot(compactCompleted, `thought ${completedLines}`, "the compact completed reasoning leaves its tail folded");
+	const completed = chat.lines(40, "work").find((line) => line.kind === "reasoning");
+	assert.ok(completed, "the completed reasoning is selectable in Work");
+	chat.toggleRow(completed.item, completed.row, true);
+	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds this block`, "Enter opens the completed reasoning in Work");
+	has(text(40, "work"), `thought ${completedLines}`, "the opened reasoning restores its full tail");
+	chat.toggleRow(completed.item, completed.row, false);
+	hasNot(text(40, "work"), `thought ${completedLines}`, "h or Enter can fold the completed reasoning again");
+	chat.setAll(true);
+	has(text(40, "work"), `▾ Main · Private reasoning · provider response · replay: provider-bound · ${completedLines} lines · Enter folds this block`, "open all opens completed private reasoning too");
+	chat.setAll(false);
+	has(text(40, "work"), `▸ Main · Private reasoning · provider response · replay: provider-bound · ${omitted} more lines · Enter opens this block`, "fold all returns completed private reasoning to its compact preview");
 	assert.equal(chat.lines(40).find((line) => line.kind === "reasoning")?.bg, "bgNote", "completed private reasoning keeps its own quiet block instead of blending into tool work");
 	assert.equal(chat.textOf("live:0"), "", "completion removes the live copy target");
 	const nextLines = previewRows + 3;
 	const next = Array.from({ length: nextLines }, (_entry, index) => `next ${index + 1}`).join("\n");
 	chat.live(0, { timestamp: 10, content: [{ type: "thinking", thinking: next }] });
-	has(text(), "▸ thinking · 3 earlier lines · Enter opens all", "the next reply starts folded again");
+	has(text(), "▸ thinking · 3 earlier lines · Enter opens this block", "the next reply starts folded again");
 	chat.live(0, undefined);
 	hasNot(text(), `next ${nextLines}`, "removing a live reply removes its expansion state and preview");
 });
@@ -2201,7 +2330,7 @@ test("screen: Consult is a separate persona-attributed conference timeline with 
 
 test("screen: the palette is made for the terminal's background: levels of text, one strength for every hue, blocks a step away", async () => {
 	const { colorMode, makeTheme, markdownTheme, parseColorReply, schemeFromEnv, schemeOf, to256, HUES } = await import("../src/screen/theme.mjs");
-	const { TOKEN } = await import("../src/screen/tokens.mjs");
+	const { LEGACY_STYLE_ALIASES, TOKEN } = await import("../src/screen/tokens.mjs");
 	const { colorToOklch, rgbColor } = await import("@earendil-works/pi-tui");
 	const light = ([r, g, b]) => (r * 299 + g * 587 + b * 114) / 1000;
 	const far = (a, b) => Math.abs(light(a) - light(b));
@@ -2219,19 +2348,20 @@ test("screen: the palette is made for the terminal's background: levels of text,
 		assert.ok(hues.every((hue) => hue.c > 0.07), `and each is a colour, not a grey: ${what}`);
 		assert.ok(Math.abs(hues[0].h - HUES.user) < 12 && Math.abs(hues[1].h - HUES.tool) < 12, `the hues are the ones named: ${what}`);
 		// Where it is: every block is near the background, in its own direction, and all of them tell apart.
-		const blocks = ["bgUser", "bgTool", "bgNote", "bgPanel", "bgInput", "bgBar", "bgSel"];
-		for (const name of blocks) assert.ok(far(rgb[name], rgb.bg) < 70, `${name} stays near the background: ${what}`);
-		assert.equal(new Set(blocks.map((name) => rgb[name].join())).size, blocks.length, `each block has a background of its own: ${what}`);
-		assert.ok(far(rgb.bgSel, rgb.bg) > far(rgb.bgUser, rgb.bg) && far(rgb.bgUser, rgb.bg) > far(rgb.bgTool, rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
-		assert.ok(far(rgb.bgBar, rgb.bg) > far(rgb.bgPanel, rgb.bg) && far(rgb.bgPanel, rgb.bg) > far(rgb.bgInput, rgb.bg), `the more a thing is chrome, the further from the background: ${what}`);
+		const blocks = [TOKEN.activity.userSurface, TOKEN.activity.shellSurface, TOKEN.activity.noteSurface, TOKEN.surface.content, TOKEN.surface.input, TOKEN.surface.raised, TOKEN.interaction.selected];
+		for (const token of blocks) assert.ok(far(rgb[token], rgb.bg) < 70, `${token} stays near the background: ${what}`);
+		assert.equal(new Set(blocks.map((token) => rgb[token].join())).size, blocks.length, `each block has a background of its own: ${what}`);
+		assert.ok(far(rgb[TOKEN.interaction.selected], rgb.bg) > far(rgb[TOKEN.activity.userSurface], rgb.bg) && far(rgb[TOKEN.activity.userSurface], rgb.bg) > far(rgb[TOKEN.activity.shellSurface], rgb.bg), `what is selected stands out most, what you said more than what the tools did: ${what}`);
+		assert.ok(far(rgb[TOKEN.surface.raised], rgb.bg) > far(rgb[TOKEN.surface.content], rgb.bg) && far(rgb[TOKEN.surface.content], rgb.bg) > far(rgb[TOKEN.surface.input], rgb.bg), `the more a thing is chrome, the further from the background: ${what}`);
 		// Text stays readable on every block.
-		for (const name of blocks) assert.ok(far(rgb.fg, rgb[name]) > 0.65 * far(rgb.fg, rgb.bg), `plain text stands out on ${name} nearly as it does on the background: ${what}`);
+		for (const token of blocks) assert.ok(far(rgb.fg, rgb[token]) > 0.65 * far(rgb.fg, rgb.bg), `plain text stands out on ${token} nearly as it does on the background: ${what}`);
 		const blue = (color) => color[2] - (color[0] + color[1]) / 2;
-		assert.ok(blue(rgb.bgUser) > blue(rgb.bg) && blue(rgb.bgUser) > blue(rgb.bgBar), `a block has the tint of its hue (yours is blue): ${what}`);
+		assert.ok(blue(rgb[TOKEN.activity.userSurface]) > blue(rgb.bg) && blue(rgb[TOKEN.activity.userSurface]) > blue(rgb[TOKEN.surface.raised]), `a block has the tint of its hue (yours is blue): ${what}`);
 	}
 	const exact = makeTheme({ mode: "truecolor" }).styles;
-	assert.equal(exact.bgTool, exact[TOKEN.activity.shellSurface], "the former feature surface remains an alias for its semantic activity token");
-	assert.equal(exact.bgSel, exact[TOKEN.interaction.selected], "selection has one semantic source despite compatibility styling");
+	assert.equal(exact.bgTool, exact[TOKEN.activity.shellSurface], "the former Chat surface remains an alias while that renderer still consumes it");
+	const retired = ["bgPanel", "bgInput", "bgBar", "bgSel", "bgTab", "catSystem", "catTools", "catTop", "catKept", "catYou", "catCarto", "catAgent", "catResult", "catState", "catWindows"];
+	assert.ok(retired.every((name) => !Object.hasOwn(LEGACY_STYLE_ALIASES, name) && !Object.hasOwn(exact, name)), "migrated surfaces and provider categories no longer recreate legacy renderer aliases");
 	assert.equal(exact.muted, exact[TOKEN.text.secondary], "text hierarchy is also reachable by semantic token");
 	assert.match(exact[TOKEN.activity.shellSurface], /^48;2;\d+;\d+;\d+$/, "a semantic background is in exact colour");
 	assert.match(exact.muted, /^38;2;\d+;\d+;\d+$/, "a text colour");
@@ -2255,16 +2385,21 @@ test("screen: lines are painted on their block's background, and text says by it
 	const { applyTheme, paint, paintStyled, sgr, STYLES } = await import("../src/screen/text.mjs");
 	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	try {
-		applyTheme({ bgTool: "48;5;235", bgSel: "48;5;239", muted: "38;5;246", ok: "38;5;115" });
-		assert.equal(paint([["✓ ", "ok"], ["read", ""]], 8, "bgTool"), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");
-		assert.equal(paintStyled("a\x1b[1mb\x1b[22m", 2, 4, "bgSel"), "\x1b[48;5;239ma\x1b[1mb\x1b[22m  \x1b[0m", "and under a line that came styled");
+		applyTheme({
+			[TOKEN.activity.shellSurface]: "48;5;235",
+			[TOKEN.interaction.selected]: "48;5;239",
+			[TOKEN.text.secondary]: "38;5;246",
+			[TOKEN.feedback.success]: "38;5;115",
+		});
+		assert.equal(paint([["✓ ", TOKEN.feedback.success], ["read", ""]], 8, TOKEN.activity.shellSurface), "\x1b[48;5;235;38;5;115m✓ \x1b[0m\x1b[48;5;235mread\x1b[0m\x1b[48;5;235m  \x1b[0m", "the block's background lies under every piece of the line and its padding");
+		assert.equal(paintStyled("a\x1b[1mb\x1b[22m", 2, 4, TOKEN.interaction.selected), "\x1b[48;5;239ma\x1b[1mb\x1b[22m  \x1b[0m", "and under a line that came styled");
 		assert.equal(sgr("bgNothing"), "", "a style the palette does not have is no style");
 		assert.equal(sgr(TOKEN.activity.shellSurface), "\x1b[48;5;235m", "a shell component can ask for its semantic surface directly");
 		assert.equal(sgr(TOKEN.interaction.selected), "\x1b[48;5;239m", "focus and selection have semantic styles too");
 		applyTheme(undefined);
-		assert.deepEqual([STYLES.bgTool, STYLES.muted, STYLES.bgSel, STYLES.ok], [undefined, "2", "7", "32"], "without a palette: no backgrounds, dim for muted, inverse for what is selected, the terminal's own green");
+		assert.deepEqual([STYLES.bgTool, STYLES.muted, STYLES[TOKEN.interaction.selected], STYLES.ok], [undefined, "2", "7", "32"], "without a palette: retained aliases and semantic selection keep terminal-safe fallbacks");
 		assert.deepEqual([STYLES[TOKEN.activity.shellSurface], STYLES[TOKEN.text.secondary], STYLES[TOKEN.interaction.selected], STYLES[TOKEN.feedback.success]], [undefined, "2", "7", "32"], "semantic tokens retain the same no-colour fallbacks");
-		assert.equal(paint([["x", "muted"]], 3, "bgTool"), "\x1b[2mx\x1b[0m  ");
+		assert.equal(paint([["x", TOKEN.text.secondary]], 3, TOKEN.activity.shellSurface), "\x1b[2mx\x1b[0m  ");
 	} finally {
 		applyTheme(undefined);
 	}
@@ -2440,6 +2575,7 @@ test("screen: a list of items that fold: the selection, opening one and all, fol
 
 test("screen: the Model tab shows the frozen provider request in reading order, then not-sent response material", async () => {
 	const { contextView, rawPayloadView } = await import("../src/screen/runtime.mjs");
+	const { TOKEN } = await import("../src/screen/tokens.mjs");
 	const big = "word ".repeat(4000); // about 5,000 tokens
 	const payload = {
 		tools: [{ type: "function", function: { name: "read", description: "Read one file.", parameters: { type: "object", properties: { path: { type: "string" } } } } }],
@@ -2484,11 +2620,11 @@ test("screen: the Model tab shows the frozen provider request in reading order, 
 	assert.equal(top[3].length, 40, "the bar is as wide as the screen");
 	assert.match(top[3], /^■+□+$/, "used cells, then free ones");
 	// A quarter of the window is the big sent result: about ten of forty cells are its colour.
-	const resultCells = view.header[3].filter(([, style]) => style === "catResult").reduce((sum, [cells]) => sum + cells.length, 0);
+	const resultCells = view.header[3].filter(([, style]) => style === TOKEN.domain.context.result).reduce((sum, [cells]) => sum + cells.length, 0);
 	assert.ok(resultCells >= 9 && resultCells <= 11, `a part takes as much of the bar as of the window: ${resultCells} of 40 cells for about 5k of 20k tokens`);
 	has(top.join("\n"), "■ Tool results ", "what each colour is");
 	has(top.join("\n"), "□ Free ", "and how much is free");
-	assert.deepEqual(runtimePresentation.sent.contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, "catSystem"], [5, "catTools"], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free");
+	assert.deepEqual(runtimePresentation.sent.contextBar([{ cat: "system", tokens: 50 }, { cat: "tools", tokens: 25 }], 100, 20).map(([cells, style]) => [cells.length, style]), [[10, TOKEN.domain.context.system], [5, TOKEN.domain.context.tools], [5, "faint"]], "the bar is the window in order: half, a quarter, a quarter free without category aliases");
 
 	const task = contextView({ sent: { ...sent, task: true, reply: undefined, results: new Map() }, windowSize: 20_000, cols: 40, writing: { content: [{ type: "text", text: "Half a tho" }] }, presentation: runtimePresentation.sent });
 	has(task.header[0][0][0], "Sent provider request", "while a task runs, the frozen request stays labelled as sent");
@@ -2532,10 +2668,11 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 		import("../src/application/workspace-presentation.mjs"),
 	]);
 	const workspacePresentation = createWorkspacePresentation();
-	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model"], "the top-level tabs group speech and private activity under Chat before the project and provider views");
+	assert.deepEqual(TABS.map((tab) => tab.name), ["Chat", "Carto", "Diff", "Shells", "Model", "Settings"], "the top-level tabs group speech and private activity under Chat before project, provider, and safety views");
 	assert.deepEqual(VIEWS.chat, [{ id: "conversation", name: "Conversation" }, { id: "work", name: "Work" }, { id: "consult", name: "Consult" }], "Chat gives isolated consultation activity its own adjacent subtab, rather than hiding it in parent Work");
 	assert.deepEqual(VIEWS.carto.find((view) => view.id === "hands"), { id: "hands", name: "Current shared brain" }, "the shelf and reports are a Carto view");
 	assert.deepEqual(VIEWS.context.find((view) => view.id === "raw"), { id: "raw", name: "Raw payload" }, "the serialized audit copy is separate from the semantic sent-request views");
+	assert.deepEqual(VIEWS.settings, [{ id: "configuration", name: "Configuration" }, { id: "safety", name: "Safety" }, { id: "assessment", name: "Assessment" }], "Settings gives editable configuration, session safety, and assessment their own settled subviews");
 	assert.equal(VIEWS.context.some((view) => view.id === "hands"), false, "the Model tab has no mutable Current shared brain view");
 	const brainDir = join(scratch, "empty-current-brain");
 	mkdirSync(brainDir, { recursive: true });
@@ -2546,6 +2683,69 @@ test("screen: Current shared brain lives in Carto, not Model", async () => {
 	const header = current.header.map((line) => line.map(([part]) => part).join("")).join("\n");
 	has(header, "Current shared brain", "the live scope is named in the view itself");
 	has(header, "not part of any sent provider request", "the view does not present live brain state as a frozen snapshot");
+});
+
+test("screen: registry, palette, and help retain six-tab control parity", async () => {
+	const [
+		{ TABS, VIEWS, KEYS_HELP, COMMANDS, paletteDestinationFor, paletteItemForCapability, taskMessageAvailabilityFor },
+		{ CONTEXT_ACTION },
+		{ REQUEST_ACTION },
+		{ REVIEW_ACTION },
+		{ RUNTIME_ACTION },
+		{ TALK_ACTION },
+		{ WORKSPACE_ACTION },
+		{ SETTINGS_ACTION },
+	] = await Promise.all([
+		import("../src/screen/app.mjs"),
+		import("../src/application/context.mjs"),
+		import("../src/application/requests.mjs"),
+		import("../src/application/review.mjs"),
+		import("../src/application/runtime-actions.mjs"),
+		import("../src/application/talk.mjs"),
+		import("../src/application/workspace.mjs"),
+		import("../src/application/settings-actions.mjs"),
+	]);
+	assert.match(KEYS_HELP, /1 to 6\s+go to a tab/, "the help sheet names the six-tab dispatcher");
+	assert.match(KEYS_HELP, /Ctrl-C\s+clear what you have typed/, "the help sheet keeps Ctrl-C as clear-line/quit, not stop");
+	assert.match(KEYS_HELP, /Ctrl-X\s+stop the agent/, "the help sheet names the canonical stop control");
+	assert.match(KEYS_HELP, /Ctrl-V pauses it/, "the help sheet names the stream pause control");
+	assert.match(KEYS_HELP, /Ctrl-K\s+search navigation and registered actions/, "the help sheet names the registry-backed palette");
+	assert.match(KEYS_HELP, /on a row of Atlas, Ledger or Plan/, "the help sheet names the live Carto editors rather than an obsolete surface");
+	assert.match(KEYS_HELP, /On another editable source it opens that source/, "the help sheet distinguishes a new Carto-row template from an existing source");
+	assert.match(KEYS_HELP, /Settings → Configuration keeps e for its saved-setting form/, "the help sheet gives Settings Configuration its own persisted-setting editor instead of a raw file door");
+	assert.doesNotMatch(KEYS_HELP, /\bBooks\b/, "the help sheet does not advertise the retired Books surface");
+	const commands = new Map(COMMANDS.map(([name, description, words]) => [name, { description, words }]));
+	assert.equal(commands.size, COMMANDS.length, "the composer exposes each named terminal command only once");
+	assert.match(commands.get("consult")?.description ?? "", /consultation conference audits/, "the full-screen composer completes the terminal's consultation audit path");
+	assert.deepEqual(commands.get("consult")?.words, ["probe"], "the composer completes the native-grammar diagnostic subcommand");
+	assert.equal(commands.get("exit")?.description, "leave; the same as /quit", "the full-screen composer retains the terminal exit alias");
+	const registered = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
+	assert.equal(registered.length, 34, "the application registry includes Settings plus complete wake create/replace/remove actions");
+	const unavailable = { enabled: false, reason: "Unavailable in this fixture." };
+	assert.deepEqual(taskMessageAvailabilityFor({ data: { taskActive: false } }, { enabled: true }), {
+		enabled: false,
+		reason: "No active task is running to receive a message.",
+	}, "Work retains a visible settled unavailable state instead of opening a task-message form with no active task");
+	assert.deepEqual(taskMessageAvailabilityFor({ data: { taskActive: true } }, { enabled: false, reason: "No active task is running to receive a message." }), { enabled: true }, "a fresh settled task activity fact enables the Work message form");
+	assert.deepEqual(taskMessageAvailabilityFor({ loading: true }, { enabled: true }), {
+		enabled: false,
+		reason: "Task activity is still loading. Refresh Work and try again.",
+	}, "a pending activity refresh fails closed with a visible reason");
+	assert.deepEqual(taskMessageAvailabilityFor({ data: { taskActive: true } }, { enabled: false, reason: "This session has no active-task message router." }), {
+		enabled: false,
+		reason: "This session has no active-task message router.",
+	}, "a missing message port stays unavailable even if a stale task projection names a task");
+	const entries = registered.map((action) => ({
+
+		action,
+		destination: paletteDestinationFor(action),
+		item: paletteItemForCapability({ id: action, label: `Label for ${action}`, category: "test", availability: unavailable }),
+	}));
+	assert.ok(entries.every(({ destination }) => destination !== undefined), "every registered action remains discoverable from the command palette");
+	assert.ok(entries.every(({ destination }) => TABS.some((tab) => tab.id === destination.tab) && VIEWS[destination.tab]?.some((view) => view.id === destination.view)), "every registered action has a declared palette tab and subview");
+	assert.deepEqual(entries.map(({ action, destination, item }) => ({ id: item.id, destination: item.destination, availability: item.availability })), entries.map(({ action, destination }) => ({ id: `capability:${action}`, destination, availability: unavailable })), "every registered action materializes one palette entry with its destination and availability reason");
+	assert.deepEqual(entries.map(({ action, item }) => item.actionId), registered, "each palette capability keeps its action identity for ActionLauncher rather than being route-only navigation");
+	assert.ok(entries.every(({ item }) => !/remains on the terminal command surface/.test(item.description)), "every registered action has a focused screen seam rather than a terminal-only fallback");
 });
 
 test("screen: a windows block followed by an ephemeral read batch tail is still a part of its own, and a request without a state block says so", async () => {
@@ -2723,8 +2923,8 @@ test("screen: nothing that a head cuts off is unreachable — the full text is i
 	expectReachable("shell command", shellsView({ windows: [{ name: "main", state: "busy", command: LONG, running: 9000, cwd: ".", network: false, sandbox: true, asks: false, tail: [] }], presentation: runtimePresentation.shells }), LONG);
 });
 
-test("screen: the small box caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {
-	const { Box } = await import("../src/screen/parts.mjs");
+test("screen: the shared form caps what goes in, counts it live, and keeps drafts through an asynchronous save", async () => {
+	const { Form } = await import("../src/screen/parts.mjs");
 	const caps = [];
 	const flashes = [];
 	const saved = [];
@@ -2733,7 +2933,7 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 		{ id: "text", label: "Text", limit: 5, value: "abc" },
 		{ id: "detail", label: "Detail", limit: 12, multiline: true, value: "" },
 	];
-	const box = new Box({
+	const box = new Form({
 		title: "x",
 		fields,
 		keyOf: (data) => data,
@@ -2763,7 +2963,7 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 	assert.equal(saved[0].get("detail"), "\n");
 	assert.equal(closed, 1);
 	// A paste is cut to what fits, and says so.
-	const box2 = new Box({
+	const box2 = new Form({
 		title: "y",
 		fields: [{ id: "text", label: "Text", limit: 6, value: "" }],
 		keyOf: (data) => data,
@@ -2780,7 +2980,7 @@ test("screen: the small box caps what goes in, counts it live, and keeps drafts 
 	// A typed action result is asynchronous: the draft stays visible and cannot be submitted twice while it settles.
 	let resolveSave;
 	let redraws = 0;
-	const pending = new Box({
+	const pending = new Form({
 		title: "pending",
 		fields: [{ id: "text", label: "Text", limit: 6, value: "draft" }],
 		keyOf: (data) => data,

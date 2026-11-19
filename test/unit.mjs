@@ -8,25 +8,35 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
+import { CONFIGURATION_SCHEMA, DEFAULTS, contextWindowLimits, loadConfig, modelContextWindow, POLICY } from "../src/config.mjs";
+import { ConfigurationRepositoryError, createConfigurationRepository } from "../src/configuration/repository.mjs";
+import { CONFIGURATION_SOURCE, resolveConfigurationSources } from "../src/configuration/sources.mjs";
 import { UI_ERROR_CODE, UI_ERROR_KIND } from "../src/application/contracts.mjs";
-import { CheckpointError } from "../src/checkpoints.mjs";
-import { WakeError } from "../src/wakes.mjs";
+import { CheckpointError, checkpoint } from "../src/checkpoints.mjs";
+import { WakeError, createWakes } from "../src/wakes.mjs";
 import { WindowError } from "../src/windows.mjs";
 import { createApplicationEvents } from "../src/application/events.mjs";
 import { createJobManager } from "../src/application/jobs.mjs";
 import { createApplication } from "../src/application/app.mjs";
+import { LIFECYCLE_ACTION, LIFECYCLE_ACTION_SPECS, createLifecycleApplication, createLifecycleBridge } from "../src/application/lifecycle.mjs";
+import { uiSuccess } from "../src/application/result.mjs";
+import { ACTION_SPECS, ACTION_TARGET_KIND, assertActionSpecParity, createActionSpecRegistry } from "../src/application/action-specs.mjs";
 import { consultMessageFingerprint, createWorkspaceQueries } from "../src/application/queries.mjs";
 import { createRuntimeActivityReader, createRuntimeModelsReader, createRuntimeStatusReader, createRuntimeViewReader } from "../src/application/runtime.mjs";
+import { createSettingsReader } from "../src/application/settings.mjs";
+import { SETTINGS_ACTION, createSettingsApplication } from "../src/application/settings-actions.mjs";
 import { createDeferredReferenceLabels } from "../src/application/references.mjs";
 import { createChatPresentation } from "../src/application/chat.mjs";
 import { createReviewPresentation } from "../src/application/review-presentation.mjs";
 import { createRuntimePresentation } from "../src/application/runtime-presentation.mjs";
+import { createSettingsPresentation } from "../src/application/settings-presentation.mjs";
 import { REQUEST_ACTION, createRequestApplication } from "../src/application/requests.mjs";
 import { REVIEW_ACTION, createReviewApplication } from "../src/application/review.mjs";
 import { RUNTIME_ACTION, createRuntimeApplication } from "../src/application/runtime-actions.mjs";
 import { copyOut, toClipboard } from "../src/infrastructure/clipboard.mjs";
-import { findTextSource, pathExists, writeScratch } from "../src/infrastructure/filesystem.mjs";
+import { findTextSource, listProjectFiles, pathExists, readText, writeScratch } from "../src/infrastructure/filesystem.mjs";
+import { createGitReviewReader } from "../src/infrastructure/git.mjs";
+import { runProcess } from "../src/infrastructure/process.mjs";
 import { CONTEXT_ACTION, createContextApplication } from "../src/application/context.mjs";
 import { TALK_ACTION, createTalkApplication } from "../src/application/talk.mjs";
 import { WORKSPACE_ACTION, createWorkspaceApplication } from "../src/application/workspace.mjs";
@@ -71,9 +81,15 @@ import { RECORD } from "../src/voice.mjs";
 import { applyStagePromotion, collectStageCandidate, createStage, disposeStage, prepareStagePromotion, StageError } from "../src/stage.mjs";
 import { createRunner, sandboxArgs, STAGE_WORK_DIR } from "../src/sandbox.mjs";
 import { renderAsyncBoundary } from "../src/screen/async-boundary.mjs";
+import { disclosureRows } from "../src/screen/disclosure.mjs";
 import { ConfirmDialog } from "../src/screen/confirm-dialog.mjs";
 import { createChat as createChatModel } from "../src/screen/chat.mjs";
 import { CommandPalette, filterPaletteItems, normalizePaletteItems } from "../src/screen/command-palette.mjs";
+import { ACTION_PLACEMENTS, assertActionPlacementParity, createActionPlacementRegistry } from "../src/screen/action-placement.mjs";
+import { ActionDialog } from "../src/screen/action-dialog.mjs";
+import { ActionLauncher, ActionRequestGate, actionInputFromDrafts, actionLaunchPlan, normalizeActionTargets, resolveActionTarget } from "../src/screen/action-launcher.mjs";
+import { TargetPicker } from "../src/screen/target-picker.mjs";
+import { WakeDialog, wakeInputFromDrafts } from "../src/screen/wake-dialog.mjs";
 import { createFocusManager } from "../src/screen/focus.mjs";
 import { createKeyHints } from "../src/screen/key-hints.mjs";
 import { createList } from "../src/screen/list.mjs";
@@ -82,9 +98,12 @@ import { createRouteManager } from "../src/screen/routes.mjs";
 import { createOverlayManager } from "../src/screen/overlays.mjs";
 import { Form } from "../src/screen/parts.mjs";
 import { createProjectionScheduler } from "../src/screen/projections.mjs";
+import { JobDrawer, jobDrawerNeeded, jobsForDrawer } from "../src/screen/job-drawer.mjs";
 import { createSelection } from "../src/screen/selection.mjs";
 import { diffView } from "../src/screen/review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "../src/screen/runtime.mjs";
+import { settingsAssessmentView, settingsOverviewView, settingsSafetyView } from "../src/screen/settings.mjs";
+import { SettingsSourcePicker, nextWritableSettingsScope, settingsConfigurationView, settingsEditorField, settingsSources, settingsWriteTarget } from "../src/screen/settings-editor.mjs";
 import { renderStatusBar } from "../src/screen/status.mjs";
 import { TOKEN } from "../src/screen/tokens.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "../src/screen/workspace.mjs";
@@ -107,6 +126,224 @@ const fresh = (t) => {
 };
 const NOW = "2026-11-15T00:00:00.000Z";
 const sha256 = (value) => createHash("sha256").update(String(value)).digest("hex");
+
+test("configuration: one schema routes and validates all thirty persisted settings", () => {
+	const keys = [
+		"server", "model", "user", "contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "windowTail", "wakeMin",
+		"wakesMax", "shellRead", "treeDepth", "screen", "colors", "theme", "initiate", "yolo", "bwrap", "repeatCut",
+		"prefill", "prefillTokens", "askMinutes", "thinking", "handoffQuestion", "chatWindow", "collapseTokens", "collapseMinutes", "collapseFull", "readAhead",
+	];
+	assert.deepEqual(CONFIGURATION_SCHEMA.keys, keys, "the Settings contract has one explicit row for every saved setting");
+	assert.deepEqual(CONFIGURATION_SCHEMA.details().map((detail) => detail.key), keys, "every saved setting has schema-derived presentation metadata");
+	assert.ok(CONFIGURATION_SCHEMA.details().every((detail) => detail.persistence === "project" && typeof detail.label === "string" && typeof detail.apply === "string" && typeof detail.risk === "string" && typeof detail.validation?.kind === "string"));
+	const configured = { ...DEFAULTS, server: "http://example.test/v1/", model: "model", user: "Ada" };
+	assert.equal(CONFIGURATION_SCHEMA.validate(configured, { requireProvider: true }).server, "http://example.test/v1", "shared validation retains startup URL normalization");
+	for (const key of keys) {
+		const raw = configured[key];
+		const formValue = Array.isArray(raw) ? raw.join("\n") : typeof raw === "boolean" ? String(raw) : String(raw);
+		assert.deepEqual(CONFIGURATION_SCHEMA.coerceSetting(key, formValue), raw, `${key} has a form-safe coercion path`);
+	}
+	const invalid = {
+		server: 4,
+		model: 4,
+		user: "one\ntwo",
+		contextWindow: 0,
+		maxTokens: 0,
+		mainTurns: 0,
+		taskTurns: POLICY.limits.plan.moveTurns.max + 1,
+		shellWait: 0,
+		windowTail: POLICY.validation.windowTailMax + 1,
+		wakeMin: 0,
+		wakesMax: 0,
+		shellRead: ["relative"],
+		treeDepth: POLICY.limits.tree.maxDepth + 1,
+		screen: 1,
+		colors: "neon",
+		theme: "neon",
+		initiate: 1,
+		yolo: 1,
+		bwrap: 1,
+		repeatCut: 1,
+		prefill: 1,
+		prefillTokens: -1,
+		askMinutes: -1,
+		thinking: 1,
+		handoffQuestion: 1,
+		chatWindow: configured.contextWindow / 2 + 1,
+		collapseTokens: POLICY.validation.minimumTokenSetting - 1,
+		collapseMinutes: -1,
+		collapseFull: POLICY.validation.collapsePercent.max + 1,
+		readAhead: 1,
+	};
+	for (const key of keys) assert.throws(() => CONFIGURATION_SCHEMA.validate({ ...configured, [key]: invalid[key] }, { requireProvider: true }), undefined, `${key} is still backend-validated after local coercion`);
+	assert.throws(() => CONFIGURATION_SCHEMA.coerceSetting("unknown", "value"), /not a known setting/);
+});
+
+test("configuration: precedence exposes saved overrides that environment and CLI currently shadow", (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	writeFileSync(install, JSON.stringify({ server: "http://install.test/v1", model: "install-model", colors: "truecolor", collapseFull: 70 }));
+	writeFileSync(join(brainDir, "config.json"), JSON.stringify({ server: "http://project.test/v1", colors: "none", collapseFull: 75 }));
+	const env = { CARTO_CONFIG: install, CARTO_SERVER: "http://environment.test/v1", CARTO_MODEL: "environment-model", CARTO_USER: "Environment User" };
+	const flags = { url: "http://command-line.test/v1", model: "command-line-model" };
+	const resolved = resolveConfigurationSources({
+		defaults: DEFAULTS,
+		install: JSON.parse(readFileSync(install, "utf8")),
+		project: JSON.parse(readFileSync(join(brainDir, "config.json"), "utf8")),
+		env,
+		flags,
+		paths: { install, project: join(brainDir, "config.json") },
+		sourceDetails: { install: { writable: true, revision: "install-r1" }, project: { writable: true, revision: "project-r1" } },
+	});
+	assert.deepEqual(resolved.config, {
+		...DEFAULTS,
+		server: "http://command-line.test/v1",
+		model: "command-line-model",
+		user: "Environment User",
+		colors: "none",
+		collapseFull: 75,
+	}, "defaults, install, project, environment, and CLI use the documented precedence order");
+	const server = resolved.entries.find((entry) => entry.key === "server");
+	assert.deepEqual(server?.source, { layer: CONFIGURATION_SOURCE.commandLine, writable: false });
+	assert.deepEqual(server?.contributors.map((entry) => [entry.layer, entry.overriddenBy]), [
+		[CONFIGURATION_SOURCE.defaults, CONFIGURATION_SOURCE.install],
+		[CONFIGURATION_SOURCE.install, CONFIGURATION_SOURCE.project],
+		[CONFIGURATION_SOURCE.project, CONFIGURATION_SOURCE.environment],
+		[CONFIGURATION_SOURCE.environment, CONFIGURATION_SOURCE.commandLine],
+		[CONFIGURATION_SOURCE.commandLine, undefined],
+	], "provenance tells Settings why a saved endpoint is not effective for this invocation");
+	assert.deepEqual(resolved.revisions, { install: "install-r1", project: "project-r1" });
+	const startup = loadConfig({ brainDir, flags, env });
+	assert.equal(startup.server, "http://command-line.test/v1", "the compatibility startup resolver shares the new precedence rules");
+	assert.equal(startup.model, "command-line-model");
+	assert.equal(startup.colors, "none");
+});
+
+test("configuration repository: source permissions, revisions, atomic writes, and write failures are typed", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	const project = join(brainDir, "config.json");
+	writeFileSync(install, JSON.stringify({ colors: "dark" }));
+	const repository = createConfigurationRepository({ paths: { install, project } });
+	const absent = await repository.read("project");
+	assert.equal(absent.revision, "absent");
+	assert.equal(absent.writable, true);
+	const written = await repository.update({
+		scope: "project",
+		expectedRevision: absent.revision,
+		transform: (values) => ({ ...values, colors: "light" }),
+	});
+	assert.match(written.revision, /^sha256:/);
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" }, "the completed rename leaves a whole JSON object, never a partial file");
+	await assert.rejects(
+		repository.update({ scope: "project", expectedRevision: absent.revision, transform: (values) => ({ ...values, theme: "dark" }) }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "revision-conflict",
+		"a stale Settings editor cannot replace a newer saved source",
+	);
+	await assert.rejects(
+		repository.update({ scope: "environment", expectedRevision: written.revision, transform: (values) => values }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "invalid-source",
+		"environment and CLI are inspectable but never config-file write targets",
+	);
+	const denied = createConfigurationRepository({
+		paths: { install, project },
+		fs: { access: async () => { throw Object.assign(new Error("permission denied"), { code: "EACCES" }); } },
+	});
+	await assert.rejects(
+		denied.update({ scope: "project", expectedRevision: written.revision, transform: (values) => values }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "source-read-only",
+		"a selected saved source has an explicit permission failure before any write",
+	);
+	const broken = createConfigurationRepository({
+		paths: { install, project },
+		fs: { rename: async () => { throw Object.assign(new Error("disk full"), { code: "EIO" }); } },
+	});
+	await assert.rejects(
+		broken.update({ scope: "project", expectedRevision: written.revision, transform: (values) => ({ ...values, theme: "dark" }) }),
+		(error) => error instanceof ConfigurationRepositoryError && error.code === "write-failed",
+		"failed atomic persistence is a typed result rather than a partially-written config",
+	);
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" }, "a failed replacement preserves the previous project configuration");
+});
+
+test("configuration jobs: abort before rename cancels, while abort after rename reports the saved fact", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	const project = join(brainDir, "config.json");
+	writeFileSync(install, "{}");
+	writeFileSync(project, JSON.stringify({ theme: "dark" }));
+	let beganWrite;
+	let releaseWrite;
+	const writing = new Promise((resolve) => { releaseWrite = resolve; });
+	const writeBegan = new Promise((resolve) => { beganWrite = resolve; });
+	let renamed = 0;
+	const delayed = createConfigurationRepository({
+		paths: { install, project },
+		fs: {
+			writeFile: async (_file, _text, options) => {
+				beganWrite();
+				await writing;
+				if (options.signal?.aborted === true) throw Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" });
+			},
+			rename: async () => { renamed++; },
+		},
+	});
+	const before = await delayed.read("project");
+	const controller = new AbortController();
+	const pending = delayed.update({
+		scope: "project",
+		expectedRevision: before.revision,
+		transform: (values) => ({ ...values, theme: "light" }),
+		signal: controller.signal,
+	});
+	await writeBegan;
+	controller.abort();
+	releaseWrite();
+	await assert.rejects(pending, (error) => error instanceof ConfigurationRepositoryError && error.code === "cancelled");
+	assert.equal(renamed, 0, "an abort before the atomic rename never reaches the durable commit boundary");
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { theme: "dark" });
+
+	const clock = Date.parse(NOW);
+	const events = createApplicationEvents({ now: () => clock });
+	const jobs = createJobManager({ events, now: () => clock });
+	const repository = createConfigurationRepository({ paths: { install, project } });
+	const app = createApplication({
+		brainDir,
+		root,
+		configuration: { repository, env: { CARTO_CONFIG: install } },
+		events,
+		jobs,
+		now: () => clock,
+	});
+	const seen = [];
+	events.subscribe((event) => {
+		seen.push(event);
+		if (event.type === "job.committed") jobs.cancel(event.payload.job.id);
+	});
+	const revision = (await repository.read("project")).revision;
+	const result = await app.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "light",
+		scope: "project",
+		expectedRevision: revision,
+	}, { requestId: "settings-after-commit" });
+	assert.equal(result.ok, true, "a cancel after rename does not pretend the file was undone");
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.data.committed, true);
+	assert.equal(result.data.refresh, "needed", "post-commit cancellation stops the provenance wait and asks for a normal refresh");
+	assert.equal(result.meta.jobId, "job-1");
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { theme: "light" });
+	assert.ok(seen.some((event) => event.type === "job.queued"));
+	assert.ok(seen.some((event) => event.type === "job.progress"));
+	assert.ok(seen.some((event) => event.type === "job.committed"));
+	assert.ok(seen.some((event) => event.type === "job.cancel-requested"));
+	assert.ok(seen.some((event) => event.type === "job.succeeded"), "the job settles as succeeded because its effect was committed");
+	const settled = jobs.get("job-1");
+	assert.equal(settled?.state, "succeeded");
+	assert.equal(settled?.effect?.committed, true);
+	assert.equal(settled?.cancellation.requested, true);
+});
+
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
@@ -338,6 +575,152 @@ test("application: events and jobs publish isolated, typed asynchronous lifecycl
 	off();
 });
 
+test("application: projection jobs expose safe snapshots and only wrap real abort-aware ports", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const now = () => Date.parse(NOW);
+	const events = createApplicationEvents({ now });
+	const jobs = createJobManager({ events, now, nextId: (() => { let id = 0; return () => `projection-${++id}`; })() });
+	let beginTree;
+	const treeBegan = new Promise((resolve) => { beginTree = resolve; });
+	const app = createApplication({
+		brainDir,
+		root,
+		now,
+		events,
+		jobs,
+		queries: {
+			gitReader: {
+				projectFiles: async (_project, { signal, reportProgress }) => {
+					reportProgress({ current: 1, total: 2, message: "Reading tracked project files." });
+					beginTree(signal);
+					await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+					return [];
+				},
+			},
+			filesystem: {
+				listProjectFiles: async () => [],
+				describeProjectFiles: async () => [],
+				readText: async () => "",
+			},
+		},
+	});
+	assert.equal("jobs" in app, false, "the composed facade no longer leaks a mutable job manager to Screen");
+	assert.deepEqual(app.jobSnapshots(), []);
+	const operation = app.projections.start("carto.tree");
+	assert.equal(operation.jobId, "projection-1");
+	await treeBegan;
+	const running = app.jobSnapshots();
+	assert.equal(Object.isFrozen(running), true);
+	assert.equal(Object.isFrozen(running[0]), true);
+	assert.equal(running[0].kind, "workspace.tree");
+	assert.deepEqual(running[0].progress, { current: 1, total: 2, message: "Reading tracked project files." });
+	assert.equal(Object.hasOwn(running[0], "controller"), false, "a snapshot cannot reveal a cancellation controller");
+	assert.equal(Object.hasOwn(running[0], "run"), false, "a snapshot cannot reveal an operation closure");
+	const asked = app.cancelJob(operation.jobId);
+	assert.equal(asked.ok, true);
+	if (!asked.ok) throw new Error(asked.error.message);
+	assert.equal(asked.data.accepted, true);
+	const cancelled = await operation.promise;
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("the cancelled tree read must not be reported as a success");
+	assert.equal(cancelled.error.kind, UI_ERROR_KIND.cancelled);
+	const settled = app.jobSnapshots()[0];
+	assert.equal(settled.state, "cancelled");
+	assert.equal(settled.result?.ok, false);
+	assert.equal(settled.result?.error.kind, UI_ERROR_KIND.cancelled, "a snapshot retains the typed outcome without revealing a controller or job closure");
+
+	const unsupported = app.projections.start("carto.atlas");
+	assert.equal(unsupported.jobId, undefined, "a legacy synchronous reader is not manufactured into a job");
+	const rejected = await unsupported.promise;
+	assert.equal(rejected.ok, false);
+	if (rejected.ok) throw new Error("an unmigrated projection must be refused");
+	assert.equal(rejected.error.code, UI_ERROR_CODE.invalidInput);
+	assert.equal(app.jobSnapshots().length, 1, "refusing an unmigrated reader starts no fake job");
+	const missing = app.cancelJob("not-a-job");
+	assert.equal(missing.ok, false);
+	if (missing.ok) throw new Error("an unknown cancellation target must be explicit");
+	assert.equal(missing.error.code, UI_ERROR_CODE.invalidInput);
+});
+
+test("application: terminal lifecycle bridge exposes named controls, disabled reasons, and fresh-context acknowledgement without leaking a terminal closure", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const bridge = createLifecycleBridge();
+	const app = createApplication({ brainDir, root, now: () => Date.parse(NOW), runtime: { lifecycle: bridge } });
+	assert.deepEqual(Object.keys(bridge).sort(), ["attach", "attached", "availability", "execute"], "the application gets only a narrow typed lifecycle bridge");
+	assert.equal(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.enabled, false);
+	assert.match(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.reason ?? "", /not attached/i);
+	const detached = await app.lifecycle.execute(LIFECYCLE_ACTION.collapse);
+	assert.equal(detached.ok, false);
+	if (detached.ok) throw new Error("an unattached lifecycle control must be blocked");
+	assert.equal(detached.error.code, UI_ERROR_CODE.policyBlocked);
+
+	const calls = [];
+	bridge.attach({
+		availability(action) {
+			return action === LIFECYCLE_ACTION.collapse
+				? { enabled: false, reason: "The agent is working. Stop it first, then collapse the context." }
+				: { enabled: true };
+		},
+		execute: async (action, input, options) => {
+			calls.push({ action, input, options: { requestId: options.requestId, acknowledged: options.confirmation?.acknowledged } });
+			return uiSuccess({ action, line: `completed ${action}` }, { meta: { at: NOW, requestId: options.requestId } });
+		},
+	});
+	assert.equal(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.enabled, false, "the owner supplies a concrete safety reason");
+	assert.match(app.lifecycle.capabilities.availability(LIFECYCLE_ACTION.collapse)?.reason ?? "", /agent is working/i);
+	const blocked = await app.lifecycle.execute(LIFECYCLE_ACTION.collapse);
+	assert.equal(blocked.ok, false);
+	if (blocked.ok) throw new Error("an owner-blocked lifecycle control must stay blocked");
+	assert.equal(calls.length, 0, "application does not invoke a lifecycle owner after its availability blocks execution");
+	const refreshed = await app.lifecycle.execute(LIFECYCLE_ACTION.refreshTop, { reason: "The assessment changed." }, { requestId: "top-1" });
+	assert.equal(refreshed.ok, true);
+	assert.deepEqual(calls, [{
+		action: LIFECYCLE_ACTION.refreshTop,
+		input: { reason: "The assessment changed." },
+		options: { requestId: "top-1", acknowledged: undefined },
+	}], "refreshing the context top is also guarded by the terminal lifecycle owner");
+	calls.splice(0);
+
+	const asked = await app.lifecycle.execute(LIFECYCLE_ACTION.freshContext, {}, { requestId: "fresh-1" });
+	assert.equal(asked.ok, false);
+	if (asked.ok) throw new Error("fresh context must require acknowledgement");
+	assert.equal(asked.error.code, UI_ERROR_CODE.confirmationRequired);
+	assert.deepEqual(asked.confirmation, {
+		actionId: LIFECYCLE_ACTION.freshContext,
+		target: "current context",
+		summary: "Start a fresh context and clear kept talk, task records, shelf placements, and the collapse marker. Stored session history remains available.",
+		strength: "acknowledge",
+	});
+	const completed = await app.lifecycle.execute(LIFECYCLE_ACTION.freshContext, {}, {
+		requestId: "fresh-2",
+		confirmation: { ...asked.confirmation, acknowledged: true },
+	});
+	assert.equal(completed.ok, true);
+	assert.deepEqual(calls, [{
+		action: LIFECYCLE_ACTION.freshContext,
+		input: {},
+		options: { requestId: "fresh-2", acknowledged: true },
+	}], "only an acknowledged typed action crosses the terminal port");
+	assert.deepEqual(new Set(LIFECYCLE_ACTION_SPECS.map((spec) => spec.id)), new Set(Object.values(LIFECYCLE_ACTION)), "every terminal lifecycle capability has the same launcher schema contract as Screen actions");
+
+	const malformed = createLifecycleApplication({ port: { availability: () => true, execute: () => ({ ok: true }) }, now: () => Date.parse(NOW) });
+	const invalid = await malformed.execute(LIFECYCLE_ACTION.stop);
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("a malformed terminal result must be contained");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.internal);
+	const malformedMeta = createLifecycleApplication({ port: { availability: () => true, execute: () => ({ ok: true, data: {}, meta: null }) }, now: () => Date.parse(NOW) });
+	const invalidMeta = await malformedMeta.execute(LIFECYCLE_ACTION.stop);
+	assert.equal(invalidMeta.ok, false);
+	if (invalidMeta.ok) throw new Error("a terminal result with malformed metadata must be contained");
+	assert.equal(invalidMeta.error.code, UI_ERROR_CODE.internal);
+	let unsafeCalls = 0;
+	const unsafeAvailability = createLifecycleApplication({ port: { availability: () => undefined, execute: () => { unsafeCalls++; return uiSuccess({}); } }, now: () => Date.parse(NOW) });
+	assert.equal(unsafeAvailability.capabilities.availability(LIFECYCLE_ACTION.stop)?.enabled, false, "an invalid terminal availability state fails closed");
+	const unsafe = await unsafeAvailability.execute(LIFECYCLE_ACTION.stop);
+	assert.equal(unsafe.ok, false);
+	assert.equal(unsafeCalls, 0, "an invalid availability state cannot open a dispatch path");
+});
+
 test("screen: deferred projection scheduling keeps cached data through stale, cancelled, failed, and invalidated reads", async () => {
 	let clock = 0;
 	const settled = [];
@@ -416,6 +799,48 @@ test("screen: deferred projection scheduling keeps cached data through stale, ca
 	await flush();
 	assert.deepEqual(scheduler.get("carto.atlas").data, { version: "retried" });
 	assert.equal(settled.length, 4, "only current success, failure, retry, and typed cancellation notify a render; stale settlements do not");
+});
+
+test("screen: a job-backed projection links only its current job and rejects its stale settlement", async () => {
+	const scheduler = createProjectionScheduler();
+	const deferred = () => {
+		let resolve;
+		const promise = new Promise((done) => { resolve = done; });
+		return { promise, resolve };
+	};
+	const flush = () => new Promise((resolve) => setImmediate(resolve));
+	const first = deferred();
+	let firstSignal;
+	assert.equal(scheduler.refresh("carto.tree", ({ signal }) => {
+		firstSignal = signal;
+		return { jobId: "tree-1", promise: first.promise };
+	}), true);
+	await flush();
+	assert.equal(scheduler.get("carto.tree").jobId, "tree-1", "the cache retains the application-owned job identity, not a controller");
+	const second = deferred();
+	let secondSignal;
+	assert.equal(scheduler.refresh("carto.tree", ({ signal }) => {
+		secondSignal = signal;
+		return { jobId: "tree-2", promise: second.promise };
+	}, { force: true }), true);
+	await flush();
+	assert.equal(firstSignal.aborted, true, "a replacement read aborts the scheduler signal that dispatches cancellation to the first job");
+	assert.equal(scheduler.get("carto.tree").jobId, "tree-2");
+	first.resolve({ ok: true, data: { stale: true } });
+	await flush();
+	assert.equal(scheduler.get("carto.tree").data, undefined, "the superseded job may settle but cannot paint its old data");
+	second.resolve({ ok: true, data: { fresh: true } });
+	await flush();
+	assert.equal(secondSignal.aborted, false);
+	assert.deepEqual(scheduler.get("carto.tree").data, { fresh: true });
+	assert.equal(scheduler.get("carto.tree").jobId, "tree-2");
+
+	assert.equal(scheduler.refresh("diff.git", () => ({
+		jobId: undefined,
+		promise: Promise.resolve({ ok: false, error: { kind: "cancelled", message: "Already cancelled." } }),
+	})), true);
+	await flush();
+	assert.equal(scheduler.get("diff.git").error, undefined, "a cancelled envelope without a job id remains a typed cancellation rather than an invalid result");
 });
 
 test("screen: the shared async boundary keeps loading, stale, error, issue, and empty data states outside feature renderers", () => {
@@ -966,6 +1391,96 @@ test("screen: status bar paints settled activity, status, notice, and footer sna
 	assert.throws(() => renderStatusBar({ state }), /terminal activity/);
 });
 
+test("screen: job status and drawer inspect snapshots and dispatch only typed cancellation", () => {
+	const jobs = [
+		{
+			id: "active-1",
+			kind: "workspace.tree",
+			state: "running",
+			target: { label: "Project tree" },
+			progress: { current: 3, total: 9, message: "Scanning project files." },
+			cancellation: { mode: "abort", requested: false, meaningful: true },
+			cancellable: true,
+		},
+		{
+			id: "review-1",
+			kind: "review.git",
+			state: "queued",
+			target: { label: "Git changes" },
+			cancellation: { mode: "abort", requested: false, meaningful: true },
+			cancellable: true,
+		},
+		{
+			id: "cancelled-1",
+			kind: "review.last",
+			state: "cancelled",
+			target: { label: "Last checkpoint change" },
+			cancellation: { mode: "settled", requested: true, meaningful: false },
+			cancellable: false,
+			result: { ok: false, data: { never: "shown" }, error: { message: "The job was cancelled." } },
+		},
+		{
+			id: "failed-1",
+			kind: "review.session",
+			state: "failed",
+			target: { label: "Session changes" },
+			cancellation: { mode: "settled", requested: false, meaningful: false },
+			cancellable: false,
+			result: { ok: false, error: { message: "Git could not read the checkpoint history." } },
+		},
+		{ id: "done-1", kind: "settings.write", state: "succeeded", cancellation: { mode: "settled", requested: false, meaningful: false }, cancellable: false, result: { ok: true, data: { never: "shown" } } },
+	];
+	assert.equal(jobDrawerNeeded([jobs[0]]), false, "one ordinary live job stays compact in the status strip");
+	assert.equal(jobDrawerNeeded(jobs), true, "competing live work and a failed/cancelled outcome make the drawer available");
+	const visible = jobsForDrawer(jobs);
+	assert.deepEqual(visible.map((job) => job.id), ["active-1", "review-1", "cancelled-1", "failed-1"]);
+	assert.equal(Object.isFrozen(visible[0]), true);
+	assert.equal(Object.hasOwn(visible.find((job) => job.id === "cancelled-1").result, "data"), false, "the drawer keeps outcomes compact even if a malformed caller supplied data");
+
+	const calls = [];
+	const flashes = [];
+	let closed = 0;
+	const drawer = new JobDrawer({
+		jobs: () => jobs,
+		keyOf: (data) => data,
+		close: () => { closed++; },
+		cancel: (id) => {
+			calls.push(id);
+			return { ok: true, data: { accepted: true } };
+		},
+		flash: (text) => flashes.push(text),
+	});
+	const plain = drawer.render(68).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+	assert.match(plain, /Background work/);
+	assert.match(plain, /Project tree.*running/);
+	assert.match(plain, /Scanning project files\. · 3\/9/);
+	drawer.handleInput("c");
+	assert.deepEqual(calls, ["active-1"], "the drawer sends only the selected id through its cancellation dispatcher");
+	assert.deepEqual(flashes, ["cancellation requested"]);
+	drawer.handleInput("escape");
+	assert.equal(closed, 1);
+
+	const rows = renderStatusBar({
+		state: { restSince: 0 },
+		core: { busy: () => false, thinking: () => true },
+		chat: { doing: () => undefined },
+		jobs: [{ ...jobs[0], cancellation: { ...jobs[0].cancellation, requested: true } }],
+		options: { contextWindow: 1_000 },
+		now: () => 1_000,
+	});
+	const status = rows.map((row) => row.map(([text]) => text).join("")).join("\n");
+	assert.match(status, /Scanning project files\. 3\/9 · cancelling/, "the persistent strip names progress and a pending cancellation without opening the drawer");
+	const stoppedRows = renderStatusBar({
+		state: { restSince: 0 },
+		core: { busy: () => false, thinking: () => true },
+		chat: { doing: () => undefined },
+		jobs: [jobs[2]],
+		options: { contextWindow: 1_000 },
+		now: () => 1_000,
+	});
+	assert.match(stoppedRows.flat().map(([text]) => text).join(""), /1 stopped job · J inspect/, "a cancelled job remains visibly inspectable after it leaves the active strip");
+});
+
 test("screen: shared key hints keep shell navigation while hiding unavailable capability actions", () => {
 	const keyHints = createKeyHints({
 		typing: "Esc: commands · Ctrl-K: palette",
@@ -1042,6 +1557,306 @@ test("screen: command palette filters registered actions, keeps disabled reasons
 	assert.equal(closes, 1, "only a successful asynchronous palette activation dismisses its overlay");
 });
 
+test("action launcher: specs and placements give every registered capability one pure Screen launch contract", () => {
+	const capabilities = { list: () => ACTION_SPECS.map((spec) => ({ id: spec.id })) };
+	const specs = createActionSpecRegistry(ACTION_SPECS);
+	const placements = createActionPlacementRegistry(ACTION_PLACEMENTS);
+	assert.deepEqual(assertActionSpecParity(capabilities, specs).actionIds, ACTION_SPECS.map((spec) => spec.id));
+	assert.deepEqual(assertActionPlacementParity(capabilities, placements).actionIds, ACTION_SPECS.map((spec) => spec.id));
+	assert.equal(specs.get("runtime.shell.send")?.target.kind, ACTION_TARGET_KIND.shellWindow);
+	assert.equal(placements.get("runtime.shell.send")?.route.view, "list");
+	assert.equal(placements.get("settings.reset")?.targetSource, "settings");
+	assert.throws(() => createActionSpecRegistry([{ id: "bad", launch: "direct", target: { kind: "none" }, fields: [{ id: "why", label: "Why", kind: "text", limit: 1, required: false, multiline: false }] }]), /cannot declare dialog fields/);
+	assert.throws(() => createActionPlacementRegistry([{ id: "bad", route: { tab: "chat" }, targetSource: "none" }]), /tab and view/);
+	assert.throws(() => assertActionPlacementParity({ list: () => [{ id: "known" }] }, placements), /missing placements/);
+});
+
+test("action launcher: settled targets, schema dialogs, confirmations, and request ids stay behind one duplicate gate", async () => {
+	const requestSpec = createActionSpecRegistry([{ id: "request.answer", launch: "dialog", target: { kind: "request", input: "id" }, fields: [{ id: "text", label: "Answer", kind: "text", required: true, multiline: true, limit: 40 }] }]);
+	const requestPlacement = createActionPlacementRegistry([{ id: "request.answer", route: { tab: "carto", view: "requests" }, targetSource: "requests", formTitle: "Answer request" }]);
+	const requestCapabilities = { get: (id) => id === "request.answer" ? { id, label: "Answer request", availability: { enabled: true } } : undefined };
+	const target = { key: "request:q1", value: "q1", label: "q1", input: { id: "q1" }, detail: "Which wording?" };
+	assert.deepEqual(normalizeActionTargets([target])[0].input, { id: "q1" }, "a settled row may supply complete backend input rather than a scalar only");
+	assert.equal(resolveActionTarget({ kind: ACTION_TARGET_KIND.request, selected: "gone", targets: [target] }).state, "pick", "a disappeared selection never resolves from live state");
+	assert.equal(resolveActionTarget({ kind: ACTION_TARGET_KIND.request, selected: "q1", targets: [] }).state, "unavailable");
+	const requestPlan = actionLaunchPlan({ capability: requestCapabilities.get("request.answer"), spec: requestSpec.get("request.answer"), placement: requestPlacement.get("request.answer"), selected: "q1", targets: [target] });
+	assert.deepEqual(requestPlan.input, { id: "q1" });
+	assert.equal(requestPlan.title, "Answer request");
+	assert.deepEqual(actionInputFromDrafts(requestPlan.fields, new Map([["text", "ready"]])), { ok: true, input: { text: "ready" } });
+	assert.equal(actionInputFromDrafts(requestPlan.fields, new Map([["text", ""]])).ok, false);
+	const blockedFlashes = [];
+	const blockedLauncher = new ActionLauncher({
+		capabilities: { get: (id) => id === "request.answer" ? { id, label: "Answer request", availability: { enabled: false, reason: "Requests are paused." } } : undefined },
+		specs: requestSpec,
+		placements: requestPlacement,
+		execute: async () => { throw new Error("an unavailable action must not dispatch"); },
+		flash: (message) => blockedFlashes.push(message),
+	});
+	assert.equal(await blockedLauncher.begin("request.answer"), false, "a launcher rechecks capability availability instead of trusting a stale palette row");
+	assert.equal(blockedFlashes.at(-1), "Requests are paused.");
+
+	const route = { tab: "chat", view: "conversation" };
+	const opened = {};
+	const results = [];
+	const deferred = [];
+	const calls = [];
+	const launcher = new ActionLauncher({
+		capabilities: requestCapabilities,
+		specs: requestSpec,
+		placements: requestPlacement,
+		currentRoute: () => route,
+		navigate: (next) => { Object.assign(route, next); return true; },
+		targetsFor: () => ({ state: "ready", targets: [target], selected: "request:q1" }),
+		execute: async (action, input, options) => {
+			calls.push({ action, input, options });
+			return { ok: true, data: { line: "answered" }, meta: { requestId: options.requestId }, notices: [] };
+		},
+		openTargetPicker: (given) => {
+			opened.picker = given;
+			return { opened: true, close: () => { opened.pickerClosed = true; } };
+		},
+		openDialog: (given) => {
+			opened.dialog = given;
+			return { opened: true, close: () => { opened.dialogClosed = true; } };
+		},
+		present: (result) => results.push(result),
+		defer: (work) => deferred.push(work),
+		requestId: () => "request-1",
+	});
+	assert.equal(await launcher.begin("request.answer", { waitForResume: true }), true);
+	assert.deepEqual(route, { tab: "carto", view: "requests" }, "the launcher routes before it looks at a target");
+	assert.equal(launcher.onRouteSettled(route), true);
+	await Promise.resolve();
+	assert.equal(opened.picker, undefined, "a route settlement cannot stack a target picker above the palette that launched it");
+	assert.equal(await launcher.resume(), true);
+	assert.equal(opened.picker.targets[0].key, "request:q1", "a newly routed action asks for a fresh target instead of applying to a retained selection");
+	assert.equal(await opened.picker.choose(target), true);
+	assert.equal(opened.pickerClosed, true, "the target picker closes before a form can replace it");
+	deferred.shift()();
+	await Promise.resolve();
+	assert.deepEqual(opened.dialog.plan.input, { id: "q1" });
+	assert.equal(await opened.dialog.submit({ text: "Use the durable wording." }), true);
+	assert.deepEqual(calls.map((call) => [call.action, call.input, call.options.requestId]), [["request.answer", { id: "q1", text: "Use the durable wording." }, "request-1"]]);
+	assert.equal(results.length, 1);
+	assert.equal(launcher.state().state, "idle");
+
+	const cancelledDialog = {};
+	const cancellable = new ActionLauncher({
+		capabilities: requestCapabilities,
+		specs: requestSpec,
+		placements: requestPlacement,
+		currentRoute: () => ({ tab: "carto", view: "requests" }),
+		targetsFor: () => ({ state: "ready", targets: [target], selected: target.key }),
+		execute: async () => { throw new Error("a cancelled draft must not dispatch"); },
+		openDialog: (given) => { cancelledDialog.given = given; return { opened: true }; },
+	});
+	assert.equal(await cancellable.launch("request.answer"), true);
+	assert.equal(cancellable.state().state, "dialog");
+	assert.equal(cancelledDialog.given.cancel(), true, "an explicit picker or form cancellation releases its pending launcher state");
+	assert.equal(cancellable.state().state, "idle");
+	assert.equal(await cancellable.launch("request.answer"), true, "a cancelled launch never blocks the next palette action");
+	assert.equal(cancelledDialog.given.cancel(), true);
+
+	const routedAway = { tab: "chat", view: "conversation" };
+	const routeCancellation = new ActionLauncher({
+		capabilities: requestCapabilities,
+		specs: requestSpec,
+		placements: requestPlacement,
+		currentRoute: () => routedAway,
+		navigate: (next) => { Object.assign(routedAway, next); return true; },
+		targetsFor: () => ({ state: "loading" }),
+		execute: async () => { throw new Error("a route-abandoned launch must not dispatch"); },
+	});
+	assert.equal(await routeCancellation.begin("request.answer"), true);
+	assert.equal(routeCancellation.state().state, "waiting-for-route");
+	Object.assign(routedAway, { tab: "chat", view: "conversation" });
+	assert.equal(routeCancellation.onRouteChanged(routedAway), true, "leaving a loading target route abandons its invisible pending launcher");
+	assert.equal(routeCancellation.state().state, "idle");
+
+	const directSpec = createActionSpecRegistry([{ id: "review.undo", launch: "existing-control", target: { kind: "none" }, fields: [] }]);
+	const directPlacement = createActionPlacementRegistry([{ id: "review.undo", route: { tab: "diff", view: "last" }, targetSource: "none" }]);
+	const directRoute = { tab: "diff", view: "last" };
+	const confirmations = [];
+	const directCalls = [];
+	const direct = new ActionLauncher({
+		capabilities: { get: (id) => id === "review.undo" ? { id, label: "Undo checkpoint", availability: { enabled: true } } : undefined },
+		specs: directSpec,
+		placements: directPlacement,
+		currentRoute: () => directRoute,
+		execute: async (action, input, options) => {
+			directCalls.push({ action, input, options });
+			if (options.confirmation === undefined) return { ok: false, confirmation: { actionId: action, target: "m1", summary: "Undo m1.", strength: "acknowledge" }, meta: { requestId: options.requestId } };
+			return { ok: true, data: { line: "m1 restored." }, meta: { requestId: options.requestId }, notices: [] };
+		},
+		openExistingControl: ({ dispatch }) => { void dispatch(); return true; },
+		openConfirmation: (given) => { confirmations.push(given); return { opened: true }; },
+		present: (result) => results.push(result),
+		requestId: (() => { let count = 0; return () => `undo-${++count}`; })(),
+	});
+	assert.equal(await direct.begin("review.undo", { waitForResume: true }), true);
+	assert.equal(await direct.resume(), true, "a no-target action resumes after the palette without waiting for an unrelated projection settlement");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(confirmations.length, 1, "an existing Screen control still routes backend confirmation through the generic launcher dialog");
+	assert.equal(await confirmations[0].confirm(), true);
+	assert.equal(directCalls.length, 2);
+	assert.notEqual(directCalls[0].options.requestId, directCalls[1].options.requestId, "confirmation retries get a fresh completed-request identity rather than a duplicate rejection");
+
+	let releaseExisting;
+	const pendingExisting = new ActionLauncher({
+		capabilities: { get: (id) => id === "review.undo" ? { id, label: "Undo checkpoint", availability: { enabled: true } } : undefined },
+		specs: directSpec,
+		placements: directPlacement,
+		currentRoute: () => directRoute,
+		execute: async () => { throw new Error("this control only opens a form"); },
+		openExistingControl: () => new Promise((resolve) => { releaseExisting = resolve; }),
+	});
+	const openingExisting = pendingExisting.launch("review.undo");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(pendingExisting.state().state, "existing-control");
+	assert.equal(await pendingExisting.begin("review.undo"), false, "an asynchronous existing control stays gated until its form/query handoff has settled");
+	releaseExisting(true);
+	assert.equal(await openingExisting, true);
+	assert.equal(pendingExisting.state().state, "idle");
+
+	const wakeSpec = createActionSpecRegistry([{ id: "runtime.wake.create", launch: "existing-control", target: { kind: "none" }, fields: [] }]);
+	const wakePlacement = createActionPlacementRegistry([{ id: "runtime.wake.create", route: { tab: "shells", view: "wakes" }, targetSource: "none" }]);
+	let wakeControl;
+	const wakeCalls = [];
+	const wakeLauncher = new ActionLauncher({
+		capabilities: { get: (id) => id === "runtime.wake.create" ? { id, label: "Create wake", availability: { enabled: true } } : undefined },
+		specs: wakeSpec,
+		placements: wakePlacement,
+		currentRoute: () => ({ tab: "shells", view: "wakes" }),
+		execute: async (action, input, options) => {
+			wakeCalls.push({ action, input, options });
+			return { ok: true, data: { line: "Created wake w1." }, meta: { requestId: options.requestId }, notices: [] };
+		},
+		openExistingControl: (given) => {
+			wakeControl = given;
+			return { opened: true, pending: true, close: () => {} };
+		},
+	});
+	assert.equal(await wakeLauncher.launch("runtime.wake.create"), true);
+	assert.equal(wakeLauncher.state().state, "existing-control", "a custom wake form retains its launcher gate until it saves or cancels");
+	assert.equal(await wakeLauncher.begin("runtime.wake.create"), false, "a retained custom form cannot open a duplicate wake action");
+	assert.equal(await wakeControl.dispatch({ kind: "time", note: "Check", every: 60, times: 1 }, { fromDialog: true }), true);
+	assert.deepEqual(wakeCalls[0].input, { kind: "time", note: "Check", every: 60, times: 1 });
+	assert.equal(wakeLauncher.state().state, "idle");
+	assert.equal(await wakeLauncher.launch("runtime.wake.create"), true);
+	assert.equal(wakeControl.cancel(), true, "custom control cancellation releases a retained launcher gate");
+	assert.equal(wakeLauncher.state().state, "idle");
+
+	let release;
+	const gate = new ActionRequestGate({ execute: () => new Promise((resolve) => { release = resolve; }), requestId: () => "dedupe-1" });
+	const first = gate.run("workspace.archive", { id: "a1" });
+	const duplicate = await gate.run("workspace.archive", { id: "a1" });
+	assert.equal(duplicate.duplicate, true, "the same async action cannot enter application.execute twice");
+	release({ ok: true, data: {}, meta: { requestId: "dedupe-1" }, notices: [] });
+	await first;
+
+	const closes = [];
+	const flashes = [];
+	let submitted;
+	const dialog = new ActionDialog({
+		actionId: "example",
+		title: "Example",
+		fields: [{ id: "count", label: "Count", kind: "integer", required: true, multiline: false, limit: 4 }],
+		keyOf: (key) => key,
+		close: () => closes.push(true),
+		flash: (message) => flashes.push(message),
+		submit: (input) => { submitted = input; return true; },
+	});
+	dialog.handleInput("enter");
+	assert.match(flashes.at(-1), /Count is required/);
+	dialog.text = "12";
+	dialog.handleInput("enter");
+	assert.deepEqual(submitted, { count: 12 }, "ActionDialog turns its schema draft into typed action input");
+	assert.equal(closes.length, 1);
+	let formCancelled = 0;
+	let formClosed = 0;
+	const cancelledForm = new ActionDialog({
+		actionId: "example",
+		fields: [{ id: "text", label: "Text", kind: "text", required: true, multiline: false, limit: 20 }],
+		keyOf: (key) => key,
+		close: () => { formClosed++; },
+		flash: (message) => flashes.push(message),
+		submit: () => { throw new Error("a cancelled form cannot submit"); },
+		cancel: () => { formCancelled++; },
+	});
+	cancelledForm.handleInput("escape");
+	assert.deepEqual([formCancelled, formClosed], [1, 1], "Escape abandons a schema action dialog instead of leaving its launcher pending");
+	assert.deepEqual(wakeInputFromDrafts(new Map([["kind", "window"], ["note", "Watch build."], ["every", "60"], ["times", "0"], ["window", "build"], ["match", "done"]])), {
+		ok: true,
+		input: { kind: "window", note: "Watch build.", every: 60, times: 0, window: "build", match: "done" },
+	}, "WakeDialog produces a complete typed trigger instead of a loose patch");
+	assert.equal(wakeInputFromDrafts(new Map([["kind", "file"], ["note", "Watch source."], ["every", "60"], ["times", "1"]])).ok, false);
+	let wakeCancelled = 0;
+	let wakeClosed = 0;
+	let wakeSubmitted;
+	const wakeDialog = new WakeDialog({
+		input: { id: "w4", kind: "time", note: "Old", every: 60, times: 1, path: "stale-path" },
+		windowSuggestions: ["build"],
+		keyOf: (key) => key,
+		close: () => { wakeClosed++; },
+		flash: (message) => flashes.push(message),
+		cancel: () => { wakeCancelled++; },
+		submit: (input) => { wakeSubmitted = input; return true; },
+	});
+	wakeDialog.drafts = ["window", "Watch build.", "60", "0", "stale-path", "build", "done"];
+	wakeDialog.syncKind();
+	assert.equal(wakeDialog.given.fields.find((field) => field.id === "path").disabled, true, "switching trigger kind disables irrelevant prior-trigger fields");
+	wakeDialog.handleInput("ctrl+enter");
+	assert.deepEqual(wakeSubmitted, { id: "w4", kind: "window", note: "Watch build.", every: 60, times: 0, window: "build", match: "done" }, "a replacement only retains its id, not stale fields from the former trigger kind");
+	assert.equal(wakeClosed, 1);
+	wakeDialog.handleInput("escape");
+	assert.deepEqual([wakeCancelled, wakeClosed], [1, 2], "Escape cancels a wake form through its launcher callback");
+});
+
+test("screen: target picker keeps unavailable settled rows visible and gates an asynchronous choice", async () => {
+	const flashes = [];
+	let closes = 0;
+	let choices = 0;
+	let settle;
+	const picker = new TargetPicker({
+		title: "Choose request",
+		targets: [
+			{ key: "gone", value: "gone", label: "Gone", disabled: true, disabledReason: "That request disappeared; refresh first." },
+			{ key: "q1", value: "q1", label: "q1" },
+		],
+		keyOf: (key) => key,
+		close: () => { closes++; },
+		flash: (message) => flashes.push(message),
+		choose: () => {
+			choices++;
+			return new Promise((resolve) => { settle = resolve; });
+		},
+	});
+	assert.match(picker.render(58).join("\n"), /That request disappeared/);
+	picker.handleInput("enter");
+	assert.match(flashes.at(-1), /disappeared/);
+	picker.handleInput("down");
+	picker.handleInput("enter");
+	picker.handleInput("enter");
+	assert.equal(choices, 1, "a chosen target waits for its first action attempt to settle");
+	settle(true);
+	await Promise.resolve();
+	await Promise.resolve();
+	assert.equal(closes, 1);
+	let pickerCancelled = 0;
+	let pickerClosed = 0;
+	const cancelledPicker = new TargetPicker({
+		title: "Choose request",
+		targets: [{ key: "q2", value: "q2", label: "q2" }],
+		keyOf: (key) => key,
+		choose: () => { throw new Error("a cancelled picker cannot choose"); },
+		close: () => { pickerClosed++; },
+		flash: (message) => flashes.push(message),
+		cancel: () => { pickerCancelled++; },
+	});
+	cancelledPicker.handleInput("escape");
+	assert.deepEqual([pickerCancelled, pickerClosed], [1, 1], "Escape abandons a target picker instead of pinning its action launch");
+});
+
 test("screen: shared forms keep local required, field-validation, help, disabled, and focus behavior without bypassing action saves", () => {
 	const flashes = [];
 	const saves = [];
@@ -1098,11 +1913,56 @@ test("screen: shared selection retains identity across projection rebuilds and f
 
 	const list = createList();
 	list.set({ items: [{ key: "heading", plain: true, head: [["Heading", ""]] }, { key: "a", head: [["A", ""]] }, { key: "b", head: [["B", ""]] }] });
+	assert.deepEqual(list.items().map((item) => item.key), ["heading", "a", "b"], "a target picker can inspect the already-settled render rows without asking a projection owner again");
 	list.select("b");
 	list.set({ items: [{ key: "b", head: [["B refreshed", ""]] }, { key: "a", head: [["A refreshed", ""]] }] });
 	assert.equal(list.selected()?.key, "b", "the list consumes the same stable selection model across a projection rebuild");
 	list.set({ items: [{ key: "a", head: [["A only", ""]] }] });
 	assert.equal(list.selected()?.key, "a");
+});
+
+test("screen: a disclosure selects folded heads or live tails, opens all retained rows, and preserves clipping facts", () => {
+	const rows = ["one", "two", "three", "four", "five"];
+	assert.deepEqual(disclosureRows({ rows, previewRows: 2 }), {
+		visibleRows: ["one", "two"],
+		totalRows: 5,
+		omittedRows: 3,
+		expandable: true,
+		mode: "folded",
+	}, "settled material starts with a bounded head preview");
+	assert.deepEqual(disclosureRows({ rows, previewRows: 2, preview: "tail" }), {
+		visibleRows: ["four", "five"],
+		totalRows: 5,
+		omittedRows: 3,
+		expandable: true,
+		mode: "folded",
+	}, "live material keeps its newest rows visible while folded");
+	assert.deepEqual(disclosureRows({ rows, previewRows: 2, open: true }), {
+		visibleRows: rows,
+		totalRows: 5,
+		omittedRows: 0,
+		expandable: true,
+		mode: "open",
+	}, "opening sends every locally retained row to the parent viewport while retaining its fold control");
+	assert.deepEqual(disclosureRows({ rows: ["short"], previewRows: 2 }), {
+		visibleRows: ["short"],
+		totalRows: 1,
+		omittedRows: 0,
+		expandable: false,
+		mode: "folded",
+	}, "a short body has no needless disclosure affordance");
+	assert.deepEqual(disclosureRows({ rows, previewRows: 0, preview: "tail", retained: { clipped: true, originalChars: 47, reason: "runner tail" } }), {
+		visibleRows: [],
+		totalRows: 5,
+		omittedRows: 5,
+		expandable: true,
+		mode: "folded",
+		retainedNotice: { clipped: true, originalChars: 47, reason: "runner tail" },
+	}, "zero-row tails remain folded and a retention boundary survives the display plan");
+	assert.equal(disclosureRows({ rows, previewRows: 2, retained: { clipped: false } }).retainedNotice, undefined, "an intact value does not invent a clipping notice");
+	assert.throws(() => disclosureRows({ rows: "not rows", previewRows: 1 }), /wrapped rows/);
+	assert.throws(() => disclosureRows({ rows, previewRows: -1 }), /non-negative whole row/);
+	assert.throws(() => disclosureRows({ rows, previewRows: 1, preview: "middle" }), /"head" or "tail"/);
 });
 
 test("screen: shared focus restores the last viable shell region after temporary overlays and handoffs", () => {
@@ -1183,6 +2043,7 @@ test("screen: one modal owner restores focus, and confirmation dialogs gate ackn
 	const flashes = [];
 	let closes = 0;
 	let confirms = 0;
+	let cancellations = 0;
 	const acknowledgement = new ConfirmDialog({
 		title: "Delete permanently?",
 		confirmation: { actionId: "workspace.delete", target: "n4", summary: "Delete n4 permanently.", strength: "acknowledge" },
@@ -1190,10 +2051,12 @@ test("screen: one modal owner restores focus, and confirmation dialogs gate ackn
 		close: () => { closes++; },
 		confirm: () => { confirms++; return true; },
 		flash: (text) => flashes.push(text),
+		cancel: () => { cancellations++; },
 	});
 	assert.match(acknowledgement.render(48).join("\n"), /Delete permanently\?/);
 	acknowledgement.handleInput("n");
 	assert.equal(closes, 1, "n cancels an acknowledgement dialog");
+	assert.equal(cancellations, 1, "an explicit confirmation cancellation can release ActionLauncher without treating it as a successful confirmation");
 	acknowledgement.handleInput("enter");
 	assert.equal(confirms, 1, "Enter confirms an acknowledgement dialog");
 	assert.equal(closes, 2, "a successful action closes the dialog");
@@ -1235,7 +2098,7 @@ test("screen: one modal owner restores focus, and confirmation dialogs gate ackn
 });
 
 test("infrastructure: scratch and clipboard exports avoid synchronous screen work", async (t) => {
-	const { brainDir } = fresh(t);
+	const { root, brainDir } = fresh(t);
 	const scratch = await writeScratch(brainDir, "message.md", "A draft from the editor");
 	assert.equal(await pathExists(scratch), true);
 	assert.equal(await pathExists(join(brainDir, "missing.md")), false);
@@ -1245,6 +2108,20 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	writeFileSync(join(sources, "b.mjs"), "first\nname: \"kept\"\n");
 	assert.deepEqual(await findTextSource(sources, "name: \"kept\"", { suffix: ".mjs" }), { file: join(sources, "b.mjs"), line: 2 });
 	assert.equal(await findTextSource(sources, "not here", { suffix: ".mjs" }), undefined);
+	mkdirSync(join(root, "src"));
+	mkdirSync(join(root, "node_modules", "ignored"), { recursive: true });
+	mkdirSync(join(root, ".git"));
+	writeFileSync(join(root, "src", "entry.mjs"), "export const asyncPort = true;\n");
+	writeFileSync(join(root, "node_modules", "ignored", "index.mjs"), "ignored\n");
+	writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+	const progress = [];
+	const listed = await listProjectFiles(root, { reportProgress: (entry) => progress.push(entry) });
+	assert.deepEqual(listed, [{ path: "src/entry.mjs", bytes: Buffer.byteLength("export const asyncPort = true;\n") }], "the async tree port skips brain, Git, and dependency folders without a synchronous project walk");
+	assert.ok(progress.some((entry) => /Found 1 project files/.test(entry.message)));
+	assert.equal(await readText(join(root, "src", "entry.mjs")), "export const asyncPort = true;\n");
+	const stoppedList = new AbortController();
+	stoppedList.abort();
+	await assert.rejects(listProjectFiles(root, { signal: stoppedList.signal }), /cancelled/i, "an aborted tree request performs no directory batch");
 	const writes = [];
 	const calls = [];
 	const ways = await toClipboard("copied words", {
@@ -1258,15 +2135,73 @@ test("infrastructure: scratch and clipboard exports avoid synchronous screen wor
 	assert.deepEqual(ways, ["the terminal (OSC 52)", "wl-copy"]);
 	assert.equal(writes.length, 1, "OSC 52 remains immediate terminal feedback while helper work is asynchronous");
 	assert.deepEqual(calls, [{ command: "wl-copy", args: [], input: "copied words", timeoutMs: POLICY.limits.screen.copyTimeoutMs }]);
+	// Export names follow the machine's local clock; choose an unambiguous local midnight rather than UTC NOW.
+	const exportAt = new Date(2026, 10, 15, 0, 0, 0).getTime();
 	const exported = await copyOut("exported words", {
 		brainDir,
 		name: "session",
-		now: Date.parse(NOW),
+		now: exportAt,
 		env: {},
 		write: () => {},
 	});
 	assert.match(exported.file, /export\/session-20261115-000000\.md$/);
 	assert.equal(readFileSync(exported.file, "utf8"), "exported words\n");
+});
+
+test("infrastructure: spawned Git review reads preserve project filtering and stop on cancellation", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const childController = new AbortController();
+	const child = runProcess(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { signal: childController.signal });
+	await new Promise((done) => setImmediate(done));
+	childController.abort();
+	const stopped = await child;
+	assert.equal(stopped.aborted, true, "aborting a projection-owned process terminates its child before it settles");
+
+	const git = async (args) => {
+		const result = await runProcess("git", args, { cwd: root });
+		assert.equal(result.status, 0, result.stderr || `git ${args[0]} failed`);
+	};
+	writeFileSync(join(root, ".gitignore"), "ignored.txt\n");
+	writeFileSync(join(root, "review.txt"), "before checkpoint\n");
+	await git(["init", "-q"]);
+	await git(["add", ".gitignore", "review.txt"]);
+	await git(["-c", "user.name=Cartographer tests", "-c", "user.email=tests@example.test", "commit", "-qm", "initial"]);
+	const reader = createGitReviewReader();
+	const tracked = await reader.projectFiles(root);
+	assert.ok(tracked?.includes("review.txt"));
+	writeFileSync(join(root, "ignored.txt"), "left out\n");
+	writeFileSync(join(root, "visible.txt"), "shown\n");
+	const listed = await reader.projectFiles(root);
+	assert.ok(listed?.includes("visible.txt"));
+	assert.equal(listed?.includes("ignored.txt"), false, "the async Git tree port retains the existing ignore contract");
+	const treeProjection = await createWorkspaceQueries({ brainDir, root }).tree();
+	assert.equal(treeProjection.ok, true);
+	if (!treeProjection.ok) throw new Error(treeProjection.error.message);
+	assert.equal(treeProjection.data.filtersGitIgnored, true);
+	assert.ok(treeProjection.data.files.some((file) => file.path === "visible.txt"));
+	assert.equal(treeProjection.data.files.some((file) => file.path === "ignored.txt"), false);
+
+	checkpoint(root, brainDir, "before m1: revise the review file");
+	writeFileSync(join(root, "review.txt"), "after checkpoint\n");
+	checkpoint(root, brainDir, "after m1");
+	const progress = [];
+	const last = await reader.lastChange(root, brainDir, { reportProgress: (entry) => progress.push(entry) });
+	assert.equal(last?.item, "m1");
+	assert.equal(last?.finished, true);
+	assert.deepEqual(last?.changes.map((change) => change.path), ["review.txt"]);
+	assert.match(last?.patch ?? "", /after checkpoint/);
+	assert.ok(progress.some((entry) => /checkpoint history/i.test(entry.message)), "the port reports real Git-read progress while its child work runs");
+	const projection = await createWorkspaceQueries({ brainDir, root }).review.last();
+	assert.equal(projection.ok, true, "the default Review query consumes the spawned Git port rather than a synchronous checkpoint reader");
+	if (!projection.ok) throw new Error(projection.error.message);
+	assert.equal(projection.data.last?.item, "m1");
+	const own = await reader.uncommitted(root);
+	assert.match(own?.status ?? "", /review\.txt/);
+	assert.match(own?.status ?? "", /visible\.txt/);
+	assert.doesNotMatch(own?.status ?? "", /ignored\.txt/);
+	const stoppedReader = new AbortController();
+	stoppedReader.abort();
+	await assert.rejects(reader.lastChange(root, brainDir, { signal: stoppedReader.signal }), /cancelled/i, "an already-aborted review never starts a Git read");
 });
 
 test("application: workspace queries defer readers and return typed empty, unavailable, and cancelled outcomes", async (t) => {
@@ -1275,6 +2210,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 	let planReads = 0;
 	let assessmentReads = 0;
 	let contextReads = 0;
+	let atlasReads = 0;
 	mkdirSync(join(brainDir, "reports"), { recursive: true });
 	writeFileSync(join(brainDir, "reports", "t1.md"), "The report body.\n");
 	writeFileSync(join(root, "tree.txt"), "abc");
@@ -1290,7 +2226,7 @@ test("application: workspace queries defer readers and return typed empty, unava
 		root,
 		now: () => Date.parse(NOW),
 		readers: {
-			loadAtlas: () => ({ atlas: { nodes: [] } }),
+			loadAtlas: () => { atlasReads++; return { atlas: { nodes: [] } }; },
 			loadAssessment: () => {
 				assessmentReads++;
 				return { text: "A deferred assessment.", written: Date.parse(NOW) };
@@ -1346,7 +2282,44 @@ test("application: workspace queries defer readers and return typed empty, unava
 	if (!listed.ok) throw new Error(listed.error.message);
 	assert.equal(listed.data.root, root, "the settled tree projection owns the target root");
 	assert.deepEqual(listed.data.files.find((file) => file.path === "tree.txt"), { path: "tree.txt", bytes: 3 });
+	assert.equal(atlasReads, 0, "the migrated tree query does not resume a synchronous atlas reader after its async traversal");
 	assert.equal(listed.meta.requestId, "tree-query");
+	let beganTree;
+	let releaseTree;
+	const treeBegan = new Promise((resolve) => { beganTree = resolve; });
+	const treeRelease = new Promise((resolve) => { releaseTree = resolve; });
+	let atlasAfterAbort = 0;
+	const cancellableTree = createWorkspaceQueries({
+		brainDir,
+		root,
+		readers: {
+			loadAtlas: () => { atlasAfterAbort++; return { atlas: { nodes: [] } }; },
+			loadLedger: () => ({ ledger: { items: [] } }),
+			loadPlan: () => ({ plan: { items: [], moves: [] } }),
+			loadContext: () => contextStore,
+		},
+		gitReader: { projectFiles: async () => undefined },
+		filesystem: {
+			listProjectFiles: async (_root, { signal }) => {
+				beganTree();
+				await treeRelease;
+				if (signal.aborted) throw new Error("cancelled tree batch");
+				return [];
+			},
+			describeProjectFiles: async () => [],
+			readText: async () => "",
+		},
+	});
+	const treeController = new AbortController();
+	const pendingTree = cancellableTree.tree({ signal: treeController.signal });
+	await treeBegan;
+	treeController.abort();
+	releaseTree();
+	const cancelledTree = await pendingTree;
+	assert.equal(cancelledTree.ok, false);
+	if (cancelledTree.ok) throw new Error("a cancelled tree projection must not settle a stale listing");
+	assert.equal(cancelledTree.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(atlasAfterAbort, 0, "the query checks cancellation after its async filesystem batch before any legacy mark reader");
 	const current = queries.context({ requestId: "context-query" });
 	assert.equal(contextReads, 0, "the shared-brain reader also waits until after the current UI stack");
 	const shared = await current;
@@ -1448,13 +2421,13 @@ test("application: review queries defer checkpoint and Git projections", async (
 		root,
 		now: () => Date.parse(NOW),
 		reviewReaders: {
-			lastChange: () => { reads.last++; return lastChange; },
-			changeSince: () => { reads.session++; return { steps: 2, changes: [], patch: "" }; },
-			uncommitted: () => { reads.git++; return undefined; },
+			lastChange: async () => { reads.last++; return lastChange; },
+			changeSince: async () => { reads.session++; return { steps: 2, changes: [], patch: "" }; },
+			uncommitted: async () => { reads.git++; return undefined; },
 		},
 	});
 	const pending = queries.review.last({ requestId: "review-last" });
-	assert.equal(reads.last, 0, "checkpoint inspection leaves the render/key stack before its synchronous legacy reader runs");
+	assert.equal(reads.last, 0, "checkpoint inspection leaves the render/key stack before its asynchronous review port starts");
 	const last = await pending;
 	assert.equal(last.ok, true);
 	if (!last.ok) throw new Error(last.error.message);
@@ -1665,6 +2638,14 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 		},
 	};
 	const wakes = {
+		set: (wanted) => {
+			calls.push({ action: "wake-set", wanted });
+			return { id: "w3", kind: wanted.path ? "file" : wanted.window ? "window" : "time", ...wanted };
+		},
+		replace: (id, wanted) => {
+			calls.push({ action: "wake-replace", id, wanted });
+			return { previous: { id, fired: 3, note: "old" }, wake: { id, kind: wanted.path ? "file" : wanted.window ? "window" : "time", ...wanted, fired: 0 } };
+		},
 		remove: (id) => {
 			calls.push({ action: "remove", id });
 			return id === "all" ? [{ id: "w1" }, { id: "w2" }] : [{ id }];
@@ -1710,6 +2691,31 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.deepEqual(removed.data.removed.map((wake) => wake.id), ["w1", "w2"]);
 	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
 
+	const createPending = app.execute(RUNTIME_ACTION.createWake, { kind: "file", note: "Watch the source.", every: 60, times: 2, path: "src" }, { requestId: "wake-create" });
+	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" }, "wake creation leaves the caller stack before it touches the scheduler");
+	const created = await createPending;
+	assert.equal(created.ok, true);
+	if (!created.ok) throw new Error(created.error.message);
+	assert.equal(created.meta.requestId, "wake-create");
+	assert.equal(created.data.wake.id, "w3");
+	assert.deepEqual(calls.at(-1), { action: "wake-set", wanted: { note: "Watch the source.", every: 60, times: 2, path: "src" } });
+	const replaced = await app.execute(RUNTIME_ACTION.replaceWake, { id: "w3", kind: "window", note: "Watch build output.", every: 60, times: 0, window: "build", match: "done" });
+	assert.equal(replaced.ok, true);
+	if (!replaced.ok) throw new Error(replaced.error.message);
+	assert.equal(replaced.data.wake.id, "w3", "a complete replacement preserves the selected wake identity");
+	assert.equal(replaced.data.wake.fired, 0, "a replacement starts with no old firing history");
+	assert.match(replaced.data.line, /schedule and firing history start over/);
+	assert.deepEqual(calls.at(-1), { action: "wake-replace", id: "w3", wanted: { note: "Watch build output.", every: 60, times: 0, window: "build", match: "done" } });
+	const badWake = await app.execute(RUNTIME_ACTION.createWake, { kind: "file", note: "Watch", every: 60, times: 1 });
+	assert.equal(badWake.ok, false);
+	if (badWake.ok) throw new Error("a file wake without a project path must be refused");
+	assert.equal(badWake.error.field, "path");
+	const staleWake = createRuntimeApplication({ wakes: { replace: () => { throw new WakeError("There is no wake \"w9\". Set: w1."); } } });
+	const missingReplacement = await staleWake.execute(RUNTIME_ACTION.replaceWake, { id: "w9", kind: "time", note: "Retry", every: 60, times: 1 });
+	assert.equal(missingReplacement.ok, false);
+	if (missingReplacement.ok) throw new Error("a wake that disappears after target selection must not be recreated");
+	assert.equal(missingReplacement.error.code, UI_ERROR_CODE.notFound);
+
 	const invalid = await app.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "   " });
 	assert.equal(invalid.ok, false);
 	if (invalid.ok) throw new Error("blank shell input must be refused");
@@ -1722,7 +2728,7 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(cancelled.ok, false);
 	if (cancelled.ok) throw new Error("a cancelled runtime action must not reach its manager");
 	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
-	assert.deepEqual(calls.at(-1), { action: "remove", id: "all" });
+	assert.deepEqual(calls.at(-1), { action: "wake-replace", id: "w3", wanted: { note: "Watch build output.", every: 60, times: 0, window: "build", match: "done" } }, "a cancelled wake action does not reach its scheduler");
 
 	const noWindows = createRuntimeApplication({});
 	const unavailable = await noWindows.execute(RUNTIME_ACTION.sendShell, { name: "main", line: "yes" });
@@ -1808,9 +2814,32 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(taskRouted.data.routed, true);
 	assert.deepEqual(taskMessages, ["Follow the narrower contract."]);
 	const noTask = await taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Continue." });
-	assert.equal(noTask.ok, true);
-	if (!noTask.ok) throw new Error(noTask.error.message);
-	assert.equal(noTask.data.routed, false, "a task that ended between keypress and deferred routing falls back to the main agent");
+	assert.equal(noTask.ok, false);
+	if (noTask.ok) throw new Error("a task that ended during deferred routing must not make a false delivery claim");
+	assert.equal(noTask.error.code, UI_ERROR_CODE.notFound);
+	assert.match(noTask.error.message, /active task ended/i);
+	let activeTask;
+	let guardedCalls = 0;
+	const guardedTaskApp = createRuntimeApplication({
+		activeTask: () => activeTask,
+		work: { tell: () => { guardedCalls++; return true; } },
+	});
+	assert.deepEqual(guardedTaskApp.capabilities.availability(RUNTIME_ACTION.routeTaskMessage), {
+		enabled: false,
+		reason: "No active task is running to receive a message.",
+	}, "the task-message capability exposes a visible unavailable state before a form can be opened");
+	const inactiveTask = await guardedTaskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Do not send this." });
+	assert.equal(inactiveTask.ok, false);
+	if (inactiveTask.ok) throw new Error("a task message without an active task must be blocked before its router runs");
+	assert.equal(inactiveTask.error.code, UI_ERROR_CODE.policyBlocked);
+	assert.equal(guardedCalls, 0);
+	activeTask = "t7";
+	assert.equal(guardedTaskApp.capabilities.availability(RUNTIME_ACTION.routeTaskMessage)?.enabled, true);
+	const activeTaskMessage = await guardedTaskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Proceed with the narrow plan." });
+	assert.equal(activeTaskMessage.ok, true);
+	if (!activeTaskMessage.ok) throw new Error(activeTaskMessage.error.message);
+	assert.match(activeTaskMessage.data.line, /will reach the running task/i);
+	assert.equal(guardedCalls, 1);
 	const stoppedTaskRoute = new AbortController();
 	const cancelledTaskRoute = taskApp.execute(RUNTIME_ACTION.routeTaskMessage, { text: "Do not deliver this." }, { signal: stoppedTaskRoute.signal });
 	stoppedTaskRoute.abort();
@@ -1823,6 +2852,33 @@ test("application: runtime controls defer shell and wake mutations behind typed 
 	assert.equal(blankTaskMessage.ok, false);
 	if (blankTaskMessage.ok) throw new Error("a blank task message must be refused");
 	assert.equal(blankTaskMessage.error.field, "text");
+});
+
+test("wakes: a complete replacement preserves id while resetting trigger lifecycle", (t) => {
+	const { root, brainDir } = fresh(t);
+	let now = Date.parse(NOW);
+	const wakes = createWakes({ root, brainDir, config: { wakeMin: 1, wakesMax: 2 }, tickMs: 60_000, clock: () => now });
+	t.after(() => wakes.shutdown());
+	const original = wakes.set({ note: "Check the first result.", every: 5, times: 2 });
+	now += 5_000;
+	wakes.check();
+	assert.equal(wakes.list()[0].fired, 1, "the original trigger can have lifecycle state before replacement");
+	const replaced = wakes.replace(original.id, { note: "Watch source changes.", every: 3, times: 0, path: "." });
+	assert.equal(replaced.previous.id, original.id);
+	assert.equal(replaced.previous.fired, 1);
+	assert.deepEqual(wakes.list(), [{
+		id: original.id,
+		kind: POLICY.enums.wakeKinds.file,
+		every: 3,
+		times: 0,
+		note: "Watch source changes.",
+		created: now,
+		fired: 0,
+		path: ".",
+	}], "replacement keeps its stable id but discards schedule/history state from the old trigger");
+	const next = wakes.set({ note: "A separate timer.", every: 3, times: 1 });
+	assert.equal(next.id, "w2", "replacement does not consume a new durable wake id");
+	assert.throws(() => wakes.replace("w9", { note: "Gone", every: 3, times: 1 }), WakeError, "a disappeared selection is refused rather than recreated");
 });
 
 test("application: active-context accounting is a deferred typed runtime projection", async (t) => {
@@ -2091,6 +3147,400 @@ test("application: assessment projection defers its runtime summary", async (t) 
 	assert.deepEqual(reads, { assessment: 1, atlas: 1, top: 1, since: 1 });
 });
 
+test("application: Settings & Safety is a deferred, fail-closed configuration and policy projection", async (t) => {
+	const { root, brainDir } = fresh(t);
+	let routeReads = 0;
+	const gate = { yolo: true };
+	const initiation = { on: false };
+	const reader = createSettingsReader({
+		config: {
+			server: "http://127.0.0.1:8080/v1",
+			model: "configured-model",
+			contextWindow: 8_000,
+			maxTokens: 2_000,
+			mainTurns: 12,
+			taskTurns: 4,
+			shellWait: 30,
+			windowTail: 10,
+			wakeMin: 60,
+			chatWindow: 800,
+			collapseTokens: 1_200,
+			collapseMinutes: 5,
+			colors: "none",
+			theme: "dark",
+			yolo: false,
+			initiate: true,
+			bwrap: true,
+		},
+		runner: { off: false, mode: "none", available: { ok: false, why: "bubblewrap cannot start here" } },
+		gate,
+		initiation,
+		modelReader: async () => {
+			routeReads++;
+			return {
+				currentId: "configured-model",
+				models: [{ id: "configured-model", contextWindow: 4_096 }],
+				ready: false,
+				diagnostic: { kind: "native-grammar", message: "the server ignored the required grammar" },
+				issue: { message: "the route listing is offline" },
+				limits: { usableContextWindow: 4_096, configuredContextWindow: 8_000, serverContextWindow: 4_096 },
+			};
+		},
+	});
+	const queries = createWorkspaceQueries({ brainDir, root, now: () => Date.parse(NOW), settingsReader: reader });
+	const pending = queries.settings.status({ requestId: "settings-status" });
+	assert.equal(routeReads, 0, "Settings leaves the render/key stack before it asks the provider-route reader");
+	const result = await pending;
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.meta.requestId, "settings-status");
+	assert.equal(routeReads, 1);
+	assert.deepEqual(result.data.policy.approval, { yolo: true, defaultYolo: false });
+	assert.deepEqual(result.data.policy.initiation, { on: false, defaultOn: true });
+	assert.equal(result.data.policy.sandbox.mode, "none");
+	assert.equal(result.data.provider.routes?.ready, false, "route discovery cannot manufacture native-grammar readiness");
+	assert.deepEqual(result.data.provider.routes?.diagnostic, { kind: "native-grammar", message: "the server ignored the required grammar" });
+	const stopped = new AbortController();
+	stopped.abort();
+	const cancelled = await queries.settings.status({ signal: stopped.signal });
+	assert.equal(cancelled.ok, false);
+	if (cancelled.ok) throw new Error("a cancelled Settings projection must not inspect live route state");
+	assert.equal(cancelled.error.code, UI_ERROR_CODE.cancelled);
+	assert.equal(routeReads, 1);
+
+	const presentation = createSettingsPresentation();
+	assert.throws(() => settingsOverviewView({ settings: result.data }), /presentation adapter/, "Settings cannot reach configuration or policy state behind the application boundary");
+	const overview = settingsOverviewView({ settings: result.data, presentation: presentation.overview });
+	const overviewText = JSON.stringify(overview);
+	assert.match(overviewText, /Settings & Safety/);
+	assert.match(overviewText, /Route listing/);
+	assert.match(overviewText, /native llama\.cpp GBNF validation is blocked/i);
+	assert.match(overviewText, /does not fall back to ordinary tool calls or prompt-only decisions/);
+	assert.match(overviewText, /YOLO · approval off/);
+	assert.match(overviewText, /the agent waits/);
+	assert.match(overviewText, /no usable sandbox/);
+	const safety = settingsSafetyView({ settings: result.data, presentation: presentation.overview });
+	assert.match(JSON.stringify(safety), /Saved policy defaults take effect only in a future session/);
+	assert.doesNotMatch(JSON.stringify(safety), /── Active configuration ──/, "Safety keeps session policy and provider readiness separate from the editable configuration collection");
+	const safetyControls = settingsSafetyView({
+		settings: result.data,
+		presentation: presentation.overview,
+		lifecycle: [
+			{ id: LIFECYCLE_ACTION.toggleApproval, label: "Toggle session approval", availability: { enabled: true } },
+			{ id: LIFECYCLE_ACTION.toggleSandbox, label: "Toggle session sandbox", availability: { enabled: false, reason: "The agent is working. Stop it first." } },
+		],
+	});
+	const sandboxControl = safetyControls.items.find((item) => item.lifecycleAction === LIFECYCLE_ACTION.toggleSandbox);
+	assert.match(JSON.stringify(safetyControls), /Terminal lifecycle controls/);
+	assert.equal(sandboxControl?.body, "The agent is working. Stop it first.", "Safety renders the terminal's settled disabled reason instead of reading a runner");
+	const loading = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
+	assert.match(loading.header[0][0][0], /Settings & Safety is loading/);
+	const stale = renderAsyncBoundary({ id: "settings.status", name: "Settings & Safety", projection: { data: result.data, loading: true }, render: (data) => settingsOverviewView({ settings: data, presentation: presentation.overview }) });
+	assert.match(stale.header[0][0][0], /showing cached data/);
+
+	const assessment = settingsAssessmentView({
+		assessment: { assessment: { text: "The project is mapped.", written: Date.parse(NOW) }, top: { at: NOW, reason: "a safe pin" }, changes: { assessment: true, written: [], removed: [] }, file: "/project/.brain/assessment.md" },
+		presentation: presentation.assessment,
+	});
+	assert.match(JSON.stringify(assessment), /top-of-context copy.*stale/i);
+	assert.match(assessment.items.find((item) => item.key === "assessment:text").body, /project is mapped/);
+	const emptyAssessment = settingsAssessmentView({ assessment: { assessment: { text: "" } }, presentation: presentation.assessment });
+	assert.match(JSON.stringify(emptyAssessment), /No assessment yet/, "an empty assessment remains a successful Settings state");
+});
+
+test("screen: Configuration renders settled provenance and produces only revision-aware saved-source targets", () => {
+	const value = (current) => Array.isArray(current) ? current.join(", ") : typeof current === "boolean" ? (current ? "on" : "off") : String(current);
+	const rows = CONFIGURATION_SCHEMA.details().map((detail) => ({
+		...detail,
+		effectiveValue: DEFAULTS[detail.key],
+		displayValue: value(DEFAULTS[detail.key]),
+		source: { layer: "default", writable: false },
+		contributors: [{ layer: "default", writable: false, value: DEFAULTS[detail.key] }],
+	}));
+	const server = rows.find((row) => row.key === "server");
+	server.effectiveValue = "http://command-line.test/v1";
+	server.displayValue = "http://command-line.test/v1";
+	server.source = { layer: "command-line", writable: false };
+	server.contributors = [
+		{ layer: "default", writable: false, value: DEFAULTS.server },
+		{ layer: "project", path: "/project/.brain/config.json", writable: true, revision: "sha256:project", value: "http://saved-project.test/v1" },
+		{ layer: "environment", writable: false, value: "http://environment.test/v1" },
+		{ layer: "command-line", writable: false, value: "http://command-line.test/v1" },
+	];
+	const shellRead = rows.find((row) => row.key === "shellRead");
+	shellRead.effectiveValue = ["~/notes", "/tmp/reference"];
+	shellRead.displayValue = "~/notes, /tmp/reference";
+	const settings = {
+		configuration: {
+			rows,
+			layers: [
+				{ layer: "default", writable: false },
+				{ layer: "install", path: "/install/config.json", writable: true, revision: "sha256:install" },
+				{ layer: "project", path: "/project/.brain/config.json", writable: true, revision: "sha256:project" },
+				{ layer: "environment", writable: false },
+				{ layer: "command-line", writable: false },
+			],
+			revisions: { install: "sha256:install", project: "sha256:project" },
+		},
+	};
+	const view = settingsConfigurationView({ settings, scope: "project" });
+	assert.equal(view.items.length, 30, "Configuration keeps one selectable row for every known persisted setting");
+	assert.match(JSON.stringify(view.header), /save target: project configuration/);
+	assert.doesNotMatch(JSON.stringify(view.header), /Selected setting/, "compact Configuration leaves the inspector in the opened row");
+	const wide = settingsConfigurationView({ settings, scope: "project", selected: "setting:server", wide: true });
+	assert.match(JSON.stringify(wide.header), /Selected setting/);
+	assert.match(JSON.stringify(wide.header), /Provider endpoint.*command line/, "wide Configuration keeps the selected identity, effective source, target, and timing together above the collection");
+	assert.match(JSON.stringify(wide.header), /Save target: project configuration.*after the provider reconnects/);
+	const serverItem = view.items.find((item) => item.key === "setting:server");
+	assert.match(serverItem.body, /Current source: command line/);
+	assert.match(serverItem.body, /A project configuration override is saved \(http:\/\/saved-project\.test\/v1\), but command line currently overrides it/);
+	assert.match(JSON.stringify(view.header), /Environment and command-line/, "the configuration header explains that process-owned overrides remain read-only");
+	const target = settingsWriteTarget(settings, server, "project");
+	assert.deepEqual(target, {
+		key: "server",
+		scope: "project",
+		label: "Provider endpoint",
+		writable: true,
+		path: "/project/.brain/config.json",
+		expectedRevision: "sha256:project",
+		hasOverride: true,
+		shadowed: true,
+		value: "http://saved-project.test/v1",
+	});
+	const serverField = settingsEditorField(server, target);
+	assert.equal(serverField.value, "http://saved-project.test/v1", "a selected saved override is edited instead of treating the command-line value as writable");
+	assert.match(serverField.help, /after the provider reconnects/);
+	const shellField = settingsEditorField(shellRead, settingsWriteTarget(settings, shellRead, "project"));
+	assert.equal(shellField.multiline, true);
+	assert.equal(shellField.value, "~/notes\n/tmp/reference");
+	assert.match(shellField.help, /typed confirmation/);
+	assert.equal(nextWritableSettingsScope(settings, "project"), "install");
+	assert.equal(nextWritableSettingsScope(settings, "install"), "project");
+	const projectReadOnly = { configuration: { ...settings.configuration, layers: settings.configuration.layers.map((source) => source.layer === "project" ? { ...source, writable: false } : source) } };
+	assert.equal(nextWritableSettingsScope(projectReadOnly, "project"), "install", "a source switch is explicit when the safe project target is read-only");
+	const flashes = [];
+	const choices = [];
+	let closed = 0;
+	const picker = new SettingsSourcePicker({
+		sources: settingsSources(projectReadOnly),
+		selected: "project",
+		keyOf: (key) => key,
+		choose: (source) => { choices.push(source.scope); return true; },
+		close: () => { closed++; },
+		flash: (message) => flashes.push(message),
+	});
+	assert.match(JSON.stringify(picker.render(80)), /Choose configuration source/);
+	assert.match(JSON.stringify(picker.render(80)), /project configuration.*read-only/, "the picker shows an unavailable safe-default target instead of silently writing elsewhere");
+	picker.handleInput("enter");
+	assert.match(flashes.at(-1), /read-only/);
+	assert.deepEqual(choices, []);
+	picker.handleInput("down");
+	picker.handleInput("enter");
+	assert.deepEqual(choices, ["install"]);
+	assert.equal(closed, 1);
+});
+
+test("application: Settings provenance and persisted actions share revisions without mutating process overrides", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	const project = join(brainDir, "config.json");
+	writeFileSync(install, JSON.stringify({ server: "http://install.test/v1", model: "install-model", collapseFull: 70 }));
+	writeFileSync(project, JSON.stringify({ colors: "none", collapseFull: 75 }));
+	const env = { CARTO_CONFIG: install, CARTO_SERVER: "http://environment.test/v1", CARTO_MODEL: "environment-model" };
+	const flags = { url: "http://command-line.test/v1", model: "command-line-model" };
+	const repository = createConfigurationRepository({ paths: { install, project } });
+	const config = loadConfig({ brainDir, flags, env });
+	const events = [];
+	const app = createApplication({
+		brainDir,
+		root,
+		config,
+		configuration: { repository, env, flags },
+		now: () => Date.parse(NOW),
+	});
+	app.events.subscribe((event) => events.push(event));
+	const snapshot = await app.queries.settings.status({ requestId: "settings-provenance" });
+	assert.equal(snapshot.ok, true);
+	if (!snapshot.ok) throw new Error(snapshot.error.message);
+	assert.equal(snapshot.data.configuration.rows.length, 30, "the typed query includes one row for every known setting");
+	const server = snapshot.data.configuration.rows.find((row) => row.key === "server");
+	assert.equal(server?.effectiveValue, "http://command-line.test/v1");
+	assert.equal(server?.source.layer, "command-line");
+	assert.equal(server?.contributors.find((entry) => entry.layer === "project"), undefined, "an absent source is not invented in provenance");
+	const collapse = snapshot.data.configuration.rows.find((row) => row.key === "collapseFull");
+	assert.equal(collapse?.effectiveValue, 75);
+	assert.equal(collapse?.source.layer, "project");
+	assert.equal(collapse?.source.writable, true);
+	const edited = await app.execute(SETTINGS_ACTION.edit, {
+		key: "collapseFull",
+		value: "80",
+		scope: "project",
+		expectedRevision: snapshot.data.configuration.revisions.project,
+	}, { requestId: "settings-edit" });
+	assert.equal(edited.ok, true);
+	if (!edited.ok) throw new Error(edited.error.message);
+	assert.equal(edited.data.row.effectiveValue, 80, "form text is coerced, then full configuration validation runs before write");
+	assert.equal(edited.meta.revision, edited.data.revision);
+	assert.equal(JSON.parse(readFileSync(project, "utf8")).collapseFull, 80);
+	assert.deepEqual(events.slice(-3).map((event) => [event.type, event.payload.action]), [
+		["action.completed", SETTINGS_ACTION.edit],
+		["configuration.changed", SETTINGS_ACTION.edit],
+		["projection.invalidated", SETTINGS_ACTION.edit],
+	], "a saved setting emits one narrow configuration fact and Settings invalidation");
+	assert.deepEqual(events.at(-1).payload.scopes, ["settings", "configuration"]);
+	const reset = await app.execute(SETTINGS_ACTION.reset, {
+		key: "collapseFull",
+		scope: "project",
+		expectedRevision: edited.data.revision,
+	});
+	assert.equal(reset.ok, true);
+	if (!reset.ok) throw new Error(reset.error.message);
+	assert.equal(reset.data.row.effectiveValue, 70, "reset removes only the selected project override and reveals install precedence");
+	assert.equal(Object.hasOwn(JSON.parse(readFileSync(project, "utf8")), "collapseFull"), false);
+	const shadowed = await app.execute(SETTINGS_ACTION.edit, {
+		key: "server",
+		value: "http://saved-project.test/v1",
+		scope: "project",
+		expectedRevision: reset.data.revision,
+	});
+	assert.equal(shadowed.ok, true);
+	if (!shadowed.ok) throw new Error(shadowed.error.message);
+	assert.equal(shadowed.data.row.source.layer, "command-line", "a persisted source reports a CLI shadow rather than pretending to reconfigure this run");
+	assert.equal(env.CARTO_SERVER, "http://environment.test/v1", "Settings never writes process environment overrides");
+	assert.deepEqual(flags, { url: "http://command-line.test/v1", model: "command-line-model" }, "Settings never mutates invocation flags");
+	const stale = await app.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "dark",
+		scope: "project",
+		expectedRevision: reset.data.revision,
+	});
+	assert.equal(stale.ok, false);
+	if (stale.ok) throw new Error("a stale source revision must be refused");
+	assert.equal(stale.error.code, UI_ERROR_CODE.conflict);
+	const blocked = await app.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "dark",
+		scope: "environment",
+		expectedRevision: shadowed.data.revision,
+	});
+	assert.equal(blocked.ok, false);
+	if (blocked.ok) throw new Error("environment must stay read-only");
+	assert.equal(blocked.error.code, UI_ERROR_CODE.policyBlocked);
+	const invalid = await app.execute(SETTINGS_ACTION.edit, {
+		key: "chatWindow",
+		value: "60000",
+		scope: "project",
+		expectedRevision: shadowed.data.revision,
+	});
+	assert.equal(invalid.ok, false);
+	if (invalid.ok) throw new Error("cross-setting validation must run in the action owner");
+	assert.equal(invalid.error.code, UI_ERROR_CODE.invalidInput);
+	const savedYoloDefault = await app.execute(SETTINGS_ACTION.edit, {
+		key: "yolo",
+		value: "true",
+		scope: "project",
+		expectedRevision: shadowed.data.revision,
+	}, {
+		confirmation: { actionId: SETTINGS_ACTION.edit, target: "project:yolo", acknowledged: true },
+	});
+	assert.equal(savedYoloDefault.ok, true);
+	if (!savedYoloDefault.ok) throw new Error(savedYoloDefault.error.message);
+	const refreshedSettings = await app.queries.settings.status();
+	assert.equal(refreshedSettings.ok, true);
+	if (!refreshedSettings.ok) throw new Error(refreshedSettings.error.message);
+	assert.equal(refreshedSettings.data.policy.approval.yolo, false, "a saved policy default does not mutate the current session policy");
+	assert.equal(refreshedSettings.data.policy.approval.defaultYolo, true, "Safety refreshes the saved policy default from the effective Settings source after a write");
+
+	const broken = createSettingsApplication({
+		repository: createConfigurationRepository({
+			paths: { install, project },
+			fs: { rename: async () => { throw Object.assign(new Error("disk full"), { code: "EIO" }); } },
+		}),
+		env,
+		flags,
+		now: () => Date.parse(NOW),
+	});
+	const failed = await broken.execute(SETTINGS_ACTION.edit, {
+		key: "theme",
+		value: "dark",
+		scope: "project",
+		expectedRevision: savedYoloDefault.data.revision,
+	});
+	assert.equal(failed.ok, false);
+	if (failed.ok) throw new Error("a repository write failure must not look saved");
+	assert.equal(failed.error.code, UI_ERROR_CODE.internal);
+});
+
+test("screen Chat: disclosures preserve retained bodies and Consult preview direction", () => {
+	const text = (chat, projection) => chat.lines(120, projection).map((line) => line.spans.map(([piece]) => piece).join("")).join("\n");
+	const long = Array.from({ length: POLICY.limits.screen.chatDetailRows + 5 }, (_unused, index) => `settled detail row ${index + 1}`).join("\n");
+	const chat = createChat();
+	chat.entry(0, { id: "detail-entry", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "detail-call", name: "shell", arguments: { command: "printf detail" } }] },
+		{ role: "toolResult", toolCallId: "detail-call", toolName: "shell", isError: false, content: [{ type: "text", text: long }] },
+	] });
+	const group = chat.items.find((item) => item.type === "group");
+	assert.ok(group, "the completed call is retained in its chat group");
+	chat.toggleRow(group.key, 0, true);
+	const openDetail = text(chat, "work");
+	assert.match(openDetail, /settled detail row 1/);
+	assert.match(openDetail, new RegExp(`settled detail row ${POLICY.limits.screen.chatDetailRows + 5}`), "an open detail exposes every locally retained wrapped row");
+	assert.doesNotMatch(openDetail, /more lines/, "an open detail no longer applies a display cap");
+	assert.match(openDetail, /Enter folds this block/, "an open retained detail remains explicitly foldable");
+
+	const blockRows = POLICY.limits.screen.chatDetailRows * 2 + 5;
+	const requestBody = Array.from({ length: blockRows }, (_unused, index) => `request block row ${index + 1}`).join("\n");
+	const request = createChat();
+	request.block("Current request", requestBody);
+	const requestLine = request.lines(120, "work").find((line) => line.kind === "block");
+	assert.ok(requestLine, "the request block keeps its stable selection reference");
+	assert.doesNotMatch(text(request, "work"), new RegExp(`request block row ${blockRows}`), "a folded request block uses its bounded head preview");
+	request.toggle(requestLine.item, true);
+	const openRequest = text(request, "work");
+	assert.match(openRequest, new RegExp(`request block row ${blockRows}`), "an open request block exposes every locally retained row");
+	assert.equal(request.textOf(requestLine.item), requestBody, "copying a request block remains independent of its fold state");
+
+	const retained = "z".repeat(POLICY.limits.screen.chatDetailChars + 17);
+	const clipped = createChat();
+	clipped.entry(0, { id: "clipped-entry", conversationId: "parent", model: [
+		{ role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall", id: "clipped-call", name: "shell", arguments: { command: "printf clipped" } }] },
+		{ role: "toolResult", toolCallId: "clipped-call", toolName: "shell", isError: false, content: [{ type: "text", text: retained }] },
+	] });
+	const clippedGroup = clipped.items.find((item) => item.type === "group");
+	assert.ok(clippedGroup);
+	clipped.toggleRow(clippedGroup.key, 0, true);
+	const openClipped = text(clipped, "work");
+	assert.match(openClipped, new RegExp(`retained text was clipped from ${retained.length} characters`), "character retention is explicit metadata, not a fabricated source row");
+	assert.doesNotMatch(clipped.textOf(clippedGroup.key, 0), /\(17 more characters\)/, "copy does not present the old synthetic trailing truncation string as source text");
+
+	const consultCount = POLICY.limits.screen.chatDetailRows + 5;
+	const liveBody = Array.from({ length: consultCount }, (_unused, index) => `live consult row ${index + 1}`).join("\n");
+	const settledBody = Array.from({ length: consultCount }, (_unused, index) => `settled consult row ${index + 1}`).join("\n");
+	const consult = createChat();
+	consult.setConsultProjection({ data: { conferences: [{ id: "co9", conference: {
+		id: "co9",
+		status: "running",
+		question: "Which preview direction is correct?",
+		active: { kind: "participant", participant: "atlas" },
+		activities: [{ participant: "cartographer", prose: settledBody }],
+	} }] } });
+	consult.live(0, { timestamp: 1, content: [{ type: "text", text: liveBody }] }, { conference: "co9", participant: "atlas" });
+	const consultText = text(consult, "consult");
+	assert.match(consultText, new RegExp(`live consult row ${consultCount}`), "a live Consult activity uses its newest tail rows");
+	assert.doesNotMatch(consultText, /live consult row 1\n/, "a live Consult activity omits its old head when folded");
+	assert.match(consultText, /settled consult row 1/, "a settled Consult activity retains its head preview");
+	assert.doesNotMatch(consultText, new RegExp(`settled consult row ${consultCount}`), "a settled Consult activity does not switch to a tail preview");
+	const joined = (line) => line.spans.map(([piece]) => piece).join("");
+	const liveHeader = consult.lines(120, "consult").find((line) => line.kind === "consult-event" && /Atlas · chat \/ prose · writing/.test(joined(line)));
+	const settledHeader = consult.lines(120, "consult").find((line) => line.kind === "consult-event" && /Cartographer · chat \/ prose$/.test(joined(line)));
+	assert.ok(liveHeader && settledHeader, "Consult keeps stable event references for each disclosure");
+	consult.toggleRow(liveHeader.item, liveHeader.row, true);
+	consult.toggleRow(settledHeader.item, settledHeader.row, true);
+	const openConsult = text(consult, "consult");
+	assert.match(openConsult, /live consult row 1/, "opening a live Consult event exposes all locally retained rows");
+	assert.match(openConsult, new RegExp(`settled consult row ${consultCount}`), "opening a settled Consult event exposes all locally retained rows");
+});
+
 test("application: consult projection defers its isolated audit list", async (t) => {
 	const { root, brainDir } = fresh(t);
 	let reads = 0;
@@ -2335,9 +3785,27 @@ test("application: composed facade dispatches actions and publishes cache-invali
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.sendShell)?.label, "Send shell input");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.routeTaskMessage)?.label, "Message active task");
 	assert.equal(app.capabilities.get(RUNTIME_ACTION.selectModel)?.label, "Select model route");
+	assert.deepEqual(app.capabilities.get(RUNTIME_ACTION.sendShell)?.availability, { enabled: true }, "identity lookup keeps the availability snapshot ActionLauncher needs after the palette has closed");
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.sendShell)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)?.availability, { enabled: true });
 	assert.deepEqual(app.capabilities.list().find((capability) => capability.id === RUNTIME_ACTION.selectModel)?.availability, { enabled: true });
+	const registeredActions = [CONTEXT_ACTION, REQUEST_ACTION, REVIEW_ACTION, RUNTIME_ACTION, TALK_ACTION, WORKSPACE_ACTION, SETTINGS_ACTION].flatMap((actions) => Object.values(actions));
+	assert.equal(registeredActions.length, 34, "the composed application includes Settings plus complete wake create/replace/remove actions");
+	assert.equal(new Set(registeredActions).size, registeredActions.length, "every declared action id is unique");
+	const registeredCapabilities = app.capabilities.list().map((capability) => capability.id);
+	assert.equal(registeredCapabilities.length, registeredActions.length, "every action has one capability presentation");
+	assert.deepEqual([...registeredCapabilities].sort(), [...registeredActions].sort(), "the composed capability registry covers every action owner");
+	assert.deepEqual([...app.actionSpecs.list().map((spec) => spec.id)].sort(), [...registeredActions].sort(), "every composed capability has one pure action schema and target contract");
+	assert.doesNotThrow(() => assertActionSpecParity(app.capabilities, app.actionSpecs));
+	assert.doesNotThrow(() => assertActionPlacementParity(app.capabilities));
+	for (const action of registeredActions) {
+		const controller = new AbortController();
+		controller.abort();
+		const stopped = await app.execute(action, {}, { signal: controller.signal });
+		assert.equal(stopped.ok, false, `${action} declines a cancelled dispatch before it reaches a durable or runtime owner`);
+		if (stopped.ok) throw new Error(`${action} must not run after cancellation`);
+		assert.equal(stopped.error.code, UI_ERROR_CODE.cancelled, `${action} has a composed owner rather than falling through as an unknown action`);
+	}
 	const unknown = await app.execute("workspace.unknown", {});
 	assert.equal(unknown.ok, false);
 	if (unknown.ok) throw new Error("unknown composed actions must fail explicitly");

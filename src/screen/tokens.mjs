@@ -94,8 +94,8 @@ export const LAYOUT = frozen({
 export const tokenStyle = (...tokens) => tokens.flat().filter((token) => typeof token === "string" && token !== "").join(" ");
 
 /**
- * Transitional style names used by the established Chat and feature views. New shell/components must use TOKEN;
- * aliases remain until the corresponding feature renderer migrates in Phase 5.
+ * Transitional style names used by established feature views. New shell/components use TOKEN; an alias remains only
+ * while a proven renderer consumer still needs it.
  */
 export const LEGACY_STYLE_ALIASES = frozen({
 	bg: TOKEN.surface.canvas,
@@ -133,22 +133,7 @@ export const LEGACY_STYLE_ALIASES = frozen({
 	bgUser: TOKEN.activity.userSurface,
 	bgTool: TOKEN.activity.shellSurface,
 	bgNote: TOKEN.activity.noteSurface,
-	bgPanel: TOKEN.surface.content,
-	bgInput: TOKEN.surface.input,
-	bgBar: TOKEN.surface.raised,
-	bgSel: TOKEN.interaction.selected,
-	bgTab: TOKEN.interaction.active,
 	chip: TOKEN.interaction.chip,
-	catSystem: TOKEN.domain.context.system,
-	catTools: TOKEN.domain.context.tools,
-	catTop: TOKEN.domain.context.top,
-	catKept: TOKEN.domain.context.kept,
-	catYou: TOKEN.domain.context.user,
-	catCarto: TOKEN.domain.context.cartographer,
-	catAgent: TOKEN.domain.context.agent,
-	catResult: TOKEN.domain.context.result,
-	catState: TOKEN.domain.context.state,
-	catWindows: TOKEN.domain.context.windows,
 });
 
 /** The semantic token behind a former one-word style name; unknown names remain available to pi-tui extensions. */

@@ -225,52 +225,76 @@ export function createWakes({ root, brainDir, config = {}, windows, tickMs = POL
 	}, tickMs);
 	ticker.unref();
 
+	/** Validate and materialize a complete trigger without mutating the schedule. `replace` reuses this exact
+	 * contract so it cannot turn into an unchecked partial patch. */
+	const buildWake = (wanted, { id, enforceLimit = true } = {}) => {
+		const asked = wanted !== null && typeof wanted === "object" ? wanted : {};
+		let note = flat(asked.note);
+		if (note === "") throw new WakeError("A wake needs a `note`: what I want to look at or do when it fires, written for myself.");
+		if (note.length > NOTE_MAX) {
+			const original = note;
+			note = note.slice(0, NOTE_MAX);
+			warn(clipNote("`note`", original, note, NOTE_MAX, { remedy: "replace the wake with its id and a complete shorter trigger, or remove it and set a new one" }));
+		}
+		if (enforceLimit && wakes.length >= most) throw new WakeError(`${plural(most, "wake")} are set, which is the limit: ${wakes.map((wake) => wake.id).join(", ")}. Remove one first.`);
+		const hasPath = typeof asked.path === "string" && asked.path.trim() !== "";
+		const hasWindow = typeof asked.window === "string" && asked.window.trim() !== "";
+		if (hasPath && hasWindow) throw new WakeError("Give `path` or `window`, not both: one wake watches one thing. Set a second wake for the other.");
+		const kind = hasPath ? POLICY.enums.wakeKinds.file : hasWindow ? POLICY.enums.wakeKinds.window : POLICY.enums.wakeKinds.time;
+		if (kind === POLICY.enums.wakeKinds.time && asked.every === undefined) throw new WakeError("Say what wakes me: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
+		if (asked.match !== undefined && asked.match !== "" && kind !== POLICY.enums.wakeKinds.window) throw new WakeError("`match` goes with `window`: it is the text a printed line must contain.");
+		const every = asked.every === undefined ? least : asked.every;
+		if (!Number.isInteger(every) || every < least || every > EVERY_MAX) {
+			throw new WakeError(`\`every\` is ${JSON.stringify(asked.every)}; it is a whole number of seconds from ${least} to ${EVERY_MAX}. A wake costs a whole turn, so ${took(least * 1000)} is the least.`);
+		}
+		const times = asked.times === undefined ? POLICY.limits.wake.timesDefault : asked.times;
+		if (!Number.isInteger(times) || times < POLICY.limits.wake.timesMin) throw new WakeError(`\`times\` is ${JSON.stringify(asked.times)}; it is how often the wake fires: 1, 2, 3, …, or 0 for until I remove it.`);
+		const now = clock();
+		const wake = { id, kind, every, times, ...(times > 0 ? { left: times } : {}), note, created: now, fired: 0 };
+		if (kind === POLICY.enums.wakeKinds.time) wake.due = now + every * 1000;
+		if (kind === POLICY.enums.wakeKinds.file) {
+			const full = resolve(root, asked.path.trim());
+			const rel = relative(root, full).split(sep).join("/");
+			if (rel.startsWith("..") || isAbsolute(rel)) throw new WakeError(`${JSON.stringify(asked.path)} is outside the project. A wake watches a file or a folder of the project.`);
+			const ownFolder = rel === POLICY.sentinels.brainDir || rel.startsWith(`${POLICY.sentinels.brainDir}/`) || rel === ".atlas" || rel.startsWith(".atlas/");
+			if (ownFolder) throw new WakeError("`.brain` is Cartographer's own folder and is not watched (the old `.atlas` folder is none either).");
+			wake.path = rel === "" ? "." : rel;
+		}
+		if (kind === POLICY.enums.wakeKinds.window) {
+			wake.window = asked.window.trim();
+			if (typeof asked.match === "string" && asked.match !== "") wake.match = asked.match;
+		}
+		return wake;
+	};
+
 	const manager = {
 		/**
 		 * Set a trigger.
 		 * @param {{ note: string, every?: number, times?: number, path?: string, window?: string, match?: string }} wanted
 		 */
 		set(wanted) {
-			let note = flat(wanted.note);
-			if (note === "") throw new WakeError("A wake needs a `note`: what I want to look at or do when it fires, written for myself.");
-			if (note.length > NOTE_MAX) {
-				const original = note;
-				note = note.slice(0, NOTE_MAX);
-				warn(clipNote("`note`", original, note, NOTE_MAX, { remedy: "`wake` with remove and the wake's id, then set it again with the shorter note (a wake is not edited)" }));
-			}
-			if (wakes.length >= most) throw new WakeError(`${plural(most, "wake")} are set, which is the limit: ${wakes.map((wake) => wake.id).join(", ")}. Remove one first.`);
-			const hasPath = typeof wanted.path === "string" && wanted.path.trim() !== "";
-			const hasWindow = typeof wanted.window === "string" && wanted.window.trim() !== "";
-			if (hasPath && hasWindow) throw new WakeError("Give `path` or `window`, not both: one wake watches one thing. Set a second wake for the other.");
-			const kind = hasPath ? POLICY.enums.wakeKinds.file : hasWindow ? POLICY.enums.wakeKinds.window : POLICY.enums.wakeKinds.time;
-			if (kind === POLICY.enums.wakeKinds.time && wanted.every === undefined) throw new WakeError("Say what wakes me: `every` (seconds) for a time, `path` for a file or folder, or `window` for a shell window.");
-			if (wanted.match !== undefined && wanted.match !== "" && kind !== POLICY.enums.wakeKinds.window) throw new WakeError("`match` goes with `window`: it is the text a printed line must contain.");
-			const every = wanted.every === undefined ? least : wanted.every;
-			if (!Number.isInteger(every) || every < least || every > EVERY_MAX) {
-				throw new WakeError(`\`every\` is ${JSON.stringify(wanted.every)}; it is a whole number of seconds from ${least} to ${EVERY_MAX}. A wake costs a whole turn, so ${took(least * 1000)} is the least.`);
-			}
-			const times = wanted.times === undefined ? POLICY.limits.wake.timesDefault : wanted.times;
-			if (!Number.isInteger(times) || times < POLICY.limits.wake.timesMin) throw new WakeError(`\`times\` is ${JSON.stringify(wanted.times)}; it is how often the wake fires: 1, 2, 3, …, or 0 for until I remove it.`);
-			const now = clock();
-			const wake = { id: `${POLICY.idPrefixes.wake}${next}`, kind, every, times, ...(times > 0 ? { left: times } : {}), note, created: now, fired: 0 };
-			if (kind === POLICY.enums.wakeKinds.time) wake.due = now + every * 1000;
-			if (kind === POLICY.enums.wakeKinds.file) {
-				const full = resolve(root, wanted.path.trim());
-				const rel = relative(root, full).split(sep).join("/");
-				if (rel.startsWith("..") || isAbsolute(rel)) throw new WakeError(`${JSON.stringify(wanted.path)} is outside the project. A wake watches a file or a folder of the project.`);
-				const ownFolder = rel === POLICY.sentinels.brainDir || rel.startsWith(`${POLICY.sentinels.brainDir}/`) || rel === ".atlas" || rel.startsWith(".atlas/");
-				if (ownFolder) throw new WakeError("`.brain` is Cartographer's own folder and is not watched (the old `.atlas` folder is none either).");
-				wake.path = rel === "" ? "." : rel;
-			}
-			if (kind === POLICY.enums.wakeKinds.window) {
-				wake.window = wanted.window.trim();
-				if (typeof wanted.match === "string" && wanted.match !== "") wake.match = wanted.match;
-			}
+			const wake = buildWake(wanted, { id: `${POLICY.idPrefixes.wake}${next}` });
 			next++;
 			wakes.push(wake);
 			look(wake);
 			save();
 			return { ...wake };
+		},
+		/** Replace a complete trigger while keeping its durable id. The new schedule has no firing/history/look state from
+		 * the old trigger, and a trigger removed after selection is refused rather than recreated under that id. */
+		replace(id, wanted) {
+			const at = wakes.findIndex((wake) => wake.id === id);
+			if (at < 0) throw new WakeError(wakes.length === 0 ? "No wake is set." : `There is no wake ${JSON.stringify(id)}. Set: ${wakes.map((wake) => wake.id).join(", ")}.`);
+			const previous = wakes[at];
+			const wake = buildWake(wanted, { id: previous.id, enforceLimit: false });
+			wakes = [...wakes.slice(0, at), wake, ...wakes.slice(at + 1)];
+			looks.delete(previous.id);
+			news = news.filter((event) => event.id !== previous.id);
+			during = during.filter((event) => event.id !== previous.id);
+			current = current.filter((wakeId) => wakeId !== previous.id);
+			look(wake);
+			save();
+			return { previous: { ...previous }, wake: { ...wake } };
 		},
 		/** Remove one trigger, or every one with "all". @returns the removed ones */
 		remove(id) {

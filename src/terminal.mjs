@@ -24,6 +24,9 @@ import { atlasSummary, attentionSummary, renderAttention, renderOutline } from "
 import { changeRecord, changeSummary } from "./checkpoints.mjs";
 import { bindTalkSource, contextPath, FLOOR, isFront, recordLine, shelfLabel, composedRows, sameShelfItem, splitReadTail } from "./context.mjs";
 import { createApplication } from "./application/app.mjs";
+import { LIFECYCLE_ACTION, createLifecycleBridge } from "./application/lifecycle.mjs";
+import { UI_ERROR_CODE, UI_ERROR_KIND } from "./application/contracts.mjs";
+import { uiError, uiFailure, uiSuccess } from "./application/result.mjs";
 import { consultMessageFingerprint } from "./application/queries.mjs";
 import { describeCall, describeResult } from "./application/activity.mjs";
 export { describeCall, describeResult } from "./application/activity.mjs";
@@ -115,25 +118,38 @@ export async function runTerminal(session, options) {
 	const workMessenger = session.work ?? Object.freeze({
 		tell: typeof session.tellWork === "function" ? session.tellWork.bind(session) : typeof session.tellTask === "function" ? session.tellTask.bind(session) : undefined,
 	});
+	// Plain-terminal composition owns an adapter too. The bridge is attached only after the terminal has constructed
+	// its narrow port below; a Screen-supplied application instead receives that port through ui.attachLifecycle.
+	const terminalLifecycleBridge = options.application === undefined ? createLifecycleBridge({ unavailableReason: "Terminal lifecycle controls are still starting." }) : undefined;
 	const application = options.application ?? createApplication({
 		brainDir: options.brainDir,
 		root: options.root,
 		config,
+		configuration: options.configuration,
 		runtime: {
 			main,
 			context,
 			engine,
 			windows,
 			wakes,
+			activeTask: session.activeTask,
 			work: workMessenger,
 			model: modelManager.current,
 			models: modelManager,
 			preview: session.preview,
 			runner: options.runner,
+			gate: options.gate,
+			initiation: options.initiation,
+			lifecycle: terminalLifecycleBridge,
 			contextWindow: () => options.contextWindow,
 		},
 	});
 	const queries = application.queries;
+	// Slash commands use the same lifecycle facade as Screen when one is available. The fallback preserves narrow
+	// compatibility for an injected legacy application, while ordinary composition publishes lifecycle invalidations.
+	const executeLifecycle = async (...args) => typeof application.lifecycle?.execute === "function"
+		? await application.lifecycle.execute(...args)
+		: await lifecyclePort.execute(...args);
 	const gate = options.gate ?? { yolo: false };
 	/** Whether the agent starts on its own at the start (config `initiate`; /initiate switches it while carto runs, never remembered). */
 	const initiation = options.initiation ?? { on: true };
@@ -854,10 +870,12 @@ export async function runTerminal(session, options) {
 					}
 				}
 				const nowBusy = live?.run !== undefined;
+				const wasBusy = busy;
 				if (busy && !nowBusy) {
 					busy = false;
 					onIdle();
 				} else busy = nowBusy;
+				if (wasBusy !== busy) ui?.lifecycleChanged?.();
 			}
 			// A running task names its own conversation in the call's details.
 			for (const slot of live?.tools ?? []) {
@@ -1275,9 +1293,10 @@ export async function runTerminal(session, options) {
 					"  /delete ID … --yes  a row is gone for good and the agent is not told: a report (its record line and its file), a ledger entry, a plan envelope or move, a node of the graph",
 						"  /collapse collapse the context now: task records, the shelf and the last of the talk stay",
 						"  /send NAME line  type a line into a shell window, as you; /shells lists the windows",
+						"  /wait [SECONDS]  with piped input, wait for shell commands and scheduled wakes; an interactive terminal already wakes itself",
 						"  /new      start a fresh context with nothing kept in view; the session's history stays stored",
 						"  /status   where the brain is and how full the context is",
-						"  /quit     leave; unfinished work continues the next time carto starts here",
+						"  /quit, /exit  leave; unfinished work continues the next time carto starts here",
 					].join("\n"),
 				);
 				return true;
@@ -1309,25 +1328,19 @@ export async function runTerminal(session, options) {
 						line("  /consult probe [PATH] accepts at most one project-relative JSON log path (paths with spaces are not supported).");
 						return true;
 					}
-					if (busy) {
-						line("  The agent is working. /stop first, then /consult probe, so the raw native-grammar check does not compete with a live request.");
+					const availability = lifecyclePort.availability(LIFECYCLE_ACTION.selectorProbe);
+					if (!availability.enabled) {
+						line(`  ${availability.reason}`);
 						return true;
 					}
-					try {
-						if (!(await ensureModelReady())) return true;
-						const models = await queries.runtime.models();
-						const modelId = models.ok ? models.data.currentId ?? config.model : config.model;
-						const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path: args[1] });
-						line(dim("  Running two synthetic, selector-only llama.cpp GBNF requests. They send no project files, chat, tools, or conference capture."));
-						const record = await runLlamaCppSelectorProbe({ server: config.server, modelId });
-						const written = writeSelectorProbeLog(logPath, record);
-						line(renderLlamaCppSelectorProbe(record));
-						const shown = relative(options.root, written) || written;
+					line(dim("  Running two synthetic, selector-only llama.cpp GBNF requests. They send no project files, chat, tools, or conference capture."));
+					const outcome = await executeLifecycle(LIFECYCLE_ACTION.selectorProbe, args[1] === undefined ? {} : { path: args[1] });
+					if (!outcome.ok && outcome.error.code !== UI_ERROR_CODE.transportFailed) line(`! Native llama.cpp selector probe could not run: ${outcome.error.message}`);
+					else if (outcome.ok) {
+						line(renderLlamaCppSelectorProbe(outcome.data.record));
+						const shown = relative(options.root, outcome.data.written) || outcome.data.written;
 						line(`  JSON log: ${shown}${args[1] === undefined ? "  (ignored under .brain/export; pass a project-relative PATH to commit one)" : ""}`);
 						line(dim("  A PASS is inspectable evidence for Cartographer's required native-grammar boundary on this endpoint; it does not establish calibrated or semantically correct routing."));
-					} catch (error) {
-						const message = error instanceof ConsultProbeError ? error.message : error?.message ?? String(error);
-						line(`! Native llama.cpp selector probe could not run: ${message}`);
 					}
 					return true;
 				}
@@ -1391,11 +1404,9 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "collapse": {
-				if (busy) {
-					line("  The agent is working. /stop first, then /collapse; or tell it to collapse its context.");
-					return true;
-				}
-				if (!(await rest({ user: true }))) line("  Nothing was collapsed.");
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.collapse);
+				if (!outcome.ok) line(`  ${outcome.error.message}`);
+				else if (!outcome.data.collapsed) line("  Nothing was collapsed.");
 				return true;
 			}
 			case "ledger": {
@@ -1460,13 +1471,9 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "pin": {
-				if (busy) {
-					line("  The agent is working. /stop first, then /pin.");
-					return true;
-				}
-				const result = await contextAction(CONTEXT_ACTION.pinTop, { reason: `${USER_NAME} asked for it` });
-				if (!result.ok) line(`! ${result.error.message}`);
-				else if (result.data.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
+				const result = await executeLifecycle(LIFECYCLE_ACTION.refreshTop, { reason: `${USER_NAME} asked for it` });
+				if (!result.ok) line(result.error.kind === "policy" ? `  ${result.error.message}` : `! ${result.error.message}`);
+				else if (result.data.refreshed.changed) line(`${bold("●")} top of the context rewritten: the assessment and the graph as they are now ${dim("(the next answer reads the whole context again)")}`);
 				else line("  The copy at the top of the context is already current.");
 				return true;
 			}
@@ -1542,33 +1549,27 @@ export async function runTerminal(session, options) {
 				return true;
 			}
 			case "yolo": {
-				const projection = await queries.plan();
-				const plan = projection.ok ? projection.data.plan : undefined;
-				const waiting = plan === undefined ? [] : waitingItems(plan);
 				if (argument === undefined) {
 					line(`  ${gate.yolo ? YOLO_LINE : "approval: on · declared change moves wait for /approve"}`);
 					line(dim(`  /yolo ${gate.yolo ? "off asks for /approve again" : "on lets declared change moves run without /approve"}`));
-				} else if (argument === "on") {
-					if (gate.yolo) line("  Approval is already off.");
-					else {
-						gate.yolo = true;
-						line(`${bold("●")} ${YOLO_LINE}`);
-						line(dim("  Every change is still one declared move with its own targets, budget, checkpoint and report. The sandbox is a separate switch (/bwrap). Not remembered: the next start asks for approval again."));
-						if (options.runner?.mode === "direct") line("! The sandbox is OFF as well: commands run directly on this machine, and nothing asks you first.");
-						setPrompt();
-						// The agent may be resting in front of a plan that waited for the user: tell it, as /approve does.
-						if (!busy && plan !== undefined && awaitsApproval(plan)) await send(`I have switched approval off: declared change moves may run without /approve while it stays off. Carry out exactly one current move revision per focus${waiting.length === 1 ? ` (${waiting[0].id})` : ""}; its targets, capabilities, budgets, checkpoints, report and acceptance still apply.`);
-					}
-				} else if (argument === "off") {
-					if (!gate.yolo) line("  Approval is already on.");
-					else {
-						gate.yolo = false;
-						line(`${bold("●")} approval: on · declared change moves wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
-						setPrompt();
-						reminded = undefined;
-						if (!busy) await approvalLine();
-					}
-				} else line("  /yolo shows the setting, /yolo on switches approval off, /yolo off switches it back on.");
+					return true;
+				}
+				if (argument !== "on" && argument !== "off") {
+					line("  /yolo shows the setting, /yolo on switches approval off, /yolo off switches it back on.");
+					return true;
+				}
+				const to = argument === "on";
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.toggleApproval, { yolo: to }, {
+					...(to ? { confirmation: { actionId: LIFECYCLE_ACTION.toggleApproval, target: "approval off", acknowledged: true } } : {}),
+				});
+				if (!outcome.ok) line(`! ${outcome.error.message}`);
+				else if (!outcome.data.changed) line(`  ${outcome.data.line}`);
+				else if (to && gate.yolo) {
+					line(`${bold("●")} ${YOLO_LINE}`);
+					line(dim("  Every change is still one declared move with its own targets, budget, checkpoint and report. The sandbox is a separate switch (/bwrap). Not remembered: the next start asks for approval again."));
+					if (options.runner?.mode === "direct") line("! The sandbox is OFF as well: commands run directly on this machine, and nothing asks you first.");
+				} else if (!to && !gate.yolo) line(`${bold("●")} approval: on · declared change moves wait for /approve again${busy ? " · a task that is running finishes" : ""}`);
+				else line(`  ${outcome.data.line}`);
 				return true;
 			}
 			case "initiate": {
@@ -1582,21 +1583,13 @@ export async function runTerminal(session, options) {
 					return true;
 				}
 				const to = argument === "on";
-				if (to === initiation.on) {
-					line(to ? "  The agent already starts on its own." : "  The agent already waits for you.");
-					return true;
-				}
-				initiation.on = to;
-				setPrompt();
-				line(`${bold("●")} ${to ? "the agent starts on its own again" : "the agent waits for you: it does nothing until you write"}`);
-				line(dim("  Not remembered: the next start follows the setting (\`initiate\` in the settings)."));
-				// Switched on while it rests: its start is now.
-				if (to && !busy && !paused && options.interactive) {
-					enqueue(async () => {
-						if (busy || closing) return;
-						line(dim("  it starts now"));
-						await submit(startNote());
-					});
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.toggleInitiation, { on: to });
+				if (!outcome.ok) line(`! ${outcome.error.message}`);
+				else if (!outcome.data.changed) line(`  ${outcome.data.line}`);
+				else {
+					line(`${bold("●")} ${to ? "the agent starts on its own again" : "the agent waits for you: it does nothing until you write"}`);
+					line(dim("  Not remembered: the next start follows the setting (\`initiate\` in the settings)."));
+					if (outcome.data.startsNow) line(dim("  it starts now"));
 				}
 				return true;
 			}
@@ -1703,31 +1696,22 @@ export async function runTerminal(session, options) {
 					line("  /bwrap shows how commands run; /bwrap off and /bwrap on switch.");
 					return true;
 				}
-				// A task that is running was told how its commands run when it started.
-				if (busy) {
-					line("  The agent is working. /stop first, then /bwrap.");
-					return true;
-				}
-				if (want === "off") {
-					if (runner.off) line("  The sandbox is already off.");
-					else {
-						if (!(await closeForSwitch("off"))) return true;
-						runner.off = true;
-						line(`${bold("!")} sandbox OFF. The commands of change tasks now run directly on this machine, as you.`);
-						line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
-						line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
-						const projection = await queries.plan();
-						const open = projection.ok ? runnableMoves(projection.data.plan).length : 0;
-						if (open > 0) line(`  The plan has ${plural(open, "approved move")} ready to run without the sandbox.`);
-						line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
-					}
-				} else if (!runner.off) line(runner.mode === "sandbox" ? "  The sandbox is already on." : `  ${sandboxLine(runner)}`);
-				else {
-					if (!(await closeForSwitch("on"))) return true;
-					runner.off = false;
-					line(runner.mode === "sandbox" ? `${bold("●")} ${sandboxLine(runner)}` : `  ${sandboxLine(runner)}`);
-				}
-				setPrompt();
+				const toOn = want === "on";
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.toggleSandbox, { on: toOn }, {
+					...(!toOn ? { confirmation: { actionId: LIFECYCLE_ACTION.toggleSandbox, target: "sandbox off", acknowledged: true } } : {}),
+				});
+				if (!outcome.ok) line(outcome.error.kind === "policy" ? `  ${outcome.error.message}` : `! ${outcome.error.message}`);
+				else if (!outcome.data.changed) line(toOn ? (runner.mode === "sandbox" ? "  The sandbox is already on." : `  ${sandboxLine(runner)}`) : "  The sandbox is already off.");
+				else if (!toOn && runner.off) {
+					line(`${bold("!")} sandbox OFF. The commands of change tasks now run directly on this machine, as you.`);
+					line("  They can read, change and delete whatever you can, anywhere, and they reach the network.");
+					line("  /undo covers the project folder only. A plan still needs /approve before anything runs.");
+					const projection = await queries.plan();
+					const open = projection.ok ? runnableMoves(projection.data.plan).length : 0;
+					if (open > 0) line(`  The plan has ${plural(open, "approved move")} ready to run without the sandbox.`);
+					line(dim("  This holds until /bwrap on, or until you leave: the next start is sandboxed again."));
+				} else if (toOn && !runner.off) line(runner.mode === "sandbox" ? `${bold("●")} ${sandboxLine(runner)}` : `  ${sandboxLine(runner)}`);
+				else line(`  ${outcome.data.line}`);
 				return true;
 			}
 			case "stop": {
@@ -1735,43 +1719,25 @@ export async function runTerminal(session, options) {
 					line("  nothing runs: the agent rests (Ctrl-X does the same when something does)");
 					return true;
 				}
-				streamFreeze.abandon();
-				await main.abort(context);
-				line(dim("  stopped"));
-				await runningLine();
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.stop);
+				if (!outcome.ok) line(`! ${outcome.error.message}`);
+				else {
+					line(dim("  stopped"));
+					await runningLine();
+				}
 				return true;
 			}
 			case "pause": {
-				// Pausing holds the agent mid-sentence: the gate keeps the model's reply unread — nothing is committed —
-				// and if nothing else is written, lifting the pause lets the very same stream go on. When the agent is
-				// mid-round of tool calls there is no stream to hold, so the pause cuts it at once (as /stop does). A line or
-				// a command written while paused abandons the held stream for good: the agent is interrupted at once and
-				// what was written is the next thing it sees. Until the pause is lifted it starts nothing of its own:
-				// no wake of its own, no auto-collapse.
+				// The lifecycle port retains the stream-freeze sequencing; this text adapter only keeps the familiar words.
 				const to = argument === "on" ? true : argument === "off" ? false : !paused;
-				if (to === paused) {
-					line(to ? "  already paused. /pause or Ctrl-V lets it go on." : "  nothing is paused.");
-					return true;
-				}
-				paused = to;
-				setPrompt();
-				if (paused) {
-					if (streamFreeze.freeze()) {
-						line(`${bold("●")} paused: the agent is held in its stream, mid-sentence · /pause or Ctrl-V lets it continue · a line or command you write ends it`);
-					} else {
-						streamFreeze.abandon();
-						if (busy) await main.abort(context);
-						line(busy
-							? `${bold("●")} paused: the agent is interrupted where it stands · your lines still reach it · /pause or Ctrl-V lets it go on`
-							: `${bold("●")} paused: the agent starts nothing of its own · your lines still reach it · /pause or Ctrl-V lets it go on`);
-					}
-					return true;
-				}
-				const resumed = streamFreeze.resume();
-				line(resumed
-					? `${bold("●")} on again — the agent goes on with its stream`
-					: `${bold("●")} on again, and what happened while it was paused is told`);
-				await wake();
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.togglePause, { paused: to });
+				if (!outcome.ok) line(`! ${outcome.error.message}`);
+				else if (!outcome.data.changed) line(to ? "  already paused. /pause or Ctrl-V lets it go on." : "  nothing is paused.");
+				else if (outcome.data.paused && outcome.data.held) line(`${bold("●")} paused: the agent is held in its stream, mid-sentence · /pause or Ctrl-V lets it continue · a line or command you write ends it`);
+				else if (outcome.data.paused && outcome.data.interrupted) line(`${bold("●")} paused: the agent is interrupted where it stands · your lines still reach it · /pause or Ctrl-V lets it go on`);
+				else if (outcome.data.paused) line(`${bold("●")} paused: the agent starts nothing of its own · your lines still reach it · /pause or Ctrl-V lets it go on`);
+				else if (outcome.data.resumed) line(`${bold("●")} on again — the agent goes on with its stream`);
+				else line(`${bold("●")} on again, and what happened while it was paused is told`);
 				return true;
 			}
 			case "shells": {
@@ -1835,22 +1801,15 @@ export async function runTerminal(session, options) {
 				}
 				return true;
 			}
-			case "new":
-				if (busy) {
-					line("  The agent is working. /stop first, then /new.");
-					return true;
-				}
-				stopReadAhead();
-				engine?.forget();
-				await main.reset(undefined, context);
-				// Nothing is carried over: not the talk, not the record of tasks, not the shelf. Reports stay on disk.
-				const cleared = await contextAction(CONTEXT_ACTION.clearKept);
-				if (!cleared.ok) line(`! ${cleared.error.message}`);
-				// Everything is read again anyway: the moment to bring the top of the context up to date.
-				const refreshed = await contextAction(CONTEXT_ACTION.pinTop, { reason: "a fresh context" });
-				if (!refreshed.ok) line(`! ${refreshed.error.message}`);
-				line(dim("  fresh context; earlier messages are no longer in view, and nothing was kept of them (/collapse keeps the talk, the task records and the shelf)"));
+			case "new": {
+				const outcome = await executeLifecycle(LIFECYCLE_ACTION.freshContext, {}, {
+					// A named terminal command is the user's acknowledgement. Screen receives the same request as a dialog.
+					confirmation: { actionId: LIFECYCLE_ACTION.freshContext, target: "current context", acknowledged: true },
+				});
+				if (!outcome.ok) line(outcome.error.kind === "policy" ? `  ${outcome.error.message}` : `! ${outcome.error.message}`);
+				else line(dim(`  ${outcome.data.terminalLine}`));
 				return true;
+			}
 			case "status": {
 				const projection = await queries.runtime.status();
 				if (!projection.ok) {
@@ -2008,10 +1967,10 @@ export async function runTerminal(session, options) {
 	};
 
 	/** A window keeps the way it was opened, so a switch of the sandbox closes every one. */
-	async function closeForSwitch(to) {
+	async function closeForSwitch(to, { quiet = false } = {}) {
 		const projection = await queries.runtime.shells();
 		if (!projection.ok) {
-			line(`! ${projection.error.message}`);
+			if (!quiet) line(`! ${projection.error.message}`);
 			return false;
 		}
 		const were = projection.data.windows.filter((win) => win.state !== POLICY.enums.windowStates.gone);
@@ -2021,10 +1980,10 @@ export async function runTerminal(session, options) {
 			reason: `${USER_NAME} switched the sandbox ${to}, which closes every window`,
 		});
 		if (!outcome.ok) {
-			line(`! ${outcome.error.message}`);
+			if (!quiet) line(`! ${outcome.error.message}`);
 			return false;
 		}
-		line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
+		if (!quiet) line(`${bold("●")} closed ${were.length === 1 ? "window" : "windows"} ${were.map((win) => win.name).join(", ")}${were.some((win) => win.state === POLICY.enums.windowStates.busy) ? ", and what ran there ended" : ""}: a window keeps the way it was opened`);
 		return true;
 	}
 
@@ -2049,6 +2008,209 @@ export async function runTerminal(session, options) {
 		const attention = attentionSummary(snapshot);
 		line(dim(`atlas: ${atlasSummary(atlas)}${attention === "" ? "" : ` · ${attention}`} · ${assessment.text === "" ? "no assessment yet" : `assessment written ${ago(Date.now() - (assessment.written ?? Date.now()))}`}${atlas.nodes.length > 0 || assessment.text !== "" ? " · /atlas and /assessment show them" : ""}`));
 	};
+
+	// ─── Typed terminal lifecycle port ───────────────────────────────────────
+	// This is deliberately created where all live terminal safety closures already exist. Screen receives this tiny
+	// capability object, never `main`, `engine`, `runner`, stream freeze, or a raw terminal command callback.
+	const lifecycleMeta = (actionOptions = {}) => ({
+		...(typeof actionOptions.requestId === "string" && actionOptions.requestId !== "" ? { requestId: actionOptions.requestId } : {}),
+	});
+	const lifecycleFailure = (message, actionOptions, { code = UI_ERROR_CODE.actionRefused, kind = UI_ERROR_KIND.unavailable, retryable = false, confirmation } = {}) => uiFailure(uiError({
+		code,
+		kind,
+		message,
+		retryable,
+	}), { meta: lifecycleMeta(actionOptions), ...(confirmation === undefined ? {} : { confirmation }) });
+	const lifecycleResult = (action, data, actionOptions, { level = "success" } = {}) => uiSuccess({ action, ...data }, {
+		meta: lifecycleMeta(actionOptions),
+		notices: data.line === undefined ? [] : [{ level, message: data.line }],
+	});
+	const lifecycleConfirmation = (action, target, summary, actionOptions) => {
+		const confirmation = { actionId: action, target, summary, strength: "acknowledge" };
+		if (actionOptions.confirmation?.acknowledged === true && actionOptions.confirmation.actionId === action && actionOptions.confirmation.target === target) return undefined;
+		return confirmation;
+	};
+	const lifecycleUnavailable = (action) => {
+		if (closing || stopped) return "This terminal is closing.";
+		if (action === LIFECYCLE_ACTION.stop) return busy ? undefined : "The agent is already resting.";
+		if (action === LIFECYCLE_ACTION.refreshTop) {
+			if (busy) return "The agent is working. /stop first, then /pin.";
+			return undefined;
+		}
+		if (action === LIFECYCLE_ACTION.collapse) {
+			if (engine === undefined) return "This session has no context-collapse engine.";
+			if (busy) return "The agent is working. /stop first, then /collapse; or tell it to collapse its context.";
+			return undefined;
+		}
+		if (action === LIFECYCLE_ACTION.freshContext) {
+			if (typeof main?.reset !== "function") return "This session cannot reset its main context.";
+			if (busy) return "The agent is working. /stop first, then /new.";
+			return undefined;
+		}
+		if (action === LIFECYCLE_ACTION.toggleSandbox) {
+			if (options.runner === undefined) return "This session has no sandbox switch.";
+			if (busy) return "The agent is working. /stop first, then /bwrap.";
+			return undefined;
+		}
+		if (action === LIFECYCLE_ACTION.selectorProbe) {
+			if (busy) return "The agent is working. /stop first, then /consult probe, so the raw native-grammar check does not compete with a live request.";
+			if (typeof modelManager.ensure !== "function") return "This session has no model-route readiness check.";
+			return undefined;
+		}
+		if ([LIFECYCLE_ACTION.togglePause, LIFECYCLE_ACTION.toggleApproval, LIFECYCLE_ACTION.toggleInitiation].includes(action)) return undefined;
+		return "That lifecycle action is not registered by this terminal.";
+	};
+	const notifyLifecycle = () => ui?.lifecycleChanged?.();
+	const lifecyclePort = Object.freeze({
+		availability(action) {
+			const reason = lifecycleUnavailable(action);
+			return reason === undefined ? { enabled: true } : { enabled: false, reason };
+		},
+		async execute(action, input = {}, actionOptions = {}) {
+			if (!Object.values(LIFECYCLE_ACTION).includes(action)) return lifecycleFailure("That lifecycle action is not registered by this terminal.", actionOptions, { code: UI_ERROR_CODE.unknownAction, kind: UI_ERROR_KIND.validation });
+			const unavailable = lifecycleUnavailable(action);
+			if (unavailable !== undefined) return lifecycleFailure(unavailable, actionOptions, { code: UI_ERROR_CODE.policyBlocked, kind: UI_ERROR_KIND.policy });
+			if (input === null || typeof input !== "object" || Array.isArray(input)) return lifecycleFailure("This lifecycle action needs an input object.", actionOptions, { code: UI_ERROR_CODE.invalidInput, kind: UI_ERROR_KIND.validation });
+			try {
+				if (action === LIFECYCLE_ACTION.stop) {
+					streamFreeze.abandon();
+					await main.abort(context);
+					notifyLifecycle();
+					return lifecycleResult(action, { stopped: true, line: "Stopped agent work." }, actionOptions);
+				}
+				if (action === LIFECYCLE_ACTION.togglePause) {
+					const to = typeof input.paused === "boolean" ? input.paused : !paused;
+					if (to === paused) return lifecycleResult(action, { paused, changed: false, line: paused ? "The agent is already paused." : "No stream is paused." }, actionOptions, { level: "info" });
+					paused = to;
+					setPrompt();
+					if (paused) {
+						if (streamFreeze.freeze()) {
+							notifyLifecycle();
+							return lifecycleResult(action, { paused, changed: true, held: true, line: "Paused the agent in its current stream. Resume lets that same stream continue." }, actionOptions);
+						}
+						streamFreeze.abandon();
+						const interrupted = busy;
+						if (interrupted) await main.abort(context);
+						notifyLifecycle();
+						return lifecycleResult(action, { paused, changed: true, held: false, interrupted, line: interrupted ? "Paused the agent and interrupted its current work." : "Paused automatic agent work." }, actionOptions);
+					}
+					const resumed = streamFreeze.resume();
+					await wake();
+					notifyLifecycle();
+					return lifecycleResult(action, { paused, changed: true, resumed, line: resumed ? "Resumed the agent's held stream." : "Resumed automatic agent work." }, actionOptions);
+				}
+				if (action === LIFECYCLE_ACTION.refreshTop) {
+					const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+					if (reason === "") return lifecycleFailure("Say why the context top is being refreshed.", actionOptions, { code: UI_ERROR_CODE.invalidInput, kind: UI_ERROR_KIND.validation });
+					const refreshed = await contextAction(CONTEXT_ACTION.pinTop, { reason });
+					if (!refreshed.ok) return lifecycleFailure(refreshed.error.message, actionOptions, { code: refreshed.error.code, kind: refreshed.error.kind, retryable: refreshed.error.retryable });
+					notifyLifecycle();
+					return lifecycleResult(action, { changed: refreshed.data.changed, refreshed: refreshed.data, line: refreshed.data.line }, actionOptions, { level: refreshed.data.changed ? "success" : "info" });
+				}
+				if (action === LIFECYCLE_ACTION.collapse) {
+					const collapsed = await rest({ user: true });
+					notifyLifecycle();
+					return lifecycleResult(action, {
+						collapsed,
+						line: collapsed ? "Collapsed the current context." : "Nothing was ready to collapse.",
+					}, actionOptions, { level: collapsed ? "success" : "info" });
+				}
+				if (action === LIFECYCLE_ACTION.freshContext) {
+					const confirmation = lifecycleConfirmation(action, "current context", "Start a fresh context and clear kept talk, task records, shelf placements, and the collapse marker. Stored session history remains available.", actionOptions);
+					if (confirmation !== undefined) return lifecycleFailure(confirmation.summary, actionOptions, { code: UI_ERROR_CODE.confirmationRequired, kind: UI_ERROR_KIND.policy, confirmation });
+					stopReadAhead();
+					engine?.forget();
+					await main.reset(undefined, context);
+					const cleared = await contextAction(CONTEXT_ACTION.clearKept);
+					if (!cleared.ok) return lifecycleFailure(cleared.error.message, actionOptions, { code: cleared.error.code, kind: cleared.error.kind, retryable: cleared.error.retryable });
+					const refreshed = await contextAction(CONTEXT_ACTION.pinTop, { reason: "a fresh context" });
+					if (!refreshed.ok) return lifecycleFailure(refreshed.error.message, actionOptions, { code: refreshed.error.code, kind: refreshed.error.kind, retryable: refreshed.error.retryable });
+					notifyLifecycle();
+					return lifecycleResult(action, {
+						changed: true,
+						cleared: cleared.data,
+						refreshed: refreshed.data,
+						line: "Started a fresh context. Earlier messages are no longer in view, and no kept material remains.",
+						terminalLine: "fresh context; earlier messages are no longer in view, and nothing was kept of them (/collapse keeps the talk, the task records and the shelf)",
+					}, actionOptions);
+				}
+				if (action === LIFECYCLE_ACTION.toggleApproval) {
+					const to = typeof input.yolo === "boolean" ? input.yolo : !gate.yolo;
+					if (to === gate.yolo) return lifecycleResult(action, { yolo: gate.yolo, changed: false, line: to ? "Approval is already off." : "Approval is already on." }, actionOptions, { level: "info" });
+					if (to) {
+						const confirmation = lifecycleConfirmation(action, "approval off", "Turn approval off for this session. Declared change moves may run without /approve while you watch.", actionOptions);
+						if (confirmation !== undefined) return lifecycleFailure(confirmation.summary, actionOptions, { code: UI_ERROR_CODE.confirmationRequired, kind: UI_ERROR_KIND.policy, confirmation });
+					}
+					const projection = await queries.plan();
+					const plan = projection.ok ? projection.data.plan : undefined;
+					const waiting = plan === undefined ? [] : waitingItems(plan);
+					gate.yolo = to;
+					setPrompt();
+					if (to && !busy && plan !== undefined && awaitsApproval(plan)) await send(`I have switched approval off: declared change moves may run without /approve while it stays off. Carry out exactly one current move revision per focus${waiting.length === 1 ? ` (${waiting[0].id})` : ""}; its targets, capabilities, budgets, checkpoints, report and acceptance still apply.`);
+					if (!to) {
+						reminded = undefined;
+						if (!busy) await approvalLine();
+					}
+					notifyLifecycle();
+					return lifecycleResult(action, { yolo: gate.yolo, changed: true, line: to ? "Approval is off for this session." : "Approval is on; declared change moves wait for approval again." }, actionOptions);
+				}
+				if (action === LIFECYCLE_ACTION.toggleInitiation) {
+					const to = typeof input.on === "boolean" ? input.on : !initiation.on;
+					if (to === initiation.on) return lifecycleResult(action, { on: initiation.on, changed: false, line: to ? "The agent already starts on its own." : "The agent already waits for you." }, actionOptions, { level: "info" });
+					initiation.on = to;
+					setPrompt();
+					const startsNow = to && !busy && !paused && options.interactive;
+					if (startsNow) {
+						enqueue(async () => {
+							if (busy || closing) return;
+							await submit(startNote());
+						});
+					}
+					notifyLifecycle();
+					return lifecycleResult(action, { on: initiation.on, changed: true, startsNow, line: to ? "The agent starts on its own again." : "The agent now waits for you." }, actionOptions);
+				}
+				if (action === LIFECYCLE_ACTION.toggleSandbox) {
+					const runner = options.runner;
+					const toOn = typeof input.on === "boolean" ? input.on : runner.off === true;
+					if (toOn === !runner.off) return lifecycleResult(action, { on: toOn, changed: false, line: toOn ? "The sandbox is already on." : "The sandbox is already off." }, actionOptions, { level: "info" });
+					if (!toOn) {
+						const confirmation = lifecycleConfirmation(action, "sandbox off", "Turn the sandbox off for this session. Change-task commands will run directly on this machine.", actionOptions);
+						if (confirmation !== undefined) return lifecycleFailure(confirmation.summary, actionOptions, { code: UI_ERROR_CODE.confirmationRequired, kind: UI_ERROR_KIND.policy, confirmation });
+					}
+					if (!(await closeForSwitch(toOn ? "on" : "off", { quiet: true }))) return lifecycleFailure("Cartographer could not safely close the shell windows before changing the sandbox.", actionOptions, { retryable: true });
+					runner.off = !toOn;
+					setPrompt();
+					notifyLifecycle();
+					return lifecycleResult(action, { on: toOn, changed: true, line: toOn ? "Sandboxed task commands are on again." : "Sandbox is off: task commands now run directly on this machine." }, actionOptions);
+				}
+				if (action === LIFECYCLE_ACTION.selectorProbe) {
+					const path = input.path === undefined || String(input.path).trim() === "" ? undefined : String(input.path).trim();
+					if (!(await ensureModelReady())) return lifecycleFailure("The active model route is not ready for the native selector probe.", actionOptions, { code: UI_ERROR_CODE.transportFailed, kind: UI_ERROR_KIND.transport, retryable: true });
+					const models = await queries.runtime.models();
+					const modelId = models.ok ? models.data.currentId ?? config.model : config.model;
+					const logPath = selectorProbeLogPath({ root: options.root, brainDir: options.brainDir, path });
+					const record = await runLlamaCppSelectorProbe({ server: config.server, modelId });
+					const written = writeSelectorProbeLog(logPath, record);
+					const shown = relative(options.root, written) || written;
+					return lifecycleResult(action, {
+						passed: record.passed,
+						written,
+						record,
+						line: record.passed ? `Native selector probe passed. JSON log: ${shown}` : `Native selector probe completed with failures. Inspect JSON log: ${shown}`,
+					}, actionOptions, { level: record.passed ? "success" : "warning" });
+				}
+				return lifecycleFailure("That lifecycle action is not registered by this terminal.", actionOptions, { code: UI_ERROR_CODE.unknownAction, kind: UI_ERROR_KIND.validation });
+			} catch (error) {
+				const message = error instanceof ConsultProbeError ? error.message : error?.message ?? String(error);
+				return lifecycleFailure(message || "Cartographer could not complete that lifecycle action.", actionOptions, {
+					code: error instanceof ConsultProbeError ? UI_ERROR_CODE.actionRefused : UI_ERROR_CODE.internal,
+					kind: error instanceof ConsultProbeError ? UI_ERROR_KIND.validation : UI_ERROR_KIND.internal,
+					retryable: !(error instanceof ConsultProbeError),
+				});
+			}
+		},
+	});
+	terminalLifecycleBridge?.attach(lifecyclePort);
 
 	// ─── Start ──────────────────────────────────────────────────────────────
 	await ledgerLine();
@@ -2142,6 +2304,7 @@ export async function runTerminal(session, options) {
 		thinking: () => thinking,
 		lastReport: () => lastReport,
 	});
+	ui?.attachLifecycle?.(lifecyclePort);
 	for (const listener of out.listeners?.("resize") ?? []) {
 		if (resizeBefore.has(listener)) continue;
 		out.off("resize", listener);

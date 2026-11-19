@@ -189,7 +189,7 @@ function mainCalls(text) {
 const NOTED = `<cartographer>\n${RECORD} My last message had no tool call.`;
 
 /** What the stand-in does next, from the messages it was sent. */
-export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof } = {}) {
+export function decide(messages, { closureGap: forcedClosureGap, focusSteps: forcedFocusSteps, returnProof: forcedReturnProof, consultLongRows } = {}) {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		const text = textOf(message);
@@ -202,6 +202,9 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 			const participant = /You are [^(]+\(([^)]+)\)/.exec(text)?.[1];
 			const finalReport = participant === "cartographer" && messages.some((entry) => entry.role === "user" && /Native GBNF authorized Cartographer to write the final advisory report/.test(textOf(entry)));
 			if (finalReport) return { calls: [{ name: "consult_return", args: { outcome: "answered", synthesis: "CONFERENCE RETURN FROM cartographer", evidence: [{ source: "c0", claim: "fixture source was captured" }], uncertainties: ["fixture-only result"] } }] };
+			if (participant === "cartographer" && Number.isInteger(consultLongRows) && consultLongRows > 0 && text.includes("SCREEN DISCLOSURE FIXTURE")) {
+				return { text: Array.from({ length: consultLongRows }, (_unused, index) => `LIVE_CONSULT_${String(index + 1).padStart(3, "0")}`).join("\n") };
+			}
 			return { text: participant === "cartographer" ? "OPENING CONFERENCE CONTRIBUTION" : `${String(participant ?? "participant").toUpperCase()} CONFERENCE CONTRIBUTION` };
 		}
 		// A task that said yes to the question before its steps collapse: it notes what its results began with.
@@ -342,7 +345,7 @@ export function decide(messages, { closureGap: forcedClosureGap, focusSteps: for
 }
 
 /**
- * @param {{ tokenDelayMs?: number, models?: (string | object)[] | ((state: { requests: any[], nativeRequests: any[] }) => (string | object)[]), holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, ignoreNativeGrammar?: boolean, asideDelayMs?: number, releaseAfterMs?: number }} options
+ * @param {{ tokenDelayMs?: number, models?: (string | object)[] | ((state: { requests: any[], nativeRequests: any[] }) => (string | object)[]), holdWhen?: (body: any) => boolean, refuseAsides?: boolean, refuseSchema?: boolean, ignoreNativeGrammar?: boolean, asideDelayMs?: number, releaseAfterMs?: number, consultLongRows?: number }} options
  *   holdWhen: a request for which it returns true gets its first token and then nothing more, until `release()`.
  *   releaseAfterMs: a held reply lets itself go after this many milliseconds, without anyone calling `release()`.
  *   progress: { total, cache, steps, stepMs }: before each reply, say in `steps` steps how far the prompt is read.
@@ -360,6 +363,7 @@ export async function startStandIn(options = {}) {
 	const closureGap = typeof options.closureGap === "string" && options.closureGap.trim() !== "" ? options.closureGap.trim() : undefined;
 	const focusSteps = Array.isArray(options.focusSteps) ? options.focusSteps : undefined;
 	const returnProof = typeof options.returnProof === "string" && options.returnProof.trim() !== "" ? options.returnProof.trim() : undefined;
+	const consultLongRows = Number.isInteger(options.consultLongRows) && options.consultLongRows > 0 ? options.consultLongRows : undefined;
 	const requests = [];
 	const nativeRequests = [];
 	const asides = [];
@@ -427,7 +431,7 @@ export async function startStandIn(options = {}) {
 			return;
 		}
 		requests.push(body);
-		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof });
+		const decision = decide(body.messages ?? [], { closureGap, focusSteps, returnProof, consultLongRows });
 		const promptTokens = Math.ceil(JSON.stringify([body.tools, body.messages]).length / 4);
 
 		response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });

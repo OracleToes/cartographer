@@ -10,13 +10,25 @@ import { bar, cut, short, span } from "./text.mjs";
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPIN_MS = POLICY.timing.spinnerMs;
+const activeJobs = (jobs) => Array.isArray(jobs) ? jobs.filter((job) => job?.state === "queued" || job?.state === "running") : [];
+const jobText = (job) => {
+	const progress = job?.progress;
+	const message = typeof progress?.message === "string" && progress.message !== "" ? progress.message : undefined;
+	const label = typeof job?.target?.label === "string" && job.target.label !== ""
+		? job.target.label
+		: typeof job?.target === "string" && job.target !== ""
+			? job.target
+			: typeof job?.kind === "string" ? job.kind.replace(/[._-]+/g, " ") : "background work";
+	const count = Number.isFinite(progress?.current) && Number.isFinite(progress?.total) && progress.total > 0 ? ` ${progress.current}/${progress.total}` : "";
+	return `${message ?? label}${count}`;
+};
 
 /**
  * Build the activity, shared-state, notice, and key-hint rows for the persistent shell. `brain` and `runtime` are
  * already-settled application projections; only the busy/rest transition is UI-local, so this function never starts
  * a read or asks a live session manager for context, shell, wake, or route state.
  */
-export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, runtime = {}, notice, legend = "", config = {}, options = {}, now = () => Date.now() } = {}) {
+export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, runtime = {}, jobs = [], notice, legend = "", config = {}, options = {}, now = () => Date.now() } = {}) {
 	if (state === null || typeof state !== "object") throw new TypeError("A status bar needs screen state.");
 	if (core === null || typeof core?.busy !== "function" || typeof core?.thinking !== "function") throw new TypeError("A status bar needs terminal activity.");
 	if (chat === null || typeof chat?.doing !== "function") throw new TypeError("A status bar needs chat activity.");
@@ -78,6 +90,15 @@ export function renderStatusBar({ state, core, chat, activity = {}, brain = {}, 
 	const wakeCount = Number.isInteger(runtime?.wakes?.count) && runtime.wakes.count > 0 ? runtime.wakes.count : 0;
 	if (wakeCount > 0) second.push([` · ${wakeCount === 1 ? "1 wake" : `${wakeCount} wakes`}${typeof runtime.wakes.next === "string" && runtime.wakes.next !== "" ? `, ${runtime.wakes.next}` : ""}`, "muted"]);
 	if (runtime?.diagnostic !== undefined && typeof runtime.diagnostic.text === "string" && runtime.diagnostic.text !== "") second.push([` · ${cut(runtime.diagnostic.text, POLICY.limits.screen.consoleErrorChars)}`, runtime.diagnostic.style ?? "muted"]);
+	const active = activeJobs(jobs);
+	const inspectableJobs = Array.isArray(jobs) ? jobs.filter((job) => job?.state === "failed" || job?.state === "cancelled") : [];
+	if (active.length > 0) {
+		const job = active.at(-1);
+		const cancelling = job?.cancellation?.requested === true ? " · cancelling" : "";
+		second.push([` · ${SPINNER[Math.floor(at / SPIN_MS) % SPINNER.length]} ${cut(jobText(job), POLICY.limits.screen.consoleErrorChars)}${cancelling}`, job?.cancellation?.requested === true ? "warn" : "tool"]);
+		if (active.length > 1) second.push([` · +${active.length - 1} job${active.length === 2 ? "" : "s"}`, "muted"]);
+	}
+	if (inspectableJobs.length > 0) second.push([` · ${inspectableJobs.length === 1 ? "1 stopped job · J inspect" : `${inspectableJobs.length} stopped jobs · J inspect`}`, "warn"]);
 	if (options.gate?.yolo === true) second.push([" · yolo", "warn"]);
 	if (options.runner?.mode === "direct") second.push([" · no sandbox", "warn"]);
 	if (!core.thinking()) second.push([" · notes hidden", "muted"]);

@@ -2,7 +2,7 @@
 
 A durable agent you start from a project folder. The program lives in one place, this folder, and is installed once. Each project gets only a brain folder, `.brain/`, which holds the agent's memory of that project.
 
-Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, and Model. Model includes the current route's native-GBNF readiness as well as provider-request inspection. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
+Cartographer is one agent with a durable project brain and finite attention. Its active context and focused working contexts are temporary; the underlying Durable transcript remains stored, while the ledger, plan, atlas, and assessment are how it keeps what matters readily available past the forget threshold. A focused context is the same agent concentrating on one bounded piece of work, not a separate worker. It can update the shared brain and project state; only the orchestrating context changes the plan. Project changes still follow the plan, approval, checkpoint, and sandbox rules described below. What waits for you gathers in one Requests view. On a terminal Cartographer runs in a full screen with a Chat tab — Conversation, Work, and isolated Consult subtabs — plus Carto, Diff, Shells, Model, and Settings. Model includes the current route's native-GBNF readiness and provider-request inspection; Settings shows configuration, session policy, provider diagnostics, and assessment without authorizing anything. Plugins are not built yet (see [What is not here yet](#what-is-not-here-yet)).
 
 ## Install
 
@@ -18,7 +18,7 @@ bash install.sh --server http://127.0.0.1:8888/v1 --model ByteShape
 
 Start it with `bash` as shown. A downloaded copy of this folder has lost its executable marks, so `./install.sh` and `carto` would both answer "Permission denied" until the script has run once.
 
-Check the install without a model (about three and a half minutes):
+Check the install without a model (the aggregate test watchdog is 10 seconds):
 
 ```sh
 npm test
@@ -44,7 +44,7 @@ Enter or `y` sets up the brain and starts a session. Anything else leaves the fo
 On a terminal `carto` takes the whole screen. `carto --plain` gives the line-by-line terminal described further down instead, and so does `"screen": false` in the settings; with `-p` or piped input it is always the plain one.
 
 ```
- Cartographer   1 Chat  2 Carto  3 Diff  4 Shells  5 Model
+ Cartographer   1 Chat  2 Carto  3 Diff  4 Shells  5 Model  6 Settings
  Conversation · Work · Consult
 
 ▎› add a seed option to the roller
@@ -73,8 +73,11 @@ The screen is deliberately static: the filled top tab is the primary location, t
 | **3 Diff** | What changed: by the last step, in this session, or against the project's own git `HEAD`. |
 | **4 Shells** | The shell windows, live, plus **Wakes**. Open a window for its newest lines or its terminal-emulator output; Wakes lists the main agent's scheduled time, file, and window triggers. |
 | **5 Model** | **Routes**, **Latest sent**, **Main sent**, **Raw payload**, **Next preview**, and **Current accounting**. Routes shows discovered model names, the active route's native-GBNF readiness, and an explicit connect/select control; the other views separate frozen provider requests, the audit-only serialized payload, an unsent calculation, and live accounting. |
+| **6 Settings · Configuration** | All saved settings with their effective value, source, and apply timing. `Enter`/`e` edits the selected setting in the chosen writable project or install source; `x` resets that source override and `s` chooses the source. Environment and command-line overrides stay descriptive and read-only. |
+| **6 Settings · Safety** | The configured provider and limits, the live approval, initiation, and sandbox policy, plus separate route-listing and native llama.cpp GBNF diagnostics. It reports the backend-owned state; it does not authorize agent work. |
+| **6 Settings · Assessment** | The current durable assessment and whether its top-of-context copy is current, stale, or missing. A current assessment can be opened in the editor; the top copy changes only through its safe refresh path. |
 
-Carto through Model are lists of items that fold. Chat's Conversation and Work use the ordinary local event feed; Consult reads only its private conference audit and live child activity. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it. Carto is read again while it shows; Diff, Shells, and Model refresh more often.
+Carto through Settings are lists of items that fold. Chat's Conversation and Work use the ordinary local event feed; Consult reads only its private conference audit and live child activity. One item is selected, and the keys act on it: open it, fold it, open its current source in an editor where that is truthful, or copy it.
 
 **Two modes.** As in vi, and **Esc** goes from one to the other. The place to type, at the bottom, shows which you are in.
 
@@ -85,16 +88,17 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 
 | In commands mode | |
 |---|---|
-| `1` to `5` | Go to a tab. |
-| `[` and `]` | Previous and next view inside Chat, Carto, Diff, Shells, and Model (`H` and `L` do the same). |
+| `1` to `6` | Go to a tab: Chat, Carto, Diff, Shells, Model, or Settings. |
+| `[` and `]` | Previous and next view inside the tab that shows (`H` and `L` do the same). |
 | `j`, `k` | Move down and up. `g` and `G` go to the first and last row. |
 | Enter, Space, `o` | Open or fold the selected row. `l` opens and `h` folds. In Chat Work, a call can lead to its owning tab; a `read`, `search`, `list`, or `task` opens its result in place. In Consult, it opens an attributed audit block or folds a conference. In Shells, Enter opens a window's output and goes back from it; in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another listed route. |
 | `+` and `-` | Open everything or fold everything (`zR` and `zM` do the same). |
-| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. |
-| `d` | In Chat Conversation, press twice to **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. Work and Consult are private and cannot be removed from future kept talk. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. In Shells → Wakes, it opens confirmation before removing the selected wake. |
+| `e` | In Chat Conversation, **Reword future kept talk** for the selected stable source. It changes only the mutable talk source for a later collapse; the active Durable conversation and every sent request stay unchanged. Current brain records use their own editor. Work and Consult are private and read-only. Model rows are read-only historical or preview material. In Settings → Configuration, it opens the selected saved-setting form for the chosen writable source; `x` resets that source override and `s` chooses project or install. In Settings → Assessment, it opens the current durable assessment; Safety rows are descriptive and read-only. |
+| `d` | In Chat Conversation, confirm **Remove from future kept talk** for the selected stable source. It does not erase the Durable transcript, omit the active message, or change a sent request. Work and Consult are private and cannot be removed from future kept talk. On a brain record, `d` is that record type's confirmed delete. In Requests, it forgets the request without telling the agent. In Shells → Wakes, it opens confirmation before removing the selected wake. |
 | `u` | In Diff, confirm **Undo last checkpoint change**. Active shell changes are checkpointed first, so the dialog may name a shell window. Recovery restores that checkpoint's changed files; a move's revision returns to unapproved review. A cut-off task warns that recovery returns the project to its earlier checkpoint. |
 | `f`, `v`, `x`, `t`, `n` | On the relevant Carto row: fold a report, archive a brain record out of what the agent reads, unshelve a file, settle a record, or create a new entry. `a` shelves from Current shared brain or approves in Requests. |
 | `y`, `Y` | Copy the selected row or the whole tab. |
+| `J` | When several background jobs run, or a job stopped or failed, inspect **Background work**. Enter or `c` requests cancellation only for the selected live job. |
 | `r` | Read the tab again. |
 | `:` | Type a command. |
 | `i`, `a`, Esc | Type. |
@@ -104,14 +108,19 @@ Pasting always goes to typing, whatever the mode was. A terminal that does not m
 |---|---|
 | Tab, Shift-Tab | Next and previous tab. While typing, Tab completes once there is text. |
 | PgUp, PgDn, wheel | Scroll. Ctrl-Home and Ctrl-End go to the top and end. |
-| Ctrl-T | Show or hide private reasoning and notes in Work and Consult. Nothing is added to the conversation. |
-| Ctrl-C | Copy selected mouse text. With nothing selected: stop the agent; with the agent at rest, leave. |
+| Ctrl-Shift-F | Search the tab that shows. Where the terminal cannot send it, use Esc then `/`. |
+| Ctrl-T | Show or hide the agent's private reasoning and notes. Nothing is added to the conversation. |
+| Ctrl-C | Clear what you typed. With the line empty, press it again soon after to leave, as `/quit` does. |
+| Ctrl-X | Stop the agent. |
+| Ctrl-V | Pause the agent in its stream; it starts nothing on its own until you unpause or write a line or command. |
+| Ctrl-K | Open the command palette for navigation and registered actions. |
 | Ctrl-L | Draw the screen again. |
-| F1 | Show the keys. |
+| Ctrl-O | Open the selected source or template in `$EDITOR`. |
+| `?`, F1 | Show the keys. |
 
-**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. A quieter third row keeps the relevant key reminder beside the input.
+**The strip** above the place to type is always there. Its first row says what the agent is doing and where: a task and its declared move, a call, or writing. While the server reads a long prompt, it says so instead. The second row shows current context accounting, the settled model-route/native-GBNF status, open goals, plan progress, waiting requests, shell windows, wakes, active abort-aware background work, and what is switched off. A stopped model server or a failed grammar gate stays visible there while local controls remain usable. When several jobs compete, or a job stopped or failed, `J` opens **Background work** to inspect it and request meaningful cancellation. A quieter third row keeps the relevant key reminder beside the input.
 
-#### Chat, Work, Consult, and Model
+#### Chat, Work, Consult, Model, and Settings
 
 Conversation is the steering wheel: it deliberately excludes reasoning, ordinary assistant text, tool work, and harness notices. Work is the private trace of ordinary agent/focus activity. Consult is a distinct, read-only projection of only the local `co<N>` conference audit plus its live child state: each contribution is visibly attributed to a consult member, while host debate-routing and final-report decisions, reasoning, chat/prose, calls, and results have separate blocks. It remains advisory—neither parent history nor project authority—and is never rendered in ordinary Work. A collapse or the screen's item limit can remove ordinary local rows from view without erasing the Durable transcript; a conference's durable audit remains consult-local.
 
@@ -129,6 +138,8 @@ Model has six distinct views:
 
 A sent request is the payload Cartographer passed to the provider, not proof of a server's hidden chat-template prompt. A sent row has no edit or delete action. Current ledger, shelf, report, and context-store records remain in Carto's **Current shared brain**; they are never unfolded as though they were part of an old frozen request.
 
+Settings keeps configuration and policy state descriptive. A route-listing result never establishes readiness: only a successful native llama.cpp GBNF proof does. Blocked and disconnected diagnostics stay visible, and Cartographer does not fall back to ordinary tool calls or prompt-only decisions. The live approval, initiation, and sandbox state says what the backend will enforce; selecting or copying a Settings row cannot change it. Assessment distinguishes the durable text from its byte-stable top-of-context copy, which becomes current only through the existing safe refresh path.
+
 **Copying.** Drag over text to select it, and it is copied when you let go. `/copy` copies the last delivered agent speech, `/copy session` exports the local session projection, `/copy report` exports the last task report, and `/copy tab` exports the tab that shows. In Consult, copying a conference exports only that private conference timeline; copying a member block exports its persona-attributed block. The files go under `.brain/export/`.
 
 **What you send while the agent works** goes to whoever is working. If a task is running, the task reads it with the result of its current step, and the main agent is told about it with the task's report. A consultation conference is isolated and does not receive interactive user input; its caller receives only its bounded final receipt. Otherwise the main agent reads your line after its current step. When the agent has put a question to you with `ask`, the next thing you send is the answer.
@@ -142,7 +153,7 @@ With `--plain` the screen looks like this (an illustration of the layout, not a 
 ```
 Cartographer · /home/momo/some/project
 new brain /home/momo/some/project/.brain · ByteShape at http://127.0.0.1:8888/v1
-Type a message. /help lists commands. Ctrl-C stops the agent; again leaves. Ctrl-T hides and shows its thinking.
+Type a message. /help lists commands. Ctrl-C clears the line; again leaves. Ctrl-X stops the agent. Ctrl-V pauses its stream. Ctrl-T hides and shows its thinking.
 › where is the config loaded?
 ┊ The user wants the place where configuration is read. I have no node for it yet, so I start an inspect focus (no move, only reading).
 ▸ task  Find where configuration is loaded. Report the file, the function and the line numbers…
@@ -202,6 +213,7 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 |---|---|
 | `/thinking`, `/thinking on`, `/thinking off`, Ctrl-T | Hide or show the agent's own text. Switching it on prints what the newest turn held back |
 | `/report`, `/report t12` | The last task's report in full, or the kept report with that id |
+| `/consult`, `/consult co1`, `/consult probe [PATH]` | List consultation conference audits, inspect one immutable conference packet, or write an inspectable no-project native-grammar diagnostic |
 | `/context` | What the agent's context holds, part by part with sizes; the kept reports; when it was last collapsed and when it will be next |
 | `/collapse` | Collapse the agent's context now. Works while the agent is idle |
 | `/fold ID …` | What the agent does with `fold`: take a kept report out of view, leaving its one line |
@@ -214,12 +226,12 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/ledger` | Goals, questions and notes, open and closed, and where the file is |
 | `/plan` | The plan, its authorization envelopes and move revisions, and where the file is |
 | `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
+| `/focus NODE_OR_PATH reason`, `/unfocus` | Set or clear the explicit Atlas focus; a running move remains a temporary overlay |
 | `/assessment` | The agent's summary of the project, and where the file is |
 | `/requests` | What waits for you: move revisions to approve and questions of taste to answer |
 | `/approve ID …` | Approve exact move revisions. `/approve p2` snapshots p2's current waiting children; bare `/approve` snapshots every current waiting move |
 | `/deny ID [why]` | Turn one request down: a move revision is superseded, an envelope selection denies its current waiting children, a question closes |
 | `/answer ID words` | Answer a question of taste; the agent uses the answer and carries on |
-| `/atlas` | The tree as the agent sees it, the graph, which nodes may be out of date, and where the file is |
 | `/pin` | Replace the copy of the assessment and the graph at the start of the agent's context with the current ones now. Works while the agent is idle |
 | `/yolo`, `/yolo on`, `/yolo off` | Show, switch off or switch back on the need for `/approve`. The settings can hold the default (`yolo`); a switch while running is never remembered. See [Without approval](#without-approval-yolo) |
 | `/initiate`, `/initiate on`, `/initiate off` | Whether the agent starts working on its own when carto starts (it looks around, tends the map and works what is approved, or sleeps when there is nothing to do). The settings can hold the default (`initiate`); a switch while running is never remembered |
@@ -230,10 +242,14 @@ Configuration is loaded in src/config.ts by loadConfig() (lines 20-58) …
 | `/shells` | The shell windows: what runs in each, for how long, and its newest lines |
 | `/kill NAME`, `/kill all` | Close a shell window, or all of them, and end what runs there |
 | `/send NAME line` | Type a line into a shell window, as you; `/shells` lists the windows |
-| `/stop`, Ctrl-C | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
+| `/wait [SECONDS]` | With piped input, wait for shell commands and scheduled wakes, letting the agent react; an interactive terminal already does this itself |
+| `/stop`, Ctrl-X in the full Screen | Stop what the agent is doing. A command it was waiting for is interrupted; other shell windows keep running |
+| `/pause`, Ctrl-V in the full Screen | Hold the agent in its stream mid-reply; use it again to continue, while any line or command ends the held stream |
 | `/new` | Start a fresh context: the current assessment and graph, and nothing else in view. The record of finished tasks, the shelf and the talk start empty; the reports stay in `.brain/reports/` |
 | `/status` | Messages in view, context size, which model is on, working or idle, how many shell windows are open, how many wakes are set, whether approval is off |
-| `/quit`, Ctrl-C when idle | Leave |
+| `/quit`, `/exit`, Ctrl-C when idle | Leave |
+
+Compatibility decision: the plain terminal retains command aliases such as `/stop` and `/pause` for scripts and line-oriented use. The full Screen exposes the matching Ctrl-X and Ctrl-V controls, and Ctrl-C remains its clear-line/quit control rather than a stop alias.
 
 ### How the agent talks to you
 
@@ -444,7 +460,7 @@ With piped input (`echo … | carto`) nobody is there to wait, and `carto` leave
 
 **Who may do what.** Starting a command or sending a line of input is for the task carrying the live declared move that owns the window. Reading, waiting, stopping and closing are open to the main agent and to every task, because none of them starts anything: the main agent can wait for a build itself, and stop or close what it no longer needs. The main agent may also run a command itself, but such a command runs in a read-only window: the project, the brain and `.git` are mounted read-only and the window has no network, so it is for the tests, the lints, git status and other checks that change nothing — like any other read. With the sandbox off the command still runs in a read-only window when bubblewrap works — the off switch now governs only how change tasks run their commands; when bubblewrap does not work, nothing holds the window to read-only and the main agent runs none. A command that must write or reach the network needs a declared change move.
 
-**You and the windows.** `/shells` lists them with their newest lines. `/kill NAME` closes one and ends what runs there, `/kill all` every one; the agent finds a line in its windows block saying that you closed it. `/stop` and Ctrl-C stop the agent and interrupt the command it was waiting for at that moment; commands in other windows keep running, and a line names them. Windows do not outlive `carto`: they end when you leave and when it is killed, and at the next start the agent is told which windows were running something and are gone.
+**You and the windows.** `/shells` lists them with their newest lines. `/kill NAME` closes one and ends what runs there, `/kill all` every one; the agent finds a line in its windows block saying that you closed it. `/stop` (or Ctrl-X in the full Screen) stops the agent and interrupts the command it was waiting for at that moment; commands in other windows keep running, and a line names them. Windows do not outlive `carto`: they end when you leave and when it is killed, and at the next start the agent is told which windows were running something and are gone.
 
 **A window after its task.** A window that is still running when its task ends can go on changing files. Those changes belong to no task, so Cartographer records them as a step of their own, named after the window, when the command ends, before the next change task starts, and when you leave. `/diff` shows such a step and `/undo` takes it back like a task's, without touching the plan. Only windows that were running something count: what you edit yourself while every window stands free is never recorded as a window's doing. What you edit while a window is at work does land in that window's step, since Cartographer cannot tell who wrote a file. A process that a command left in the background of a free window (`… &`) is not noticed this way; its changes go unrecorded until the next task's checkpoint takes them as given.
 
@@ -1000,8 +1016,9 @@ The integration suite runs the real `carto` command in throwaway project folders
 | `src/screen/parts.mjs` | The parts of the screen as pi-tui components: the row of tabs, the bodies of the tabs, the strip, the place to type, the sheet of keys |
 | `src/screen/keys.mjs` | Keys by name for the commands mode; text that was pasted without being marked as pasted |
 | `src/screen/chat.mjs` | Chat Conversation and Work plus the isolated Consult audit: folded calls, live response material, local speech/work projections, and persona-attributed conference activity |
-| `src/screen/list.mjs` | A list of items that fold, with one selected: what Carto, Diff, Shells, and Model use |
-| `src/screen/views.mjs` | What those tabs hold: the brain's files as items with their place in the file, the changes by file, the shell windows, and the request the agent was sent, part by part |
+| `src/screen/list.mjs` | A list of items that fold, with one selected: what Carto, Diff, Shells, Model, and Settings use |
+| `src/screen/{workspace,review,runtime,settings}.mjs` | Settled feature views for the shared brain, checkpoint review, runtime/model inspection, and Settings & Safety |
+| `src/screen/views.mjs` | The command that opens a selected source or template in the configured editor |
 | `src/screen/text.mjs` | Text in cells: width, wrapping, styled lines; and telling a repeating reply from ordinary text |
 | `src/screen/theme.mjs` | The palette: levels of text, one hue for each kind of block, backgrounds made for the terminal's own |
 | `src/screen/copy.mjs` | Copying to the clipboard and to `.brain/export/` |

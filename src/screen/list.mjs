@@ -20,6 +20,7 @@
 import { POLICY } from "../config.mjs";
 import { createSelection } from "./selection.mjs";
 import { cut, fit, lineText, width, wrap } from "./text.mjs";
+import { TOKEN } from "./tokens.mjs";
 
 /** The most rows one opened body shows before it says how many more there are; opening everything lifts this. */
 const BODY_ROWS = POLICY.limits.screen.listBodyRows;
@@ -54,6 +55,8 @@ export function createList() {
 			touch();
 		},
 		selected: () => selection.selected(choosable()),
+		/** Settled render items for a local target picker; callers may read them but never mutate a projection through this list. */
+		items: () => Object.freeze([...items]),
 		select(key) {
 			selection.select(choosable(), key);
 			touch();
@@ -141,8 +144,8 @@ export function createList() {
 				for (const line of bodyOf(item).replace(/\n+$/, "").split("\n")) for (const piece of wrap(line, Math.max(8, cols - width(pad)))) rows.push([piece, item.bodyStyle?.(line) ?? ""]);
 				const limit = mode === "all" ? Number.POSITIVE_INFINITY : BODY_ROWS;
 				// What an item holds stands on a panel, so that it reads as inside the item.
-				for (const [piece, style] of rows.slice(0, limit)) out.push({ spans: [[pad, ""], [piece, style]], key: item.key, bg: "bgPanel" });
-				if (rows.length > limit) out.push({ spans: [[pad, ""], [`… ${rows.length - limit} more rows: + unfolds everything in full`, "faint"]], key: item.key, bg: "bgPanel" });
+				for (const [piece, style] of rows.slice(0, limit)) out.push({ spans: [[pad, ""], [piece, style]], key: item.key, bg: TOKEN.surface.content });
+				if (rows.length > limit) out.push({ spans: [[pad, ""], [`… ${rows.length - limit} more rows: + unfolds everything in full`, "faint"]], key: item.key, bg: TOKEN.surface.content });
 			}
 			built = { cols, lines: out, version };
 			return out;

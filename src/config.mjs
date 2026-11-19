@@ -7,9 +7,11 @@
 //   4. CARTO_SERVER, CARTO_MODEL     environment (CARTO_USER for the name)
 //   5. --url, --model                command line
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { USER_NAME } from "./user.mjs";
+import { createConfigurationSchema } from "./configuration/schema.mjs";
+import { configurationPaths, resolveConfigurationSources } from "./configuration/sources.mjs";
 
 /** The core folder: where Cartographer is installed. Every project runs this one copy. */
 export const CORE_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -316,6 +318,12 @@ export function contextWindowLimits(configuredContextWindow, serverContextWindow
 
 export class ConfigError extends Error {}
 
+/**
+ * The public startup resolver and the Settings application boundary share this exact validation contract. It is
+ * exported so an embedding adapter can describe the same thirty saved values without importing terminal code.
+ */
+export const CONFIGURATION_SCHEMA = createConfigurationSchema({ defaults: DEFAULTS, policy: POLICY, ErrorType: ConfigError });
+
 function readJson(path) {
 	if (!existsSync(path)) return {};
 	try {
@@ -331,81 +339,33 @@ function readJson(path) {
  * @param {{ brainDir: string, flags: { url?: string, model?: string }, env?: NodeJS.ProcessEnv }} input
  */
 export function loadConfig({ brainDir, flags, env = process.env }) {
-	// The install's settings stand next to the code; CARTO_CONFIG names another file in their place, so that a
-	// checkout with settings of its own (the tests, or a second install sharing one copy) can read none at all.
-	const corePath = env.CARTO_CONFIG ? env.CARTO_CONFIG : join(CORE_DIR, "config.json");
-	const projectPath = join(brainDir, "config.json");
-	const coreSettings = readJson(corePath);
-	const projectSettings = readJson(projectPath);
-	const retiredConsultSettings = ["consultModel", "consultMaxTokens", "consultTemperature", "consultTimeoutSeconds"];
-	const retiredAt = [
-		...retiredConsultSettings.filter((key) => Object.hasOwn(coreSettings, key)).map((key) => `${corePath}:${key}`),
-		...retiredConsultSettings.filter((key) => Object.hasOwn(projectSettings, key)).map((key) => `${projectPath}:${key}`),
-	];
-	if (retiredAt.length > 0) {
-		throw new ConfigError(`Removed external-consult setting(s): ${retiredAt.join(", ")}. C5 uses the caller's resolved model only; remove these settings instead of expecting a fallback model.`);
-	}
-	const retiredGrammarSettings = ["consultGrammar"];
-	const retiredGrammarAt = [
-		...retiredGrammarSettings.filter((key) => Object.hasOwn(coreSettings, key)).map((key) => `${corePath}:${key}`),
-		...retiredGrammarSettings.filter((key) => Object.hasOwn(projectSettings, key)).map((key) => `${projectPath}:${key}`),
-	];
-	if (retiredGrammarAt.length > 0) {
-		throw new ConfigError(`Removed native-grammar compatibility setting(s): ${retiredGrammarAt.join(", ")}. Native llama.cpp GBNF enforcement is required for Cartographer; remove these settings instead of selecting an adapter.`);
-	}
-	if (env.CARTO_CONSULT_MODEL !== undefined) {
-		throw new ConfigError("CARTO_CONSULT_MODEL was removed by the C5 consult cutover. A conference uses the caller's resolved model only; unset this environment variable instead of setting it empty.");
-	}
-	const config = {
-		...DEFAULTS,
-		shellRead: [...DEFAULTS.shellRead],
-		...coreSettings,
-		...projectSettings,
-		...(env.CARTO_SERVER ? { server: env.CARTO_SERVER } : {}),
-		...(env.CARTO_MODEL ? { model: env.CARTO_MODEL } : {}),
-		...(env.CARTO_USER !== undefined && env.CARTO_USER !== "" ? { user: env.CARTO_USER } : {}),
-		...(flags.url ? { server: flags.url } : {}),
-		...(flags.model ? { model: flags.model } : {}),
-	};
-	if (typeof config.server !== "string" || typeof config.model !== "string") {
-		throw new ConfigError(
-			[
-				"No model server is configured.",
-				`Put this in ${corePath} (the port and model are yours to change):`,
-				'  { "server": "http://127.0.0.1:8888/v1", "model": "ByteShape" }',
-				"or pass --url and --model.",
-			].join("\n"),
-		);
-	}
-	config.server = config.server.replace(/\/+$/, "");
-	if (config.user !== undefined) {
-		if (typeof config.user !== "string") throw new ConfigError("config: user must be one name, as a string");
-		const user = config.user.trim();
-		if (user === "" || /[\r\n]/.test(config.user)) throw new ConfigError("config: user must be one name on one line");
-		if (user.length > POLICY.validation.userChars) throw new ConfigError(`config: user must be ${POLICY.validation.userChars} characters or fewer`);
-		config.user = user;
-	}
-	for (const key of ["contextWindow", "maxTokens", "mainTurns", "taskTurns", "shellWait", "treeDepth", "windowTail", "wakeMin", "wakesMax"]) {
-		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.positiveIntegerMin) throw new ConfigError(`config: ${key} must be a whole number, ${POLICY.validation.positiveIntegerMin} or more`);
-	}
-	if (config.taskTurns > POLICY.limits.plan.moveTurns.max) throw new ConfigError(`config: taskTurns must be ${POLICY.limits.plan.moveTurns.max} or fewer: one focus is one small execution move`);
-	for (const key of ["chatWindow", "collapseTokens"]) {
-		if (!Number.isInteger(config[key]) || config[key] < POLICY.validation.minimumTokenSetting) throw new ConfigError(`config: ${key} must be a whole number of tokens, ${POLICY.validation.minimumTokenSetting} or more`);
-	}
-	if (config.chatWindow > config.contextWindow / POLICY.validation.chatWindowDivisor) throw new ConfigError("config: chatWindow must not be more than half of contextWindow");
-	if (typeof config.collapseMinutes !== "number" || !(config.collapseMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: collapseMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
-	if (!Number.isInteger(config.collapseFull) || config.collapseFull < POLICY.validation.collapsePercent.min || config.collapseFull > POLICY.validation.collapsePercent.max) throw new ConfigError(`config: collapseFull must be a whole number from ${POLICY.validation.collapsePercent.min} to ${POLICY.validation.collapsePercent.max} (percent)`);
-	for (const key of ["screen", "repeatCut", "prefill", "yolo", "bwrap", "initiate", "handoffQuestion"]) if (typeof config[key] !== "boolean") throw new ConfigError(`config: ${key} must be true or false`);
-	if (!POLICY.enums.colors.includes(config.colors)) throw new ConfigError(`config: colors must be ${POLICY.enums.colors.slice(0, -1).map((color) => JSON.stringify(color)).join(", ")} or ${JSON.stringify(POLICY.enums.colors.at(-1))}`);
-	if (!POLICY.enums.themes.includes(config.theme)) throw new ConfigError(`config: theme must be ${POLICY.enums.themes.slice(0, -1).map((theme) => JSON.stringify(theme)).join(", ")} or ${JSON.stringify(POLICY.enums.themes.at(-1))}`);
-	if (!Number.isInteger(config.prefillTokens) || config.prefillTokens < POLICY.validation.prefillTokensMin) throw new ConfigError(`config: prefillTokens must be a whole number of tokens, ${POLICY.validation.prefillTokensMin} or more`);
-	if (typeof config.askMinutes !== "number" || !(config.askMinutes >= POLICY.validation.nonNegativeMin)) throw new ConfigError(`config: askMinutes must be a number of minutes, ${POLICY.validation.nonNegativeMin} or more`);
-	if (typeof config.readAhead !== "boolean") throw new ConfigError("config: readAhead must be true or false");
-	if (config.windowTail > POLICY.validation.windowTailMax) throw new ConfigError(`config: windowTail must be a whole number from ${POLICY.validation.positiveIntegerMin} to ${POLICY.validation.windowTailMax}`);
-	if (config.treeDepth > POLICY.limits.tree.maxDepth) throw new ConfigError(`config: treeDepth must be a whole number from ${POLICY.validation.positiveIntegerMin} to ${POLICY.limits.tree.maxDepth}`);
-	if (typeof config.thinking !== "boolean") throw new ConfigError("config: thinking must be true or false");
-	if (!Array.isArray(config.shellRead) || config.shellRead.some((path) => typeof path !== "string" || !/^(\/|~\/)/.test(path))) {
-		throw new ConfigError('config: shellRead must be a list of folders, each a full path or starting with ~/');
-	}
-	return config;
+	// The synchronous launch path stays public for compatibility. Its pure source precedence and validation rules
+	// live in configuration/ so an asynchronous Settings write resolves the exact same effective configuration.
+	const paths = configurationPaths({ coreDir: CORE_DIR, brainDir, env });
+	const coreSettings = readJson(paths.install);
+	const projectSettings = readJson(paths.project);
+	CONFIGURATION_SCHEMA.assertSources({
+		install: coreSettings,
+		project: projectSettings,
+		installPath: paths.install,
+		projectPath: paths.project,
+		env,
+	});
+	const resolved = resolveConfigurationSources({
+		defaults: DEFAULTS,
+		install: coreSettings,
+		project: projectSettings,
+		env,
+		flags,
+		paths,
+	});
+	return CONFIGURATION_SCHEMA.validate(resolved.config, {
+		requireProvider: true,
+		missingProviderMessage: () => [
+			"No model server is configured.",
+			`Put this in ${paths.install} (the port and model are yours to change):`,
+			'  { "server": "http://127.0.0.1:8888/v1", "model": "ByteShape" }',
+			"or pass --url and --model.",
+		].join("\n"),
+	});
 }

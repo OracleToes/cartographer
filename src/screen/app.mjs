@@ -5,6 +5,7 @@
 //   3 Diff     what was changed: by the last step, in this session, or against the project's own git HEAD
 //   4 Shells   the shell windows, live
 //   5 Model    route readiness, sent provider payloads, next-request preview, and current accounting
+//   6 Settings configuration, assessment, session policy, and native-grammar diagnostics
 //
 // Two modes, as in vi, and Esc goes from one to the other.
 //   typing    every key is text for the agent, in pi-tui's editor: Enter sends, pasted text keeps its lines, Tab
@@ -24,27 +25,36 @@
 // handed a `screen` to print to: it carries out the commands, wakes the agent, collapses its context and words
 // everything Cartographer has to say, exactly as it does line by line.
 import { DEFAULTS, POLICY } from "../config.mjs";
+import { actionPlacementFor, assertActionPlacementParity } from "./action-placement.mjs";
 import { EventEmitter } from "node:events";
 import { basename, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
+import { LIFECYCLE_ACTION, LIFECYCLE_ACTION_SPECS, createLifecycleBridge, lifecycleActionSpecFor } from "../application/lifecycle.mjs";
 import { createChatPresentation } from "../application/chat.mjs";
 import { createReviewPresentation } from "../application/review-presentation.mjs";
 import { createRuntimePresentation } from "../application/runtime-presentation.mjs";
+import { createSettingsPresentation } from "../application/settings-presentation.mjs";
 import { createWorkspacePresentation } from "../application/workspace-presentation.mjs";
+import { CONTEXT_ACTION } from "../application/context.mjs";
 import { REQUEST_ACTION } from "../application/requests.mjs";
 import { REVIEW_ACTION } from "../application/review.mjs";
 import { TALK_ACTION } from "../application/talk.mjs";
 import { WORKSPACE_ACTION } from "../application/workspace.mjs";
 import { RUNTIME_ACTION } from "../application/runtime-actions.mjs";
+import { SETTINGS_ACTION } from "../application/settings-actions.mjs";
 import { launchEditor } from "../infrastructure/editor.mjs";
 import { findExecutable, findTextSource, pathExists, readText, writeScratch } from "../infrastructure/filesystem.mjs";
 import { stamp } from "../time.mjs";
 import { createChat, homeOf } from "./chat.mjs";
 import { CommandPalette } from "./command-palette.mjs";
+import { ActionDialog } from "./action-dialog.mjs";
+import { ActionLauncher } from "./action-launcher.mjs";
 import { ConfirmDialog } from "./confirm-dialog.mjs";
+import { TargetPicker } from "./target-picker.mjs";
+import { WakeDialog } from "./wake-dialog.mjs";
 import { createDeferredReferenceLabels } from "../application/references.mjs";
 import { copyOut, selectionText, toClipboard } from "./copy.mjs";
 import { createPasteWatch, isKeyRelease, isPaste, keyOf } from "./keys.mjs";
@@ -57,6 +67,7 @@ import { createNoticeStore, NOTICE_LEVEL } from "./notices.mjs";
 import { createOverlayManager } from "./overlays.mjs";
 import { renderStatusBar } from "./status.mjs";
 import { createProjectionScheduler } from "./projections.mjs";
+import { JobDrawer, jobDrawerNeeded } from "./job-drawer.mjs";
 import { Air, AIRY_ROWS, ChatBody, Farewell, Form, ListBody, marginOf, Prompt, Sheet, Strip, TabBar, ViewBar } from "./parts.mjs";
 import { applyTheme, cut, sgr } from "./text.mjs";
 import { colorMode, makeTheme, markdownTheme, schemeFromEnv } from "./theme.mjs";
@@ -64,6 +75,8 @@ import { TOKEN } from "./tokens.mjs";
 import { editorCommand } from "./views.mjs";
 import { diffView } from "./review.mjs";
 import { accountingProjectionView, contextView, modelRoutesView, previewView, rawPayloadView, shellsOutView, shellsView, wakesView } from "./runtime.mjs";
+import { settingsAssessmentView, settingsSafetyView } from "./settings.mjs";
+import { SettingsSourcePicker, settingsConfigurationView, settingsEditorField, settingsSources, settingsWriteTarget } from "./settings-editor.mjs";
 import { atlasView, handsView, ledgerView, planView, requestsView, treeView } from "./workspace.mjs";
 import { USER_NAME } from "../user.mjs";
 
@@ -78,6 +91,7 @@ export const TABS = [
 	{ id: "diff", name: "Diff" },
 	{ id: "shells", name: "Shells" },
 	{ id: "context", name: "Model" },
+	{ id: "settings", name: "Settings" },
 ];
 /** The views inside a tab; [ and ] go from one to the next. */
 export const VIEWS = {
@@ -112,33 +126,120 @@ export const VIEWS = {
 		{ id: "preview", name: "Next preview" },
 		{ id: "parts", name: "Current accounting" },
 	],
+	settings: [
+		{ id: "configuration", name: "Configuration" },
+		{ id: "safety", name: "Safety" },
+		{ id: "assessment", name: "Assessment" },
+	],
 };
 /** Every list-backed view; Chat's Conversation, Work, and Consult share the chat projection instead. */
-const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts"];
+const PAGES = ["carto.atlas", "carto.ledger", "carto.plan", "carto.requests", "carto.tree", "carto.hands", "diff.last", "diff.session", "diff.git", "shells.list", "shells.out", "shells.wakes", "context.routes", "context.window", "context.main", "context.raw", "context.preview", "context.parts", "settings.configuration", "settings.safety", "settings.assessment"];
 /** How often a view is read again while it shows, in milliseconds. */
 const EVERY = POLICY.timing.screenRefreshMs;
-const QUESTION_ID = new RegExp(POLICY.patterns.questionId);
 /** How long each spinner mark stands; the status strip owns its visible marks. */
 const SPIN_MS = POLICY.timing.spinnerMs;
 
-// A palette may safely expose every registered capability before every feature has a dedicated control. Selecting an
-// item goes to the narrowest existing screen seam; only that screen's contextual action supplies target/input and
-// crosses the application action boundary. Unmigrated runtime controls stay discoverable with their terminal path.
-const paletteDestinationFor = (id) => {
-	if (id.startsWith("talk.")) return { tab: "chat", view: "conversation", name: "Chat · Conversation", hint: "Choose kept talk, then use its contextual action." };
-	if (id.startsWith("workspace.")) return { tab: "carto", view: "atlas", name: "Carto", hint: "Choose the relevant record, then use its contextual action." };
-	if (id.startsWith("request.")) return { tab: "carto", view: "requests", name: "Carto · Requests", hint: "Choose a request, then approve, deny, answer, or forget it." };
-	if (id.startsWith("review.")) return { tab: "diff", view: "last", name: "Diff · Last step", hint: "Inspect the latest checkpoint change, then use its contextual recovery action." };
-	if (id.startsWith("context.")) return { tab: "context", view: "parts", name: "Model · Current accounting", hint: "Review the current context before using its control." };
-	if (id.startsWith("runtime.shell.")) return { tab: "shells", view: "list", name: "Shells · List", hint: "Choose a shell window before acting on it." };
-	if (id.startsWith("runtime.wake.")) return { tab: "shells", view: "wakes", name: "Shells · Wakes", hint: "Choose a scheduled wake before removing it." };
-	if (id.startsWith("runtime.model.")) return { tab: "context", view: "routes", name: "Model · Routes", hint: "Choose a route, then connect or select it through the Runtime action boundary." };
-	if (id.startsWith("runtime.task.")) return { tab: "chat", view: "work", name: "Chat · Work", hint: "Use the composer to send safe steering to the active task." };
-	return undefined;
+// Palette placement stays separate from capabilities: application metadata owns whether an action is available,
+// while this pure Screen registry says which settled route provides its target.
+const routeName = ({ tab, view }) => {
+	const tabName = TABS.find((entry) => entry.id === tab)?.name ?? tab;
+	const viewName = VIEWS[tab]?.find((entry) => entry.id === view)?.name ?? view;
+	return `${tabName} · ${viewName}`;
+};
+export const paletteDestinationFor = (id) => {
+	const placement = actionPlacementFor(id);
+	if (placement === undefined) return undefined;
+	return {
+		...placement.route,
+		name: routeName(placement.route),
+		hint: placement.paletteText ?? "Continue with this action from the settled view.",
+	};
+};
+
+/** Turn an application capability into an executable launcher entry, never a terminal-command fallback. */
+export const paletteItemForCapability = (capability) => {
+	const placement = actionPlacementFor(capability.id);
+	const destination = paletteDestinationFor(capability.id);
+	// Clearing kept material without resetting the live conversation creates an invalid half-fresh context. It remains
+	// an application action for the terminal-owned fresh-context sequence, but is deliberately not a Screen control.
+	const disabledReason = capability.id === CONTEXT_ACTION.pinTop
+		? "Refreshing the context top is sequenced by the terminal lifecycle owner so it cannot run while the agent is working."
+		: capability.id === CONTEXT_ACTION.clearKept
+			? "Clearing kept context is sequenced only by Start fresh context, which resets the live conversation first."
+			: destination === undefined ? "This action has no Screen placement yet." : undefined;
+	return {
+		id: `capability:${capability.id}`,
+		actionId: capability.id,
+		label: capability.label,
+		category: capability.category,
+		availability: capability.availability,
+		description: capability.id === CONTEXT_ACTION.pinTop
+			? "Model · Current accounting. Refresh context top is guarded by the terminal lifecycle owner."
+			: capability.id === CONTEXT_ACTION.clearKept
+				? "Model · Current accounting. Start fresh context uses this durable clear after the terminal safely resets the live conversation."
+				: destination === undefined
+					? "This registered action has no Screen placement yet."
+					: `${destination.name}. ${destination.hint}`,
+		keywords: [capability.id, placement?.shortcut, placement?.terminalPath].filter((value) => typeof value === "string" && value !== "").join(" "),
+		destination,
+		...(disabledReason === undefined ? {} : { disabled: true, disabledReason }),
+	};
+};
+
+// Lifecycle is intentionally separate from application actions: these placements describe the Screen controls for
+// the terminal-owned port, while the port remains the authority for every safety/availability decision.
+const LIFECYCLE_PLACEMENTS = Object.freeze([
+	Object.freeze({ id: LIFECYCLE_ACTION.stop, route: Object.freeze({ tab: "chat", view: "conversation" }), shortcut: "Ctrl-X", paletteText: "Stop agent work", terminalPath: "/stop" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.togglePause, route: Object.freeze({ tab: "chat", view: "conversation" }), shortcut: "Ctrl-V", paletteText: "Pause or resume stream", terminalPath: "/pause" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.refreshTop, route: Object.freeze({ tab: "context", view: "parts" }), shortcut: "p", paletteText: "Refresh context top", formTitle: "Refresh context top", terminalPath: "/pin" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.collapse, route: Object.freeze({ tab: "context", view: "parts" }), shortcut: "c", paletteText: "Collapse context", terminalPath: "/collapse" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.freshContext, route: Object.freeze({ tab: "context", view: "parts" }), shortcut: "N", paletteText: "Start fresh context", terminalPath: "/new" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.toggleApproval, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Toggle session approval", terminalPath: "/yolo" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.toggleInitiation, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Toggle session initiation", terminalPath: "/initiate" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.toggleSandbox, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Toggle session sandbox", terminalPath: "/bwrap" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.selectorProbe, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Run native selector probe", formTitle: "Run native selector probe", terminalPath: "/consult probe [PATH]" }),
+]);
+const LIFECYCLE_PLACEMENT_BY_ID = new Map(LIFECYCLE_PLACEMENTS.map((entry) => [entry.id, entry]));
+const lifecyclePlacementFor = (id) => LIFECYCLE_PLACEMENT_BY_ID.get(id);
+const lifecycleDestinationFor = (id) => {
+	const placement = lifecyclePlacementFor(id);
+	return placement === undefined ? undefined : {
+		...placement.route,
+		name: routeName(placement.route),
+		hint: placement.paletteText ?? "Continue with this terminal-owned lifecycle action from the listed route.",
+	};
+};
+/** Turn a typed terminal lifecycle capability into a palette item without treating it as a normal application action. */
+export const paletteItemForLifecycleCapability = (capability) => {
+	const placement = lifecyclePlacementFor(capability.id);
+	const destination = lifecycleDestinationFor(capability.id);
+	return {
+		id: `lifecycle:${capability.id}`,
+		lifecycleActionId: capability.id,
+		label: capability.label,
+		category: capability.category,
+		availability: capability.availability,
+		description: destination === undefined
+			? "This terminal lifecycle action has no Screen placement yet."
+			: `${destination.name}. ${destination.hint}`,
+		keywords: [capability.id, placement?.shortcut, placement?.terminalPath].filter((value) => typeof value === "string" && value !== "").join(" "),
+		destination,
+		...(destination === undefined ? { disabled: true, disabledReason: "This terminal lifecycle action has no Screen placement yet." } : {}),
+	};
+};
+
+/** Derive Work's task-message affordance solely from its settled activity projection and static router capability. */
+export const taskMessageAvailabilityFor = (activity, fallback) => {
+	const reason = typeof fallback?.reason === "string" ? fallback.reason : "";
+	if (fallback?.enabled === false && /no active-task message router/i.test(reason)) return fallback;
+	if (activity?.data?.taskActive === true) return { enabled: true };
+	if (activity?.loading === true) return { enabled: false, reason: "Task activity is still loading. Refresh Work and try again." };
+	if (typeof activity?.error?.message === "string" && activity.error.message !== "") return { enabled: false, reason: `Task activity is unavailable: ${activity.error.message}` };
+	return { enabled: false, reason: "No active task is running to receive a message." };
 };
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
-const COMMANDS = [
+export const COMMANDS = [
 	["requests", "what waits for you: change moves, questions of taste, "],
 	["approve", "approve requests by id, or the whole plan as it stands"],
 	["deny", "turn a request down: /deny ID [why]"],
@@ -152,6 +253,7 @@ const COMMANDS = [
 		["diff", "what the last change task did to the files", ["all"]],
 	["undo", "take the last change task back; again for the one before it"],
 	["report", "the last task's report in full; /report t12 shows a kept one"],
+	["consult", "consultation conference audits; /consult co1 shows its immutable packet; /consult probe [PATH] writes a native-grammar diagnostic", ["probe"]],
 	["stop",  "stop what the agent is doing (Ctrl-X); shell windows keep running"],
 	["pause", "hold the agent in its stream mid-reply (Ctrl-V); until you unpause it starts nothing of its own — a line or command you write ends the held stream"],
 	["copy", "the agent's last message; or: session, report, tab", ["session", "report", "tab"]],
@@ -180,6 +282,7 @@ const COMMANDS = [
 	["keys", "the keys of the full screen"],
 	["help", "every command, with what it does"],
 	["quit", "leave; unfinished work continues the next time carto starts here"],
+	["exit", "leave; the same as /quit"],
 ];
 
 // A heading stands at the start of its line; an entry is a key, at least two spaces, and what the key does. The
@@ -198,20 +301,22 @@ export const KEYS_HELP = [
 	"  Ctrl-W, -U, -K   delete a word, to the start, to the end; Ctrl-Y brings it back; Ctrl-- undoes",
 	"",
 	"Commands",
-	"  1 to 5           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
-	"  [ and ]          the previous and the next view inside Chat, Carto, Diff, Shells and Model (H and L do the same)",
+	"  1 to 6           go to a tab (Chat holds Conversation, private Work, and the isolated Consult audit)",
+	"  [ and ]          the previous and the next view inside the tab that shows (H and L do the same)",
 	"  j, k             move down and up over the items; g and G go to the first and the last",
 	"  Enter, Space, o  open what is selected, or fold it; l opens, h folds. In Work, Enter opens private reasoning or a call, and l takes a call to where its work lives. In Consult, Enter folds a conference or opens its attributed activity. In Shells, Enter on a window shows its output as a terminal emulator does (Enter goes back); in Wakes it opens the selected schedule row. In Model → Routes, Enter validates the active route or selects and validates another route.",
 	"  + and -          open everything, fold everything (zR and zM do the same)",
 	"  Ctrl-D, Ctrl-U   scroll half a page; Ctrl-F and Ctrl-B a page; Ctrl-E and Ctrl-Y a row",
 	"  /                search the tab that shows; Enter or Down goes to the next match, Up to the one before, Esc closes the search",
-	"  e                on an entry of Atlas, Ledger, Plan or Books: the small box on its fields — a live counter shows how full a field is and the book's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels",
-	`  E                the $EDITOR door on the same row: the entry's own JSON at its line; on anything but an entry, a template for a new one. Ctrl-O is the same door, in every tab and mode, including while you type; everywhere e does not open the box (the tree, the diff, Chat, Model), e is this same door: in Conversation it rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
-	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, book entry, node of the graph — or brings it back; d opens a confirmation before it deletes for good, in Requests before it forgets without a word to the agent, and in Shells → Wakes before it removes the selected wake; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a book entry settles, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain). In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
+	"  e                on a row of Atlas, Ledger or Plan: the small box on its fields — a live counter shows how full a field is and the row's limit is where it stops; Tab goes to the next field, Enter saves one-line fields, and in a field that holds a long text Enter ends a line and Ctrl-Enter saves; Esc cancels. In Settings → Configuration, it opens the selected schema-derived saved-setting form.",
+	`  E                the $EDITOR door on the same row: on an Atlas, Ledger or Plan row, the entry's own JSON; with no such row, a template for a new one. On another editable source it opens that source. Ctrl-O is the same door, in every tab and mode, including while you type; Settings → Configuration keeps e for its saved-setting form, while its $EDITOR door names no raw configuration-file editor. In Conversation e rewords a stable source for a future kept talk; private Work cannot be edited; sent Model payloads are read-only`,
+	"  f, v, d, x, t    the same keys on a row outside Chat: f folds a report out of view or brings it back (in Current shared brain); v archives a row out of what the agent reads — a report, ledger entry, plan envelope or move, node of the graph — or brings it back; d opens a confirmation before it deletes for good, in Requests before it forgets without a word to the agent, and in Shells → Wakes before it removes the selected wake; t settles it (a ledger entry closes, a reported move opens a prompt for why its proof witnesses its done-when, a completed envelope closes, a node confirms); sent Model payloads have no delete action; x takes a shelved file off the shelf (in Current shared brain), or in Settings → Configuration resets the selected saved-source override. In Conversation, d opens confirmation before removing one stable source from future kept talk only; the active conversation and sent requests stay unchanged.",
 	"  u                in Diff, asks before taking the latest checkpoint change back and reopening its move for approval when it has one",
-	"  n                a new ledger entry, plan envelope, child move on a selected envelope, book entry or node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
+	"  n                a new ledger entry, plan envelope, child move on a selected envelope, or Atlas node: the small box uses the same operations as the agent (E opens the template in $EDITOR instead)",
+	"  s                in Settings → Configuration, choose the writable project or install source that an edit/reset affects; environment and command-line overrides stay read-only",
 	"  a                in Current shared brain, shelve a file (puts /shelve in the prompt); in Requests, approve the request",
 	"  y, Y             copy what is selected; copy the whole tab",
+	"  J                when several jobs run, or a job stopped or failed, inspect Background work; Enter or c asks to cancel the selected live job",
 	"  r                read the tab again",
 	"  :                type a command",
 	"  i, a, Esc        type",
@@ -266,6 +371,10 @@ export async function runScreen(session, options, runTerminal) {
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`): ephemeral local activity only. */
 	let core = { busy: () => false, paused: () => false, thinking: () => true };
+	// runTerminal installs this narrow typed port after it owns its live stream/context closures. Screen never receives
+	// those closures directly, even though it composes the application facade before terminal startup completes.
+	const lifecycleBridge = createLifecycleBridge();
+	let refreshLifecycleCapabilities = () => {};
 	// The file-completion helper is resolved before the terminal starts, never by a render or key handler.
 	const fileSearch = await findExecutable(["fd", "fdfind"]);
 
@@ -297,10 +406,11 @@ export async function runScreen(session, options, runTerminal) {
 	// A palette for the terminal's own background. It starts from what the settings and the environment say, and
 	// is made again when the terminal answers what its colours are, and whenever it says they have changed.
 	const colors = { mode: colorMode(config.colors), background: undefined, foreground: undefined };
+	let configuredTheme = config.theme;
 	let mdTheme;
 	let themeVersion = 0;
 	const retheme = () => {
-		const theme = makeTheme({ mode: colors.mode, ...(config.theme === "dark" || config.theme === "light" ? { scheme: config.theme } : { background: colors.background, foreground: colors.foreground, scheme: schemeFromEnv() }) });
+		const theme = makeTheme({ mode: colors.mode, ...(configuredTheme === "dark" || configuredTheme === "light" ? { scheme: configuredTheme } : { background: colors.background, foreground: colors.foreground, scheme: schemeFromEnv() }) });
 		applyTheme(theme.styles);
 		mdTheme = markdownTheme(theme.styles);
 		themeVersion++;
@@ -317,6 +427,7 @@ export async function runScreen(session, options, runTerminal) {
 	const workspacePresentation = createWorkspacePresentation();
 	const reviewPresentation = createReviewPresentation();
 	const runtimePresentation = createRuntimePresentation();
+	const settingsPresentation = createSettingsPresentation();
 	// The Consult subview receives only its own asynchronously refreshed co<N> cache. The records never join parent
 	// talk/work, a request, or the shared brain; these synchronous callbacks merely read that isolated cache.
 	const CONSULT_PROJECTION = "chat.consult";
@@ -329,7 +440,7 @@ export async function runScreen(session, options, runTerminal) {
 	});
 	chat.setConsultProjection(consultProjection());
 	const askColors = () => {
-		if (config.theme === "dark" || config.theme === "light" || colors.mode === "none") return;
+		if (configuredTheme === "dark" || configuredTheme === "light" || colors.mode === "none") return;
 		const take = (told) => {
 			const rgb = (color) => (color === undefined ? undefined : [color.r, color.g, color.b]);
 			const [background, foreground] = [rgb(told.background), rgb(told.foreground)];
@@ -347,6 +458,7 @@ export async function runScreen(session, options, runTerminal) {
 	const state = {
 		tab: "chat",
 		view: { chat: "conversation", carto: "atlas", diff: "last", shells: "list", context: "routes" },
+		settingsScope: "project", // the explicit persisted source Configuration edits; never an environment or CLI override
 		shell: undefined, // the shell window whose output the Output view shows
 		mode: "type",
 		selected: undefined, // a stop of the Conversation, Work, or Consult projection
@@ -451,6 +563,23 @@ export async function runScreen(session, options, runTerminal) {
 		attach(given) {
 			core = given;
 		},
+		/** The terminal owns the implementation; Screen retains only the typed lifecycle port and settled availability. */
+		attachLifecycle(port) {
+			lifecycleBridge.attach(port);
+			refreshLifecycleCapabilities();
+			rebuild("context.parts");
+			rebuild("settings.safety");
+			draw();
+		},
+		/** The terminal calls this after its safety state changes; renderers consume the resulting snapshot only. */
+		lifecycleChanged() {
+			if (state.closed) return;
+			refreshLifecycleCapabilities();
+			refreshRuntimeActivity(true);
+			rebuild("context.parts");
+			rebuild("settings.safety");
+			draw();
+		},
 		notice(text) {
 			syncThinking();
 			flash(text);
@@ -544,6 +673,7 @@ export async function runScreen(session, options, runTerminal) {
 		activity: currentRuntimeActivity(),
 		brain: readBrain(),
 		runtime: runtimeStatusForStrip(),
+		jobs: jobSnapshots,
 		notice: notices.latest({ live: true }),
 		legend: legend(),
 		config,
@@ -554,7 +684,13 @@ export async function runScreen(session, options, runTerminal) {
 	const keyHints = createKeyHints({
 		typing: "Esc: commands · Ctrl-K: palette · Ctrl-O: $EDITOR · ? all keys",
 		fallback: ["j k move", "Enter open"],
-		global: ["Ctrl-K palette", "? all keys"],
+		global: [
+			{ text: "Ctrl-X stop", capability: LIFECYCLE_ACTION.stop },
+			{ text: "Ctrl-V pause/resume", capability: LIFECYCLE_ACTION.togglePause },
+			{ text: "J jobs", when: (context) => context?.jobs === true },
+			"Ctrl-K palette",
+			"? all keys",
+		],
 		routes: {
 			"chat.conversation": [
 				"j k move",
@@ -563,7 +699,7 @@ export async function runScreen(session, options, runTerminal) {
 				{ text: "d remove kept talk", capability: TALK_ACTION.forget },
 				"y copy",
 			],
-			"chat.work": ["j k move", "Enter open", "y copy"],
+			"chat.work": ["j k move", "Enter open", { text: "m message task", capability: RUNTIME_ACTION.routeTaskMessage }, "y copy"],
 			"chat.consult": ["j k move", "Enter open", "+ all", "y copy"],
 			"carto.atlas": [
 				{ text: "t confirm", capability: WORKSPACE_ACTION.settle },
@@ -589,8 +725,8 @@ export async function runScreen(session, options, runTerminal) {
 			"carto.requests": [
 				{ text: "a approve", capability: REQUEST_ACTION.approve },
 				{ text: "n deny", capability: REQUEST_ACTION.deny },
+				{ text: "e answer", capability: REQUEST_ACTION.answer },
 				{ text: "d forget", capability: WORKSPACE_ACTION.delete },
-				"e edit",
 			],
 			"carto.tree": ["Enter fold", "y copy", "e edit"],
 			"carto.hands": [
@@ -603,18 +739,56 @@ export async function runScreen(session, options, runTerminal) {
 			"diff.last": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
 			"diff.session": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
 			"diff.git": [{ text: "u undo", capability: REVIEW_ACTION.undo }, "Enter open", "y copy", "e edit"],
-			"shells.list": ["Enter output", "y copy"],
+			"shells.list": [
+				"Enter output",
+				{ text: "s send", capability: RUNTIME_ACTION.sendShell },
+				{ text: "d close", capability: RUNTIME_ACTION.closeShell },
+				{ text: "D close all", capability: RUNTIME_ACTION.closeAllShells },
+				"y copy",
+			],
 			"shells.out": ["Enter back"],
-			"shells.wakes": [{ text: "d remove", capability: RUNTIME_ACTION.removeWake }, "Enter open", "y copy"],
+			"shells.wakes": [
+				{ text: "n create", capability: RUNTIME_ACTION.createWake },
+				{ text: "e replace", capability: RUNTIME_ACTION.replaceWake },
+				{ text: "d remove", capability: RUNTIME_ACTION.removeWake },
+				"Enter open",
+				"y copy",
+			],
 			"context.routes": [{ text: "Enter connect/select", capabilities: [RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel] }, "y copy"],
 			"context.window": ["Enter open", "y copy"],
 			"context.main": ["Enter open", "y copy"],
 			"context.raw": ["Enter open", "y copy"],
 			"context.preview": ["Enter open", "y copy"],
-			"context.parts": ["Enter open", "+ all", "y copy"],
+			"context.parts": [
+				"Enter open",
+				{ text: "p refresh top", capability: LIFECYCLE_ACTION.refreshTop },
+				{ text: "N fresh context", capability: LIFECYCLE_ACTION.freshContext },
+				{ text: "c collapse", capability: LIFECYCLE_ACTION.collapse },
+				"+ all",
+				"y copy",
+			],
+			"settings.configuration": [
+				"j k move",
+				{ text: "Enter/e edit", capability: SETTINGS_ACTION.edit },
+				{ text: "x reset", capability: SETTINGS_ACTION.reset },
+				"s source",
+				"y copy",
+			],
+			"settings.safety": [
+				"j k move",
+				{ text: "Ctrl-K lifecycle", capabilities: [LIFECYCLE_ACTION.toggleApproval, LIFECYCLE_ACTION.toggleInitiation, LIFECYCLE_ACTION.toggleSandbox, LIFECYCLE_ACTION.selectorProbe] },
+				"Enter open",
+				"y copy",
+			],
+			"settings.assessment": ["j k move", "Enter open", "e edit", "y copy"],
 		},
 	});
-	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: paletteCapabilities });
+	const legend = () => keyHints.text({
+		mode: state.mode,
+		route: viewId(),
+		capabilities: [...paletteCapabilities, ...lifecycleCapabilities],
+		context: { jobs: jobDrawerNeeded(jobSnapshots) },
+	});
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = () => routes.id();
 	/** The file a view comes from, for `e` when no item names one. */
@@ -630,6 +804,7 @@ export async function runScreen(session, options, runTerminal) {
 		brainDir,
 		root,
 		config,
+		configuration: options.configuration,
 		runtime: {
 			main: session.main,
 			context: session.context,
@@ -643,13 +818,66 @@ export async function runScreen(session, options, runTerminal) {
 			models: session.models,
 			preview: session.preview,
 			runner: options.runner,
-			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
+		gate: options.gate,
+		initiation: options.initiation,
+		// This late-bound facade is the only lifecycle surface the application sees. runTerminal attaches its typed
+		// owner after it has established the stream/context safety conditions.
+		lifecycle: lifecycleBridge,
+		contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
 		},
 	});
+	assertActionPlacementParity(application.capabilities);
 	const queries = application.queries;
-	// Availability is a composition-time snapshot: opening the palette never consults a manager from a key handler
-	// or render pass. The registered capability remains its single metadata source, including disabled reasons.
-	const paletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
+	// Job facts enter Screen as immutable snapshots. Rendering only reads this cache; job events below own replacement
+	// reads, so no renderer can reach a manager/controller while it paints.
+	let jobSnapshots = Object.freeze([]);
+	const refreshJobSnapshots = () => {
+		const listed = typeof application.jobSnapshots === "function" ? application.jobSnapshots() : [];
+		jobSnapshots = Object.freeze(Array.isArray(listed) ? [...listed] : []);
+		return jobSnapshots;
+	};
+	const cancelJob = (id) => typeof application.cancelJob === "function"
+		? application.cancelJob(id)
+		: { ok: false, error: { message: "Background job cancellation is unavailable in this session." } };
+	refreshJobSnapshots();
+	// Capability presentation is a settled Screen snapshot. Most registered availability is static composition state;
+	// task messaging additionally follows the deferred Runtime activity fact, so Work visibly says why there is no
+	// message form instead of asking the live task owner from a key handler or render pass.
+	const basePaletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
+	let paletteCapabilities = Object.freeze([]);
+	const refreshPaletteCapabilities = (activity) => {
+		paletteCapabilities = Object.freeze(basePaletteCapabilities.map((capability) => Object.freeze(capability.id === RUNTIME_ACTION.routeTaskMessage
+			? { ...capability, availability: taskMessageAvailabilityFor(activity, capability.availability) }
+			: { ...capability })));
+		return paletteCapabilities;
+	};
+	refreshPaletteCapabilities();
+	// The launcher uses the same settled Work availability as hints and the palette. Other actions retain their
+	// application-owned dynamic availability checks; only task identity is intentionally cached by Runtime activity.
+	const screenActionCapabilities = Object.freeze({
+		get: (id) => id === RUNTIME_ACTION.routeTaskMessage
+			? paletteCapabilities.find((capability) => capability.id === id)
+			: application.capabilities.get(id),
+		availability: (id) => id === RUNTIME_ACTION.routeTaskMessage
+			? paletteCapabilities.find((capability) => capability.id === id)?.availability
+			: application.capabilities.availability(id),
+		list: () => [...application.capabilities.list().filter((capability) => capability.id !== RUNTIME_ACTION.routeTaskMessage), ...paletteCapabilities.filter((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)],
+	});
+	let lifecycleCapabilities = Object.freeze([]);
+	const lifecycleService = application.lifecycle;
+	const lifecycleCapabilityRegistry = Object.freeze({
+		get: (id) => lifecycleCapabilities.find((capability) => capability.id === id),
+		availability: (id) => lifecycleCapabilities.find((capability) => capability.id === id)?.availability,
+		list: () => lifecycleCapabilities,
+	});
+	// Terminal lifecycle availability is pushed into this settled Screen cache when the owner attaches or changes.
+	// Key hints and the palette consume only this snapshot; neither reads a live terminal closure while painting.
+	refreshLifecycleCapabilities = () => {
+		const listed = typeof lifecycleService?.capabilities?.list === "function" ? lifecycleService.capabilities.list() : [];
+		lifecycleCapabilities = Object.freeze(listed.map((capability) => Object.freeze({ ...capability })));
+		return lifecycleCapabilities;
+	};
+	refreshLifecycleCapabilities();
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
 	const review = Object.freeze({ execute: application.execute });
 	const talk = Object.freeze({ execute: application.execute });
@@ -667,16 +895,22 @@ export async function runScreen(session, options, runTerminal) {
 		return cancelled;
 	};
 	/** Cached deferred projections. Rendering never starts a durable read; refresh below owns requests and rejects stale results. */
+	// These four routes use real abort-aware filesystem/Git ports, so their application-owned job closures can report
+	// progress and receive cancellation. The other deferred readers remain direct projections until they gain a real
+	// asynchronous port; they are not dressed up as jobs merely because the scheduler defers their stack.
+	const startProjectionJob = (id, projectionOptions) => typeof application.projections?.start === "function"
+		? application.projections.start(id, projectionOptions)
+		: undefined;
 	const DEFERRED_PROJECTION = Object.freeze({
 		"carto.atlas": ({ signal }) => queries.atlas({ signal }),
 		"carto.ledger": ({ signal }) => queries.ledger({ signal }),
 		"carto.plan": ({ signal }) => queries.plan({ signal }),
 		"carto.requests": ({ signal }) => queries.requests({ yolo: options.gate?.yolo === true, signal }),
-		"carto.tree": ({ signal }) => queries.tree({ signal }),
+		"carto.tree": ({ signal }) => startProjectionJob("carto.tree", { signal }) ?? queries.tree({ signal }),
 		"carto.hands": ({ signal }) => queries.context({ signal }),
-		"diff.last": ({ signal }) => queries.review.last({ signal }),
-		"diff.session": ({ signal }) => queries.review.session({ started, signal }),
-		"diff.git": ({ signal }) => queries.review.git({ signal }),
+		"diff.last": ({ signal }) => startProjectionJob("diff.last", { signal }) ?? queries.review.last({ signal }),
+		"diff.session": ({ signal }) => startProjectionJob("diff.session", { started, signal }) ?? queries.review.session({ started, signal }),
+		"diff.git": ({ signal }) => startProjectionJob("diff.git", { signal }) ?? queries.review.git({ signal }),
 		"shells.list": ({ signal }) => queries.runtime.shells({ signal }),
 		"shells.out": ({ signal }) => queries.runtime.shellOutput({ name: state.shell, signal }),
 		"shells.wakes": ({ signal }) => queries.runtime.wakes({ signal }),
@@ -687,6 +921,9 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": ({ signal }) => queries.runtime.sent({ scope: "newest", signal }),
 		"context.preview": ({ signal }) => queries.runtime.preview({ signal }),
 		"context.parts": ({ signal }) => queries.runtime.context({ signal }),
+		"settings.configuration": ({ signal }) => queries.settings.status({ signal }),
+		"settings.safety": ({ signal }) => queries.settings.status({ signal }),
+		"settings.assessment": ({ signal }) => queries.runtime.assessment({ signal }),
 	});
 	const PROJECTION_NAME = Object.freeze({
 		"carto.atlas": "Atlas",
@@ -708,8 +945,14 @@ export async function runScreen(session, options, runTerminal) {
 		"context.raw": "Raw provider payload",
 		"context.preview": "Next request preview",
 		"context.parts": "Current active-context accounting",
+		"settings.configuration": "Configuration",
+		"settings.safety": "Safety",
+		"settings.assessment": "Assessment",
 	});
 	let settleProjection = () => {};
+	// Constructed after overlay helpers exist. Projection settlement may happen sooner, so this remains optional here.
+	let actionLauncher;
+	let lifecycleLauncher;
 	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
 	const projectionFor = (id) => projections.get(id);
 	const RUNTIME_ACTIVITY_PROJECTION = "runtime.activity";
@@ -763,16 +1006,23 @@ export async function runScreen(session, options, runTerminal) {
 	const invalidateProjections = () => projections.invalidate();
 	/** All adapter actions publish the same invalidation fact, including a slash command handled by the terminal core. */
 	const stopApplicationEvents = application.events.subscribe((event) => {
+		if (event.type.startsWith("job.")) {
+			refreshJobSnapshots();
+			if (!state.closed) draw();
+			return;
+		}
 		if (event.type !== "projection.invalidated") return;
 		const scopes = event.payload.scopes ?? [];
 		const brainChanged = scopes.some((scope) => ["workspace", "context", "requests"].includes(scope));
 		const runtimeChanged = scopes.includes("runtime");
-		const projectionChanged = brainChanged || runtimeChanged || scopes.includes("review");
+		const settingsChanged = scopes.some((scope) => ["settings", "configuration"].includes(scope));
+		const projectionChanged = brainChanged || runtimeChanged || settingsChanged || scopes.includes("review");
 		if (!projectionChanged) return;
 		if (brainChanged) invalidateBrain();
 		invalidateProjections();
 		if (runtimeChanged) {
 			refreshRuntimeStatusProjection(true);
+			refreshRuntimeActivity(true);
 			if ([RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel].includes(event.payload.action)) refreshRuntimeModelProjection(true);
 		}
 		refresh(viewId(), true);
@@ -785,7 +1035,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "carto.ledger") return projectionView(id, (data) => ledgerView({ file: data.file, ledger: data.ledger, lines: data.lines, presentation: workspacePresentation.ledger }));
 		if (id === "carto.plan") return projectionView(id, (data) => planView({ file: data.file, yolo: options.gate?.yolo === true, plan: data.plan, lines: data.lines, presentation: workspacePresentation.plan }));
 		if (id === "carto.requests") return projectionView(id, (data) => requestsView({ requests: data.items, presentation: workspacePresentation.requests }));
-		if (id === "carto.tree") return projectionView(id, (data) => treeView({ tree: data, presentation: workspacePresentation.tree }, isOpen));
+		if (id === "carto.tree") return projectionView(id, (data) => treeView({
+			tree: { ...data, marks: workspacePresentation.tree.marks(projectionFor("carto.atlas").data?.atlas) },
+			presentation: workspacePresentation.tree,
+		}, isOpen));
 		if (id === "carto.hands") return projectionView(id, (data) => handsView({ context: data, presentation: workspacePresentation.hands }));
 		if (id.startsWith("diff.")) return projectionView(id, (data) => diffView({ review: data, presentation: reviewPresentation }, id.slice(5)));
 		if (id === "shells.list") return projectionView(id, (data) => shellsView({ ...data, presentation: runtimePresentation.shells }));
@@ -799,6 +1052,14 @@ export async function runScreen(session, options, runTerminal) {
 		if (id === "context.raw") return projectionView(id, (data) => rawPayloadView({ sent: data.sent, presentation: runtimePresentation.sent }));
 		if (id === "context.preview") return projectionView(id, (data) => previewView({ preview: data.preview, presentation: runtimePresentation.preview }));
 		if (id === "context.parts") return projectionView(id, (data) => accountingProjectionView({ accounting: data, config, presentation: runtimePresentation.accounting }));
+		if (id === "settings.configuration") return projectionView(id, (data) => settingsConfigurationView({
+			settings: data,
+			scope: state.settingsScope,
+			selected: pageOf(id)?.list.selected()?.key,
+			wide: cols >= 100,
+		}));
+		if (id === "settings.safety") return projectionView(id, (data) => settingsSafetyView({ settings: data, presentation: settingsPresentation.overview, lifecycle: lifecycleCapabilities.filter((capability) => [LIFECYCLE_ACTION.toggleApproval, LIFECYCLE_ACTION.toggleInitiation, LIFECYCLE_ACTION.toggleSandbox, LIFECYCLE_ACTION.selectorProbe].includes(capability.id)) }));
+		if (id === "settings.assessment") return projectionView(id, (data) => settingsAssessmentView({ assessment: data, presentation: settingsPresentation.assessment }));
 		return { header: [], items: [] };
 	};
 	const rebuild = (id = viewId()) => {
@@ -812,9 +1073,22 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	settleProjection = (id) => {
 		if (state.closed) return;
-		if (id === RUNTIME_ACTIVITY_PROJECTION || id === RUNTIME_STATUS_PROJECTION) return void draw();
+		if (id === RUNTIME_ACTIVITY_PROJECTION) {
+			refreshPaletteCapabilities(projectionFor(RUNTIME_ACTIVITY_PROJECTION));
+			return void draw();
+		}
+		if (id === RUNTIME_STATUS_PROJECTION) return void draw();
 		rebuild(id);
-		if (viewId() === id) draw();
+		// Tree marks are a pure presentation derivation of the cached Atlas. Refresh the tree rows when that settled
+		// Atlas changes, without having its filesystem query touch an atlas reader of its own.
+		if (id === "carto.atlas") rebuild("carto.tree");
+		if (viewId() === id || id === "carto.atlas" && viewId() === "carto.tree") {
+			draw();
+			// A palette launch waits for this already-settled projection instead of asking a live manager for targets.
+			// The launcher ignores unrelated routes and any currently-open dialog/picker.
+			actionLauncher?.onRouteSettled(routes.current());
+			lifecycleLauncher?.onRouteSettled(routes.current());
+		}
 	};
 	/** Read a view again. */
 	const refresh = (id = viewId(), force = false) => {
@@ -849,6 +1123,214 @@ export async function runScreen(session, options, runTerminal) {
 		draw();
 		return result.ok;
 	};
+	/** A live appearance setting changes this Screen only when the saved write became the effective value. */
+	const applyLiveScreenSetting = (row) => {
+		if (row?.apply !== "live-screen") return;
+		if (row.key === "colors" && typeof row.effectiveValue === "string") colors.mode = colorMode(row.effectiveValue);
+		if (row.key === "theme" && typeof row.effectiveValue === "string") configuredTheme = row.effectiveValue;
+		if (row.key !== "colors" && row.key !== "theme") return;
+		retheme();
+		chat.restyle();
+		askColors();
+		tui.invalidate();
+	};
+	/** Settings actions preserve the form on an ordinary failure, and refresh the settled provenance after a conflict. */
+	const presentSettingsResult = (result, id = viewId()) => {
+		const line = result.ok ? result.data.line : result.error.message;
+		flash(String(line).replace(/\n+/g, " "), result.ok ? (result.data.changed === false ? NOTICE_LEVEL.info : NOTICE_LEVEL.success) : NOTICE_LEVEL.error);
+		if (result.ok) applyLiveScreenSetting(result.data.row);
+		else refresh(id, true);
+		draw();
+		return result.ok;
+	};
+	const selectedSetting = () => {
+		const item = pageOf("settings.configuration")?.list.selected();
+		return item?.setting?.row;
+	};
+	const cachedSettings = () => projectionFor("settings.configuration").data ?? projectionFor("settings.safety").data;
+	/** Configuration sources are explicit: a read-only project never silently becomes an install write. */
+	const settingsTarget = ({ key, scope } = {}) => {
+		const settings = cachedSettings();
+		const rows = Array.isArray(settings?.configuration?.rows) ? settings.configuration.rows : [];
+		const row = typeof key === "string" && key !== "" ? rows.find((entry) => entry?.key === key) : selectedSetting();
+		if (row === undefined || settings === undefined) return undefined;
+		try { return { row, settings, target: settingsWriteTarget(settings, row, scope ?? state.settingsScope) }; }
+		catch { return undefined; }
+	};
+	/** A target picker sees only render rows or Chat's already-settled local transcript—never a manager. */
+	const actionTargetsFor = (placement, pending) => {
+		const source = placement.targetSource;
+		if (source === "none") return { state: "ready", targets: [] };
+		if (source === "kept-talk") {
+			const selectedLine = chatBody.lines()[selectedRow()];
+			const targets = chat.items
+				.filter((item) => (item?.type === "user" || item?.type === "agent") && item.source !== undefined)
+				.map((item) => ({
+					key: `talk:${item.key}`,
+					value: item.key,
+					label: String(item.text ?? "speech").replace(/\s+/g, " ").trim().slice(0, 120) || "speech",
+					detail: item.type === "agent" ? "Delivered agent speech kept for a future collapse." : "Submitted user speech kept for a future collapse.",
+					input: { source: item.source },
+					...(item.type === "agent" && item.delivery !== "delivered" ? { disabled: true, disabledReason: "Undelivered agent speech is not a stable kept-talk source." } : {}),
+				}));
+			if (targets.length === 0) return { state: "unavailable", reason: "No stable kept-talk source is available in Conversation. Refresh and try again." };
+			return { state: "ready", targets, selected: selectedLine?.item === undefined ? undefined : `talk:${selectedLine.item}` };
+		}
+		const id = `${placement.route.tab}.${placement.route.view}`;
+		const projection = projectionFor(id);
+		if (projection.data === undefined) {
+			if (projection.loading === true) return { state: "loading" };
+			return { state: "unavailable", reason: projection.error?.message === undefined ? "That target view is not settled. Refresh and try again." : `That target view is unavailable: ${projection.error.message}` };
+		}
+		const page = pageOf(id);
+		if (page === undefined) return { state: "unavailable", reason: "That target view is unavailable. Refresh and try again." };
+		const items = page.list.items();
+		const label = (item) => (item.head ?? []).map(([part]) => String(part)).join("").replace(/\s+/g, " ").trim() || String(item.key ?? "target");
+		const selected = page.list.selected()?.key;
+		const keyed = (pattern, input) => items.flatMap((item) => {
+			const matched = pattern.exec(String(item.key ?? ""));
+			if (matched === null) return [];
+			return [{ key: item.key, value: matched[1], label: label(item), input: input(matched[1], item) }];
+		});
+		let targets;
+		if (source === "requests") {
+			targets = keyed(/^request:(.+)$/, (requestId) => pending.actionId === REQUEST_ACTION.approve ? { ids: [requestId] } : { id: requestId });
+		} else if (source === "shell-windows") {
+			targets = keyed(/^window:(.+)$/, (name) => ({ name }));
+		} else if (source === "wakes") {
+			targets = items.flatMap((item) => {
+				const matched = /^wake:(.+)$/.exec(String(item.key ?? ""));
+				if (matched === null) return [];
+				const settled = item.target;
+				const input = settled !== null && typeof settled === "object"
+					? { ...settled, id: matched[1] }
+					: { id: matched[1] };
+				return [{ key: item.key, value: matched[1], label: label(item), input }];
+			});
+		} else if (source === "model-routes") {
+			targets = items.flatMap((item) => typeof item.target?.modelId !== "string" || item.target.modelId === "" ? [] : [{
+				key: item.key,
+				value: item.target.modelId,
+				label: label(item),
+				input: { modelId: item.target.modelId, ...(Number.isInteger(item.target.contextWindow) && item.target.contextWindow > 0 ? { contextWindow: item.target.contextWindow } : {}) },
+			}]);
+		} else if (source === "atlas-nodes") {
+			targets = keyed(/^node:(.+)$/, (node) => ({ target: node }));
+		} else if (source === "files") {
+			targets = items.flatMap((item) => typeof item.target?.file !== "string" || item.target.file === "" || item.target.folder === true ? [] : [{ key: item.key, value: item.target.file, label: label(item), input: { path: item.target.file } }]);
+		} else if (source === "plan-envelopes") {
+			targets = keyed(/^envelope:(.+)$/, (parent) => ({ parent, rowKey: `envelope:${parent}` }));
+		} else if (source === "settings") {
+			targets = items.flatMap((item) => {
+			const row = item.setting?.row;
+			const write = item.setting?.write;
+			if (typeof row?.key !== "string" || row.key === "" || typeof write?.scope !== "string") return [];
+			const unavailable = write.writable !== true
+				? `The ${write.scope} configuration source is read-only. Choose a writable saved source first.`
+				: write.expectedRevision === undefined ? "Refresh Settings before changing this setting so its saved-source revision is known." : undefined;
+			return [{
+				key: item.key,
+				value: row.key,
+				label: label(item),
+				input: { key: row.key, scope: write.scope, ...(write.expectedRevision === undefined ? {} : { expectedRevision: write.expectedRevision }) },
+				...(unavailable === undefined ? {} : { disabled: true, disabledReason: unavailable }),
+			}];
+		});
+		} else if (source === "workspace-rows") {
+			const allowed = pending.actionId === WORKSPACE_ACTION.unshelve ? /^(shelf):(.+)$/
+				: [WORKSPACE_ACTION.fold, WORKSPACE_ACTION.recall, WORKSPACE_ACTION.toggleFold].includes(pending.actionId) ? /^(report):(.+)$/
+					: /^(report|entry|item|envelope|move|node):(.+)$/;
+			targets = items.flatMap((item) => {
+				const matched = allowed.exec(String(item.key ?? ""));
+				if (matched === null) return [];
+				const rowId = matched[2];
+				return [{ key: item.key, value: rowId, label: label(item), input: { id: rowId, rowKey: item.key } }];
+			});
+		}
+		if (!Array.isArray(targets) || targets.length === 0) return { state: "unavailable", reason: "No current target is available in this settled view. Refresh and try again." };
+		return { state: "ready", targets, selected };
+	};
+	const chooseSettingsSource = () => {
+		const settings = cachedSettings();
+		if (settings === undefined) return flash("Configuration is still loading; refresh Settings before choosing a source.");
+		const sources = settingsSources(settings);
+		if (!sources.some((source) => source.writable === true)) return flash("Neither saved configuration source is writable in this session.");
+		openModal(({ close }) => new SettingsSourcePicker({
+			sources,
+			selected: state.settingsScope,
+			keyOf,
+			close,
+			flash,
+			choose: (source) => {
+				state.settingsScope = source.scope;
+				rebuild("settings.configuration");
+				flash(`save target: ${source.scope} configuration`, NOTICE_LEVEL.info);
+				draw();
+				return true;
+			},
+		}), { width: Math.max(30, Math.min(76, terminal.columns - 4)), anchor: "center" });
+	};
+	const requestSettingsEdit = (requested) => {
+		const selected = settingsTarget(requested);
+		if (selected === undefined) {
+			flash("Choose a settled configuration setting before editing.");
+			return false;
+		}
+		const { row, target } = selected;
+		if (target.writable !== true) {
+			flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
+			return false;
+		}
+		if (target.expectedRevision === undefined) {
+			flash("Refresh Settings before editing so the selected source revision is known.");
+			return false;
+		}
+		const field = settingsEditorField(row, target);
+		return openModal(({ close }) => new Form({
+			title: `Edit ${row.label} · ${target.scope}`,
+			fields: [field],
+			keyOf,
+			flash,
+			close,
+			save: (drafts) => application.execute(SETTINGS_ACTION.edit, {
+				key: row.key,
+				value: drafts.get("value"),
+				scope: target.scope,
+				expectedRevision: target.expectedRevision,
+			}).then((asked) => {
+				if (asked.confirmation === undefined) return presentSettingsResult(asked, "settings.configuration");
+				// The form owns its draft until it reaches the application's confirmation boundary. Once the backend asks
+				// for acknowledgement, that exact request replaces the form; a cancelled confirmation makes no write.
+				close();
+				setTimeout(() => {
+					if (!state.closed) openConfirmation(asked.confirmation, () => application.execute(SETTINGS_ACTION.edit, {
+						key: row.key,
+						value: drafts.get("value"),
+						scope: target.scope,
+						expectedRevision: target.expectedRevision,
+					}, {
+						confirmation: { ...asked.confirmation, acknowledged: true },
+					}).then((result) => presentSettingsResult(result, "settings.configuration")), { title: `Save ${row.label}?` });
+				}, 0);
+				return true;
+			}),
+			redraw: draw,
+		}), { width: boxWidth([field], terminal.columns), anchor: "center" });
+	};
+	const requestSettingsReset = () => {
+		const selected = settingsTarget();
+		if (selected === undefined) return flash("Choose a settled configuration setting before resetting it.");
+		const { row, target } = selected;
+		if (target.writable !== true) return flash(`The ${target.scope} configuration source is read-only. Press s to choose a writable saved source.`);
+		if (target.expectedRevision === undefined) return flash("Refresh Settings before resetting so the selected source revision is known.");
+		void application.execute(SETTINGS_ACTION.reset, {
+			key: row.key,
+			scope: target.scope,
+			expectedRevision: target.expectedRevision,
+		})
+			.then((result) => presentSettingsResult(result, "settings.configuration"))
+			.catch((error) => flash(`could not reset that setting: ${error?.message ?? error}`));
+	};
 	/** Choose or validate a settled route row through the typed Runtime model boundary; there is no provider call in this key handler. */
 	const requestModelRoute = (target) => {
 		if (target === undefined || typeof target.modelId !== "string" || target.modelId === "") return flash("choose a model route before connecting");
@@ -860,18 +1342,6 @@ export async function runScreen(session, options, runTerminal) {
 		void application.execute(action, input)
 			.then((result) => presentRuntimeResult(result, route))
 			.catch((error) => flash(`could not prepare that model route: ${error?.message ?? error}`));
-	};
-	const requestWakeRemoval = (wake) => {
-		if (wake === undefined || typeof wake.id !== "string" || wake.id === "") return flash("choose a wake before removing it");
-		const route = viewId();
-		void application.execute(RUNTIME_ACTION.removeWake, { id: wake.id })
-			.then((asked) => {
-				if (asked.confirmation === undefined) return presentRuntimeResult(asked, route);
-				openConfirmation(asked.confirmation, () => application.execute(RUNTIME_ACTION.removeWake, { id: wake.id }, {
-					confirmation: { ...asked.confirmation, acknowledged: true },
-				}).then((result) => presentRuntimeResult(result, route)), { title: wake.id === "all" ? "Remove every wake?" : "Remove wake?" });
-			})
-			.catch((error) => flash(`could not prepare that wake removal: ${error?.message ?? error}`));
 	};
 	/** Run a row action through the typed application boundary, then redraw its projection after it settles. */
 	const runWorkspaceAction = (action, input, options_ = {}) => {
@@ -969,6 +1439,10 @@ export async function runScreen(session, options, runTerminal) {
 		if (changed) {
 			cancelProjection(previous.id);
 			if (previous.id === "chat.consult") cancelConsultProjection();
+			// A route change before target settlement is an explicit abandonment, not permission to keep a hidden
+			// picker pending behind a different view. Overlay-backed/executing launches retain their own safeguards.
+			actionLauncher?.onRouteChanged(current);
+			lifecycleLauncher?.onRouteChanged(current);
 		}
 		tui.resetTextSelection();
 		refresh(current.id, true);
@@ -1240,11 +1714,17 @@ export async function runScreen(session, options, runTerminal) {
 	// Snapshot of what the box opens with, so a save knows which fields were edited.
 	const openFieldBox = async (viewId_, rowKey) => {
 		const found = await editFieldsFor(viewId_, rowKey);
-		if (viewId() !== viewId_) return;
-		if (found === undefined) return flash("that is not an entry of its book, or the book cannot be read");
-		if (found.error !== undefined) return flash(found.error);
+		if (viewId() !== viewId_) return false;
+		if (found === undefined) {
+			flash("that is not an entry of its book, or the book cannot be read");
+			return false;
+		}
+		if (found.error !== undefined) {
+			flash(found.error);
+			return false;
+		}
 		const { id, fields } = found;
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: id,
 			fields,
 			keyOf,
@@ -1322,10 +1802,13 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	const openAddBox = (book) => {
 		const template = ADD_FIELDS[book];
-		if (template === undefined) return flash("this view has no add");
+		if (template === undefined) {
+			flash("this view has no add");
+			return false;
+		}
 		const id = viewId();
 		const fields = template();
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: `new ${book}`,
 			fields,
 			keyOf,
@@ -1339,10 +1822,16 @@ export async function runScreen(session, options, runTerminal) {
 	/** `n` on an envelope declares a child move through the typed workspace action. */
 	const openMoveBox = async (parentId) => {
 		const found = await queries.entry({ book: "plan", id: parentId });
-		if (viewId() !== "carto.plan") return;
-		if (!found.ok || found.data.item.parent !== undefined) return flash(found.ok ? "that envelope is no longer in the plan" : found.error.message);
+		if (viewId() !== "carto.plan") return false;
+		if (!found.ok || found.data.item.parent !== undefined) {
+			flash(found.ok ? "that envelope is no longer in the plan" : found.error.message);
+			return false;
+		}
 		const parent = found.data.item;
-		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) return flash(`${parent.id} is not an open envelope`);
+		if (parent.status !== POLICY.enums.entryStatus.open || parent.archived === true) {
+			flash(`${parent.id} is not an open envelope`);
+			return false;
+		}
 		const changing = parent.mode === POLICY.enums.planMode.change;
 		const fields = [
 			{ id: "text", label: "Action", limit: POLICY.limits.plan.itemChars, value: "" },
@@ -1358,7 +1847,7 @@ export async function runScreen(session, options, runTerminal) {
 				{ id: "commandStarts", label: "Command-start budget", limit: 1, value: String(POLICY.limits.plan.moveBudget.commandStarts) },
 			] : [{ id: "proof", label: "Proof, if needed", limit: POLICY.limits.plan.proofChars, multiline: true, value: "" }]),
 		];
-		openModal(({ close }) => new Form({
+		return openModal(({ close }) => new Form({
 			title: `new move under ${parent.id}`,
 			fields,
 			keyOf,
@@ -1450,17 +1939,25 @@ export async function runScreen(session, options, runTerminal) {
 	const chatProjection = () => (state.view.chat === "work" ? "work" : state.view.chat === "consult" ? "consult" : "talk");
 	const moveSelection = (by) => {
 		const all = stops();
-		if (all.length === 0) return;
-		let at = all.findIndex(({ stop }) => stop === state.selected);
-		// Scrolled away from the selection, the keys start from what is in view.
+		if (all.length === 0) return void chatScroll.scrollBy(by);
+		const at = all.findIndex(({ stop }) => stop === state.selected);
 		const row = at === -1 ? -1 : all[at].index;
 		const [top, rows] = [chatScroll.scrollTop - chatBody.leadNow(), chatScroll.viewportHeight];
-		if (rows > 0 && (row < top || row >= top + rows)) {
-			const inView = all.filter(({ index }) => index >= top && index < top + rows);
+		const inView = rows > 0 ? all.filter(({ index }) => index >= top && index < top + rows) : [];
+		// Scrolled away from the selection, the keys start from a header in view. A long body can fill the whole
+		// viewport, though; in that case j/k remain ordinary outer-viewport scrolling rather than warping back to a
+		// distant selected header.
+		if (at === -1 || (rows > 0 && (row < top || row >= top + rows))) {
 			if (inView.length > 0) return void showStop(by > 0 ? inView[0] : inView.at(-1));
-			at = -1;
+			return void chatScroll.scrollBy(by);
 		}
-		showStop(at === -1 ? all.at(-1) : all[Math.max(0, Math.min(all.length - 1, at + by))]);
+		const next = by > 0
+			? inView.find(({ index }) => index > row)
+			: inView.findLast(({ index }) => index < row);
+		// A disclosure can fill the viewport between its own header and the next one. Keep that content in the one
+		// outer document: j/k take one row through it until another selectable header is actually in view.
+		if (next === undefined) return void chatScroll.scrollBy(by);
+		showStop(next);
 	};
 	/** Open or fold what is selected in Chat; `to` forces one of the two. With `jump`, a call goes to its tab. */
 	const activate = ({ to, jump = false } = {}) => {
@@ -1498,6 +1995,18 @@ export async function runScreen(session, options, runTerminal) {
 		if (tui.hasOverlay()) return;
 		openModal(({ close }) => new Sheet({ title: "Keys", text: KEYS_HELP, rows: () => terminal.rows, keyOf, close }), { width: Math.max(20, Math.min(108, terminal.columns - 4)), anchor: "center" });
 	};
+	/** Route-local shortcuts use the same launcher as the palette; no key handler touches a Runtime manager. */
+	const launchAction = (actionId) => {
+		if (actionLauncher === undefined) return false;
+		void actionLauncher.launch(actionId).catch((error) => flash(`could not open that action: ${error?.message ?? error}`));
+		return true;
+	};
+	/** Lifecycle controls share the launch/confirmation gate but dispatch only through application.lifecycle. */
+	const launchLifecycle = (actionId) => {
+		if (lifecycleLauncher === undefined) return false;
+		void lifecycleLauncher.launch(actionId).catch((error) => flash(`could not open that lifecycle action: ${error?.message ?? error}`));
+		return true;
+	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
 		const inChat = chatTab();
@@ -1518,7 +2027,29 @@ export async function runScreen(session, options, runTerminal) {
 		// They stand on a report or shelved file in Current shared brain, a graph node, a ledger entry, a plan envelope
 		// or move, or a request. Model rows are frozen or prospective and have no mutable-record action.
 		if (!inChat) {
+			if (viewId() === "settings.configuration") {
+				if (key === "enter" || key === "e") return void requestSettingsEdit();
+				if (key === "x") return void requestSettingsReset();
+				if (key === "s") return void chooseSettingsSource();
+			}
+			if (viewId() === "settings.safety" && (key === "enter" || key === " " || key === "o")) {
+				const lifecycleAction = pageOf("settings.safety")?.list.selected()?.lifecycleAction;
+				if (typeof lifecycleAction === "string") return void launchLifecycle(lifecycleAction);
+			}
 			if (key === "u" && viewId().startsWith("diff.")) return void requestReviewUndo();
+			if (viewId() === "context.parts" && key === "p") return void launchLifecycle(LIFECYCLE_ACTION.refreshTop);
+			if (viewId() === "context.parts" && key === "N") return void launchLifecycle(LIFECYCLE_ACTION.freshContext);
+			if (viewId() === "context.parts" && key === "c") return void launchLifecycle(LIFECYCLE_ACTION.collapse);
+			if (viewId() === "shells.list") {
+				if (key === "s") return void launchAction(RUNTIME_ACTION.sendShell);
+				if (key === "d") return void launchAction(RUNTIME_ACTION.closeShell);
+				if (key === "D") return void launchAction(RUNTIME_ACTION.closeAllShells);
+			}
+			if (viewId() === "shells.wakes") {
+				if (key === "n") return void launchAction(RUNTIME_ACTION.createWake);
+				if (key === "e") return void launchAction(RUNTIME_ACTION.replaceWake);
+				if (key === "d") return void launchAction(RUNTIME_ACTION.removeWake);
+			}
 			const item = pageOf().list.selected();
 			const rowKey = typeof item?.key === "string" ? item.key : undefined;
 			const bookId = rowKey !== undefined && /^[a-z]+:/.test(rowKey) ? rowKey.slice(rowKey.indexOf(":") + 1) : undefined;
@@ -1528,22 +2059,16 @@ export async function runScreen(session, options, runTerminal) {
 			if (key === "t" && rowKey !== undefined && /^(?:report|entry|item|envelope|move|node):/.test(rowKey)) return void settleWorkspaceRow(rowKey, bookId);
 			if (key === "x" && rowKey !== undefined && rowKey.startsWith("shelf:")) return void runWorkspaceAction(WORKSPACE_ACTION.unshelve, { id: bookId });
 			if (viewId() === "context.routes" && (key === "enter" || key === " " || key === "o")) return void requestModelRoute(item?.target);
-			if (key === "d" && viewId() === "shells.wakes" && rowKey?.startsWith("wake:")) return void requestWakeRemoval({ id: rowKey.slice(5) });
 			// Deleting is for good, so it always opens the same scoped confirmation. A request is not deleted but
 			// forgotten: the agent is told nothing of it, and so forgets it had asked.
 			if (key === "d" && deletable) return void requestWorkspaceDelete(bookId);
 			if (key === "d" && rowKey !== undefined && rowKey.startsWith("shelf:")) return flash("a shelved file is not deleted: x takes it off the shelf");
-			// A request is approved or turned down the way the commands do it, so that the agent is told what changed.
+			// Requests use the settled row's typed launcher contract. The next agent turn sees the durable decision through
+			// its state projection; a Screen key never constructs a slash command or reaches request storage directly.
 			if (viewId() === "carto.requests" && rowKey !== undefined && rowKey.startsWith("request:")) {
-				if (key === "a") {
-					if (QUESTION_ID.test(bookId)) return flash("a question is answered with words: /answer " + bookId + " words");
-					setMode("type");
-					return void submit(`/approve ${bookId}`);
-				}
-				if (key === "n") {
-					setMode("type");
-					return void submit(`/deny ${bookId}`);
-				}
+				if (key === "a") return void launchAction(REQUEST_ACTION.approve);
+				if (key === "n") return void launchAction(REQUEST_ACTION.deny);
+				if (key === "e") return void launchAction(REQUEST_ACTION.answer);
 			}
 			// In Plan, n on an envelope declares one child move; elsewhere it opens the book's new-entry box.
 			if (key === "n" && viewId() === "carto.plan" && rowKey?.startsWith("envelope:")) return void openMoveBox(bookId);
@@ -1563,8 +2088,9 @@ export async function runScreen(session, options, runTerminal) {
 			return;
 		}
 		if (key === "/") return void terminal.press?.(SEARCH_KEY);
-		if (/^[1-5]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
+		if (/^[1-6]$/.test(key)) return void setTab(TABS[Number(key) - 1].id);
 		if (key === "?") return void showKeys();
+		if (key === "J") return void showJobs();
 		if (key === "]" || key === "L") return void stepView(1);
 		if (key === "[" || key === "H") return void stepView(-1);
 		if (key === "y") return void copySelected();
@@ -1583,6 +2109,7 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "ctrl+e") return void scroll.scrollBy(1);
 		if (key === "ctrl+y") return void scroll.scrollBy(-1);
 		if (inChat) {
+			if (state.view.chat === "work" && key === "m") return void launchAction(RUNTIME_ACTION.routeTaskMessage);
 			if (key === "d") return void removeChat();
 			if (key === "j" || key === "down") return void moveSelection(1);
 			if (key === "k" || key === "up") return void moveSelection(-1);
@@ -1617,14 +2144,17 @@ export async function runScreen(session, options, runTerminal) {
 		if (key === "j" || key === "down") {
 			// A tab with nothing to select is scrolled instead.
 			if (!anchor() && !list.move(1)) page.scroll.scrollBy(1);
+			if (viewId() === "settings.configuration") rebuild();
 			return void show();
 		}
 		if (key === "k" || key === "up") {
 			if (!anchor() && !list.move(-1)) page.scroll.scrollBy(-1);
+			if (viewId() === "settings.configuration") rebuild();
 			return void show();
 		}
 		if (key === "g" || key === "home") {
 			list.first();
+			if (viewId() === "settings.configuration") rebuild();
 			return void page.scroll.scrollToStart();
 		}
 		if (key === "G" || key === "end") {
@@ -1803,7 +2333,22 @@ export async function runScreen(session, options, runTerminal) {
 		if (opened === undefined) flash("finish or cancel the open dialog first");
 		return opened;
 	};
-	const openConfirmation = (confirmation, confirm, { title } = {}) => openModal(({ close }) => new ConfirmDialog({
+	/** The detailed drawer is reserved for competing live work or a failed/cancelled result that needs inspection. */
+	const showJobs = () => {
+		if (!jobDrawerNeeded(jobSnapshots)) {
+			const live = jobSnapshots.filter((job) => job?.state === "queued" || job?.state === "running");
+			return flash(live.length === 1 ? "the one background job is shown in the status strip" : "no background job needs inspection");
+		}
+		return openModal(({ close }) => new JobDrawer({
+			jobs: () => jobSnapshots,
+			keyOf,
+			close,
+			cancel: cancelJob,
+			flash,
+			redraw: draw,
+		}), { width: Math.max(34, Math.min(78, terminal.columns - 4)), anchor: "center" });
+	};
+	const openConfirmation = (confirmation, confirm, { title, cancel } = {}) => openModal(({ close }) => new ConfirmDialog({
 		title,
 		confirmation,
 		keyOf,
@@ -1811,28 +2356,171 @@ export async function runScreen(session, options, runTerminal) {
 		confirm,
 		flash,
 		redraw: draw,
+		...(typeof cancel === "function" ? { cancel } : {}),
 	}), { width: Math.max(20, Math.min(76, terminal.columns - 4)), anchor: "center" });
+	const presentLaunchedResult = (result, pending) => {
+		const id = `${pending.placement.route.tab}.${pending.placement.route.view}`;
+		if (pending.actionId.startsWith("settings.")) return presentSettingsResult(result, id);
+		if (pending.actionId.startsWith("runtime.")) return presentRuntimeResult(result, id);
+		if (pending.actionId.startsWith("review.")) return presentReviewResult(result, id);
+		if (pending.actionId.startsWith("workspace.")) return presentWorkspaceResult(result, id);
+		if (pending.actionId.startsWith("request.") || pending.actionId.startsWith("context.")) {
+			flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+			if (!result.ok) refresh(id, true);
+			draw();
+			return result.ok;
+		}
+		if (pending.actionId.startsWith("talk.")) {
+			flash((result.ok ? result.data.line : result.error.message).replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+			draw();
+			return result.ok;
+		}
+		return presentWorkspaceResult(result, id);
+	};
+	/** Lifecycle outcomes are terminal-owned but use the same UiResult/notice contract as application actions. */
+	const presentLifecycleResult = (result, pending) => {
+		const id = `${pending.placement.route.tab}.${pending.placement.route.view}`;
+		const line = result.ok ? result.data.line : result.error.message;
+		flash(String(line ?? "Lifecycle action completed.").replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+		refreshLifecycleCapabilities();
+		if (!result.ok) refresh(id, true);
+		draw();
+		return result.ok;
+	};
+	const openExistingActionControl = ({ plan, placement, dispatch, cancel }) => {
+		const input = plan.input ?? {};
+		if (plan.actionId === REVIEW_ACTION.undo) {
+			return (async () => {
+				if (core.busy()) {
+					flash("The agent is working. Stop it first, then undo its checkpoint change.");
+					return false;
+				}
+				// Preserve the established recovery bridge: active shell changes become their own checkpoint before undo
+				// names a recovery target. Both legs remain application actions; only the launcher owns confirmation.
+				if (application.capabilities.availability(REVIEW_ACTION.recordWindows)?.enabled === true) {
+					const recorded = await application.execute(REVIEW_ACTION.recordWindows);
+					if (!recorded.ok) return presentReviewResult(recorded, `${placement.route.tab}.${placement.route.view}`);
+				}
+				return dispatch();
+			})();
+		}
+		if ([RUNTIME_ACTION.createWake, RUNTIME_ACTION.replaceWake].includes(plan.actionId)) {
+			// Suggestions are copied only from an already-settled Shells projection. A form may name another window,
+			// but it never probes the live manager while it is being opened or painted.
+			const shellSnapshot = projectionFor("shells.list").data;
+			const windowSuggestions = Array.isArray(shellSnapshot?.windows)
+				? shellSnapshot.windows.filter((window) => typeof window?.name === "string" && window.name !== "" && window.state !== POLICY.enums.windowStates.gone).map((window) => window.name)
+				: [];
+			const openedWakeDialog = openModal(({ close }) => new WakeDialog({
+				title: plan.actionId === RUNTIME_ACTION.replaceWake ? `Replace wake ${input.id ?? ""}`.trim() : "Create wake",
+				input,
+				windowSuggestions,
+				keyOf,
+				close,
+				flash,
+				redraw: draw,
+				submit: (wakeInput) => dispatch(wakeInput, { fromDialog: true }),
+				cancel,
+			}), { width: Math.max(46, Math.min(82, terminal.columns - 4)), anchor: "center" });
+			return openedWakeDialog === undefined ? false : { ...openedWakeDialog, pending: true };
+		}
+		if (plan.actionId === SETTINGS_ACTION.edit) return requestSettingsEdit(input);
+		if (plan.actionId === WORKSPACE_ACTION.add) return openAddBox(BOOK_VIEWS[viewId()] ?? "ledger");
+		if (plan.actionId === WORKSPACE_ACTION.addMove) {
+			if (typeof input.parent !== "string" || input.parent === "") return false;
+			return openMoveBox(input.parent);
+		}
+		if (plan.actionId === WORKSPACE_ACTION.edit) {
+			if (typeof input.rowKey !== "string" || input.rowKey === "") return false;
+			return openFieldBox(viewId(), input.rowKey);
+		}
+		if (plan.actionId === WORKSPACE_ACTION.settle) {
+			if (typeof input.id !== "string" || input.id === "") return false;
+			// Palette candidates are settled Ledger rows at this placement. Dispatching retains the application's durable
+			// validation without re-querying a row from the key/overlay path; Plan's reported-move review bridge remains
+			// the contextual `t` control on its own settled view.
+			return dispatch();
+		}
+		return false;
+	};
+	// The palette feeds this single launcher. Its target callback reads only current list/chat rows and its execution
+	// callback is application.execute; no Screen component receives a manager or performs a hidden live lookup.
+	actionLauncher = new ActionLauncher({
+		capabilities: screenActionCapabilities,
+		specs: application.actionSpecs,
+		placements: Object.freeze({ get: actionPlacementFor }),
+		execute: application.execute,
+		currentRoute: () => routes.current(),
+		navigate: (route) => setRoute(route),
+		targetsFor: actionTargetsFor,
+		openDialog: ({ plan, submit, cancel }) => openModal(({ close }) => new ActionDialog({
+			actionId: plan.actionId,
+			title: plan.title,
+			fields: plan.fields,
+			input: plan.input,
+			keyOf,
+			close,
+			flash,
+			redraw: draw,
+			submit,
+			cancel,
+		}), { width: boxWidth(plan.fields, terminal.columns), anchor: "center" }),
+		openTargetPicker: ({ title, targets, choose, cancel }) => openModal(({ close }) => new TargetPicker({
+			title,
+			targets,
+			keyOf,
+			close,
+			flash,
+			redraw: draw,
+			choose,
+			cancel,
+		}), { width: Math.max(28, Math.min(82, terminal.columns - 4)), anchor: "center" }),
+		openConfirmation: ({ confirmation, confirm, cancel }) => openConfirmation(confirmation, confirm, {
+			title: `${application.capabilities.get(confirmation.actionId)?.label ?? "Confirm action"}?`,
+			cancel,
+		}),
+		openExistingControl: openExistingActionControl,
+		present: presentLaunchedResult,
+		flash,
+	});
+	if (typeof lifecycleService?.execute === "function") {
+		lifecycleLauncher = new ActionLauncher({
+			capabilities: lifecycleCapabilityRegistry,
+			specs: Object.freeze({ get: lifecycleActionSpecFor, list: () => LIFECYCLE_ACTION_SPECS }),
+			placements: Object.freeze({ get: lifecyclePlacementFor }),
+			execute: lifecycleService.execute,
+			currentRoute: () => routes.current(),
+			navigate: (route) => setRoute(route),
+			openDialog: ({ plan, submit, cancel }) => openModal(({ close }) => new ActionDialog({
+				actionId: plan.actionId,
+				title: plan.title,
+				fields: plan.fields,
+				input: plan.input,
+				keyOf,
+				close,
+				flash,
+				redraw: draw,
+				submit,
+				cancel,
+			}), { width: boxWidth(plan.fields, terminal.columns), anchor: "center" }),
+			openConfirmation: ({ confirmation, confirm, cancel }) => openConfirmation(confirmation, confirm, {
+				title: `${lifecycleCapabilityRegistry.get(confirmation.actionId)?.label ?? "Confirm lifecycle action"}?`,
+				cancel,
+			}),
+			present: presentLifecycleResult,
+			flash,
+		});
+	}
 	const paletteItems = () => [
 		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation, private Work, and isolated Consult.", destination: { tab: "chat", view: "conversation", name: "Chat" } },
 		{ id: "navigate.carto", label: "Go to Carto", category: "navigation", description: "Atlas, Ledger, Plan, Requests, Tree, and the shared brain.", destination: { tab: "carto", view: "atlas", name: "Carto" } },
 		{ id: "navigate.review", label: "Go to Diff and review", category: "navigation", description: "Last-step, session, and git change inspection.", destination: { tab: "diff", view: "last", name: "Diff · Last step" } },
 		{ id: "navigate.shells", label: "Go to Shells", category: "navigation", description: "Open shell windows and their captured output.", destination: { tab: "shells", view: "list", name: "Shells · List" } },
 		{ id: "navigate.model", label: "Go to Model", category: "navigation", description: "Model-route readiness, sent requests, preview, and current context accounting.", destination: { tab: "context", view: "routes", name: "Model · Routes" } },
+		{ id: "navigate.settings", label: "Go to Settings", category: "navigation", description: "Configuration, session policy, provider diagnostics, and assessment.", destination: { tab: "settings", view: "configuration", name: "Settings · Configuration" } },
 		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
-		...paletteCapabilities.map((capability) => {
-			const destination = paletteDestinationFor(capability.id);
-			return {
-				id: `capability:${capability.id}`,
-				label: capability.label,
-				category: capability.category,
-				availability: capability.availability,
-				description: destination === undefined
-					? `${capability.id} is registered but remains on the terminal command surface until its focused screen control migrates.`
-					: `${destination.name}. ${destination.hint}`,
-				keywords: capability.id,
-				destination,
-			};
-		}),
+		...paletteCapabilities.map(paletteItemForCapability),
+		...lifecycleCapabilities.map(paletteItemForLifecycleCapability),
 	];
 	const openPaletteDestination = (destination) => {
 		if (destination === undefined) return false;
@@ -1847,19 +2535,34 @@ export async function runScreen(session, options, runTerminal) {
 		close,
 		flash,
 		redraw: draw,
-		activate: (item) => {
+		activate: async (item) => {
 			if (item.id === "shell.refresh") {
 				invalidateBrain();
 				refresh(viewId(), true);
 				flash("read again", NOTICE_LEVEL.info);
 				return true;
 			}
+			if (item.actionId !== undefined) {
+				const started = await actionLauncher.begin(item.actionId, { waitForResume: true });
+				// CommandPalette closes only after this promise resolves. Defer target/dialog resolution one turn so the
+				// shared overlay owner never stacks it on the palette; route settlement resumes a loading target later.
+				if (started) setTimeout(() => {
+					if (!state.closed) void actionLauncher.resume();
+				}, 0);
+				return started;
+			}
+			if (item.lifecycleActionId !== undefined && lifecycleLauncher !== undefined) {
+				const started = await lifecycleLauncher.begin(item.lifecycleActionId, { waitForResume: true });
+				if (started) setTimeout(() => {
+					if (!state.closed) void lifecycleLauncher.resume();
+				}, 0);
+				return started;
+			}
 			if (openPaletteDestination(item.destination)) {
 				flash(`opened ${item.destination.name}`, NOTICE_LEVEL.info);
 				return true;
 			}
-			flash(`${item.label} is available through the terminal command surface.`, NOTICE_LEVEL.info);
-			return true;
+			return false;
 		},
 	}), { width: Math.max(20, Math.min(82, terminal.columns - 4)), anchor: "center" });
 	const full = { basis: 0, grow: 1, minSize: 1 };
@@ -1883,7 +2586,7 @@ export async function runScreen(session, options, runTerminal) {
 	const pasted = createPasteWatch();
 	const watchInput = (chunk) => pasted.read(chunk);
 	/** The keys the commands mode takes that the editor has no use for with Alt held. */
-	const AFTER_ESCAPE = new Set([..."12345jkgGhloeYriazuR+-[]HL?/: "]);
+	const AFTER_ESCAPE = new Set([..."123456jkgGhloeYriazuR+-[]HL?/: "]);
 	tui.addInputListener((data) => {
 		if (state.closed || isKeyRelease(data)) return undefined;
 		// A sheet lies over the screen: the keys are its own.
@@ -1913,8 +2616,8 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			reader.emit("SIGINT");
 		}
-		else if (key === "ctrl+x") keys.emit("keypress", "", { ctrl: true, name: "x" });
-		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
+		else if (key === "ctrl+x") launchLifecycle(LIFECYCLE_ACTION.stop);
+		else if (key === "ctrl+v") launchLifecycle(LIFECYCLE_ACTION.togglePause);
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
 		else if (key === "ctrl+k") showPalette();

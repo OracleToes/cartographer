@@ -1,6 +1,6 @@
 # Cartographer — the pair-programmer design
 
-**Status:** retained source of product intent, refreshed 2026-11-16. It is not the delivery plan: `docs/atlas-attention.md` records the verified Atlas baseline, `docs/consult-mode-proposal.md` specifies the approved consultation target, and `docs/plan.md` carries the active delivery sequence. The README documents the harness as it is; historical plans remain evidence in Git rather than active scope.
+**Status:** retained source of product intent, refreshed 2026-11-16. It is not the delivery plan: `docs/atlas-attention.md` records the verified Atlas baseline, `docs/consult-mode-proposal.md` specifies the approved consultation target, and [the Phase 2 UI delivery plan](./ui-redesign-phase-2-architecture-plan.md) carries the active delivery sequence. The README documents the harness as it is; historical plans remain evidence in Git rather than active scope.
 
 Rules of evidence, same as everywhere in this project: no live claims until a live run exists; measurements are bytes or tokens stated as such; anything not yet verified is marked open.
 
