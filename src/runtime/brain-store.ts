@@ -45,14 +45,14 @@ export class BrainStore {
 
   async read(): Promise<MiniBrain> {
     const brain = await this.harness.snapshot(BrainDocument, this.root.id, BACKGROUND_CONTEXT);
-    return structuredClone((brain ?? createEmptyBrain()) as unknown as MiniBrain);
+    return copyBrain(brain ?? createEmptyBrain());
   }
 
   async apply(command: MiniCommand): Promise<Decision> {
     let result: Decision | undefined;
     await this.root.commit(async (transaction) => {
       const document = await transaction.doc(BrainDocument, this.root.id);
-      result = decide(structuredClone(document) as unknown as MiniBrain, command);
+      result = decide(copyBrain(document), command);
       Object.assign(document, result.brain as unknown as StoredBrain);
     }, BACKGROUND_CONTEXT);
     if (result === undefined) throw new Error("Mini Brain command did not produce a result.");
@@ -75,4 +75,8 @@ export class BrainStore {
       await transaction.doc(BrainDocument, this.root.id);
     }, BACKGROUND_CONTEXT);
   }
+}
+
+function copyBrain(value: unknown): MiniBrain {
+  return JSON.parse(JSON.stringify(value)) as MiniBrain;
 }
