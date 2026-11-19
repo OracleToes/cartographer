@@ -334,3 +334,22 @@ test("Enter opens the selected Brain and Context record whole, not a footer mess
     assert.ok(brain === undefined || /^[LXAWH]/.test(brain.handle));
   });
 });
+
+test("a record page hides the list keys and names its own", async () => {
+  const { actionContextOf } = await import("../dist/ui/frame.js");
+  const { footerHints } = await import("../dist/ui/actions.js");
+  const { visibleWidth } = await import("@earendil-works/pi-tui");
+  await withProject(async (project) => {
+    const view = await project.view();
+    const list = actionContextOf(stateOf(project, { view, detail: null }));
+    const page = actionContextOf(stateOf(project, { view, detail: "record" }));
+    const listKeys = footerHints(list, 120, visibleWidth);
+    const pageKeys = footerHints(page, 120, visibleWidth);
+    // The defect: the footer said `j k move` while `j k` scrolled the page.
+    assert.match(listKeys, /j k move/);
+    assert.match(pageKeys, /j k scroll/);
+    assert.doesNotMatch(pageKeys, /j k move/);
+    assert.doesNotMatch(pageKeys, /i input|a actions|\? help/);
+    assert.match(pageKeys, /Esc back/);
+  });
+});

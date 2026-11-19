@@ -150,7 +150,7 @@ export function recordDetailRows(detail: RecordDetail, columns: number): string[
     }
     for (const wrapped of wrap(line, inner)) rows.push(`  ${wrapped}`);
   }
-  rows.push("");
-  rows.push(`  ${token.faint("Esc or Backspace returns to the list · j k scroll · g G ends")}`);
+  // No key hint here. The footer under the body already lists the keys that
+  // work, and two copies of one list is how one of them becomes a lie.
   return rows;
 }

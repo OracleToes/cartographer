@@ -238,9 +238,18 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     reference?.hide();
     reference = undefined;
     if (wasRecord || next === "record") {
-      // A page replaces the body, so it starts at its own top; leaving it puts
-      // the transcript back at its end, which is where a new answer arrives.
-      scroll.scrollTo(0, { disableFollow: true });
+      // A page replaces the body, so it starts at its own top. Leaving it puts
+      // the list back at its end, which is where a new answer arrives.
+      //
+      // Do not pass `disableFollow` here. Pi TUI draws its jump-to-end label
+      // whenever a follow-end view is not following, and a short page that fits
+      // the viewport is "not following" the moment follow is suppressed: the
+      // label then sits on the screen with nothing to jump to, and only another
+      // scroll clears it. A plain `scrollTo(0)` leaves follow on when the page
+      // fits, and turns it off by itself when the page is longer than the
+      // viewport, which is when the label is telling the truth.
+      if (next === "record") scroll.scrollTo(0);
+      else scroll.scrollToEnd();
       paint();
       tui.requestRender();
       return;
@@ -555,6 +564,28 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     if (data === "1") return switchTab("chat");
     if (data === "2") return switchTab("brain");
     if (data === "3") return switchTab("context");
+    // A record page is read, not navigated. `j` and `k` move the page, because
+    // the list they used to move is behind the page and cannot be seen; a key
+    // that changes something invisible is the defect this screen keeps
+    // producing. The footer under the page says exactly this.
+    if (detail === "record") {
+      if (data === "j" || matchesKey(data, Key.down)) {
+        scroll.scrollBy(1);
+        return { consume: true };
+      }
+      if (data === "k" || matchesKey(data, Key.up)) {
+        scroll.scrollBy(-1);
+        return { consume: true };
+      }
+      if (data === "g" || matchesKey(data, Key.home)) {
+        scroll.scrollToStart();
+        return { consume: true };
+      }
+      if (data === "G" || matchesKey(data, Key.end)) {
+        scroll.scrollToEnd();
+        return { consume: true };
+      }
+    }
     if (data === "j" || matchesKey(data, Key.down)) {
       selected += 1;
       selected = clampSelection({ tab, view, selected });

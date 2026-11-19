@@ -26,8 +26,10 @@ export interface ActionContext {
   pinSelected: boolean;
   /** The selected row is a Brain record. */
   brainSelected: boolean;
-  /** A detail overlay is open. */
+  /** A reference or the edit hint is open over the list. */
   detailOpen: boolean;
+  /** A record page has replaced the body, so the list is not the thing on screen. */
+  recordOpen: boolean;
   /** The agent or a local action is working. */
   busy: boolean;
   /** A turn is paused. */
@@ -56,16 +58,27 @@ export interface Action {
 }
 
 const navigating = (context: ActionContext): boolean => context.mode === "navigate";
+/**
+ * Navigate mode with the list visible.
+ *
+ * A record page replaces the body, so the keys that move the list are not the
+ * keys that work while it is open. Gating the *actions* rather than the footer
+ * is what keeps one list of keys in one place: `?`, the footer, and the key
+ * handler all read the same `available(context)`.
+ */
+const listing = (context: ActionContext): boolean => navigating(context) && !context.recordOpen;
 const chatting = (context: ActionContext): boolean => navigating(context) && context.tab === "chat";
 const onContext = (context: ActionContext): boolean => navigating(context) && context.tab === "context";
 
 export const ACTIONS: readonly Action[] = [
-  { id: "move", keys: ["j", "k"], label: "move", help: "Move the selection down or up. The arrow keys do the same.", group: "move", when: navigating },
-  { id: "ends", keys: ["g", "G"], label: "ends", help: "Move the selection to the first or the last row.", group: "move", when: navigating },
-  { id: "tabs", keys: ["1", "2", "3"], label: "tabs", help: "Show Chat, Brain, or Context.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen },
-  { id: "input", keys: ["i"], label: "input", help: "Open the input. In Chat edit detail it replaces the selected Chat text.", group: "turn", when: (context) => navigating(context) && !context.busy },
-  { id: "actions", keys: ["a"], label: "actions", help: "Show the compact command reference. Esc closes it.", group: "view", when: navigating },
-  { id: "help", keys: ["?"], label: "help", help: "Show every key that works now. Esc closes it.", group: "view", when: navigating },
+  { id: "move", keys: ["j", "k"], label: "move", help: "Move the selection down or up. The arrow keys do the same.", group: "move", when: listing },
+  { id: "ends", keys: ["g", "G"], label: "ends", help: "Move the selection to the first or the last row.", group: "move", when: listing },
+  { id: "tabs", keys: ["1", "2", "3"], label: "tabs", help: "Show Chat, Brain, or Context.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen },
+  { id: "input", keys: ["i"], label: "input", help: "Open the input. In Chat edit detail it replaces the selected Chat text.", group: "turn", when: (context) => listing(context) && !context.busy },
+  // A reference describes the list, and a record page covers the list, so both
+  // references belong to the list view only.
+  { id: "actions", keys: ["a"], label: "actions", help: "Show the compact command reference. Esc closes it.", group: "view", when: listing },
+  { id: "help", keys: ["?"], label: "help", help: "Show every key that works now. Esc closes it.", group: "view", when: listing },
   { id: "fold", keys: ["f"], label: "fold", help: "Fold or unfold the selected Chat item. A folded item stays in agent context.", group: "chat", when: (context) => chatting(context) && context.chatSelected },
   { id: "edit", keys: ["e"], label: "edit", help: "Open edit detail for the selected Chat item.", group: "chat", when: (context) => chatting(context) && context.chatSelected },
   { id: "disclosure", keys: ["o"], label: "open", help: "Expand or fold the selected live disclosure.", group: "chat", when: (context) => chatting(context) && context.activitySelected },
@@ -75,14 +88,17 @@ export const ACTIONS: readonly Action[] = [
   { id: "unpin", keys: ["u"], label: "remove at collapse", help: "Remove the selected pin at the next collapse.", group: "context", when: (context) => onContext(context) && context.pinSelected && !context.busy },
   { id: "unpin-now", keys: ["U"], label: "remove now", help: "Remove the selected pin now and restart from a fresh context.", group: "context", when: (context) => onContext(context) && context.pinSelected && !context.busy },
   { id: "pause", keys: ["p"], label: "pause", help: "Stop at a durable boundary and keep an editable draft.", group: "turn", when: (context) => navigating(context) && context.running },
-  { id: "resume", keys: ["r"], label: "resume", help: "Edit the paused draft, or start the next useful task when idle.", group: "turn", when: (context) => navigating(context) && (context.paused || !context.busy) },
+  { id: "resume", keys: ["r"], label: "resume", help: "Edit the paused draft, or start the next useful task when idle.", group: "turn", when: (context) => listing(context) && (context.paused || !context.busy) },
   { id: "cancel", keys: ["x"], label: "cancel", help: "Cancel the running or paused turn.", group: "turn", when: (context) => navigating(context) && (context.running || context.paused) },
   { id: "interrupt", keys: ["I"], label: "interrupt", help: "Stop the active stream and send now.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "steer", keys: ["S"], label: "steer", help: "Queue a message for the next durable boundary.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "follow-up", keys: ["F"], label: "follow-up", help: "Queue a message to start after the active run.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "escape", keys: ["Esc"], label: "back", help: "Return to Navigate mode and close a detail.", group: "view", when: (context) => context.mode === "insert" || context.detailOpen },
   { id: "close-detail", keys: ["Backspace"], label: "close", help: "Close a detail, or clear the selection.", group: "view", when: (context) => context.detailOpen, hidden: true },
-  { id: "open", keys: ["Enter"], label: "open", help: "Open the selected item. In the input box, Enter sends instead.", group: "view", when: (context) => context.mode === "navigate" },
+  { id: "page-scroll", keys: ["j k"], label: "scroll", help: "Move the record page one line. g and G jump to the ends.", group: "move", when: (context) => context.recordOpen },
+  { id: "page-back", keys: ["Esc"], label: "back", help: "Return to the list; the record stays selected.", group: "view", when: (context) => context.recordOpen },
+  { id: "page-ends", keys: ["g", "G"], label: "ends", help: "Jump the record page to its first or last line.", group: "move", when: (context) => context.recordOpen },
+  { id: "open", keys: ["Enter"], label: "open", help: "Open the selected record whole. In the input box, Enter sends instead.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen },
   { id: "send", keys: ["Enter"], label: "send", help: "Send with the chosen mode, or run a command that starts with `/`.", group: "turn", when: (context) => context.mode === "insert" },
   { id: "quit", keys: ["Ctrl+C"], label: "quit", help: "Close Carto.", group: "view", when: () => true, hidden: true },
 ];
