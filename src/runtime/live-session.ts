@@ -11,6 +11,8 @@ import {
   InboxDoc,
   LiveDoc,
   ToolResultEntry,
+  type InboxState,
+  type LiveState,
   createRegistry,
   Harness,
 } from "@earendil-works/pi-durable";
@@ -25,6 +27,7 @@ import { modelsForConfig } from "./llama-swap-model.js";
 import { LiveCarryDocument, readLiveCarry } from "./live-carry.js";
 import { createCartoExtension } from "./carto-extension.js";
 import { createPathWakeTask, PATH_WAKE_TASK_NAME, pathFingerprint } from "./path-wake-task.js";
+import { createPrefillMonitor, type PrefillMonitor, type PrefillState } from "./prefill.js";
 import { createTimeWakeTask, TIME_WAKE_TASK_NAME } from "./wake-task.js";
 import { digestProjectFile, resolveProjectWatchPath } from "./workspace.js";
 
@@ -50,6 +53,8 @@ export interface LiveSessionOptions {
   models?: Models;
   contextBudget?: number;
   initialCarryPins?: CarryPin[];
+  /** A monitor for the server's prompt reading; created for llama-swap when absent. */
+  prefill?: PrefillMonitor;
 }
 
 export type LiveActivityKind = "reasoning" | "model" | "tool-call" | "tool-output" | "warning" | "error";
@@ -74,6 +79,10 @@ export class LiveSession {
   private constructor(
     private readonly projectRoot: string,
     private readonly harness: Harness,
+    /** How far llama.cpp is with reading a prompt, when the provider reports it. */
+    readonly prefill: PrefillMonitor,
+    /** The model's context window, read from the Pi catalog at open. */
+    readonly contextWindow: number,
     private readonly root: Awaited<ReturnType<Harness["root"]>>,
     private readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>,
     private readonly timeWakeTask: ReturnType<typeof createTimeWakeTask>,
@@ -91,6 +100,7 @@ export class LiveSession {
       const models =
         options.models ??
         (options.config === undefined ? builtinModels() : modelsForConfig(options.config, options.model) ?? builtinModels());
+      const providerId = options.model.provider;
       if (models.getModel(options.model.provider, options.model.modelId) === undefined) {
         throw new Error(`Pi does not know the model ${options.model.provider}/${options.model.modelId}.`);
       }
@@ -109,7 +119,14 @@ export class LiveSession {
         }),
       );
 
-      harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
+      // Wrap the Models object the Harness is given, so the request that Pi
+      // Durable builds itself still carries `return_progress`. Only the
+      // selected provider is touched; every other request passes through.
+      const prefill =
+        options.prefill ??
+        createPrefillMonitor({ provider: providerId, ...(options.config?.llamaSwapEndpoint === undefined ? {} : {}) });
+      harness = await Harness.open(storage, { models: prefill.wrap(models), registry }, BACKGROUND_CONTEXT);
+      const contextWindow = models.getModel(providerId, options.model.modelId)?.contextWindow ?? 32_768;
       const agent = {
         model: options.model,
         instructions: CARTO_INSTRUCTIONS,
@@ -125,7 +142,17 @@ export class LiveSession {
         }
       }, BACKGROUND_CONTEXT);
       harness.resume();
-      return new LiveSession(options.projectRoot, harness, root, database, timeWakeTask, pathWakeTask, patchApplyTask);
+      return new LiveSession(
+        options.projectRoot,
+        harness,
+        prefill,
+        contextWindow,
+        root,
+        database,
+        timeWakeTask,
+        pathWakeTask,
+        patchApplyTask,
+      );
     } catch (error) {
       if (harness === undefined) await database.close();
       else await harness.close(BACKGROUND_CONTEXT);
@@ -203,6 +230,28 @@ export class LiveSession {
     return draft;
   }
 
+  /** How far the newest prompt reading is, or undefined before the first request. */
+  prefillState(): PrefillState | undefined {
+    return this.prefill.current();
+  }
+
+  /** The last finished reading, for the status line after a run ends. */
+  lastPrefill(): { fresh: number; ms: number; at: number } | undefined {
+    return this.prefill.last();
+  }
+
+  /**
+   * The live documents only, for a frame that must be cheap. It never reads
+   * the transcript, so it is safe at ten frames a second on a long run.
+   */
+  async liveView(): Promise<LiveSessionView> {
+    const [live, inbox] = await Promise.all([
+      this.harness.snapshot(LiveDoc, this.root.id, BACKGROUND_CONTEXT),
+      this.harness.snapshot(InboxDoc, this.root.id, BACKGROUND_CONTEXT),
+    ]);
+    return this.project(undefined, live, inbox);
+  }
+
   async isBusy(): Promise<boolean> {
     return (await this.view()).busy;
   }
@@ -221,6 +270,14 @@ export class LiveSession {
       this.harness.snapshot(InboxDoc, this.root.id, BACKGROUND_CONTEXT),
       this.activeEntries(),
     ]);
+    return this.project(history, live, inbox);
+  }
+
+  private project(
+    history: readonly { model?: readonly unknown[] }[] | undefined,
+    live: LiveState | null | undefined,
+    inbox: InboxState | null | undefined,
+  ): LiveSessionView {
     const queued: Array<{ id: string; mode: "steer" | "follow-up"; text: string }> = (inbox?.items ?? [])
       .filter((item): item is Extract<(typeof inbox extends undefined ? never : NonNullable<typeof inbox>["items"][number]), { mode: "steer" | "followUp" }> =>
         item.mode === "steer" || item.mode === "followUp",
@@ -231,8 +288,9 @@ export class LiveSession {
         text: contentText(item.content),
       }));
     // Do not cap completed activity. It stays visible as one-line folded
-    // disclosures, so Carto never hides agent-generated content by age.
-    const activity = completedActivity(history);
+    // disclosures, so Carto never hides agent-generated content by age. A
+    // frame that did not read the transcript keeps what it already has.
+    const activity = completedActivity(history ?? []);
     if (live?.generation?.message !== undefined) {
       activity.push(...assistantActivity(live.generation.message, true, "live"));
     }

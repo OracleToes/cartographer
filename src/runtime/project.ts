@@ -92,10 +92,14 @@ export class CartoProject {
     }
   }
 
+  /**
+   * Everything the screen shows, from storage. A view never writes: a screen
+   * reads many times a second, and a read that commits would fight the agent
+   * for the same Brain document. Handles are assigned where the Brain changes
+   * (`open()` calls `syncHandles()`, and every decision that changes a record
+   * brings its handle with it), so a read always finds a complete table.
+   */
   async view(): Promise<ProjectView> {
-    // A carry pin enters this live generation after the Brain was last written.
-    // Give it its short handle before the UI or a projection can show it.
-    await this.syncHandles();
     const [brain, liveCarryPins, liveView] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins(), this.live.view()]);
     return {
       brain,
@@ -113,6 +117,36 @@ export class CartoProject {
    * Keep the private handle table in step with the live generation's carry
    * pins. No handle is renumbered here; a collapse rebuilds the whole table.
    */
+  /**
+   * A cheap view for a frame that the spinner clock asked for: the live
+   * documents, the Brain, and the projection, without the transcript. The
+   * transcript only changes when a run writes an entry, which arrives as a
+   * commit, and a commit asks for a full read of its own.
+   */
+  async liveFrameView(): Promise<ProjectView> {
+    const [brain, liveCarryPins, liveView] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins(), this.live.liveView()]);
+    return {
+      brain,
+      context: projectContext(brain, {
+        budget: CONTEXT_BUDGET,
+        carryPins: mergeCarryPins(liveCarryPins, brain.carryPins),
+      }),
+      liveCarryPins,
+      turn: this.projectTurnView({ ...liveView, activity: [] }),
+      activity: liveView.activity,
+    };
+  }
+
+  /** How far the server is with reading the newest prompt. */
+  prefill(): { current: ReturnType<LiveSession["prefillState"]>; last: ReturnType<LiveSession["lastPrefill"]>; window: number } {
+    return { current: this.live.prefillState(), last: this.live.lastPrefill(), window: this.live.contextWindow };
+  }
+
+  /** The provider's own report of a prompt reading, for a screen that marks itself dirty. */
+  onPrefill(listener: () => void): () => void {
+    return this.live.prefill.subscribe(listener);
+  }
+
   async syncHandles(): Promise<void> {
     const [brain, liveCarryPins] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins()]);
     const carryPins = mergeCarryPins(liveCarryPins, brain.carryPins);
