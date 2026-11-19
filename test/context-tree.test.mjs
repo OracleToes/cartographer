@@ -101,8 +101,10 @@ test("every root in the tree is reachable and shows its content once unfolded", 
   const marked = treeRows(tree, folds, new Set(), toolsIndex, 100);
   assert.match(plain(marked.find((row) => row.text.includes("Tools")).text), /▌/);
   const text = marked.map((row) => plain(row.text)).join("\n");
-  assert.match(text, /chat$/m);
-  assert.match(text, /ledger$/m);
+  // Rows are padded to the width, so trim before matching a bare label.
+  const lines = text.split("\n").map((line) => line.trim());
+  assert.ok(lines.includes("· chat"), `the chat tool row is missing: ${JSON.stringify(lines)}`);
+  assert.ok(lines.includes("· ledger"), "the ledger tool row is missing");
   // Unfolding one tool shows its description and its schema.
   const toolRows = treeRows(tree, new Set([...folds, "tools-4-0-chat"]), new Set(), toolsIndex, 100);
   const shown = toolRows.map((row) => plain(row.text)).join("\n");
