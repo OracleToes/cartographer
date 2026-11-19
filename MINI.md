@@ -191,21 +191,61 @@ when something changed.
 
 ### 6.1 The state block
 
-The projection ends with a **state block**: a short section at the very end of
-the context, after everything the agent reads.
+The context ends with a **state block**: a short section after everything the
+agent reads. It is the agent's own dashboard about its brain and the project.
 
 It tells the agent:
 
 - what is stale in the Brain;
-- the state of the context;
+- the state of the context, including how full it is;
 - what is taking up space, broken down by Brain part — Ledger, Atlas, Chat — and
-  by tool calls, separately from the stable parts.
+  by tool calls, separately from the stable parts such as the system and tool
+  prompts.
 
 It is the part of the context expected to change often. Its items carry
 structured IDs.
 
-> Confirmed by the person. Open: the exact fields and the ID scheme. See
-> `docs/open-questions.md` §7.
+### 6.2 The state block is the continuation
+
+There is no separate nudge and no "you are not done" message. The agent is
+executing the system prompt; the state block tells it where things stand, and it
+decides what to do next: reason further, make a tool call, or sleep.
+
+A run ends when a reply carries no tool call. To continue the agent's work, the
+state block is delivered as the next turn. The agent reads the current state and
+acts on it. The old design kept these apart: a dashboard and a synthetic
+continuation. They are one mechanism.
+
+**The block must arrive as a user-role message.** A new request is only made when
+the context ends in a user message or a tool result. A section in the system
+prompt cannot start a turn, and a later system message cannot either. This is a
+property of Pi Durable, not a design choice.
+
+**The block is identified by shape, not by announcement.** It uses the same
+delimiters every time, and the system prompt describes the shape once. Nothing in
+the message says "this is not the person's text": the model recognises the form.
+Carto also tags the message so it is never mistaken for Chat, and never becomes a
+Chat record.
+
+### 6.3 The present is all that matters
+
+This is the core philosophy of the project, not a detail of the block.
+
+A model only ever needs what it needs to act **now**. Carto curates the context
+to be exactly that. The state block is the last thing the model reads on every
+request: it is information about the present, not a history of state, and it is
+not kept.
+
+**It is appended to every request and removed from the context after use.** It
+exists only at the tail — the rattle on the snake. It never accumulates, so its
+cost is one block in the prefill and nothing more.
+
+**It is purely informative and never instructive.** It does not ask the agent to
+do anything. It tells the agent where things stand. Continuing the turn is a
+consequence of the agent following its system prompt with accurate information
+about now, not an instruction inside the block.
+
+> Confirmed by the person, who named this the crux of the project.
 
 ## 7. Project files and the edit boundary
 

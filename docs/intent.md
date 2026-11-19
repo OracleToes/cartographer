@@ -159,6 +159,23 @@ The projection carries structure, handles, and state.
 **Established by.** The person was shown that the payload contained every Person
 message twice, and chose the tool result over the projection.
 
+## 12a. The state block is the continuation
+
+**Decision.** There is no separate nudge and no "you are not done" text. The
+agent executes the system prompt. The state block tells it where things stand,
+and it decides what comes next: reason, call a tool, or sleep.
+
+The old design had two mechanisms, a dashboard and a synthetic continuation. They
+are one.
+
+The block arrives as a user-role message because Pi only makes a new request when
+the context ends in a user message or a tool result. Its identity comes from its
+shape, described once in the system prompt, not from an announcement inside it.
+Carto tags it so it never becomes Chat.
+
+**Established by.** The person's answer that the state block is the continuation,
+and the agent's report of the Pi constraint, which the person accepted.
+
 ## 12. The state block
 
 **Decision.** The projection ends with a short state block. It tells the agent
@@ -179,6 +196,56 @@ because the agent reads it to know when something changed.
 
 **Established by.** The person confirmed the timestamp is mandatory for this
 reason when asked whether it was an invented requirement.
+
+## 12b. The present is all that matters
+
+**Decision.** The core philosophy: a model only needs what it needs to act now.
+Carto curates the context to be exactly that.
+
+The state block is the last thing the model reads on every request. It is
+information about the present, not a history. It is appended to every request and
+removed from the context after use, so it exists only at the tail and never
+accumulates.
+
+It is purely informative and never instructive. It does not tell the agent to do
+anything. Continuing the turn happens because the agent follows its system prompt
+with accurate information.
+
+**Established by.** The person named this the crux of the project and corrected
+the agent for treating the block as a kept record.
+
+## 12c. The system prompt is the core directive
+
+**Decision.** The system prompt is the first thing the agent sees and the thing it
+will follow as core instruction, combined with the person's instruction and the
+context. It teaches the agent how to think and act: how to interpret its
+environment, and how to use its tools well.
+
+It guides the agent into the desired pattern of thinking rather than prohibiting
+what it must not do. Because the curated context is short, the agent has little to
+distract it from these directives, so they carry the weight that rules would
+otherwise have to.
+
+**Established by.** The person's agreement that instruction is better than
+prohibition, and that the agent must know how to use its tools well.
+
+## 13a. The agent is long-running and only stops by sleeping
+
+**Decision.** The agent does not suffer context rot because it rarely reaches the
+limit; it collapses before that. A run ends when a reply carries no tool call.
+Only a deliberate `sleep` stops the agent.
+
+`chat` is the tool through which the agent declares something user-facing. Plain
+text is the agent's own reasoning and is not Chat. This is prompted and
+emphasised so it is understood, not learned by trial and error, and it makes
+reasoning genuinely ephemeral because it is part of the task context rather than
+a record.
+
+`sleep` takes a wake timer. It sleeps until that timer fires, indefinitely if
+there is no timer, or until the person wakes it.
+
+**Established by.** The person's description of the long-running design and the
+observed main-branch behaviour.
 
 ## 14. Procedural, then one state flow
 

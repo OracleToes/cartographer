@@ -103,7 +103,26 @@ state block, which is already the volatile part. *Needs:* which.
 does not move it. *Needs:* confirm this is still wanted, since it affects cache
 stability.
 
-## §7. The state block's schema
+## §7. The state block
+
+**Q7.0 — How is the block removed after the request?** Settled that the block is
+appended to every request and is not kept. Open: the mechanism.
+
+`beforeProviderRequest` replaces the provider body for that request only, so the
+block could be injected there and never touch the transcript — but that hook
+cannot *start* a run, and a run needs a context ending in a user message or tool
+result. `onYield` can start one but appends a persisted message.
+
+Possible shapes:
+- persistent user message, trimmed from the payload on later requests by
+  `beforeProviderRequest`, so the store keeps it and the model never sees two;
+- a persisted message carrying a marker, excluded when the next request is built;
+- something else, if Pi has a way to append an entry that is not part of the
+  context.
+
+*Needs:* a decision on the mechanism before the context layer is built.
+
+### The block's schema
 
 **Q7.1 — What fields?** Confirmed contents: staleness, context state, and a
 space breakdown by Brain part and tool calls. *Needs:* the actual field list.
