@@ -3517,14 +3517,14 @@ test("screen Chat: disclosures preserve retained bodies and Consult preview dire
 	const liveBody = Array.from({ length: consultCount }, (_unused, index) => `live consult row ${index + 1}`).join("\n");
 	const settledBody = Array.from({ length: consultCount }, (_unused, index) => `settled consult row ${index + 1}`).join("\n");
 	const consult = createChat();
-	consult.setConsultProjection({ data: { conferences: [{ id: "co-disclosure", conference: {
-		id: "co-disclosure",
+	consult.setConsultProjection({ data: { conferences: [{ id: "co9", conference: {
+		id: "co9",
 		status: "running",
 		question: "Which preview direction is correct?",
 		active: { kind: "participant", participant: "atlas" },
 		activities: [{ participant: "cartographer", prose: settledBody }],
 	} }] } });
-	consult.live(0, { timestamp: 1, content: [{ type: "text", text: liveBody }] }, { conference: "co-disclosure", participant: "atlas" });
+	consult.live(0, { timestamp: 1, content: [{ type: "text", text: liveBody }] }, { conference: "co9", participant: "atlas" });
 	const consultText = text(consult, "consult");
 	assert.match(consultText, new RegExp(`live consult row ${consultCount}`), "a live Consult activity uses its newest tail rows");
 	assert.doesNotMatch(consultText, /live consult row 1\n/, "a live Consult activity omits its old head when folded");
