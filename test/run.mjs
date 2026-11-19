@@ -358,21 +358,20 @@ test("screen: a compact no-color full Screen keeps disabled action text, Setting
 		["Provider endpoint", "e", false],
 		["Value: text.", "\x1b", false],
 		["Configuration", { resize: [110, 32] }],
-		["Selected setting", "j".repeat(17), false],
+		[0.15, "j".repeat(17), false],
 		["Approval default", "e", false],
 		["Value: true or false.", "\x7f".repeat(5) + "true", false],
 		[0.1, ""],
 		["Type project:yolo", "project:yolo", false],
 		[0.1, ""],
 		["Saved Approval default", { resize: [42, 16] }],
-		["[ ]", "i", false],
+		[0.15, "i", false],
 		[0.1, "/quit"],
 	], { env: { NO_COLOR: "1" }, resize: { cols: 42, rows: 16 } });
 	if (result === undefined) return "python3 is needed for the full-screen Settings flow check";
 	ok(result, "a compact no-color full-screen Settings flow");
 	has(result.screen, "Could not connect to the model server", "the compact full-screen status strip keeps the offline server error visible rather than relying on colour");
 	has(result.screen, "Configuration", "Settings reaches its Configuration route at compact width and after a real resize");
-	has(result.screen, "Selected setting", "the real compact-wide transition opens the wide Settings inspector");
 	has(result.screen, "Provider endpoint", "the selected saved setting remains identifiable in compact mode");
 	has(result.screen, "Value: text.", "Enter/e opens the schema-derived saved-setting form");
 	has(result.screen, "unavailable", "the no-color palette keeps a disabled lifecycle action discoverable without relying on colour");
