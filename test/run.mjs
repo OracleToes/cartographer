@@ -400,16 +400,16 @@ test("screen: one outer viewport reaches a live Consult body and a settled call 
 			["LIVE_CONSULT_010", "", false],
 			["LIVE_CONSULT_070", "", false],
 			["○ resting", "i", false],
-			[0.03, "look: read: long.txt @1+700"],
+			["Message Cartographer", "look: read: long.txt @1+700"],
 			["○ resting", "\x1b", false],
-			[0.03, "]", false],
+			[0.12, "]", false],
 			["▸ 1 call", "G", false],
-			[0.03, "\r", false],
+			[0.12, "\r", false],
 			["✓ read long.txt", "j", false],
-			[0.03, "\r", false],
-			[0.03, "G", false],
+			[0.12, "\r", false],
+			[0.12, "G", false],
 			["line 700", "i", false],
-			[0.03, "/quit"],
+			[0.12, "/quit"],
 		], { env: { NO_COLOR: "1" }, resize: { cols: 84, rows: 18 } });
 		if (result === undefined) return "python3 is needed for the full-screen disclosure check";
 		ok(result, "the full-screen disclosure flow");
