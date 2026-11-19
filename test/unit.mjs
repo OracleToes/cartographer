@@ -262,6 +262,84 @@ test("configuration repository: source permissions, revisions, atomic writes, an
 	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" }, "a failed replacement preserves the previous project configuration");
 });
 
+test("configuration jobs: abort before rename cancels, while abort after rename reports the saved fact", async (t) => {
+	const { root, brainDir } = fresh(t);
+	const install = join(root, "install.json");
+	const project = join(brainDir, "config.json");
+	writeFileSync(install, "{}");
+	writeFileSync(project, JSON.stringify({ colors: "dark" }));
+	let beganWrite;
+	let releaseWrite;
+	const writing = new Promise((resolve) => { releaseWrite = resolve; });
+	const writeBegan = new Promise((resolve) => { beganWrite = resolve; });
+	let renamed = 0;
+	const delayed = createConfigurationRepository({
+		paths: { install, project },
+		fs: {
+			writeFile: async (_file, _text, options) => {
+				beganWrite();
+				await writing;
+				if (options.signal?.aborted === true) throw Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR" });
+			},
+			rename: async () => { renamed++; },
+		},
+	});
+	const before = await delayed.read("project");
+	const controller = new AbortController();
+	const pending = delayed.update({
+		scope: "project",
+		expectedRevision: before.revision,
+		transform: (values) => ({ ...values, colors: "light" }),
+		signal: controller.signal,
+	});
+	await writeBegan;
+	controller.abort();
+	releaseWrite();
+	await assert.rejects(pending, (error) => error instanceof ConfigurationRepositoryError && error.code === "cancelled");
+	assert.equal(renamed, 0, "an abort before the atomic rename never reaches the durable commit boundary");
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "dark" });
+
+	const clock = Date.parse(NOW);
+	const events = createApplicationEvents({ now: () => clock });
+	const jobs = createJobManager({ events, now: () => clock });
+	const repository = createConfigurationRepository({ paths: { install, project } });
+	const app = createApplication({
+		brainDir,
+		root,
+		configuration: { repository, env: { CARTO_CONFIG: install } },
+		events,
+		jobs,
+		now: () => clock,
+	});
+	const seen = [];
+	events.subscribe((event) => {
+		seen.push(event);
+		if (event.type === "job.committed") jobs.cancel(event.payload.job.id);
+	});
+	const revision = (await repository.read("project")).revision;
+	const result = await app.execute(SETTINGS_ACTION.edit, {
+		key: "colors",
+		value: "light",
+		scope: "project",
+		expectedRevision: revision,
+	}, { requestId: "settings-after-commit" });
+	assert.equal(result.ok, true, "a cancel after rename does not pretend the file was undone");
+	if (!result.ok) throw new Error(result.error.message);
+	assert.equal(result.data.committed, true);
+	assert.equal(result.data.refresh, "needed", "post-commit cancellation stops the provenance wait and asks for a normal refresh");
+	assert.equal(result.meta.jobId, "job-1");
+	assert.deepEqual(JSON.parse(readFileSync(project, "utf8")), { colors: "light" });
+	assert.ok(seen.some((event) => event.type === "job.queued"));
+	assert.ok(seen.some((event) => event.type === "job.progress"));
+	assert.ok(seen.some((event) => event.type === "job.committed"));
+	assert.ok(seen.some((event) => event.type === "job.cancel-requested"));
+	assert.ok(seen.some((event) => event.type === "job.succeeded"), "the job settles as succeeded because its effect was committed");
+	const settled = jobs.get("job-1");
+	assert.equal(settled?.state, "succeeded");
+	assert.equal(settled?.effect?.committed, true);
+	assert.equal(settled?.cancellation.requested, true);
+});
+
 test("prompt: the sleep checklist names the person whose message may be waiting", () => {
 	const prompt = systemPrompt({ root: "/project" });
 	assert.ok(prompt.includes(`no message from ${USER_NAME} waiting`));
