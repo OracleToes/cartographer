@@ -135,6 +135,27 @@ Brain or separate.
 change. But it is still tokens on every request. *Needs:* whether it is always
 present or only when something is stale.
 
+## §7b. Prompt editing in the TUI
+
+**Deferred by the person.** Do not build this now. The person's reason: prompt
+text benefits from programmatic insertions and other things that are not
+human-readable, and the core of the project matters more than an editor for the
+prompt. Editing is to be added later as a manipulation on whatever works.
+
+What is known and should not be lost:
+- The person wants to be able to edit the prompt in the TUI, including the tool
+  descriptions, which are part of the prompt's voice.
+- The old tree hardcoded the prompt with a comment saying prompt wording is
+  source code with no runtime customization. That is an assumption, not intent.
+- The old prompt (`origin/main:src/prompt.mjs`) is 265 lines in nineteen named
+  sections — `one-mind`, `dyad`, `roles`, `talking`, `taste`, `plan`, `dispatch`,
+  `goals`, `ledger`, `atlas`, `assessment`, `running`, `context`, `duty`, `sleep`,
+  `state`, `code`, `consult` — written in first person as the agent talking to
+  itself. It is the closest thing to the desired voice that exists anywhere.
+- Open: one file or several; whether the shipped prompt is a coalescing default
+  or created once and owned; and whether schemas stay in code while descriptions
+  move to text.
+
 ## §8. The edit boundary and the appetite constraint
 
 **Q8.1 — How does "only wants small atomic edits" get enforced or encouraged?**
