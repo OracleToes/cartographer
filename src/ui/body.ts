@@ -116,10 +116,16 @@ export function contextBody(input: BodyInput): BodyRow[] {
     // and the cost sits at the right edge. The handle the agent sees at the
     // start of the text is not printed twice.
     const body = summarizeBlock(view, block, columns);
+    // A multi-line block says how much is behind its first line. Without this
+    // the `…` is the only cue, and `R1 Carto rules …` reads as a record that
+    // happens to be short rather than as eight lines of protocol text.
+    const behind = block.text.split("\n").length - 1;
+    const more = behind > 0 ? token.faint(` +${behind} ${behind === 1 ? "line" : "lines"}`) : "";
+    const cost = token.faint(`${short(block.estimatedTokens)} tok`);
     rows.push({
       text: row(
         `${rail(selected)} ${token.accent(block.handle)}  ${token.muted(sectionLabel(block.section))}  ${body}`,
-        token.faint(`${short(block.estimatedTokens)} tok`),
+        more === "" ? cost : `${more} ${cost}`,
         columns,
       ),
       selectable: index,

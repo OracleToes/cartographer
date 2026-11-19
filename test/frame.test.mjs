@@ -313,3 +313,24 @@ test("a reference opens in the body band, so the token bar and footer stay visib
   }
   assert.ok(referenceMaxHeight(24) >= 17, "a 24-row terminal should show most of the key list");
 });
+test("Enter opens the selected Brain and Context record whole, not a footer message", async () => {
+  const { recordDetail, recordDetailRows } = await import("../dist/ui/detail.js");
+  await withProject(async (project) => {
+    const view = await project.view();
+    // The defect: `R1 Carto rules …` was the whole view of an eight-line record,
+    // and Enter answered "R1 is selected" instead of showing it.
+    const rules = recordDetail("context", view, 0);
+    assert.ok(rules !== undefined, "the rules block must open");
+    assert.equal(rules.handle, "R1");
+    // Every line the block holds is in the page, not just its first.
+    const page = plain(recordDetailRows(rules, 100).join("\n"));
+    assert.ok(rules.lines.length > 1, "R1 is more than one line");
+    for (const line of rules.lines.filter((value) => value.trim() !== "")) {
+      assert.ok(page.includes(line.slice(0, 40)), `the page dropped a line: ${JSON.stringify(line.slice(0, 40))}`);
+    }
+    assert.match(page, /Esc or Backspace returns to the list/);
+    // A Brain row opens too, and its handle matches the list's.
+    const brain = recordDetail("brain", view, 0);
+    assert.ok(brain === undefined || /^[LXAWH]/.test(brain.handle));
+  });
+});

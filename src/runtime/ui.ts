@@ -21,6 +21,7 @@ import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
 import { selectedLabel } from "../ui/body.js";
 import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
 import { BlankRow } from "../ui/chrome.js";
+import { recordDetail, recordDetailRows } from "../ui/detail.js";
 import { CHROME_ABOVE, ReferenceOverlay, referenceMaxHeight } from "../ui/overlay.js";
 import { inputBoxRows, inputTextCells, INPUT_TITLE } from "../ui/input-box.js";
 import { margin } from "../ui/text.js";
@@ -196,7 +197,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     parts.status.left = next.status.left;
     parts.bar.left = next.bar.left;
     parts.footer.left = next.footer.left;
-    parts.body.setText(next.bodyText);
+    parts.body.setText(detail === "record" ? recordPage(state) : next.bodyText);
     paintInput();
     spinnerPaintAt = state.now;
     dirty = false;
@@ -217,10 +218,33 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
    * current state (which actions are available, what the draft is). An overlay
    * is cheap; a stale reference is a lie.
    */
+  /**
+   * The record page for the current selection, or an empty page.
+   *
+   * It is the body, not an overlay: a record can be any length, and the body is
+   * the region Pi TUI already scrolls. Swapping the body's text means the bar,
+   * the status row, and the footer stay exactly where they are, so a record that
+   * is longer than the screen cannot hide the bar.
+   */
+  const recordPage = (state: FrameState): string => {
+    const record = recordDetail(tab, state.view, clampSelection({ tab, view: state.view, selected }));
+    if (record === undefined) return "  Nothing is selected.";
+    return recordDetailRows(record, width).join("\n");
+  };
+
   const showDetail = (next: Detail): void => {
+    const wasRecord = detail === "record";
     detail = next;
     reference?.hide();
     reference = undefined;
+    if (wasRecord || next === "record") {
+      // A page replaces the body, so it starts at its own top; leaving it puts
+      // the transcript back at its end, which is where a new answer arrives.
+      scroll.scrollTo(0, { disableFollow: true });
+      paint();
+      tui.requestRender();
+      return;
+    }
     if (next === null) {
       paint();
       tui.requestRender();
@@ -465,10 +489,11 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       }
       return;
     }
-    // Brain and Context records have no separate detail view yet; announce the
-    // selection in the footer rather than pretending to open something.
-    notice = { text: `${selectedLabel(tab, view, index) ?? "Nothing"} is selected. Enter opens items on the Chat tab.`, kind: "info" };
-    wake();
+    // A Brain or Context row is a summary, so Enter opens the record whole. This
+    // is what the person asked for: a row that ends in `…` must be readable, and
+    // a footer message saying it is selected is not a view of anything.
+    if (recordDetail(tab, view, index) === undefined) return;
+    showDetail("record");
   };
 
   const navigate = (): void => {
@@ -582,10 +607,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return { consume: true };
     }
     if (data === "e" && tab === "chat") {
-      if (selectedChat(view, clampSelection({ tab, view, selected })) !== undefined) {
-        detail = "chat";
-        wake();
-      }
+      if (selectedChat(view, clampSelection({ tab, view, selected })) !== undefined) showDetail("chat");
       return { consume: true };
     }
     if (data === "o" && tab === "chat") {

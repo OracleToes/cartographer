@@ -28,7 +28,14 @@ import { token } from "./tokens.js";
  */
 
 export type Tab = "chat" | "brain" | "context";
-export type Detail = "help" | "actions" | "chat" | null;
+/**
+ * What is open over the list.
+ *
+ * `help` and `actions` are references and draw as Pi TUI overlays. `chat` is the
+ * edit hint, also an overlay. `record` is a page: it replaces the body, because
+ * it must scroll, and the body is the one region Pi TUI lays out and scrolls.
+ */
+export type Detail = "help" | "actions" | "chat" | "record" | null;
 
 export interface FrameState {
   root: string;
@@ -235,6 +242,7 @@ function bodyText(state: FrameState, selection: number, widthNow: number): strin
 export function detailLines(state: FrameState, inner: number): string[] {
   if (state.detail === "help") return helpLines(state, inner);
   if (state.detail === "actions") return actionLines(state);
+  if (state.detail === "record") return [];
   if (state.detail === "chat") {
     return [
       token.warning("Chat edit selected. Press i to replace its text."),
@@ -299,6 +307,7 @@ function footerRow(state: FrameState, inner: number): string {
 }
 
 function footerRight(state: FrameState): string {
+  if (state.detail === "record") return token.faint("Esc back to the list · j k scroll · g G ends");
   if (state.detail !== null) return token.faint(`Esc closes ${state.detail === "chat" ? "the edit" : state.detail}`);
   if (state.notice !== undefined) {
     return state.notice.kind === "error" ? token.danger(state.notice.text) : token.warning(state.notice.text);
