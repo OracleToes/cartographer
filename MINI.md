@@ -207,7 +207,7 @@ Chat is a deliberate durable record. It is separate from raw model output.
 - A person can delete either type at collapse or delete it now.
 - Raw model text never silently becomes Agent Chat.
 
-Chat is never collapsed by default. The person may manually fold an individual Chat item in the Chat tab. Chat remains in context unless it has a deletion mark or is deleted now.
+Chat starts expanded in the Chat tab and is never folded by default. The person may manually fold an individual Chat item with `f`. A folded item stays in fresh context. Chat remains in context unless it has a deletion mark or is deleted now.
 
 If a model writes ordinary text without the `chat` tool, Carto keeps it as visible transient model activity. It is not a deliberate Agent Chat record.
 
