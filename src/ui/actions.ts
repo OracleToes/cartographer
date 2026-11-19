@@ -75,6 +75,7 @@ export const ACTIONS: readonly Action[] = [
   { id: "ends", keys: ["g", "G"], label: "ends", help: "Move the selection to the first or the last row.", group: "move", when: listing },
   { id: "tabs", keys: ["1", "2", "3"], label: "tabs", help: "Show Chat, Brain, or Context.", group: "view", when: (context) => context.mode === "navigate" && !context.detailOpen && !context.recordOpen && context.tab !== "context" },
   { id: "prompt-fold", keys: ["←", "→"], label: "fold", help: "Fold or unfold the selected part of the prompt.", group: "move", when: (context) => context.mode === "navigate" && context.tab === "context" },
+  { id: "prompt-edit", keys: ["e"], label: "edit record", help: "Edit the durable record behind the selected prompt part. A part with no record cannot be edited here.", group: "context", when: (context) => context.mode === "navigate" && context.tab === "context" },
   { id: "prompt-view", keys: ["v"], label: "human/real", help: "Swap the selected part between readable text and the provider's own JSON.", group: "view", when: (context) => context.mode === "navigate" && context.tab === "context" },
   { id: "input", keys: ["i"], label: "input", help: "Open the input. In Chat edit detail it replaces the selected Chat text.", group: "turn", when: (context) => listing(context) && !context.busy },
   // A reference describes the list, and a record page covers the list, so both

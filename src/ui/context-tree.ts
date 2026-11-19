@@ -76,8 +76,14 @@ export function treeRows(tree: ContextTree, folds: Folds, real: Folds, selected:
     // is the kind of precision that misleads.
     const cost = share === undefined ? "" : token.faint(` ▤${short(share)}`);
     const counts = foldable ? token.faint(` (${node.children.length})`) : "";
+    const stale = node.stale === true ? token.warning(" · changed since") : "";
     rows.push({
-      text: row(`${here === selected ? token.accent("▌") : " "} ${indent}${token.accent(marker)} ${node.label}`, `${cost}${counts}`, columns, 1),
+      text: row(
+        `${here === selected ? token.accent("▌") : " "} ${indent}${token.accent(marker)} ${node.label}`,
+        `${stale}${cost}${counts}`,
+        columns,
+        1,
+      ),
       id: node.id,
       foldable,
       head: true,

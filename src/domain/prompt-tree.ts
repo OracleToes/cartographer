@@ -37,6 +37,41 @@ export interface TreeNode {
   children: readonly TreeNode[];
   /** Estimated tokens for this node and its children, for sharing out a total. */
   weight: number;
+  /**
+   * The node's text no longer matches the record it came from.
+   *
+   * A sent message is history: editing the Chat record behind it does not
+   * rewrite what was sent. The node keeps the record so the person can see which
+   * record it was, but it is marked `stale` so the screen does not offer an
+   * edit that would silently do nothing to this row.
+   */
+  stale?: boolean;
+  /**
+   * The durable record this node came from, when there is one.
+   *
+   * A prompt is built from records, but a prompt part is not a record: the
+   * instructions block has no record, and a tool schema is code. Only a node
+   * with a `record` can be edited through the record layer, and the UI says so
+   * rather than offering an edit that has nowhere to go.
+   */
+  record?: PromptRecordRef;
+}
+
+export interface PromptRecordRef {
+  kind: "chat" | "ledger" | "atlas";
+  /** The generation-local handle, which is the only name the person sees. */
+  handle: string;
+  /** The durable id, resolved below the presentation layer. */
+  id: string;
+}
+
+/** A record the prompt might contain, with the names the screen can show. */
+export interface RecordHint {
+  kind: "chat" | "ledger" | "atlas";
+  handle: string;
+  id: string;
+  /** The record's own text, used to match a Person message exactly. */
+  text: string;
 }
 
 export interface ContextTree {
@@ -59,7 +94,18 @@ export interface ContextTree {
  * arrived. Until it does, the tree is structural and `exact` is false, which is
  * the one case where the screen is allowed to show an estimate.
  */
-export function contextTree(payload: ProviderPayload, at: number, usage?: number): ContextTree {
+export function contextTree(
+  payload: ProviderPayload,
+  at: number,
+  usage?: number,
+  /**
+   * The handle table and record ids, so a prompt node can name the record it came
+   * from. The system message carries Carto's whole projection as text, so this
+   * cannot be recovered from the payload alone; the caller passes it and a node
+   * without a match simply has no record.
+   */
+  records?: readonly RecordHint[],
+): ContextTree {
   const roots: TreeNode[] = [];
   let index = 0;
 
@@ -67,8 +113,20 @@ export function contextTree(payload: ProviderPayload, at: number, usage?: number
     const text = typeof payload.system === "string" ? payload.system : JSON.stringify(payload.system, null, 2);
     roots.push({ ...node(`system-${index++}`, "System prompt", text.split("\n"), text), children: [] });
   }
+  // A Person message consumes one Chat record, in order: the prompt carries one
+  // message per Chat, so pairing them by position is exact and survives an edit.
+  let chatCursor = 0;
+  const chats = (records ?? []).filter((record) => record.kind === "chat");
   for (const message of payload.messages ?? []) {
-    roots.push(messageNode(message, index++));
+    if (message.role === "user") {
+      // One record per Person message, in order. The cursor advances after the
+      // slice is taken, not inside the call.
+      const mine = chats[chatCursor] === undefined ? [] : [chats[chatCursor]!];
+      chatCursor += 1;
+      roots.push(messageNode(message, index++, mine));
+    } else {
+      roots.push(messageNode(message, index++, records));
+    }
   }
   if (payload.tools !== undefined && payload.tools.length > 0) {
     roots.push(toolsNode(payload.tools, `tools-${index++}`));
@@ -151,16 +209,33 @@ function weigh(node: TreeNode, weights: Map<string, number>): number {
   return weight;
 }
 
-function messageNode(message: ProviderMessage, index: number): TreeNode {
+function messageNode(message: ProviderMessage, index: number, records?: readonly RecordHint[]): TreeNode {
   const role = typeof message.role === "string" ? message.role : "unknown";
   const id = `message-${index}`;
   const label = labelFor(role, message);
   const children: TreeNode[] = [];
 
+  const record = records?.find((hint) => matches(role, message, hint));
+  // A matched Chat record whose text has since changed no longer describes this
+  // node. Only a Chat record has its own text in the prompt as a message body;
+  // a Ledger or Atlas record appears inside the projection, whose surrounding
+  // lines make an exact comparison meaningless.
+  const stale =
+    record !== undefined &&
+    record.kind === "chat" &&
+    typeof message.content === "string" &&
+    message.content !== record.text;
+
   // A message's content is a string, or a list of parts. Both are walked so the
   // real order inside one message is preserved.
   if (typeof message.content === "string") {
-    if (message.content.trim() !== "") children.push(textNode(`${id}-content`, "Text", message.content));
+    if (message.content.trim() !== "") {
+      children.push({
+        ...textNode(`${id}-content`, "Text", message.content),
+        ...(record === undefined ? {} : { record }),
+        ...(stale ? { stale: true } : {}),
+      });
+    }
   } else if (Array.isArray(message.content)) {
     message.content.forEach((part, partIndex) => {
       const child = partNode(part, `${id}-part-${partIndex}`);
@@ -185,7 +260,28 @@ function messageNode(message: ProviderMessage, index: number): TreeNode {
   return {
     ...node(id, label, children.length === 0 ? ["(empty)"] : [`${children.length} ${children.length === 1 ? "part" : "parts"}`], JSON.stringify(message, null, 2)),
     children,
+    ...(record === undefined ? {} : { record }),
+    ...(stale ? { stale: true } : {}),
   };
+}
+
+/**
+ * Does this message carry this record's text?
+ *
+ * A Person message is the Chat record itself. The system message carries the
+ * whole projection, so a record is matched by its handle line, which the
+ * projection writes as `L1 Ledger · ...`. Matching the handle line rather than
+ * the record's body keeps a record whose text is also quoted elsewhere from
+ * claiming the wrong node.
+ */
+function matches(role: string, message: ProviderMessage, hint: RecordHint): boolean {
+  // A Person message is its Chat record whether or not the record still reads
+  // the same; a text comparison would detach the node the moment it was edited,
+  // which is exactly when the person needs to see the connection.
+  if (hint.kind === "chat" && role === "user") return true;
+  if (role !== "system" && role !== "developer") return false;
+  if (typeof message.content !== "string") return false;
+  return message.content.includes(`${hint.handle} `) || message.content.includes(`${hint.handle}\n`);
 }
 
 function partNode(part: unknown, id: string): TreeNode | undefined {

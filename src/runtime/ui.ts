@@ -21,7 +21,7 @@ import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
 import { selectedLabel } from "../ui/body.js";
 import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
 import { BlankRow } from "../ui/chrome.js";
-import { contextTree } from "../domain/prompt-tree.js";
+import { contextTree, findNode, type RecordHint, type TreeNode } from "../domain/prompt-tree.js";
 import { selectableCount } from "../ui/body.js";
 import { selectableOf, treeRows, unconfirmedRows, type TreeRow } from "../ui/context-tree.js";
 import { recordDetail, recordDetailRows } from "../ui/detail.js";
@@ -78,7 +78,16 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   let applying = false;
   let quitting = false;
   let sendMode: SendMode = "follow-up";
-  let insertAction: "send" | "edit-chat" | "agent-chat" | "resume" = "send";
+  let insertAction: "send" | "edit-chat" | "agent-chat" | "resume" | "edit-record" = "send";
+  /**
+   * The record the input box is editing, when the box was opened by `e` on a
+   * Context node.
+   *
+   * It is a `PromptRecordRef`: the kind, the handle the person sees, and the
+   * durable id. The id never reaches the screen, and the handle never reaches
+   * storage; `submit` uses the id and the title uses the handle.
+   */
+  let editing: { kind: "chat" | "ledger" | "atlas"; handle: string; id: string } | undefined;
   let view = await project.view();
   const folds = new Set<string>();
   const expandedActivity = new Set<string>();
@@ -265,9 +274,40 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       const rows = unconfirmedRows(state.view, treeFolds, 0, width);
       return { rows, ids: selectableOf(rows), exact: false };
     }
-    const tree = contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input);
+    const tree = promptTree(snapshot);
     const rows = treeRows(tree, treeFolds, treeReal, 0, width);
     return { rows, ids: selectableOf(rows), exact: tree.exact };
+  };
+
+  /**
+   * The prompt tree, with each node tied to the durable record it came from.
+   *
+   * One builder, so the page, the key handler, and the edit target all agree on
+   * which node is which. The hints come from the Brain the same frame is drawn
+   * from, so a handle in the tree is a handle the person can also see on Brain.
+   */
+  const promptTree = (snapshot: { payload: import("./prompt-store.js").ProviderPayload; at: number; usage?: { input: number } | undefined }) => {
+    const hints: RecordHint[] = [
+      ...visibleChat(view.brain).map((entry) => ({
+        kind: "chat" as const,
+        id: entry.id,
+        handle: handleOf(view.brain.handles, "chat", entry.id) ?? "C?",
+        text: entry.text,
+      })),
+      ...view.brain.ledger.map((entry) => ({
+        kind: "ledger" as const,
+        id: entry.id,
+        handle: handleOf(view.brain.handles, "ledger", entry.id) ?? "L?",
+        text: entry.text,
+      })),
+      ...view.brain.atlas.map((node) => ({
+        kind: "atlas" as const,
+        id: node.id,
+        handle: handleOf(view.brain.handles, "atlas", node.id) ?? "A?",
+        text: node.title,
+      })),
+    ];
+    return contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input, hints);
   };
 
   /**
@@ -289,7 +329,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
         .map((entry) => entry.text)
         .join("\n");
     }
-    const tree = contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input);
+    const tree = promptTree(snapshot);
     const rows = treeRows(tree, treeFolds, treeReal, mark, width);
     if (selectableOf(rows).length === 0) return fallback;
     return rows.map((entry) => entry.text).join("\n");
@@ -364,6 +404,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       const handle = entry === undefined ? undefined : handleOf(view.brain.handles, "chat", entry.id);
       return handle === undefined ? INPUT_TITLE.editChat("C?") : INPUT_TITLE.editChat(handle);
     }
+    if (insertAction === "edit-record" && editing !== undefined) return `edit ${editing.handle}`;
     if (insertAction === "agent-chat") return INPUT_TITLE.agentChat();
     if (insertAction === "resume") return INPUT_TITLE.resume();
     return INPUT_TITLE.send(sendMode);
@@ -485,6 +526,27 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     mode = "navigate";
     detail = null;
     tui.setFocus(null);
+    if (action === "edit-record") {
+      const target = editing;
+      editing = undefined;
+      if (target !== undefined) {
+        // The record layer: the record is the source of truth, and the prompt
+        // reflects it on the next request. Nothing here writes a prompt.
+        await work(async () => {
+          if (target.kind === "chat") await project.editChat(target.id, value);
+          else if (target.kind === "ledger") {
+            const entry = view.brain.ledger.find((candidate) => candidate.id === target.id);
+            if (entry !== undefined) await project.upsertLedger({ ...entry, text: value });
+          } else {
+            // An Atlas claim is source-backed, so its text is not a free field:
+            // editing it without evidence would make the claim unsupported.
+            // The command path already enforces that, so it owns this edit.
+            notice = { text: `Atlas ${target.handle} is edited with /atlas, so its evidence still matches its claim.`, kind: "info" };
+          }
+        });
+      }
+      return;
+    }
     if (action === "edit-chat") {
       const entry = selectedChat(view, clampSelection({ tab, view, selected }));
       if (entry !== undefined) await work(() => project.editChat(entry.id, value));
@@ -527,9 +589,14 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     tui.requestRender();
   };
 
-  const enterInsert = (seed = "", action: "send" | "edit-chat" | "agent-chat" | "resume" = "send"): void => {
+  const enterInsert = (
+    seed = "",
+    action: "send" | "edit-chat" | "agent-chat" | "resume" | "edit-record" = "send",
+    record?: { kind: "chat" | "ledger" | "atlas"; handle: string; id: string },
+  ): void => {
     mode = "insert";
     insertAction = action;
+    editing = record;
     editor.setText(seed);
     tui.setFocus(editor);
     // Paint now, not on the next tick: the person pressed a key and expects
@@ -587,6 +654,15 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return Math.max(1, selectableOf(treeRows(tree, treeFolds, treeReal, 0, width)).length);
     }
     return Math.max(1, selectableCount(tab, view));
+  };
+
+  /** The prompt node under the selection, when Context is showing. */
+  const selectedNode = (): TreeNode | undefined => {
+    const id = currentTree(currentState()).ids[chosen()];
+    if (id === undefined) return undefined;
+    const snapshot = project.prompts.current();
+    if (snapshot === undefined) return undefined;
+    return findNode(promptTree(snapshot).roots, id);
   };
 
   /** The selection index, clamped by what is on screen. */
@@ -741,6 +817,29 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       if (entry !== undefined) {
         if (folds.has(entry.id)) folds.delete(entry.id);
         else folds.add(entry.id);
+        wake();
+      }
+      return { consume: true };
+    }
+    if (data === "e" && tab === "context") {
+      const node = selectedNode();
+      const record = node?.stale === true ? undefined : node?.record;
+      if (node?.stale === true) {
+        notice = { text: "That message was already sent. Edit it on the Chat tab, where the record lives.", kind: "info" };
+        wake();
+        return { consume: true };
+      }
+      if (record !== undefined) {
+        const text =
+          record.kind === "chat"
+            ? view.brain.chat.find((candidate) => candidate.id === record.id)?.text
+            : view.brain.ledger.find((candidate) => candidate.id === record.id)?.text;
+        enterInsert(text ?? "", "edit-record", record);
+      } else {
+        // A prompt part with no durable record — the instructions block, a tool
+        // schema, the transcript — cannot be edited here, and the screen says
+        // which part it is rather than opening an empty box.
+        notice = { text: "That part has no durable record behind it, so the record layer cannot edit it.", kind: "info" };
         wake();
       }
       return { consume: true };

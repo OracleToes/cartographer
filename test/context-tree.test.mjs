@@ -111,3 +111,16 @@ test("every root in the tree is reachable and shows its content once unfolded", 
   assert.match(shown, /Send one message\./);
   assert.match(shown, /text: string/);
 });
+
+test("a sent message whose record changed is marked stale, not offered as editable", () => {
+  const hints = [{ kind: "chat", handle: "C1", id: "chat-1", text: "revised question" }];
+  const tree = contextTree(payload(), 1_000, undefined, hints);
+  const person = tree.roots.find((root) => root.label === "Person · you");
+  assert.ok(person !== undefined);
+  // The transcript keeps what was sent; the record it came from now differs.
+  assert.equal(person.stale, true);
+  assert.deepEqual(person.record, { kind: "chat", handle: "C1", id: "chat-1", text: "revised question" });
+  // A record that still matches is not stale, so it stays editable.
+  const same = contextTree(payload(), 1_000, undefined, [{ ...hints[0], text: "What is the retry policy?" }]);
+  assert.notEqual(same.roots.find((root) => root.label === "Person · you")?.stale, true);
+});
