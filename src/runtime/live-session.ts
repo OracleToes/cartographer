@@ -27,6 +27,7 @@ import { modelsForConfig } from "./llama-swap-model.js";
 import { LiveCarryDocument, readLiveCarry } from "./live-carry.js";
 import { createCartoExtension } from "./carto-extension.js";
 import { createPathWakeTask, PATH_WAKE_TASK_NAME, pathFingerprint } from "./path-wake-task.js";
+import type { PromptStore } from "./prompt-store.js";
 import { createPrefillMonitor, type PrefillMonitor, type PrefillState } from "./prefill.js";
 import { createTimeWakeTask, TIME_WAKE_TASK_NAME } from "./wake-task.js";
 import { digestProjectFile, resolveProjectWatchPath } from "./workspace.js";
@@ -55,6 +56,8 @@ export interface LiveSessionOptions {
   initialCarryPins?: CarryPin[];
   /** A monitor for the server's prompt reading; created for llama-swap when absent. */
   prefill?: PrefillMonitor;
+  /** Where the assembled prompt is recorded, so the screen can show it. */
+  promptStore?: PromptStore;
 }
 
 export type LiveActivityKind = "reasoning" | "model" | "tool-call" | "tool-output" | "warning" | "error";
@@ -111,6 +114,7 @@ export class LiveSession {
       const patchApplyTask = createPatchApplyTask(options.projectRoot, options.brain);
       registry.install(
         createCartoExtension({
+          ...(options.promptStore === undefined ? {} : { promptStore: options.promptStore }),
           brain: options.brain,
           projectRoot: options.projectRoot,
           contextId: basename(options.path, ".sqlite"),

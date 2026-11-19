@@ -254,8 +254,11 @@ export function detailLines(state: FrameState, inner: number): string[] {
 }
 
 /** The rows that can be selected, so a stale index cannot point past the end. */
-export function clampSelection(state: Pick<FrameState, "tab" | "view" | "selected">): number {
-  const count = selectableCount(state.tab, state.view);
+export function clampSelection(state: Pick<FrameState, "tab" | "view" | "selected"> & { contextCount?: number }): number {
+  // The Context tab counts its tree's rows, which the runtime knows and this
+  // pure function does not. A caller that has them passes `contextCount`; the
+  // block count is the fallback, so the function stays pure.
+  const count = state.tab === "context" && state.contextCount !== undefined ? state.contextCount : selectableCount(state.tab, state.view);
   if (count === 0) return 0;
   return Math.min(Math.max(state.selected, 0), count - 1);
 }

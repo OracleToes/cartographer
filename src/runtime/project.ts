@@ -16,6 +16,7 @@ import type {
   SourceRef,
   WakeEntry,
 } from "../domain/types.js";
+import { PromptStore } from "./prompt-store.js";
 import { BrainStore } from "./brain-store.js";
 import type { CollapseMode, GlobalConfig } from "./config.js";
 import { parseModelRef } from "./config.js";
@@ -54,18 +55,22 @@ export class CartoProject {
     readonly config: GlobalConfig,
     private readonly brainStore: BrainStore,
     private live: LiveSession,
+    /** The last prompt the harness assembled, shared with the harness itself. */
+    readonly prompts: PromptStore,
   ) {}
 
   static async open(root: string, config: GlobalConfig): Promise<CartoProject> {
     await mkdir(contextDirectory(root), { recursive: true });
     const brainStore = await BrainStore.open(brainDatabasePath(root));
     let live: LiveSession | undefined;
+    let prompts: PromptStore | undefined;
     try {
       const brain = await brainStore.read();
       await removeUnreferencedContextFiles(root, brain);
       await ensureReferencedContextFiles(root, brain);
       const model = parseModelRef(config.model);
       const generation = brain.context.liveGeneration ?? randomUUID();
+      prompts = new PromptStore();
       live = await LiveSession.open({
         path: contextDatabasePath(root, generation),
         model,
@@ -73,11 +78,12 @@ export class CartoProject {
         projectRoot: root,
         brain: brainStore,
         contextBudget: CONTEXT_BUDGET,
+        promptStore: prompts,
       });
       if (brain.context.liveGeneration === null) {
         await brainStore.apply({ kind: "context.initialize", liveGeneration: generation });
       }
-      const project = new CartoProject(root, config, brainStore, live);
+      const project = new CartoProject(root, config, brainStore, live, prompts ?? new PromptStore());
       await project.refreshEvidence();
       await project.syncHandles();
       await project.reconcileWakes();
@@ -98,6 +104,13 @@ export class CartoProject {
    * for the same Brain document. Handles are assigned where the Brain changes
    * (`open()` calls `syncHandles()`, and every decision that changes a record
    * brings its handle with it), so a read always finds a complete table.
+   */
+  /**
+   * The last prompt the harness assembled.
+   *
+   * It lives on the project rather than on the screen so the screen and the
+   * harness share one object across a UI restart, and so a headless run can read
+   * it too.
    */
   async view(): Promise<ProjectView> {
     const [brain, liveCarryPins, liveView] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins(), this.live.view()]);

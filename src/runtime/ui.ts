@@ -21,6 +21,8 @@ import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
 import { selectedLabel } from "../ui/body.js";
 import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
 import { BlankRow } from "../ui/chrome.js";
+import { contextTree } from "../domain/prompt-tree.js";
+import { selectableOf, treeRows, unconfirmedRows, type TreeRow } from "../ui/context-tree.js";
 import { recordDetail, recordDetailRows } from "../ui/detail.js";
 import { CHROME_ABOVE, ReferenceOverlay, referenceMaxHeight } from "../ui/overlay.js";
 import { inputBoxRows, inputTextCells, INPUT_TITLE } from "../ui/input-box.js";
@@ -62,6 +64,15 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   let detail: Detail = null;
   /** The one overlay handle for a reference, or `undefined` when none is open. */
   let reference: OverlayHandle | undefined;
+  /**
+   * Which Context nodes are open, and which show the provider's own JSON.
+   *
+   * Both are sets of node ids. A node id is stable while the payload it came
+   * from is unchanged, so a fold survives a repaint; a new request builds new
+   * ids and the folds start closed, which is the compact view.
+   */
+  let treeFolds = new Set<string>();
+  let treeReal = new Set<string>();
   let selected = 0;
   let applying = false;
   let quitting = false;
@@ -197,7 +208,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     parts.status.left = next.status.left;
     parts.bar.left = next.bar.left;
     parts.footer.left = next.footer.left;
-    parts.body.setText(detail === "record" ? recordPage(state) : next.bodyText);
+    parts.body.setText(detail === "record" ? recordPage(state) : tab === "context" && detail === null ? contextPage(state, next.bodyText) : next.bodyText);
     paintInput();
     spinnerPaintAt = state.now;
     dirty = false;
@@ -230,6 +241,53 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     const record = recordDetail(tab, state.view, clampSelection({ tab, view: state.view, selected }));
     if (record === undefined) return "  Nothing is selected.";
     return recordDetailRows(record, width).join("\n");
+  };
+
+  /**
+   * The Context tab: the prompt tree, folded.
+   *
+   * It is built from the payload the harness recorded, so it is the prompt and
+   * not a projection of it. Before the first request there is no payload, and
+   * the rows say so and show the projection that is expected, marked
+   * unconfirmed. Either way the rows come from one function, so the selection
+   * index means the same thing in both states.
+   */
+  /**
+   * The Context tab's rows, and the selectable node ids in the same order.
+   *
+   * Every caller goes through this, so the selection index cannot mean one row
+   * on screen and another in the key handler.
+   */
+  const currentTree = (state: FrameState): { rows: TreeRow[]; ids: string[]; exact: boolean } => {
+    const snapshot = project.prompts.current();
+    if (snapshot === undefined) {
+      const rows = unconfirmedRows(state.view, treeFolds, 0, width);
+      return { rows, ids: selectableOf(rows), exact: false };
+    }
+    const tree = contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input);
+    const rows = treeRows(tree, treeFolds, treeReal, 0, width);
+    return { rows, ids: selectableOf(rows), exact: tree.exact };
+  };
+
+  /**
+   * The Context tab as text.
+   *
+   * `marker` is the selection index. It is passed down rather than applied here
+   * so the tab and a test draw the same rows: a second pass that rewrites the
+   * first column would be a second renderer.
+   */
+  const contextPage = (state: FrameState, fallback: string): string => {
+    const chosen = clampSelection({ tab, view: state.view, selected });
+    const snapshot = project.prompts.current();
+    if (snapshot === undefined) {
+      return unconfirmedRows(state.view, treeFolds, chosen, width)
+        .map((entry) => entry.text)
+        .join("\n");
+    }
+    const tree = contextTree(snapshot.payload, snapshot.at, snapshot.usage?.input);
+    const rows = treeRows(tree, treeFolds, treeReal, chosen, width);
+    if (selectableOf(rows).length === 0) return fallback;
+    return rows.map((entry) => entry.text).join("\n");
   };
 
   const showDetail = (next: Detail): void => {
@@ -505,6 +563,15 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     showDetail("record");
   };
 
+  /** The selection index, clamped by the tab that is showing. */
+  const chosen = (): number =>
+    clampSelection({
+      tab,
+      view,
+      selected,
+      ...(tab === "context" ? { contextCount: currentTree(currentState()).ids.length } : {}),
+    });
+
   const navigate = (): void => {
     mode = "navigate";
     tui.setFocus(null);
@@ -587,13 +654,13 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       }
     }
     if (data === "j" || matchesKey(data, Key.down)) {
-      selected += 1;
-      selected = clampSelection({ tab, view, selected });
+      selected = Math.min(9_999, chosen() + 1);
+      selected = chosen();
       wake();
       return { consume: true };
     }
     if (data === "k" || matchesKey(data, Key.up)) {
-      selected = Math.max(0, selected - 1);
+      selected = Math.max(0, chosen() - 1);
       wake();
       return { consume: true };
     }
@@ -604,7 +671,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     }
     if (data === "G" || matchesKey(data, Key.end)) {
       selected = 9_999;
-      selected = clampSelection({ tab, view, selected });
+      selected = chosen();
       wake();
       return { consume: true };
     }
@@ -626,6 +693,33 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     }
     if (data === "?") {
       showDetail(detail === "help" ? null : "help");
+      return { consume: true };
+    }
+    // Context is a tree: `<` and `>` fold and unfold the selected node, and `v`
+    // swaps that node between the human view and the provider's own JSON. These
+    // run before the generic movement keys so `h`/`l` stay free for later.
+    if (tab === "context" && (data === "h" || matchesKey(data, Key.left) || data === "l" || matchesKey(data, Key.right))) {
+      const state = currentState();
+      const index = clampSelection({ tab, view, selected });
+      const id = currentTree(state).ids[index];
+      if (id !== undefined) {
+        const opening = data === "l" || matchesKey(data, Key.right);
+        if (opening) treeFolds.add(id);
+        else treeFolds.delete(id);
+        wake();
+      }
+      return { consume: true };
+    }
+    if (tab === "context" && data === "v") {
+      const state = currentState();
+      const index = clampSelection({ tab, view, selected });
+      const id = currentTree(state).ids[index];
+      if (id !== undefined) {
+        if (treeReal.has(id)) treeReal.delete(id);
+        else treeReal.add(id);
+        treeFolds.add(id);
+        wake();
+      }
       return { consume: true };
     }
     if (data === "f" && tab === "chat") {
