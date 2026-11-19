@@ -156,6 +156,29 @@ What is known and should not be lost:
   or created once and owned; and whether schemas stay in code while descriptions
   move to text.
 
+## §7c. The system prompt draft
+
+`docs/prompt-draft.md` is a first draft. It is a proposal, not intent, and the
+person has not reviewed it.
+
+Open in it:
+- **Q7c.1 — Is the pronoun split right in practice?** "We" for the work, "I" for
+  the agent's own uncertainty. The draft uses "I trust nothing I have not read"
+  and "we make small changes". Whether that reads as one voice or two is a judgement
+  about the prose, not the rule.
+- **Q7c.2 — Does the tool list belong in the prompt at all?** The draft repeats
+  each tool's purpose in a `tools` section, and each tool also carries a
+  description in its schema. Duplication costs tokens and can disagree. Open:
+  whether the prompt describes tools or defers to their descriptions.
+- **Q7c.3 — How is "small atomic changes" taught?** The `working` section
+  currently asserts it and gives a self-check ("when we notice ourselves
+  organising..."). Open: whether that is enough to change behaviour, since the
+  person suspects prompting is the lever but has not seen it work.
+- **Q7c.4 — What is the agent's name?** The draft says "Carto". The old prompt
+  said "Cartographer". Open.
+- **Q7c.5 — Length.** The draft is roughly 900 words. The old prompt was longer,
+  but carried a larger product. Open: whether this is the right size.
+
 ## §8. The edit boundary and the appetite constraint
 
 **Q8.1 — How does "only wants small atomic edits" get enforced or encouraged?**
