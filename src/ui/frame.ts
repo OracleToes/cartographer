@@ -188,14 +188,22 @@ export function renderFrame(state: FrameState, columns: number): Frame {
     `${edge}${pad}${padLine(meterRow(frameMeter(state), barCells(widthNow)), inner)}${pad}${edge}`,
   ];
   const bottom = [ruleRow(), chrome(footerRow(state, inner), "", 0)];
+  // A reference is an overlay on the live screen, but this flat frame has no
+  // overlay layer, so it is appended after the body at the same inset the chrome
+  // uses. A test reads it here; the screen reads `ReferenceOverlay`, and both
+  // take their words from the same functions.
+  const body = bodyText(state, clampSelection(state), widthNow).split("\n");
+  const detail = detailLines(state, inner);
+  if (detail.length > 0) {
+    body.push("");
+    for (const line of detail) body.push(`${" ".repeat(gutter + 2)}${line}`);
+  }
   return {
     top,
     // A flat frame is what a test and a non-alt-screen host read, so each row
     // is padded to the terminal width here. In the component tree the
     // `ScrollView` supplies that width and the rows stay unpadded.
-    body: bodyText(state, clampSelection(state), widthNow)
-      .split("\n")
-      .map((line) => padLine(line, widthNow)),
+    body: body.map((line) => padLine(line, widthNow)),
     bottom,
   };
 }
@@ -205,23 +213,25 @@ export function renderFrame(state: FrameState, columns: number): Frame {
  * scrollbar belongs at the terminal's edge, not in the gutter. Its own two
  * cells of inset are part of the text.
  *
- * A menu (`?`, `a`) is not the page; it is inset like the chrome so it is read
- * in the same place every time.
+ * A reference (`?`, `a`, the Chat edit detail) is **not** here. It is an
+ * overlay drawn by `runtime/ui.ts` through `tui.showOverlay`, so it reads
+ * wherever the body happens to be scrolled to and cannot be mistaken for the
+ * transcript. `detailLines` below is the flat renderer of that same content,
+ * kept for `renderFrame` so a test can assert on it without a terminal.
  */
 function bodyText(state: FrameState, selection: number, widthNow: number): string {
-  const gutter = margin(widthNow);
-  const inner = Math.max(1, widthNow - gutter * 2 - 4);
   const body = bodyRows({ ...state, selected: selection }, widthNow);
-  const detail = detailLines(state, inner);
-  const lines = body.map((entry) => entry.text);
-  if (detail.length > 0) {
-    lines.push("");
-    for (const line of detail) lines.push(`${" ".repeat(gutter + 2)}${line}`);
-  }
-  return lines.join("\n");
+  return body.map((entry) => entry.text).join("\n");
 }
 
-/** The overlay for `?`, `a`, and the Chat edit detail. */
+/**
+ * The flat rows of a reference, for `renderFrame`.
+ *
+ * The live screen does not use this: `runtime/ui.ts` shows a reference through
+ * `tui.showOverlay` with the same words, taken from `helpLines` and
+ * `actionLines`. This function exists so a test can assert the content without a
+ * terminal, and so the flat and overlay paths read from one source.
+ */
 export function detailLines(state: FrameState, inner: number): string[] {
   if (state.detail === "help") return helpLines(state, inner);
   if (state.detail === "actions") return actionLines(state);
@@ -229,6 +239,7 @@ export function detailLines(state: FrameState, inner: number): string[] {
     return [
       token.warning("Chat edit selected. Press i to replace its text."),
       token.muted("d marks it for deletion at collapse; D removes it now."),
+      token.muted("Esc closes the edit and keeps the Chat as it is."),
     ];
   }
   return [];

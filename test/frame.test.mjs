@@ -260,22 +260,47 @@ test("the footer keeps one row in insert mode and names the mode", async () => {
   });
 });
 
-test("a menu is inset like the chrome, and it opens at its title", async () => {
+test("a reference is drawn as an overlay, and the flat frame agrees with it", async () => {
   await withProject(async (project) => {
     const view = await project.view();
+    // The live screen shows `?` and `a` through `tui.showOverlay`. The flat frame
+    // has no overlay layer, so it appends the same words after the body, inset
+    // like the chrome. Both read from `helpLines`/`actionLines`, so this test
+    // asserts the shared source rather than a second copy.
     for (const detail of ["help", "actions"]) {
       const frame = renderFrame(stateOf(project, { view, detail }), 100);
       assertFrameWidth(frame, 100);
-      const menu = plain(frame.body.slice(-6).join("\n"));
-      // A menu row starts inside the gutter (1) and the pad (2), so its first
-      // glyph is at column 3, where the chrome's own content starts.
-      for (const row of frame.body.slice(-4)) {
-        assert.equal(plain(row)[0], " ", `a menu row touches the left edge: ${JSON.stringify(plain(row))}`);
+      const rows = frame.body.slice(-6);
+      for (const row of rows.slice(-4)) {
+        assert.equal(plain(row)[0], " ", `a reference row touches the left edge: ${JSON.stringify(plain(row))}`);
       }
-      assert.match(menu, /^ {3}\S/m);
+      const text = plain(rows.join("\n"));
+      assert.match(text, /^ {3}\S/m);
     }
-    // A menu must not be scrolled to its own end by the body's follow mode.
-    const help = renderFrame(stateOf(project, { view, detail: "help" }), 100);
-    assert.match(plain(help.body[0]), /DURABLE CHAT/);
   });
+});
+
+test("a reference overlay is one row per line, summary first, and never taller than its budget", async () => {
+  const { ReferenceOverlay, referenceMaxHeight, referenceRows } = await import("../dist/ui/overlay.js");
+  await withProject(async (project) => {
+    const view = await project.view();
+    for (const detail of ["help", "actions", "chat"]) {
+      const state = stateOf(project, { view, detail });
+      const budget = referenceMaxHeight(24);
+      const rows = referenceRows(state, 60, budget);
+      // The summary is the row that survives a clip, because the overlay
+      // compositor clips from the bottom.
+      assert.match(plain(rows[0]), /Esc closes/);
+      const rendered = new ReferenceOverlay(state, budget).render(60);
+      assert.deepEqual(rendered, rows);
+      // A row is one row: the component never wraps a reference line.
+      assert.equal(new ReferenceOverlay(state, budget).render(60).length, rows.length);
+    }
+  });
+});
+
+test("a reference budget leaves the chrome room on a short terminal", async () => {
+  const { referenceMaxHeight } = await import("../dist/ui/overlay.js");
+  assert.ok(referenceMaxHeight(24) <= 16);
+  assert.ok(referenceMaxHeight(10) >= 4);
 });

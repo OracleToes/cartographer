@@ -8,6 +8,7 @@ import {
   Text,
   TuiAltScreen,
   VStack,
+  type OverlayHandle,
   type StackEntry,
 } from "@earendil-works/pi-tui";
 
@@ -20,6 +21,7 @@ import { parseCommand, runCommand, type UiCommand } from "../ui/commands.js";
 import { selectedLabel } from "../ui/body.js";
 import { actionContextOf, clampSelection, frameParts, helpLines, type Detail, type FrameState, type Tab } from "../ui/frame.js";
 import { BlankRow } from "../ui/chrome.js";
+import { ReferenceOverlay, referenceMaxHeight } from "../ui/overlay.js";
 import { inputBoxRows, inputTextCells, INPUT_TITLE } from "../ui/input-box.js";
 import { margin } from "../ui/text.js";
 import { SPINNER_INTERVAL_MS } from "../ui/spinner.js";
@@ -57,6 +59,8 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   let tab: Tab = "chat";
   let mode: Mode = "navigate";
   let detail: Detail = null;
+  /** The one overlay handle for a reference, or `undefined` when none is open. */
+  let reference: OverlayHandle | undefined;
   let selected = 0;
   let applying = false;
   let quitting = false;
@@ -201,17 +205,34 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   };
 
   /**
-   * A reference is read from the top. The body follows its own end so a
-   * streamed answer stays in view, but a `?` or `a` reference longer than the
-   * body would open scrolled to its last line and its title would never be
-   * seen. Opening one therefore leaves follow mode at the top of the body;
-   * closing it returns the body to the end.
+   * A reference is an overlay, not a tail of the body.
+   *
+   * `?`, `a`, and the Chat edit detail open through `tui.showOverlay`, so they
+   * are drawn on top of the screen and given focus. The body does not move, the
+   * transcript's scroll position is not disturbed, and a reference is readable
+   * whatever the body is showing. Closing the overlay returns focus to the
+   * screen, and the body is exactly where it was.
+   *
+   * The component is rebuilt on every open because the words depend on the
+   * current state (which actions are available, what the draft is). An overlay
+   * is cheap; a stale reference is a lie.
    */
   const showDetail = (next: Detail): void => {
-    const wasOpen = detail !== null;
     detail = next;
-    if (next !== null) scroll.scrollTo(0, { disableFollow: true });
-    else if (wasOpen) scroll.scrollToEnd();
+    reference?.hide();
+    reference = undefined;
+    if (next === null) {
+      paint();
+      tui.requestRender();
+      return;
+    }
+    const overlay = new ReferenceOverlay(currentState(), referenceMaxHeight(terminal.rows));
+    reference = tui.showOverlay(overlay, {
+      width: Math.max(20, Math.min(width, 96)),
+      maxHeight: referenceMaxHeight(tui.terminal.rows),
+      anchor: "center",
+      margin: 1,
+    });
     paint();
     tui.requestRender();
   };
@@ -466,13 +487,36 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       return undefined;
     }
     if (matchesKey(data, Key.escape)) {
-      if (detail !== null) showDetail(null);
-      navigate();
+      // One Escape closes the reference; a second leaves the screen alone. A
+      // reference is a thing you opened, not a place you navigated to, so it
+      // must not take two different meanings from one key press.
+      if (detail !== null) {
+        showDetail(null);
+        return { consume: true };
+      }
       return { consume: true };
     }
+    // A reference that is a page of words (`?`, `a`) owns the keyboard while it
+    // is open. It closes on its own key or on Escape, and the screen underneath
+    // does not move: reaching into the transcript with `j` while a reference
+    // covers it would move something the person cannot see. A tab switch is let
+    // past, because it closes the reference anyway.
+    if (reference !== undefined && detail !== "chat") {
+      if (data === "?" || data === "a") {
+        showDetail(null);
+        return { consume: true };
+      }
+      if (data === "1") return switchTab("chat");
+      if (data === "2") return switchTab("brain");
+      if (data === "3") return switchTab("context");
+      return { consume: true };
+    }
+    // The Chat edit reference is a hint, not a page: it names keys, so those
+    // keys must work. It closes on the first key, and the key then does its job,
+    // which keeps one key meaning one thing in one mode.
+    if (reference !== undefined && detail === "chat") showDetail(null);
     if (matchesKey(data, Key.backspace)) {
-      if (detail !== null) showDetail(null);
-      else selected = 0;
+      selected = 0;
       wake();
       return { consume: true };
     }
