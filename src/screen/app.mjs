@@ -32,6 +32,7 @@ import { fileURLToPath } from "node:url";
 import { CombinedAutocompleteProvider, KeybindingsManager, Markdown, ProcessTerminal, ScrollView, setKeybindings, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, VStack } from "@earendil-works/pi-tui";
 import { charsPerTokenNow } from "../calibrate.mjs";
 import { createApplication } from "../application/app.mjs";
+import { LIFECYCLE_ACTION, LIFECYCLE_ACTION_SPECS, createLifecycleBridge, lifecycleActionSpecFor } from "../application/lifecycle.mjs";
 import { createChatPresentation } from "../application/chat.mjs";
 import { createReviewPresentation } from "../application/review-presentation.mjs";
 import { createRuntimePresentation } from "../application/runtime-presentation.mjs";
@@ -158,19 +159,82 @@ export const paletteDestinationFor = (id) => {
 export const paletteItemForCapability = (capability) => {
 	const placement = actionPlacementFor(capability.id);
 	const destination = paletteDestinationFor(capability.id);
+	// Clearing kept material without resetting the live conversation creates an invalid half-fresh context. It remains
+	// an application action for the terminal-owned fresh-context sequence, but is deliberately not a Screen control.
+	const disabledReason = capability.id === CONTEXT_ACTION.pinTop
+		? "Refreshing the context top is sequenced by the terminal lifecycle owner so it cannot run while the agent is working."
+		: capability.id === CONTEXT_ACTION.clearKept
+			? "Clearing kept context is sequenced only by Start fresh context, which resets the live conversation first."
+			: destination === undefined ? "This action has no Screen placement yet." : undefined;
 	return {
 		id: `capability:${capability.id}`,
 		actionId: capability.id,
 		label: capability.label,
 		category: capability.category,
 		availability: capability.availability,
+		description: capability.id === CONTEXT_ACTION.pinTop
+			? "Model · Current accounting. Refresh context top is guarded by the terminal lifecycle owner."
+			: capability.id === CONTEXT_ACTION.clearKept
+				? "Model · Current accounting. Start fresh context uses this durable clear after the terminal safely resets the live conversation."
+				: destination === undefined
+					? "This registered action has no Screen placement yet."
+					: `${destination.name}. ${destination.hint}`,
+		keywords: [capability.id, placement?.shortcut, placement?.terminalPath].filter((value) => typeof value === "string" && value !== "").join(" "),
+		destination,
+		...(disabledReason === undefined ? {} : { disabled: true, disabledReason }),
+	};
+};
+
+// Lifecycle is intentionally separate from application actions: these placements describe the Screen controls for
+// the terminal-owned port, while the port remains the authority for every safety/availability decision.
+const LIFECYCLE_PLACEMENTS = Object.freeze([
+	Object.freeze({ id: LIFECYCLE_ACTION.stop, route: Object.freeze({ tab: "chat", view: "conversation" }), shortcut: "Ctrl-X", paletteText: "Stop agent work", terminalPath: "/stop" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.togglePause, route: Object.freeze({ tab: "chat", view: "conversation" }), shortcut: "Ctrl-V", paletteText: "Pause or resume stream", terminalPath: "/pause" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.refreshTop, route: Object.freeze({ tab: "context", view: "parts" }), shortcut: "p", paletteText: "Refresh context top", formTitle: "Refresh context top", terminalPath: "/pin" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.collapse, route: Object.freeze({ tab: "context", view: "parts" }), shortcut: "c", paletteText: "Collapse context", terminalPath: "/collapse" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.freshContext, route: Object.freeze({ tab: "context", view: "parts" }), shortcut: "N", paletteText: "Start fresh context", terminalPath: "/new" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.toggleApproval, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Toggle session approval", terminalPath: "/yolo" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.toggleInitiation, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Toggle session initiation", terminalPath: "/initiate" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.toggleSandbox, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Toggle session sandbox", terminalPath: "/bwrap" }),
+	Object.freeze({ id: LIFECYCLE_ACTION.selectorProbe, route: Object.freeze({ tab: "settings", view: "safety" }), paletteText: "Run native selector probe", formTitle: "Run native selector probe", terminalPath: "/consult probe [PATH]" }),
+]);
+const LIFECYCLE_PLACEMENT_BY_ID = new Map(LIFECYCLE_PLACEMENTS.map((entry) => [entry.id, entry]));
+const lifecyclePlacementFor = (id) => LIFECYCLE_PLACEMENT_BY_ID.get(id);
+const lifecycleDestinationFor = (id) => {
+	const placement = lifecyclePlacementFor(id);
+	return placement === undefined ? undefined : {
+		...placement.route,
+		name: routeName(placement.route),
+		hint: placement.paletteText ?? "Continue with this terminal-owned lifecycle action from the listed route.",
+	};
+};
+/** Turn a typed terminal lifecycle capability into a palette item without treating it as a normal application action. */
+export const paletteItemForLifecycleCapability = (capability) => {
+	const placement = lifecyclePlacementFor(capability.id);
+	const destination = lifecycleDestinationFor(capability.id);
+	return {
+		id: `lifecycle:${capability.id}`,
+		lifecycleActionId: capability.id,
+		label: capability.label,
+		category: capability.category,
+		availability: capability.availability,
 		description: destination === undefined
-			? "This registered action has no Screen placement yet."
+			? "This terminal lifecycle action has no Screen placement yet."
 			: `${destination.name}. ${destination.hint}`,
 		keywords: [capability.id, placement?.shortcut, placement?.terminalPath].filter((value) => typeof value === "string" && value !== "").join(" "),
 		destination,
-		...(destination === undefined ? { disabled: true, disabledReason: "This action has no Screen placement yet." } : {}),
+		...(destination === undefined ? { disabled: true, disabledReason: "This terminal lifecycle action has no Screen placement yet." } : {}),
 	};
+};
+
+/** Derive Work's task-message affordance solely from its settled activity projection and static router capability. */
+export const taskMessageAvailabilityFor = (activity, fallback) => {
+	const reason = typeof fallback?.reason === "string" ? fallback.reason : "";
+	if (fallback?.enabled === false && /no active-task message router/i.test(reason)) return fallback;
+	if (activity?.data?.taskActive === true) return { enabled: true };
+	if (activity?.loading === true) return { enabled: false, reason: "Task activity is still loading. Refresh Work and try again." };
+	if (typeof activity?.error?.message === "string" && activity.error.message !== "") return { enabled: false, reason: `Task activity is unavailable: ${activity.error.message}` };
+	return { enabled: false, reason: "No active task is running to receive a message." };
 };
 
 /** The commands that are typed and sent, for the list that opens when a line starts with a slash. */
@@ -305,6 +369,10 @@ export async function runScreen(session, options, runTerminal) {
 	const started = Date.now();
 	/** What the terminal core lets the screen ask (src/terminal.mjs, `ui.attach`): ephemeral local activity only. */
 	let core = { busy: () => false, paused: () => false, thinking: () => true };
+	// runTerminal installs this narrow typed port after it owns its live stream/context closures. Screen never receives
+	// those closures directly, even though it composes the application facade before terminal startup completes.
+	const lifecycleBridge = createLifecycleBridge();
+	let refreshLifecycleCapabilities = () => {};
 	// The file-completion helper is resolved before the terminal starts, never by a render or key handler.
 	const fileSearch = await findExecutable(["fd", "fdfind"]);
 
@@ -493,6 +561,23 @@ export async function runScreen(session, options, runTerminal) {
 		attach(given) {
 			core = given;
 		},
+		/** The terminal owns the implementation; Screen retains only the typed lifecycle port and settled availability. */
+		attachLifecycle(port) {
+			lifecycleBridge.attach(port);
+			refreshLifecycleCapabilities();
+			rebuild("context.parts");
+			rebuild("settings.safety");
+			draw();
+		},
+		/** The terminal calls this after its safety state changes; renderers consume the resulting snapshot only. */
+		lifecycleChanged() {
+			if (state.closed) return;
+			refreshLifecycleCapabilities();
+			refreshRuntimeActivity(true);
+			rebuild("context.parts");
+			rebuild("settings.safety");
+			draw();
+		},
 		notice(text) {
 			syncThinking();
 			flash(text);
@@ -596,7 +681,12 @@ export async function runScreen(session, options, runTerminal) {
 	const keyHints = createKeyHints({
 		typing: "Esc: commands · Ctrl-K: palette · Ctrl-O: $EDITOR · ? all keys",
 		fallback: ["j k move", "Enter open"],
-		global: ["Ctrl-K palette", "? all keys"],
+		global: [
+			{ text: "Ctrl-X stop", capability: LIFECYCLE_ACTION.stop },
+			{ text: "Ctrl-V pause/resume", capability: LIFECYCLE_ACTION.togglePause },
+			"Ctrl-K palette",
+			"? all keys",
+		],
 		routes: {
 			"chat.conversation": [
 				"j k move",
@@ -665,7 +755,14 @@ export async function runScreen(session, options, runTerminal) {
 			"context.main": ["Enter open", "y copy"],
 			"context.raw": ["Enter open", "y copy"],
 			"context.preview": ["Enter open", "y copy"],
-			"context.parts": ["Enter open", "+ all", "y copy"],
+			"context.parts": [
+				"Enter open",
+				{ text: "p refresh top", capability: LIFECYCLE_ACTION.refreshTop },
+				{ text: "N fresh context", capability: LIFECYCLE_ACTION.freshContext },
+				{ text: "c collapse", capability: LIFECYCLE_ACTION.collapse },
+				"+ all",
+				"y copy",
+			],
 			"settings.configuration": [
 				"j k move",
 				{ text: "Enter/e edit", capability: SETTINGS_ACTION.edit },
@@ -673,11 +770,16 @@ export async function runScreen(session, options, runTerminal) {
 				"s source",
 				"y copy",
 			],
-			"settings.safety": ["j k move", "Enter open", "y copy"],
+			"settings.safety": [
+				"j k move",
+				{ text: "Ctrl-K lifecycle", capabilities: [LIFECYCLE_ACTION.toggleApproval, LIFECYCLE_ACTION.toggleInitiation, LIFECYCLE_ACTION.toggleSandbox, LIFECYCLE_ACTION.selectorProbe] },
+				"Enter open",
+				"y copy",
+			],
 			"settings.assessment": ["j k move", "Enter open", "e edit", "y copy"],
 		},
 	});
-	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: paletteCapabilities });
+	const legend = () => keyHints.text({ mode: state.mode, route: viewId(), capabilities: [...paletteCapabilities, ...lifecycleCapabilities] });
 	// ─── The tabs that are lists ─────────────────────────────────────────────
 	const viewId = () => routes.id();
 	/** The file a view comes from, for `e` when no item names one. */
@@ -707,16 +809,54 @@ export async function runScreen(session, options, runTerminal) {
 			models: session.models,
 			preview: session.preview,
 			runner: options.runner,
-			gate: options.gate,
-			initiation: options.initiation,
-			contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
+		gate: options.gate,
+		initiation: options.initiation,
+		// This late-bound facade is the only lifecycle surface the application sees. runTerminal attaches its typed
+		// owner after it has established the stream/context safety conditions.
+		lifecycle: lifecycleBridge,
+		contextWindow: () => options.config?.contextWindow ?? options.contextWindow,
 		},
 	});
 	assertActionPlacementParity(application.capabilities);
 	const queries = application.queries;
-	// Availability is a composition-time snapshot: opening the palette never consults a manager from a key handler
-	// or render pass. The registered capability remains its single metadata source, including disabled reasons.
-	const paletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
+	// Capability presentation is a settled Screen snapshot. Most registered availability is static composition state;
+	// task messaging additionally follows the deferred Runtime activity fact, so Work visibly says why there is no
+	// message form instead of asking the live task owner from a key handler or render pass.
+	const basePaletteCapabilities = Object.freeze(application.capabilities.list().map((capability) => Object.freeze({ ...capability })));
+	let paletteCapabilities = Object.freeze([]);
+	const refreshPaletteCapabilities = (activity) => {
+		paletteCapabilities = Object.freeze(basePaletteCapabilities.map((capability) => Object.freeze(capability.id === RUNTIME_ACTION.routeTaskMessage
+			? { ...capability, availability: taskMessageAvailabilityFor(activity, capability.availability) }
+			: { ...capability })));
+		return paletteCapabilities;
+	};
+	refreshPaletteCapabilities();
+	// The launcher uses the same settled Work availability as hints and the palette. Other actions retain their
+	// application-owned dynamic availability checks; only task identity is intentionally cached by Runtime activity.
+	const screenActionCapabilities = Object.freeze({
+		get: (id) => id === RUNTIME_ACTION.routeTaskMessage
+			? paletteCapabilities.find((capability) => capability.id === id)
+			: application.capabilities.get(id),
+		availability: (id) => id === RUNTIME_ACTION.routeTaskMessage
+			? paletteCapabilities.find((capability) => capability.id === id)?.availability
+			: application.capabilities.availability(id),
+		list: () => [...application.capabilities.list().filter((capability) => capability.id !== RUNTIME_ACTION.routeTaskMessage), ...paletteCapabilities.filter((capability) => capability.id === RUNTIME_ACTION.routeTaskMessage)],
+	});
+	let lifecycleCapabilities = Object.freeze([]);
+	const lifecycleService = application.lifecycle;
+	const lifecycleCapabilityRegistry = Object.freeze({
+		get: (id) => lifecycleCapabilities.find((capability) => capability.id === id),
+		availability: (id) => lifecycleCapabilities.find((capability) => capability.id === id)?.availability,
+		list: () => lifecycleCapabilities,
+	});
+	// Terminal lifecycle availability is pushed into this settled Screen cache when the owner attaches or changes.
+	// Key hints and the palette consume only this snapshot; neither reads a live terminal closure while painting.
+	refreshLifecycleCapabilities = () => {
+		const listed = typeof lifecycleService?.capabilities?.list === "function" ? lifecycleService.capabilities.list() : [];
+		lifecycleCapabilities = Object.freeze(listed.map((capability) => Object.freeze({ ...capability })));
+		return lifecycleCapabilities;
+	};
+	refreshLifecycleCapabilities();
 	const workspace = Object.freeze({ execute: application.execute, template: application.workspace.template });
 	const review = Object.freeze({ execute: application.execute });
 	const talk = Object.freeze({ execute: application.execute });
@@ -785,6 +925,7 @@ export async function runScreen(session, options, runTerminal) {
 	let settleProjection = () => {};
 	// Constructed after overlay helpers exist. Projection settlement may happen sooner, so this remains optional here.
 	let actionLauncher;
+	let lifecycleLauncher;
 	const projections = createProjectionScheduler({ onSettled: (id, projection) => settleProjection(id, projection) });
 	const projectionFor = (id) => projections.get(id);
 	const RUNTIME_ACTIVITY_PROJECTION = "runtime.activity";
@@ -849,6 +990,7 @@ export async function runScreen(session, options, runTerminal) {
 		invalidateProjections();
 		if (runtimeChanged) {
 			refreshRuntimeStatusProjection(true);
+			refreshRuntimeActivity(true);
 			if ([RUNTIME_ACTION.ensureModel, RUNTIME_ACTION.selectModel].includes(event.payload.action)) refreshRuntimeModelProjection(true);
 		}
 		refresh(viewId(), true);
@@ -881,7 +1023,7 @@ export async function runScreen(session, options, runTerminal) {
 			selected: pageOf(id)?.list.selected()?.key,
 			wide: cols >= 100,
 		}));
-		if (id === "settings.safety") return projectionView(id, (data) => settingsSafetyView({ settings: data, presentation: settingsPresentation.overview }));
+		if (id === "settings.safety") return projectionView(id, (data) => settingsSafetyView({ settings: data, presentation: settingsPresentation.overview, lifecycle: lifecycleCapabilities.filter((capability) => [LIFECYCLE_ACTION.toggleApproval, LIFECYCLE_ACTION.toggleInitiation, LIFECYCLE_ACTION.toggleSandbox, LIFECYCLE_ACTION.selectorProbe].includes(capability.id)) }));
 		if (id === "settings.assessment") return projectionView(id, (data) => settingsAssessmentView({ assessment: data, presentation: settingsPresentation.assessment }));
 		return { header: [], items: [] };
 	};
@@ -896,13 +1038,18 @@ export async function runScreen(session, options, runTerminal) {
 	};
 	settleProjection = (id) => {
 		if (state.closed) return;
-		if (id === RUNTIME_ACTIVITY_PROJECTION || id === RUNTIME_STATUS_PROJECTION) return void draw();
+		if (id === RUNTIME_ACTIVITY_PROJECTION) {
+			refreshPaletteCapabilities(projectionFor(RUNTIME_ACTIVITY_PROJECTION));
+			return void draw();
+		}
+		if (id === RUNTIME_STATUS_PROJECTION) return void draw();
 		rebuild(id);
 		if (viewId() === id) {
 			draw();
 			// A palette launch waits for this already-settled projection instead of asking a live manager for targets.
 			// The launcher ignores unrelated routes and any currently-open dialog/picker.
 			actionLauncher?.onRouteSettled(routes.current());
+			lifecycleLauncher?.onRouteSettled(routes.current());
 		}
 	};
 	/** Read a view again. */
@@ -1257,6 +1404,7 @@ export async function runScreen(session, options, runTerminal) {
 			// A route change before target settlement is an explicit abandonment, not permission to keep a hidden
 			// picker pending behind a different view. Overlay-backed/executing launches retain their own safeguards.
 			actionLauncher?.onRouteChanged(current);
+			lifecycleLauncher?.onRouteChanged(current);
 		}
 		tui.resetTextSelection();
 		refresh(current.id, true);
@@ -1807,6 +1955,12 @@ export async function runScreen(session, options, runTerminal) {
 		void actionLauncher.launch(actionId).catch((error) => flash(`could not open that action: ${error?.message ?? error}`));
 		return true;
 	};
+	/** Lifecycle controls share the launch/confirmation gate but dispatch only through application.lifecycle. */
+	const launchLifecycle = (actionId) => {
+		if (lifecycleLauncher === undefined) return false;
+		void lifecycleLauncher.launch(actionId).catch((error) => flash(`could not open that lifecycle action: ${error?.message ?? error}`));
+		return true;
+	};
 	/** One command, by the name of its key (src/screen/keys.mjs). */
 	const command = (key) => {
 		const inChat = chatTab();
@@ -1832,8 +1986,14 @@ export async function runScreen(session, options, runTerminal) {
 				if (key === "x") return void requestSettingsReset();
 				if (key === "s") return void chooseSettingsSource();
 			}
+			if (viewId() === "settings.safety" && (key === "enter" || key === " " || key === "o")) {
+				const lifecycleAction = pageOf("settings.safety")?.list.selected()?.lifecycleAction;
+				if (typeof lifecycleAction === "string") return void launchLifecycle(lifecycleAction);
+			}
 			if (key === "u" && viewId().startsWith("diff.")) return void requestReviewUndo();
-			if (viewId() === "context.parts" && key === "p") return void launchAction(CONTEXT_ACTION.pinTop);
+			if (viewId() === "context.parts" && key === "p") return void launchLifecycle(LIFECYCLE_ACTION.refreshTop);
+			if (viewId() === "context.parts" && key === "N") return void launchLifecycle(LIFECYCLE_ACTION.freshContext);
+			if (viewId() === "context.parts" && key === "c") return void launchLifecycle(LIFECYCLE_ACTION.collapse);
 			if (viewId() === "shells.list") {
 				if (key === "s") return void launchAction(RUNTIME_ACTION.sendShell);
 				if (key === "d") return void launchAction(RUNTIME_ACTION.closeShell);
@@ -2155,6 +2315,16 @@ export async function runScreen(session, options, runTerminal) {
 		}
 		return presentWorkspaceResult(result, id);
 	};
+	/** Lifecycle outcomes are terminal-owned but use the same UiResult/notice contract as application actions. */
+	const presentLifecycleResult = (result, pending) => {
+		const id = `${pending.placement.route.tab}.${pending.placement.route.view}`;
+		const line = result.ok ? result.data.line : result.error.message;
+		flash(String(line ?? "Lifecycle action completed.").replace(/\n+/g, " "), result.ok ? NOTICE_LEVEL.success : NOTICE_LEVEL.error);
+		refreshLifecycleCapabilities();
+		if (!result.ok) refresh(id, true);
+		draw();
+		return result.ok;
+	};
 	const openExistingActionControl = ({ plan, placement, dispatch, cancel }) => {
 		const input = plan.input ?? {};
 		if (plan.actionId === REVIEW_ACTION.undo) {
@@ -2214,7 +2384,7 @@ export async function runScreen(session, options, runTerminal) {
 	// The palette feeds this single launcher. Its target callback reads only current list/chat rows and its execution
 	// callback is application.execute; no Screen component receives a manager or performs a hidden live lookup.
 	actionLauncher = new ActionLauncher({
-		capabilities: application.capabilities,
+		capabilities: screenActionCapabilities,
 		specs: application.actionSpecs,
 		placements: Object.freeze({ get: actionPlacementFor }),
 		execute: application.execute,
@@ -2251,6 +2421,34 @@ export async function runScreen(session, options, runTerminal) {
 		present: presentLaunchedResult,
 		flash,
 	});
+	if (typeof lifecycleService?.execute === "function") {
+		lifecycleLauncher = new ActionLauncher({
+			capabilities: lifecycleCapabilityRegistry,
+			specs: Object.freeze({ get: lifecycleActionSpecFor, list: () => LIFECYCLE_ACTION_SPECS }),
+			placements: Object.freeze({ get: lifecyclePlacementFor }),
+			execute: lifecycleService.execute,
+			currentRoute: () => routes.current(),
+			navigate: (route) => setRoute(route),
+			openDialog: ({ plan, submit, cancel }) => openModal(({ close }) => new ActionDialog({
+				actionId: plan.actionId,
+				title: plan.title,
+				fields: plan.fields,
+				input: plan.input,
+				keyOf,
+				close,
+				flash,
+				redraw: draw,
+				submit,
+				cancel,
+			}), { width: boxWidth(plan.fields, terminal.columns), anchor: "center" }),
+			openConfirmation: ({ confirmation, confirm, cancel }) => openConfirmation(confirmation, confirm, {
+				title: `${lifecycleCapabilityRegistry.get(confirmation.actionId)?.label ?? "Confirm lifecycle action"}?`,
+				cancel,
+			}),
+			present: presentLifecycleResult,
+			flash,
+		});
+	}
 	const paletteItems = () => [
 		{ id: "navigate.chat", label: "Go to Chat", category: "navigation", description: "Conversation, private Work, and isolated Consult.", destination: { tab: "chat", view: "conversation", name: "Chat" } },
 		{ id: "navigate.carto", label: "Go to Carto", category: "navigation", description: "Atlas, Ledger, Plan, Requests, Tree, and the shared brain.", destination: { tab: "carto", view: "atlas", name: "Carto" } },
@@ -2260,6 +2458,7 @@ export async function runScreen(session, options, runTerminal) {
 		{ id: "navigate.settings", label: "Go to Settings", category: "navigation", description: "Configuration, session policy, provider diagnostics, and assessment.", destination: { tab: "settings", view: "configuration", name: "Settings · Configuration" } },
 		{ id: "shell.refresh", label: "Refresh visible view", category: "navigation", description: "Discard the visible projection cache and ask its deferred boundary for a replacement." },
 		...paletteCapabilities.map(paletteItemForCapability),
+		...lifecycleCapabilities.map(paletteItemForLifecycleCapability),
 	];
 	const openPaletteDestination = (destination) => {
 		if (destination === undefined) return false;
@@ -2287,6 +2486,13 @@ export async function runScreen(session, options, runTerminal) {
 				// shared overlay owner never stacks it on the palette; route settlement resumes a loading target later.
 				if (started) setTimeout(() => {
 					if (!state.closed) void actionLauncher.resume();
+				}, 0);
+				return started;
+			}
+			if (item.lifecycleActionId !== undefined && lifecycleLauncher !== undefined) {
+				const started = await lifecycleLauncher.begin(item.lifecycleActionId, { waitForResume: true });
+				if (started) setTimeout(() => {
+					if (!state.closed) void lifecycleLauncher.resume();
 				}, 0);
 				return started;
 			}
@@ -2348,8 +2554,8 @@ export async function runScreen(session, options, runTerminal) {
 			}
 			reader.emit("SIGINT");
 		}
-		else if (key === "ctrl+x") keys.emit("keypress", "", { ctrl: true, name: "x" });
-		else if (key === "ctrl+v") keys.emit("keypress", "", { ctrl: true, name: "v" });
+		else if (key === "ctrl+x") launchLifecycle(LIFECYCLE_ACTION.stop);
+		else if (key === "ctrl+v") launchLifecycle(LIFECYCLE_ACTION.togglePause);
 		else if (key === "ctrl+t") keys.emit("keypress", "", { ctrl: true, name: "t" });
 		else if (key === "ctrl+l") tui.requestRender(true);
 		else if (key === "ctrl+k") showPalette();

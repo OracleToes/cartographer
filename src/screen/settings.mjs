@@ -7,9 +7,21 @@
 const note = (text, style = "muted") => ({ key: `note:${text}`, plain: true, head: [[text, style]] });
 
 /** The session-only safety and provider view. Persisted settings have their own Configuration collection. */
-export function settingsSafetyView({ settings, presentation } = {}) {
+export function settingsSafetyView({ settings, presentation, lifecycle = [] } = {}) {
 	if (presentation === undefined || typeof presentation.describe !== "function") throw new TypeError("Safety needs its presentation adapter.");
+	if (!Array.isArray(lifecycle)) throw new TypeError("Safety lifecycle controls need a settled capability array.");
 	const described = presentation.describe(settings);
+	const lifecycleRows = lifecycle.filter((capability) => capability !== null && typeof capability === "object" && typeof capability.id === "string" && typeof capability.label === "string").map((capability) => {
+		const enabled = capability.availability?.enabled === true;
+		const reason = typeof capability.availability?.reason === "string" && capability.availability.reason.trim() !== "" ? capability.availability.reason.trim() : "This lifecycle action is unavailable right now.";
+		return {
+			key: `lifecycle:${capability.id}`,
+			head: [[`${capability.label}  `, "bold"], [enabled ? "available" : "unavailable", enabled ? "ok" : "warn"], [enabled ? "  · Enter opens" : "", "muted"]],
+			body: enabled ? "Terminal-owned control. Enter opens its typed action flow; confirmation appears when required." : reason,
+			copy: `${capability.label}: ${enabled ? "available" : `unavailable — ${reason}`}`,
+			lifecycleAction: capability.id,
+		};
+	});
 	const header = [
 		[["Safety", "bold"]],
 		[["Session policy is shown here, but authorization stays with the backend. Saved policy defaults take effect only in a future session; a listed provider route is not agent-ready until native llama.cpp GBNF validation passes.", "muted"]],
@@ -36,6 +48,10 @@ export function settingsSafetyView({ settings, presentation } = {}) {
 			body: policy.detail,
 			copy: `${policy.label}: ${policy.state}\n${policy.detail}\n${policy.default}`,
 		})),
+		...(lifecycleRows.length === 0 ? [] : [
+			{ key: "lifecycle", plain: true, head: [["── Terminal lifecycle controls ──", "muted"]] },
+			...lifecycleRows,
+		]),
 	];
 	return { header, items };
 }

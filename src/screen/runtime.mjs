@@ -45,7 +45,7 @@ export function wakesView({ wakes = [], lines = [], presentation } = {}) {
 	if (presentation === undefined || typeof presentation.describe !== "function") throw new TypeError("Wake schedules need their Runtime presentation adapter.");
 	if (wakes.length === 0) {
 		return {
-			header: [[["Wake schedule", "bold"]], [["Wakes belong to the main agent and remain scheduled until they fire their last time or are removed.", "muted"]]],
+			header: [[["Wake schedule", "bold"]], [["Wakes belong to the main agent and remain scheduled until they fire their last time, are replaced, or are removed.", "muted"]]],
 			items: [note("  The agent has set no wake.")],
 		};
 	}
@@ -72,7 +72,7 @@ export function wakesView({ wakes = [], lines = [], presentation } = {}) {
 	});
 	return {
 		header: [
-			[[`${wakes.length === 1 ? "1 wake" : `${wakes.length} wakes`} scheduled`, "bold"], ["  · remove one with d; /wakes remove ID remains available in the prompt", "muted"]],
+			[[`${wakes.length === 1 ? "1 wake" : `${wakes.length} wakes`} scheduled`, "bold"], ["  · n creates, e replaces the selected trigger, d removes; /wakes remove ID remains available in the prompt", "muted"]],
 			[["A wake starts no provider request while this view is read. Its lifecycle is refreshed through the Runtime projection.", "faint"]],
 		],
 		items,

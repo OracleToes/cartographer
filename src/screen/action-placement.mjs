@@ -105,8 +105,12 @@ export function assertActionPlacementParity(capabilities, placements = ACTION_PL
 
 const RAW_ACTION_PLACEMENTS = [
 	// Context
-	placement("context.pin-top", { route: route("context", "parts"), shortcut: "p", paletteText: "Refresh context top", formTitle: "Refresh context top", terminalPath: "/pin" }),
-	placement("context.clear-kept", { route: route("context", "parts"), shortcut: "N", paletteText: "Start fresh context", terminalPath: "terminal lifecycle bridge" }),
+	// The terminal-owned lifecycle port guards Screen refreshes while work is active; this application action remains
+	// available to the terminal owner and for its fresh-context sequence.
+	placement("context.pin-top", { route: route("context", "parts"), paletteText: "Refresh context top (lifecycle sequence)", formTitle: "Refresh context top", terminalPath: "/pin" }),
+	// This durable clear is invoked only by the terminal-owned fresh-context sequence. It stays placed for parity and
+	// inspection, but Screen marks it lifecycle-only instead of exposing a half-fresh direct action.
+	placement("context.clear-kept", { route: route("context", "parts"), paletteText: "Clear kept context (fresh-context sequence)", terminalPath: "terminal lifecycle bridge" }),
 
 	// Requests
 	placement("request.approve", { route: route("carto", "requests"), targetSource: ACTION_TARGET_SOURCE.requests, shortcut: "a", paletteText: "Approve request", terminalPath: "/approve ID" }),
