@@ -58,7 +58,7 @@ export interface LedgerEntry {
 export type AtlasEdgeKind = "replaces" | "depends-on" | "contradicts";
 
 /**
- * A typed, optional edge to another Atlas node (MINI.md §2.3, confirmed).
+ * A typed, optional edge to another Atlas node (MINI.md §2.1, confirmed).
  * Nothing requires an edge; a node or a sub-graph may float unconnected.
  */
 export interface AtlasEdge {

@@ -161,7 +161,7 @@ Not rebuilt and not deleted: `MINI.md`, `AGENTS.md`, `docs/`, `bin/`
 (launcher), `package.json`/`tsconfig.json` (build scaffolding), `LICENSE`.
 
 **Atlas edges are stored as written, 2026-11-20.** The person ruled that
-MINI.md §2.3 is to be applied to the letter: no existence validation on
+MINI.md §2.1 is to be applied to the letter: no existence validation on
 edges at write time, and no cascade stripping edges when a node is
 deleted. The graph is the agent's garden — a flood of unconnected nodes,
 islands, and edges naming vanished nodes are the agent's to tend. The

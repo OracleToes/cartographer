@@ -7,7 +7,7 @@
  * store applies it inside one transaction or not at all.
  *
  * Deletion is a single step with no pending state and no undo
- * (MINI.md §2.3, confirmed).
+ * (MINI.md §2.1, confirmed).
  */
 import { reconcileHandles } from "./handles.js";
 import type {
@@ -99,7 +99,7 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     }
 
     case "atlas.upsert": {
-      // Edges are stored as written (MINI.md §2.3, confirmed): the graph is
+      // Edges are stored as written (MINI.md §2.1, confirmed): the graph is
       // the agent's garden and permissive by intent — a flood of unconnected
       // nodes or an edge to a vanished target is the agent's to tend, not
       // the runtime's to validate away.

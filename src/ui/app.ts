@@ -36,7 +36,7 @@ import {
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
-import { staleHandles } from "../runtime/carto-extension.js";
+import { staleMarks } from "../runtime/carto-extension.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode } from "./chrome.js";
@@ -71,11 +71,12 @@ async function agentChatSeen(brain: BrainStore): Promise<Set<string>> {
 }
 
 function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>): SidebarCounts {
-  const staleList = staleHandles(brainState);
+  // Typed marks, not prefix parsing: the stale kind is what the Brain reports.
+  const marks = staleMarks(brainState);
   const stale: Partial<Record<BookKind, number>> = {};
-  for (const label of staleList) {
-    const kind = ({ A: "atlas", L: "ledger", C: "chat", P: "pins", W: "wakes" } as const)[label[0]?.toUpperCase() ?? ""];
-    if (kind !== undefined) stale[kind] = (stale[kind] ?? 0) + 1;
+  for (const mark of marks) {
+    const kind: BookKind = mark.kind === "pin" ? "pins" : "atlas";
+    stale[kind] = (stale[kind] ?? 0) + 1;
   }
   return {
     atlas: brainState.atlas.length,
@@ -84,7 +85,7 @@ function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>): Side
     pins: brainState.userPins.length + brainState.carryPins.length,
     wakes: brainState.wakes.length,
     stale,
-    staleTotal: staleList.length,
+    staleTotal: marks.length,
   };
 }
 

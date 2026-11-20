@@ -64,23 +64,34 @@ const estimatePart = (value: unknown): number => {
   return json === undefined ? 0 : Math.ceil(json.length / 4);
 };
 
-/** Handles of records whose file-backed evidence drifted at the last rebuild. */
-export function staleHandles(brain: CartoBrain): string[] {
-  const stale: string[] = [];
+/** Records whose file-backed evidence drifted at the last rebuild, as typed marks. */
+export function staleMarks(brain: CartoBrain): Array<{ kind: "atlas" | "pin"; label: string }> {
+  const marks: Array<{ kind: "atlas" | "pin"; label: string }> = [];
   for (const node of brain.atlas) {
     const drifted = node.evidence.some((ref) => ref.kind === "file" && ref.freshness === "stale");
     if (!drifted) continue;
     const handle = handleOf(brain.handles, "atlas", node.id);
-    if (handle !== undefined) stale.push(`${handle} (evidence changed)`);
+    if (handle !== undefined) marks.push({ kind: "atlas", label: `${handle} (evidence changed)` });
   }
   for (const layer of [brain.userPins, brain.carryPins]) {
     for (const pin of layer) {
       if (pin.source.kind !== "file" || pin.source.freshness !== "stale") continue;
       const handle = handleOf(brain.handles, "pin", pin.id);
-      if (handle !== undefined) stale.push(`${handle} (source changed)`);
+      if (handle !== undefined) marks.push({ kind: "pin", label: `${handle} (source changed)` });
     }
   }
-  return [...new Set(stale)].sort();
+  const seen = new Set<string>();
+  const unique = marks.filter((mark) => {
+    if (seen.has(mark.label)) return false;
+    seen.add(mark.label);
+    return true;
+  });
+  return unique.sort((left, right) => left.label.localeCompare(right.label));
+}
+
+/** Handles of records whose file-backed evidence drifted at the last rebuild. */
+export function staleHandles(brain: CartoBrain): string[] {
+  return staleMarks(brain).map((mark) => mark.label);
 }
 
 /** Everything the block reports, from the Brain and the session, for one request. Exported for the tests. */

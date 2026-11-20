@@ -1,5 +1,5 @@
 /**
- * Where things live (MINI.md §2.2). The Brain is the only durable storage,
+ * Where things live (MINI.md §2.3). The Brain is the only durable storage,
  * and it lives under `.brain/` inside the project. The agent holds no path
  * into it — the runtime computes these, and no tool takes a `.brain` path.
  *

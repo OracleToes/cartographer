@@ -54,7 +54,7 @@ Deleting a Brain record is a single step with no undo state.
 
 The Brain is the only durable storage. Nothing else in Carto is durable.
 
-### 2.3 The Atlas graph
+### 2.1 The Atlas graph
 
 Nodes are source-backed claims with evidence. Edges between nodes are optional
 and typed; nothing requires a node to connect to another node. A node, or a
@@ -73,7 +73,7 @@ Edge types (directed, except `contradicts` which is symmetric):
 
 > Confirmed by the person.
 
-### 2.1 The agent owns its Brain
+### 2.2 The agent owns its Brain
 
 The agent modifies everything in its Brain without approval. The Brain is its own
 garden. There is no approval queue, no change-request record type, and no state
@@ -85,7 +85,7 @@ tend the Brain.
 > Confirmed by the person: "the agent should be able to modify everything in its
 > brain without approval, that is its own garden."
 
-### 2.2 The agent does not see `.brain`
+### 2.3 The agent does not see `.brain`
 
 The agent does not read or write `.brain` directly. This is not a permission
 gate; it is a scoping decision. Direct access would let curiosity fill the
@@ -94,7 +94,7 @@ agent's context with duplicated or stale copies of its own state.
 > The person named this explicitly as a case where their trust of the agent
 > scopes its capability, rather than a rule the agent must obey.
 
-### 2.3 Deletion is cheap and unpoliced
+### 2.4 Deletion is cheap and unpoliced
 
 Deleting a Brain record costs nothing and needs no approval. The prompt asks the
 agent to size its own entries; the runtime does not enforce a limit the agent
@@ -322,7 +322,7 @@ prompt cannot start a turn, and a later system message cannot either. This is a
 property of Pi Durable, not a design choice.
 
 **The mechanism.** After a text-only reply, `onYield` continues the run with a
-byte-sized marker user message. On every request, `beforeProviderRequest`
+byte-sized marker user message. On every request, `beforeRequest`
 strips any marker from the payload and appends a freshly rendered state block as
 a trailing user-role message. The model sees exactly one current block at the
 tail; the store keeps only markers; markers die with the generation's store at
@@ -379,10 +379,16 @@ approve / apply queue, and `changes` is not a Brain record type.
 
 ## 8. The workspace
 
-Carto uses the Pi TUI alternate screen. It has three tabs: **Chat**, **Brain**,
-and **Context**. There is no permanent palette, settings screen, or drawer.
+Carto uses the Pi TUI alternate screen. The workspace renders **modes** —
+**Chat**, **Context**, and **Brain** — reachable by key and palette, not
+fixed tabs. There is no permanent palette, settings screen, or drawer.
 
-**The Context tab is the real prompt**, in the order the model sees it, with a
+> The three-tab frame was re-scoped by the person on 2026-11-20: the token
+> bar is required, the Context view is the flagship, and the mode set
+> follows Posting's dense-screen philosophy on pi-tui primitives. See
+> `docs/intent.md` §44 and `docs/ui-proposal.md`.
+
+**The Context view is the real prompt**, in the order the model sees it, with a
 fold tree. Functions, schemas, and records are collapsible; a leaf is never
 folded. Tools get one collapsible entry per tool in their own sub-tree. Schema-
 shaped content has a human-readable view and a real view. The fold rule applies
@@ -403,25 +409,30 @@ different glyph and colour before the first measured request.
 
 Three delivery modes survive:
 
-- **Interrupt** — the person stops the run at a Pi Durable boundary.
+- **Interrupt** — the person stops the run now, not politely at a boundary.
 - **Steer** — a message queued at the next Pi Durable boundary; the agent sees
   it arrive in the transcript.
 - **Follow-up** — a message queued for after the run.
 
 Pause, edit-draft, and resume are gone; what the agent had said or proposed
 already lives in Chat and the Ledger. Cancel is interrupt plus dropping what
-was queued. A provider stream cannot be frozen and resumed; a stop takes
-effect at a boundary.
+was queued. A provider stream cannot be frozen mid-token; the stop takes
+effect as close to now as the run's abort check allows — not at a boundary,
+and not on the agent's convenience.
 
-> Confirmed by the person.
+> Confirmed by the person; the interrupt semantics were restated by the
+> person on 2026-11-20 ("Interrupt means interrupt"). See `docs/intent.md`
+> §47 and `docs/open-questions.md` §10.
 
 ## 10. Wake and sleep
 
-The agent can sleep and wake on a time or a project path. Wakes
-use Pi Durable tasks. A folder wake is bounded.
+The agent can sleep. A `sleep` without a time option ends the run; the agent
+wakes when the person wakes it. A `sleep` with a timer ends the run; it
+wakes when the timer expires. No other wake machinery exists — no folder
+wake, no project-path wake.
 
-> Confirmed as a product part the person named. Open: the bounds and the wake
-> record's shape. See `docs/open-questions.md` §11.
+> Confirmed by the person, 2026-11-20. See `docs/intent.md` §37 and
+> `docs/open-questions.md` §11.
 
 ## 10a. The tool surface
 
