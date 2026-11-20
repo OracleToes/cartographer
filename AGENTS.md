@@ -285,9 +285,11 @@ on one occasion the local branch pointer `arena/<branch>` was moved back to
 the base commit while the working tree kept everything as untracked files.
 The remote tip is the source of truth. Expect it, and repair it when found:
 
-- Treat the local branch as possibly stale. Before trusting `git status` or
-  cutting a diff, `git fetch origin <current-branch>`; compare
-  `git rev-parse HEAD` with `origin/<branch>`.
+- Treat the local branch as possibly stale. At the START of every turn —
+  before any edit, build, or test, not only when git misbehaves —
+  `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
+  `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
+  on the base; it happened once and cost one misplaced commit.
 - If the branch pointer trails the remote tip, move it forward with
   `git reset --mixed origin/<current-branch>` (working tree untouched; the
   reflog keeps the old value). Never force-push; never pull rewrites onto a

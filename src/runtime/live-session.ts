@@ -125,6 +125,10 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       // The environment the built-in bash runs through: one per conversation,
       // cwd at the project root. No policy of ours is attached to it.
       env: () => new NodeExecutionEnv({ cwd: root }),
+      // The person's delivery call (2026-11-20): queued messages land as ONE
+      // batch at the next boundary, not one-at-a-time (pi's default). Read at
+      // each use by pi, so this applies everywhere including follow-ups.
+      settings: { steeringMode: "all", followUpMode: "all" },
       ...(options.onReport === undefined ? {} : { onReport: options.onReport }),
     }, BACKGROUND_CONTEXT);
     const agent = {
