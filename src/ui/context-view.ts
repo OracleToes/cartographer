@@ -1,8 +1,16 @@
 /**
  * The Context view — the surgery view (MINI.md §8; docs/ui-proposal.md §5).
- * Read-only accurate rendering of what the model reads, grouped by part.
+ * Read-only accurate rendering of what the model reads, grouped by part
+ * in the real order it appears in the context window:
  *
- * Left rail: parts with estimated tokens and percentage shares.
+ * 1. SYSTEM (Rules & instructions: CARTO_INSTRUCTIONS)
+ * 2. PROJECTION (The frozen projection snapshot: carto-context)
+ * 3. TOOLS (Tool declarations with descriptions & JSON parameter schemas)
+ * 4. TRANSCRIPT (Dialogue messages in chronological order)
+ * 5. TOOL WORK (Reasoning, tool invocations, and tool results)
+ * 6. STATE BLOCK (The trailing <carto-state> block at the request tail)
+ *
+ * Left rail: parts in context-window order with token counts and % shares.
  * Right pane: foldable content, exact wire bytes toggleable with human view.
  * Navigable via vim motions (j/k, tab to toggle raw bytes, esc to return to Chat).
  */
@@ -15,16 +23,46 @@ import {
   type Focusable,
 } from "@earendil-works/pi-tui";
 
-import { estimateTokens } from "../domain/estimate.js";
+import { estimateSerialized, estimateTokens } from "../domain/estimate.js";
 import type { CartoBrain } from "../domain/records.js";
 import { projectContext } from "../domain/projection.js";
 import { tokens } from "./tokens.js";
 
+export interface ContextToolItem {
+  name: string;
+  description: string;
+  parameters: unknown;
+}
+
+export interface ContextDialogueMessage {
+  id: string | number;
+  role: string;
+  text: string;
+  timestamp?: number | undefined;
+}
+
+export interface ContextWorkItem {
+  id: string | number;
+  kind: string;
+  name?: string | undefined;
+  args?: string | undefined;
+  output?: string | undefined;
+  text?: string | undefined;
+}
+
+export interface ContextViewData {
+  brain: CartoBrain;
+  systemPrompt: string;
+  tools: ContextToolItem[];
+  transcriptMessages: ContextDialogueMessage[];
+  toolWorkItems: ContextWorkItem[];
+  stateBlockText: string;
+}
+
 export interface ContextPartItem {
-  id: string;
+  id: "system" | "projection" | "tools" | "transcript" | "tool-work" | "state-block";
   name: string;
   tokens: number;
-  lines: string[];
   rawText: string;
 }
 
@@ -36,66 +74,64 @@ export class ContextView implements Component, Focusable {
   private showRaw = false;
   private parts: ContextPartItem[] = [];
   private totalTokens = 0;
+  private data: ContextViewData | undefined;
 
-  setData(
-    brain: CartoBrain,
-    systemPrompt: string,
-    toolDescriptions: string[],
-    transcriptText: string,
-    toolWorkText: string,
-    stateBlockText: string,
-  ): void {
-    const projection = projectContext(brain);
-    const systemTokens = estimateTokens(systemPrompt);
-    const toolsTokens = estimateTokens(toolDescriptions.join("\n"));
+  setData(data: ContextViewData): void {
+    this.data = data;
+    const projection = projectContext(data.brain);
+
+    const systemPromptText = data.systemPrompt;
+    const projectionText = projection.text;
+    const toolsRawText = JSON.stringify(data.tools, null, 2);
+    const transcriptRawText = JSON.stringify(data.transcriptMessages, null, 2);
+    const toolWorkRawText = JSON.stringify(data.toolWorkItems, null, 2);
+    const stateBlockText = data.stateBlockText;
+
+    const systemTokens = estimateTokens(systemPromptText);
     const projTokens = projection.total;
-    const transTokens = estimateTokens(transcriptText);
-    const workTokens = estimateTokens(toolWorkText);
+    const toolsTokens = estimateSerialized(data.tools);
+    const transTokens = estimateSerialized(data.transcriptMessages);
+    const workTokens = estimateSerialized(data.toolWorkItems);
     const stateTokens = estimateTokens(stateBlockText);
 
-    this.totalTokens = systemTokens + toolsTokens + projTokens + transTokens + workTokens + stateTokens;
+    this.totalTokens = systemTokens + projTokens + toolsTokens + transTokens + workTokens + stateTokens;
 
+    // Real order in the context window:
     this.parts = [
       {
         id: "system",
         name: "SYSTEM",
         tokens: systemTokens,
-        lines: [systemPrompt],
-        rawText: systemPrompt,
-      },
-      {
-        id: "tools",
-        name: "TOOLS",
-        tokens: toolsTokens,
-        lines: toolDescriptions,
-        rawText: toolDescriptions.join("\n\n"),
+        rawText: systemPromptText,
       },
       {
         id: "projection",
         name: "PROJECTION",
         tokens: projTokens,
-        lines: projection.parts.map((p) => `[${p.label}]\n${p.text}`),
-        rawText: projection.text,
+        rawText: projectionText,
+      },
+      {
+        id: "tools",
+        name: "TOOLS",
+        tokens: toolsTokens,
+        rawText: toolsRawText,
       },
       {
         id: "transcript",
         name: "TRANSCRIPT",
         tokens: transTokens,
-        lines: transcriptText.split("\n"),
-        rawText: transcriptText,
+        rawText: transcriptRawText,
       },
       {
         id: "tool-work",
         name: "TOOL WORK",
         tokens: workTokens,
-        lines: toolWorkText.split("\n"),
-        rawText: toolWorkText,
+        rawText: toolWorkRawText,
       },
       {
         id: "state-block",
         name: "STATE BLOCK",
         tokens: stateTokens,
-        lines: stateBlockText.split("\n"),
         rawText: stateBlockText,
       },
     ];
@@ -133,7 +169,89 @@ export class ContextView implements Component, Focusable {
   }
 
   invalidate(): void {
-    // Stateless rendering.
+    // Stateless.
+  }
+
+  private renderToolsFormatted(tools: ContextToolItem[], width: number): string[] {
+    const lines: string[] = [];
+    lines.push(tokens.cardBg(` ${tokens.bold(tokens.muted(`Registered Tools (${tools.length}):`))}`.padEnd(width)));
+    lines.push(tokens.cardBg(" ".repeat(width)));
+
+    for (const tool of tools) {
+      lines.push(tokens.cardBg(`   ${tokens.bold(tokens.accent(`▎ ${tool.name}`))}`.padEnd(width)));
+      const descWrapped = wrapTextWithAnsi(tool.description, Math.max(1, width - 6));
+      for (const dl of descWrapped) {
+        lines.push(tokens.cardBg(`     ${tokens.muted(dl)}`.padEnd(width)));
+      }
+      lines.push(tokens.cardBg(`     ${tokens.bold(tokens.tool("schema:"))}`.padEnd(width)));
+      const schemaLines = JSON.stringify(tool.parameters, null, 2).split("\n");
+      for (const sl of schemaLines) {
+        lines.push(tokens.cardBg(`       ${tokens.output(sl)}`.padEnd(width)));
+      }
+      lines.push(tokens.cardBg(" ".repeat(width)));
+    }
+    return lines;
+  }
+
+  private renderTranscriptFormatted(messages: ContextDialogueMessage[], width: number): string[] {
+    const lines: string[] = [];
+    lines.push(tokens.cardBg(` ${tokens.bold(tokens.muted(`Dialogue Transcript (${messages.length} messages):`))}`.padEnd(width)));
+    lines.push(tokens.cardBg(" ".repeat(width)));
+
+    if (messages.length === 0) {
+      lines.push(tokens.cardBg(`   ${tokens.muted("(no conversation messages yet)")}`.padEnd(width)));
+      lines.push(tokens.cardBg(" ".repeat(width)));
+      return lines;
+    }
+
+    for (const msg of messages) {
+      const isUser = msg.role === "user";
+      const who = isUser ? tokens.accent("you") : tokens.agent("carto");
+      const ts = msg.timestamp ? ` · ${new Date(msg.timestamp).toISOString()}` : "";
+      lines.push(tokens.cardBg(`   ${tokens.bold(who)} ${tokens.muted(`[#${msg.id}${ts}]`)}`.padEnd(width)));
+      const bodyLines = wrapTextWithAnsi(msg.text, Math.max(1, width - 6));
+      for (const bl of bodyLines) {
+        lines.push(tokens.cardBg(`     ${bl}`.padEnd(width)));
+      }
+      lines.push(tokens.cardBg(" ".repeat(width)));
+    }
+    return lines;
+  }
+
+  private renderToolWorkFormatted(items: ContextWorkItem[], width: number): string[] {
+    const lines: string[] = [];
+    lines.push(tokens.cardBg(` ${tokens.bold(tokens.muted(`Tool Work & Reasoning (${items.length} items):`))}`.padEnd(width)));
+    lines.push(tokens.cardBg(" ".repeat(width)));
+
+    if (items.length === 0) {
+      lines.push(tokens.cardBg(`   ${tokens.muted("(no tool work or reasoning yet)")}`.padEnd(width)));
+      lines.push(tokens.cardBg(" ".repeat(width)));
+      return lines;
+    }
+
+    for (const item of items) {
+      if (item.kind === "reasoning") {
+        lines.push(tokens.cardBg(`   ${tokens.bold(tokens.reasoning("▎ think"))} ${tokens.muted(`[#${item.id}]`)}`.padEnd(width)));
+        const textLines = wrapTextWithAnsi(item.text ?? "", Math.max(1, width - 6));
+        for (const tl of textLines) {
+          lines.push(tokens.cardBg(`     ${tokens.reasoning(tl)}`.padEnd(width)));
+        }
+      } else if (item.kind === "toolCall") {
+        lines.push(tokens.cardBg(`   ${tokens.bold(tokens.tool(`▎ call: ${item.name}`))} ${tokens.muted(`[#${item.id}]`)}`.padEnd(width)));
+        const argLines = (item.args ?? "").split("\n");
+        for (const al of argLines) {
+          lines.push(tokens.cardBg(`     ${tokens.muted(al)}`.padEnd(width)));
+        }
+      } else if (item.kind === "toolResult") {
+        lines.push(tokens.cardBg(`   ${tokens.bold(tokens.muted(`▎ result`))} ${tokens.muted(`[#${item.id}]`)}`.padEnd(width)));
+        const outLines = wrapTextWithAnsi(item.output ?? "", Math.max(1, width - 6));
+        for (const ol of outLines) {
+          lines.push(tokens.cardBg(`     ${tokens.output(ol)}`.padEnd(width)));
+        }
+      }
+      lines.push(tokens.cardBg(" ".repeat(width)));
+    }
+    return lines;
   }
 
   private renderRightPane(part: ContextPartItem, width: number): string[] {
@@ -143,9 +261,23 @@ export class ContextView implements Component, Focusable {
     lines.push(tokens.cardHeaderBg(headerText.padEnd(width)));
     lines.push(tokens.cardBg(" ".repeat(width)));
 
-    const bodyText = this.showRaw ? part.rawText : part.lines.join("\n");
-    const rawLines = bodyText.split("\n");
+    if (!this.showRaw && this.data) {
+      if (part.id === "tools") {
+        lines.push(...this.renderToolsFormatted(this.data.tools, width));
+        return lines;
+      }
+      if (part.id === "transcript") {
+        lines.push(...this.renderTranscriptFormatted(this.data.transcriptMessages, width));
+        return lines;
+      }
+      if (part.id === "tool-work") {
+        lines.push(...this.renderToolWorkFormatted(this.data.toolWorkItems, width));
+        return lines;
+      }
+    }
 
+    // Default or raw rendering
+    const rawLines = part.rawText.split("\n");
     for (const rawLine of rawLines) {
       if (rawLine.trim().length === 0) {
         lines.push(tokens.cardBg(" ".repeat(width)));
@@ -178,13 +310,13 @@ export class ContextView implements Component, Focusable {
     const selectedPart = this.parts[this.selectedPartIndex] ?? this.parts[0];
     if (!selectedPart) return lines;
 
-    // Split layout
+    // Split layout (rail on left, content pane on right)
     if (width >= 72) {
       const railWidth = Math.min(32, Math.floor(width * 0.35));
       const paneWidth = Math.max(30, width - railWidth - 2);
 
       const railLines: string[] = [];
-      railLines.push(tokens.sidebarBg(` ${tokens.bold(tokens.muted("PARTS RAIL"))}`.padEnd(railWidth)));
+      railLines.push(tokens.sidebarBg(` ${tokens.bold(tokens.muted("PARTS RAIL (IN ORDER)"))}`.padEnd(railWidth)));
       railLines.push(tokens.sidebarBg(" ".repeat(railWidth)));
 
       this.parts.forEach((part, idx) => {

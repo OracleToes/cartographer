@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
+import { createBashTool } from "@earendil-works/pi-durable/tools";
 
 import {
   closeLiveSession,
@@ -43,7 +44,8 @@ import {
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
-import { renderLiveStateBlock, staleMarks } from "../runtime/carto-extension.js";
+import { createTools } from "../runtime/tools.js";
+import { CARTO_INSTRUCTIONS, renderLiveStateBlock, staleMarks } from "../runtime/carto-extension.js";
 import { isMarkerMessage, splitContextMessages, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
@@ -57,7 +59,7 @@ import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./side
 import { TranscriptView, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
-import { ContextView } from "./context-view.js";
+import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { tokens } from "./tokens.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -135,6 +137,10 @@ function messageOf(entry: ContextEntryLike): MessageLike | undefined {
   if (!Array.isArray(entry.model) || entry.model.length === 0) return undefined;
   const message = entry.model[0];
   return message !== null && typeof message === "object" ? (message as MessageLike) : undefined;
+}
+
+function timestampOf(message: MessageLike): number {
+  return typeof message.timestamp === "number" ? message.timestamp : 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -282,6 +288,82 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
   await refreshSidebar();
 
+  const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
+    const productTools = createTools({
+      root: options.root,
+      brain,
+      session: state.session.state,
+    });
+    const bashTool = createBashTool();
+    const allTools: ContextToolItem[] = [...productTools, bashTool].map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }));
+
+    const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
+    const transcriptMessages: ContextDialogueMessage[] = [];
+    const toolWorkItems: ContextWorkItem[] = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!entry) continue;
+      const message = messageOf(entry);
+      if (message === undefined) continue;
+      const role = message.role ?? "user";
+      const id = entry.id ?? i;
+      const ts = message.timestamp;
+      if (role === "user") {
+        const textContent = typeof message.content === "string" ? message.content : undefined;
+        if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
+          transcriptMessages.push({ id, role, text: textContent, timestamp: ts });
+        }
+      } else if (role === "assistant") {
+        const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+        for (let j = 0; j < content.length; j++) {
+          const part = content[j];
+          if (!isRecord(part)) continue;
+          if (part.type === "thinking" && typeof part.thinking === "string") {
+            toolWorkItems.push({ id: `${id}-${j}`, kind: "reasoning", text: part.thinking });
+          } else if (part.type === "text" && typeof part.text === "string") {
+            toolWorkItems.push({ id: `${id}-${j}`, kind: "output", text: part.text });
+          } else if (part.type === "toolCall" && typeof part.name === "string") {
+            if (part.name === "chat") {
+              const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
+              transcriptMessages.push({ id: `${id}-${j}`, role: "assistant [chat]", text: textArg, timestamp: ts });
+            } else {
+              toolWorkItems.push({ id: `${id}-${j}`, kind: "toolCall", name: part.name, args: prettyArgs(part.arguments) });
+            }
+          }
+        }
+      } else if (role === "toolResult") {
+        const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+        for (let j = 0; j < content.length; j++) {
+          const part = content[j];
+          if (!isRecord(part)) continue;
+          const toolText = typeof part.text === "string" ? part.text : "";
+          if (!toolText.startsWith("carto: ")) {
+            toolWorkItems.push({ id: `${id}-${j}`, kind: "toolResult", output: toolText });
+          }
+        }
+      }
+    }
+
+    const stateBlock = await renderLiveStateBlock(
+      { root: options.root, brain, session: state.session.state, markdownPath: join(options.root, ".brain/context", ".projection.md") },
+      [],
+    );
+
+    contextView.setData({
+      brain: brainState,
+      systemPrompt: CARTO_INSTRUCTIONS,
+      tools: allTools,
+      transcriptMessages,
+      toolWorkItems,
+      stateBlockText: stateBlock,
+    });
+  };
+
   const switchToView = async (view: ViewMode) => {
     state.view = view;
     headerState.view = view;
@@ -300,15 +382,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       ledgerView.setData(brainState);
       tui.setFocus(ledgerView);
     } else if (view === "context") {
-      const sysPrompt = "Carto rules and system prompt.";
-      const toolDescs = ["chat", "atlas", "ledger", "pin", "read", "edit", "shell", "tree", "collapse", "sleep"].map((n) => `tool ${n}`);
-      const transText = transcript.toPlainText();
-      const workText = state.session.state.lastReportedInput !== null ? `last report: ${state.session.state.lastReportedInput} tokens` : "none";
-      const stateBlock = await renderLiveStateBlock(
-        { root: options.root, brain, session: state.session.state, markdownPath: join(options.root, ".brain/context", ".projection.md") },
-        [],
-      );
-      contextView.setData(brainState, sysPrompt, toolDescs, transText, workText, stateBlock);
+      await syncContextView(brainState);
       tui.setFocus(contextView);
     }
     tui.requestRender();
@@ -481,6 +555,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         transcript: transcriptTokens,
         toolWork: toolWorkTokens,
       };
+
+      if (state.view === "context") {
+        await syncContextView(brainState);
+      }
 
       tui.requestRender();
     } finally {
