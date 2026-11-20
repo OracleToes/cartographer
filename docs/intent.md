@@ -599,3 +599,57 @@ to the person again. Issues reported by the person are fixed as reported.
 
 **Established by.** The person, directly: "i will test carto thoroughly and
 report any issues as i come across them."
+
+## 42. Now is a one-shot modifier on the next action — nothing else
+
+**Decision.** Now arms a single-action modifier on the next action the
+person takes on the context: that action applies to the model's view
+immediately, every other queued change stays queued. Now is not an
+apply-all, not a rebuild shortcut, and not collapse — `/collapse` is the
+spec's separate call and is not mixed into Now. There is no confirmation
+or prefill warning in the UI; the cost is documented in the README, and
+taking Now is the acknowledgment. Reorder follows the same rule as every
+other action: applied at collapse, or immediately with Now armed — there
+is no per-reorder prefill penalty by default.
+
+**Established by.** The person, directly: "Now applies *this* action
+immediately, without applying the other things queued to change. it is a
+modifier on the Next action the user takes on the context." And: "if i had
+12 changes queued in the context, and i wanted to Delete one item Now, and
+then all 12 changes also happened immediately, i would be furious."
+
+## 43. Person-created records are authentic, indistinguishable, and of any type
+
+**Decision.** The person can create, edit, delete, and reorder records of
+every type the Brain knows — atlas, ledger, chat, pin, wake — from the
+workspace. What is created is authentic and standard: identical in every
+respect to an agent-created record. The agent does not know the
+difference, and does not know that the person created, deleted, or moved
+anything at all. This is previously stated intent, not a new decision; it
+is recorded here so it is not re-asked.
+
+**Established by.** The person, directly: "it should become what ever type
+of entry you make. the user can make all types of entry the brain knows
+how to store, such as atlas, ledger, chat, etc. it is not distinct at all,
+it exists as authentic and standard as anything else in the brain, the
+agent doesn't know the difference or even that the user put it there- or
+deleted or moved anything for that matter. This is also previously stated
+intent, and i should not have to repeat myself about it."
+
+## 44. The workspace renders modes, not tabs
+
+**Decision.** R5 renders modes (Chat / Context / Brain) reachable by keys
+and the command palette, Posting-style. MINI.md §8's three-tab frame is not
+carried into the build.
+
+**Established by.** The person, one line: "modes, as you proposed."
+
+## 45. Now's cost is documented in the README; no in-UI warning
+
+**Decision.** Now carries no confirmation or warning dialog. Its cost —
+a rebuilt payload and the prefill it forces — is documented in the README
+(`README.md`, the rebuild removed the old one). The README is the
+acknowledgement mechanism.
+
+**Established by.** The person, directly: "there is no prefill warning
+about Now, it is documented in the README."

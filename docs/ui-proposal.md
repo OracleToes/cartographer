@@ -169,34 +169,48 @@ BLOCK   · the state block, ~1,700 tokens · never removed, never shown raw
 **What you can do to it** — edits here are real edits to the source of
 truth, not a private annotation layer:
 
+All changes land on collapse unless **Now** is armed. **Now** is a
+one-shot modifier on the *next* action you take on the context — it applies
+exactly that action immediately and leaves everything else queued. It is not
+an apply-all, it is not a rebuild shortcut, and it is not collapse: `/collapse`
+is the spec's separate call and stays separate. No confirmation or warning is
+shown for Now; the cost — a rebuilt payload and the prefill it forces — is
+documented in the README. Mine is to arm it per action; the cost document is
+the acknowledgement.
+
 | Action | Keys (proposed) | What actually happens |
 | --- | --- | --- |
-| Delete a Brain-backed item (an atlas node, a ledger entry, a chat line, a pin) | `d` + confirm | The record is deleted. One step; delete means delete; no undo, no pending state (§2 of the questions, confirmed). |
-| Remove an ephemeral item (tool work, a reasoning line) | `d` | Dropped from the context that gets rebuilt at the next collapse — and gone for the rest of this generation if you take **Now**. |
-| Edit an item's text | `e` | An edit to the underlying item. Brain-backed items are edited in the Brain; the change is everywhere the record appears. |
-| Reorder | `<` / `>` | Open — §10, Q3: order is a collapse-time convention (§6.1); what a person-set order persists as is for you to decide. |
-| Insert content | `a` | Open — §10, Q2: what inserted content becomes (a person-authored record? which kind?). |
-| Collapse / **Now** | `c` | The collapse ceremony (agent-triggered or person-triggered; MINI.md §32) — this is what makes staged changes part of what the model sees. Immediate application outside collapse forces a prefill; you take it knowing the cost. Whether **Now** is simply the person-triggered collapse or a distinct lighter action is §10, Q1. |
+| **Now** (modifier) | `!` (proposed) | Arms Now for exactly the next action on the context. Visible in the footer while armed; disarms after that one action. |
+| Delete a Brain-backed item (atlas node, ledger entry, chat line, pin, wake) | `!` + `d`, or `d` alone | The record is deleted — one step, no undo (delete means delete). Alone: applies at collapse. With Now: the payload is rebuilt from post-delete state now. |
+| Remove an ephemeral item (tool work, reasoning) | `d` | Gone from the context rebuilt at the next collapse; with Now, gone now. |
+| Edit an item's text | `!` + `e`, or `e` | An edit to the underlying item, everywhere the record appears. Alone: model sees it after collapse; with Now: immediately. |
+| Reorder | `<` / `>` | Same rule as every action: applied at collapse, or now with Now armed. There is no prefill cost for reorders you don't Now. |
+| Insert content | `a` | You create an authentic record of any type the Brain knows — atlas, ledger, chat, pin, wake. Authentic and standard: identical to agent-created records, indistinguishable to the agent (it does not know you created, deleted, or moved anything). Alone: lands at collapse like every change; with Now: immediately. |
+| Collapse | `c` | The spec's collapse call (MINI.md §32). Its own ceremony; unrelated to Now. |
 
 - **How changes land:** the Brain is the books and is sticky by default —
   only what you add to it intentionally becomes part of it. Edits to Brain
   records are real and permanent the moment you make them: the record, the
   state block's pending-changes line (which lists pending Brain writes
   since the projection was rebuilt — machinery that already exists), and
-  every listing. What changes hands at **collapse** is the *projection*: the
-  frozen bytes the model is reading catch up to the Brain when the context
-  is rebuilt. Collapse is how your gardening becomes what the model sees.
-- **Now** exists for when you will not wait for the collapse: it applies
-  everything you have staged to the live context immediately, and it costs a
-  prefill — you take the action knowing that, and that agreement is yours to
-  give, not something the UI does for you.
+  every listing. The frozen projection the model is currently reading keeps
+  feeding the old bytes until the context is rebuilt; **collapse is how
+  queued changes become what the model sees**. Reordering follows the same
+  rule; nothing is special-cased.
+- **Now** is a modifier on the next action, not a separate apply-all:
+  armed for one action, consumed by it, everything else still queued. It
+  forces the payload rebuild for that action and the prefill that follows;
+  the cost is documented in the README, not warned about in the UI. If you
+  had twelve changes queued and Now-deleted one, the other eleven stay
+  queued — anything else would be furious-making, and it is not what Now
+  is.
 - **The ephemeral parts** are the tool calls, the reasoning, the state
   block's contents — nothing else. They never reach the Brain by themselves.
 - **Editing whose text?** Brain-backed content edits write through to the
-  Brain. Ephemeral content has no record to write through; the honest
-  operation there is removal (now, or at collapse). Whether ephemeral
-  content can be *text-edited in place* — and where that edit would live —
-  is folded into §10, Q2 rather than invented here.
+  Brain. Ephemeral content has no record to write through; removal is the
+  operation there. If you want to *annotate* ephemeral content, you insert
+  a record of your own (see the insert row) — authentic, indistinguishable,
+  and it outlives the ephemeral thing.
 - The state block itself is never removable or editable (spec); the marker is
   never rendered. The projection is never edited directly — you edit Brain
   records, and the projection is rebuilt from them at collapse.
@@ -218,8 +232,12 @@ sees the consequence in one place.
 - **Wakes** — armed wakes with their reason and, for time-wakes, the countdown
   (the sleep-tool wake, §11 below).
 - Editable as of the corrected doctrine: an edit here is an edit to the
-  record itself, everywhere. Delete is one step (no undo). Which actions
-  ship in which R5 stage is a build-order question, not a doctrine one.
+  record itself, everywhere. Delete is one step (no undo). You can create,
+  edit, delete, and reorder records of every type the Brain knows —
+  atlas, ledger, chat, pin, wake — and a person-created record is
+  authentic and indistinguishable: the agent does not know you created,
+  deleted, or moved anything. Which actions ship in which R5 stage is a
+  build-order question, not a doctrine one.
 
 ## 7. The token bar (required; redesigned prefill visual)
 
@@ -273,7 +291,7 @@ gets no default key yet — the person marks it or it gets one in the palette.
 3. **R5c — Brain views** (lists + folded records, editable).
 4. **R5d — Context surgery view**, read-only accurate rendering first
    (rail + panes + real/human toggle).
-5. **R5e — surgery edits** (exclude → reorder → edit → insert), each behind
+5. **R5e — surgery edits** (delete → edit → insert → reorder, plus the Now modifier), each behind
    its own stage so each is bootable.
 6. **R5f — prefill measurement**, only if the server ever sends
    `prompt_progress`; otherwise never built (Q9/Q13.3 remain honest absences).
@@ -284,38 +302,16 @@ do not come back.
 
 ## 10. Person's marks and open questions
 
-**Marked this round:** token bar → **A**. Posting philosophy/structure →
-confirmed (pi-tui first, hand-rolled minimum only). Surgery semantics → the
-corrected doctrine above (the ephemeral overlay I proposed is rejected and
-will not be built). R4 testing → you will test Carto yourself, at your own
-pace, and report issues as you come across them; nothing is gated on your
-testing and this file will not raise it again.
+**Marked:** token bar → **A**. Layout → **modes**, as proposed. Posting
+philosophy/structure → confirmed. Now → a one-shot modifier on the next
+action, no warning, collapse stays separate, cost documented in the
+README. Person-created records → authentic and indistinguishable, every
+Brain type. Reorder → same as every action (collapse, or Now). R4 testing
+→ yours, at your pace, never raised again.
 
-**Open, sharp:**
-
-1. **Now (Q1):** is "apply now" simply the person-triggered collapse
-   (MINI.md §32's person path — the full ceremony: seal, purge, fresh
-   generation), or a distinct lighter action that rebuilds the context in
-   place and keeps the generation? My lean: Now *is* the person-triggered
-   collapse — one ceremony, one meaning; the prefill warning is the cost
-   ack you described.
-2. **Insert target (Q2):** when you add content that isn't a Brain record
-   yet, what should it become — a person-authored Ledger entry, a new
-   record type, or something else? My lean: a person-authored Ledger
-   entry; no new record type without you asking for one. Same question
-   covers whether ephemeral tool-work text can be edited in place and
-   where that edit would live.
-3. **Reorder persistence (Q3):** §6.1 makes order a collapse-time
-   convention. If you reorder in the view, should that order be remembered
-   (a person-set standing arrangement the next rebuild respects — which
-   means new Brain-side state), or is reorder meaningful only for a Now?
-   My lean: Now-only; a standing order is new machinery and needs your
-   word.
-4. **Layout:** modes-not-tabs (recommended) or literal three tabs?
-5. **Sidebar & boot:** visible by default? Default view on boot — Chat?
-6. **Keys:** the interrupt binding; steer/follow-up bindings; any keys you
-   want guaranteed.
-7. Anything above that misreads what you want.
+**Open (asked in full in the 2026-11-20 conversation):** sidebar at boot;
+boot default view; the interrupt key; how the input line sends steer
+versus follow-up.
 
 ## 11. Confirmed since the plan was written (not open)
 
@@ -324,9 +320,17 @@ testing and this file will not raise it again.
   confirmed 2026-11-20; pi-tui first, hand-rolled the minimum.
 - **R4 is not gated on your testing and will not be raised again**; you
   test Carto at your own pace and report what you find.
-- **Context edits are source-of-truth edits** (record or tombstone), never
-  an ephemeral overlay; collapse makes them part of the model's context,
-  Now applies them at prefill cost. Confirmed by objection, 2026-11-20.
+- **Context edits are source-of-truth edits**, never an ephemeral overlay;
+  collapse makes queued changes part of the model's context. Now is a
+  one-shot modifier on the next action — the twelve-queued-changes test.
+  Collapse is `/collapse`, a separate spec call, and is not mixed into
+  Now. Confirmed 2026-11-20.
+- **Person-created records are authentic and indistinguishable** from
+  agent-created ones, for every Brain type; the agent does not know the
+  person created, deleted, or moved anything. Previously stated intent;
+  recorded 2026-11-20.
+- **The layout is modes, not tabs** — MINI.md §8's three-tab frame is not
+  carried into R5. Confirmed 2026-11-20.
 
 - **Wakes are the sleep tool's wake**: the agent calls `sleep` — with no time,
   until you wake it; with a timer, it wakes when the timer fires. Nothing
