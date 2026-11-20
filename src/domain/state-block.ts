@@ -29,6 +29,7 @@
  * `none` rather than lying by omission, and nothing is omitted.
  */
 import type { WakeEntry } from "./records.js";
+import { estimateSerialized, estimateTokens } from "./estimate.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
 export const STATE_BLOCK_CLOSE = "</carto-state>";
@@ -104,11 +105,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   return [STATE_BLOCK_OPEN, fullness, space, pending, stale, wakeLines, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
 }
 
-/** pi-ai messages, estimated the same way everywhere: 4 bytes per token. */
-export function estimateSerialized(value: unknown): number {
-  const json = JSON.stringify(value);
-  return json === undefined ? 1 : Math.max(1, Math.ceil(json.length / 4));
-}
+export { estimateSerialized };
 
 export interface MessageLike {
   readonly role: string;
@@ -144,7 +141,7 @@ export function splitContextMessages(messages: readonly MessageLike[]): {
       if (Array.isArray(message.toolsAdded) && message.toolsAdded.length > 0) {
         parts.push(JSON.stringify(message.toolsAdded));
       }
-      systemTokens += Math.max(1, Math.ceil(parts.join("\n\n").length / 4));
+      systemTokens += estimateTokens(parts.join("\n\n"));
       continue;
     }
     const toolWork =

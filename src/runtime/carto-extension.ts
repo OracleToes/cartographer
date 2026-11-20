@@ -20,6 +20,7 @@ import type { CartoBrain } from "../domain/records.js";
 import {
   STATE_BLOCK_MARKER,
   appendStateBlock,
+  estimateSerialized,
   renderStateBlock,
   splitContextMessages,
   stripStateBlocks,
@@ -59,10 +60,7 @@ export interface CartoExtensionOptions {
   now?: () => number;
 }
 
-const estimatePart = (value: unknown): number => {
-  const json = JSON.stringify(value);
-  return json === undefined ? 0 : Math.ceil(json.length / 4);
-};
+const estimatePart = estimateSerialized;
 
 /** Records whose file-backed evidence drifted at the last rebuild, as typed marks. */
 export function staleMarks(brain: CartoBrain): Array<{ kind: "atlas" | "pin"; label: string }> {
