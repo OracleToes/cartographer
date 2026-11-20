@@ -145,18 +145,16 @@ export class CartoProject {
   }
 
   /**
-   * Everything the screen shows, from storage. A view never writes: a screen
-   * reads many times a second, and a read that commits would fight the agent
-   * for the same Brain document. Handles are assigned where the Brain changes
-   * (`open()` calls `syncHandles()`, and every decision that changes a record
-   * brings its handle with it), so a read always finds a complete table.
+   * Everything a reader shows, from storage. A view never writes, and a read
+   * that commits would fight the agent for the same Brain document. Handles
+   * are assigned where the Brain changes (`open()` calls `syncHandles()`, and
+   * every decision that changes a record brings its handle with it), so a
+   * read always finds a complete table.
    */
   /**
-   * The last prompt the harness assembled.
-   *
-   * It lives on the project rather than on the screen so the screen and the
-   * harness share one object across a UI restart, and so a headless run can read
-   * it too.
+   * The last prompt the harness assembled, plus the provider's own usage for
+   * it. It lives on the project so the harness hooks and the state block
+   * share one object.
    */
   async view(): Promise<ProjectView> {
     const [brain, liveView] = await Promise.all([this.brainStore.read(), this.live.view()]);
@@ -171,28 +169,10 @@ export class CartoProject {
   }
 
   /**
-   * A cheap view for a frame that the spinner clock asked for: the live
-   * documents, the Brain, and the projection, without the transcript. The
-   * transcript only changes when a run writes an entry, which arrives as a
-   * commit, and a commit asks for a full read of its own.
-   */
-  async liveFrameView(): Promise<ProjectView> {
-    const [brain, liveView] = await Promise.all([this.brainStore.read(), this.live.liveView()]);
-    return {
-      brain,
-      context: projectContext(brain, { budget: CONTEXT_BUDGET }),
-      turn: this.projectTurnView(liveView),
-      activity: liveView.activity,
-      error: liveView.error,
-      archivePresent: this.archivePresent,
-    };
-  }
-
-  /**
    * Keep the private handle table in step with the Brain. No handle is
-   * renumbered here; a collapse rebuilds the whole table. The UI calls this on
-   * a timer, so a needless commit would churn SQLite: do not write when the
-   * stored table already covers every record.
+   * renumbered here; a collapse rebuilds the whole table. Called at open and
+   * after each evidence refresh; do not write when the stored table already
+   * covers every record.
    */
   async syncHandles(): Promise<void> {
     const brain = await this.brainStore.read();

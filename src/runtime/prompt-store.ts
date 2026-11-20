@@ -28,24 +28,22 @@ export interface ProviderMessage {
 }
 
 /**
- * The last prompt the harness assembled, kept for the screen.
+ * The last prompt the harness assembled, kept so the state block can report
+ * the context honestly.
  *
  * This is a mirror of a fact, not a cache of a guess: `beforeProviderRequest`
- * hands over the messages Pi is about to send, so the screen shows what was
- * sent rather than what a projection predicted. Three consequences worth
- * stating, because each one was a defect in the earlier design:
+ * hands over the messages Pi is about to send, so everything derived from it
+ * describes what was sent rather than what a projection predicted. Two
+ * consequences worth stating, because each one was a defect in the earlier
+ * design:
  *
- * 1. **It is written by the harness, not by the UI.** The UI has no way to
- *    construct a plausible-looking prompt, so it cannot show one that was never
- *    sent.
+ * 1. **It is written by the harness, not by any reader.** No reader can
+ *    construct a plausible-looking prompt, so nothing downstream of it can
+ *    display one that was never sent.
  * 2. **A token count arrives separately and later.** The messages are known
  *    before the request; `Usage` is only known after the response. Until then
- *    the tree is structural and its totals are estimates, which the screen must
- *    mark as such.
- * 3. **It survives a UI restart within one process.** The store outlives the
- *    screen frame, so reopening Carto on a live project shows the last real
- *    prompt instead of falling back to an estimate the moment the first frame
- *    is drawn.
+ *    any fullness figure derived from the payload is an estimate, and it must
+ *    be marked as such.
  */
 
 export interface PromptSnapshot {

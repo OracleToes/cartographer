@@ -73,7 +73,8 @@ export interface CartoExtensionOptions {
   contextBudget: number;
   durableTasks?: readonly AnyTask[];
   /**
-   * Where the screen reads the prompt the model was sent.
+   * Where the prompt the model was sent is recorded, plus the provider's own
+   * usage for it. The state block reads this to report the context honestly.
    *
    * Optional so a test or a headless host can leave it out; when it is present
    * the generation hooks keep it current.
@@ -142,9 +143,9 @@ export function createCartoExtension(options: CartoExtensionOptions) {
        *
        * `beforeProviderRequest` receives the messages Pi assembled for this
        * request, in the provider's order, after every section and every tool
-       * definition has been applied. Recording them here is what makes the
-       * Context tab true: the screen reads this, and it has no other way to
-       * obtain a prompt that was not sent.
+       * definition has been applied. Recording them is what lets the state
+       * block report what the last request carried: this is the only place
+       * Carto can obtain a prompt that was actually sent.
        */
       ...(options.stateBlock === undefined
         ? []
@@ -152,8 +153,8 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       hook(GenerationTask, {
         beforeProviderRequest: (request) => {
           // The payload is the provider's own body. It is recorded as-is; the
-          // tree renderer reads it, and a field it does not know still reaches
-          // the real view because the real view is this JSON.
+          // state block reads it, and a field it does not know still reaches
+          // whatever reports context pressure, because the record is this JSON.
           options.promptStore?.observe(request.payload as import("./prompt-store.js").ProviderPayload);
           // Returning nothing keeps the payload exactly as Pi built it.
           return undefined;

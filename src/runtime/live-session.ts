@@ -48,7 +48,7 @@ export interface LiveSessionOptions {
   /** Test or host-provided Pi model catalog. Normal starts use the built-in catalog. */
   models?: Models;
   contextBudget?: number;
-  /** Where the assembled prompt is recorded, so the screen can show it. */
+  /** Where the assembled prompt and the provider's usage are recorded, so the state block can report the context honestly. */
   promptStore?: PromptStore;
   /**
    * Called when the agent's `collapse` tool or a declined compaction asks for
@@ -223,18 +223,6 @@ export class LiveSession {
     await this.root.abort(BACKGROUND_CONTEXT);
   }
 
-  /**
-   * The live documents only, for a frame that must be cheap. It never reads
-   * the transcript, so it is safe at ten frames a second on a long run.
-   */
-  async liveView(): Promise<LiveSessionView> {
-    const [live, inbox] = await Promise.all([
-      this.harness.snapshot(LiveDoc, this.root.id, BACKGROUND_CONTEXT),
-      this.harness.snapshot(InboxDoc, this.root.id, BACKGROUND_CONTEXT),
-    ]);
-    return this.project(undefined, live, inbox);
-  }
-
   async isBusy(): Promise<boolean> {
     return (await this.view()).busy;
   }
@@ -271,8 +259,7 @@ export class LiveSession {
         text: contentText(item.content),
       }));
     // Do not cap completed activity. It stays visible as one-line folded
-    // disclosures, so Carto never hides agent-generated content by age. A
-    // frame that did not read the transcript keeps what it already has.
+    // disclosures, so Carto never hides agent-generated content by age.
     const activity = completedActivity(history ?? []);
     if (live?.generation?.message !== undefined) {
       activity.push(...assistantActivity(live.generation.message, true, "live"));
