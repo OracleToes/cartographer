@@ -37,9 +37,9 @@ See `docs/intent.md` §18.
 **Q2.5 — deletionMarks (derived, one-word veto).** The set the person picked
 included deletion marks, but the single-step answer abolishes the mark's only
 function: the record sat in a pending-at-collapse state until a purge cleared
-it, which is a two-step delete with an internal name. Recorded as removed.
-*Needs:* one word from the person if marks exist for a reason other than
-pending deletion.
+it, which is a two-step delete with an internal name. *Resolved 2026-11-20:*
+vestigial; dropped. No extra legacy machinery unless the project needs it.
+See `docs/intent.md` §35.
 
 ## §3. Pi Durable immutability versus real deletion — resolved
 
@@ -195,9 +195,9 @@ Open in it:
 ## §8. The edit boundary and the appetite constraint
 
 **Q8.1 — How does "only wants small atomic edits" get enforced or encouraged?**
-The person suspects better prompting fixes it and is unsure whether prompting is
-enough. The old spec had no mechanism for this at all. *Needs:* whether this is
-prompt-only, or whether the edit tool can express atomicity structurally.
+*Resolved 2026-11-20:* prompt-only, stated explicitly by the person ("prompt
+only, i stated this explicitly earlier too"). No structural enforcement in the
+edit tool. See `docs/intent.md` §36.
 
 **Q8.2 — What is the fallback mode called, and how is it entered?** The person
 described "instructed not to edit, edit tool disabled, shell trusted". *Needs:*
@@ -236,33 +236,47 @@ queue. Confirmed by the person. See `docs/intent.md` §33.
 
 ## §11. Wake and sleep
 
-**Q11.1 — Are wakes still in scope for the first rebuild?** They are a named
-product part but the largest piece of durable task machinery.
+*Resolved 2026-11-20, by the person:* wakes are the `sleep` tool's wake. A
+`sleep` without a time option wakes when the person wakes it; a `sleep` with a
+timer wakes when the timer is up. No other wake machinery — no folder wake, no
+project path wake, nothing else. (MINI.md §10's "time or a project path" and
+the folder-wake bounds below are dropped with it.) See `docs/intent.md` §37.
 
-**Q11.2 — What are the bounds?** The old spec said a folder wake checks direct
-entries and has a 10,000-entry limit. That number looks invented. *Needs:* a real
-bound, or "bounds are the runtime's problem".
+**Q11.1 — Are wakes still in scope for the first rebuild?** *Resolved
+2026-11-20:* the sleep-tool wake only, per above.
 
-## §12. The workspace, unchanged but unverified
+**Q11.2 — What are the bounds?** *Resolved 2026-11-20:* moot. The question
+concerned the folder wake's 10,000-entry limit; the folder wake is dropped.
+A timer wake's bound is the timer the agent sets; the runtime's problem.
 
-**Q12.1 — The three tabs.** Chat, Brain, Context. The person has not contradicted
-them. *Needs:* confirmation that the tab split is still right now that Brain has
-fewer record types.
+## §12. The workspace, re-scoped by the person
 
-**Q12.2 — Five-row disclosure.** `MINI.md` said "every long live item has an
-independent five-row newest-text disclosure window", and the code defaults to
-`rows = 5`. Nothing requires five. *Needs:* whether a fixed number is wanted, or
+*2026-11-20, by the person:* R5 (the UI) is designed from a deep crawl of the
+Posting source — Posting's design philosophy and structure, pi-tui first where
+it does what we want, hand-rolled the minimum for Posting-level elegance. The
+MINI.md §8 frame and three-tab split are "not necessarily required"; the
+Context view and the token bar are required, the former being the flagship
+("the open-brain surgery section": see, remove, reorder, edit, add — an
+accurate, structured, editable representation of everything the agent sees).
+R4 and any slice's testing is blocked on the person having a UI they are
+comfortable working in. The proposal is `docs/ui-proposal.md`; the frame/tab
+questions below now resolve at the person's marks on that proposal.
+
+**Q12.1 — The three tabs.** Open — superseded by the re-scope. The proposal
+offers modes-not-tabs against literal tabs; the person's marks decide.
+
+**Q12.2 — Five-row disclosure.** Open. *Needs:* whether a fixed number is wanted, or
 "enough to read, expandable".
 
-**Q12.3 — The footer hint set.** The old spec enumerated hints per mode. They
-depend on keys that may no longer exist.
+**Q12.3 — The footer hint set.** Open — the proposal replaces the enumerated hint set with a context-sensitive footer (Posting's idiom); what keys are guaranteed is one of the marks the person makes on the proposal.
 
 ## §13. Small things that are probably assumptions
 
 **Q13.1 — `collapseMode` configuration.** With no approval, the setting has no
 meaning. Removed from the rewrite. *Needs:* acknowledgement that it is gone.
 
-**Q13.2 — The `10,000-entry` folder wake limit.** Unverified number.
+**Q13.2 — The `10,000-entry` folder wake limit.** Moot as of 2026-11-20: the
+folder wake is dropped with the sleep-tool-only resolution of §11.
 
 **Q13.3 — `1.4k tok/s`, `reading 64%`, `· 12s` in the status row.** These imply a
 live token-rate measurement. Unverified, same problem as §9.
@@ -284,7 +298,8 @@ The person locked these earlier. *Needs:* confirm they survive the rewrite.
 **Q14.2 — Colour roles.** Muted, accent, warning were named in code. *Needs:*
 nothing unless the person contradicts them.
 
-**Q14.3 — Tab order.** Chat, Brain, Context. *Needs:* confirmation only.
+**Q14.3 — Tab order.** Open — folds into the person's marks on
+`docs/ui-proposal.md`.
 
 ---
 

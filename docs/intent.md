@@ -517,3 +517,34 @@ tree, rendered at the project root at a small fixed depth until slice three's
 **Established by.** The person, answering the four questions asked before
 slice two began: "reuse the Brain handles", "ephemeral is fine", "per-generation
 snapshot file", "everything in the continuation-loop slice".
+
+## 35. The archive carries no deletion marks
+
+**Decision.** The archive is the sealed previous generation's store, and it
+is opened sealed. `deletionMarks` — the pending-at-collapse set of records
+awaited purge — is dropped. Deletion is one step, as decided in §18; the
+mark had no function left. No extra legacy machinery is carried unless the
+project needs it.
+
+**Established by.** The person, reviewing the Q2.5 derivation: "i think you
+determined deletionmarks was vestigial? ... that doesn't sound useful?"
+
+## 36. Small atomic edits are a prompt matter, not a tool limit
+
+**Decision.** "Only wants small atomic edits" is taught by prompting. The
+edit tool does not express atomicity structurally; no size, count, or shape
+limit is enforced in the tool.
+
+**Established by.** The person, directly and explicitly: "prompt only, i
+stated this explicitly earlier too".
+
+## 37. Wakes are the sleep tool's wake
+
+**Decision.** The only wake is the `sleep` tool's. A `sleep` without a time
+option wakes when the person wakes it; a `sleep` with a timer wakes when the
+timer is up. No other wake machinery is needed — no folder wake, no project
+path wake. MINI.md §10's second wake path and the bounds question (§11 of
+docs/open-questions.md) are dropped with it.
+
+**Established by.** The person, in one line and the timer semantics stated
+with it in the same message: "wakes = only the sleep tool".
