@@ -89,7 +89,7 @@ export const ACTIONS: readonly Action[] = [
   { id: "interrupt", keys: ["p"], label: "interrupt", help: "Stop the run at its Pi Durable boundary. Queued messages stay.", group: "turn", when: (context) => navigating(context) && context.running },
   { id: "continue", keys: ["r"], label: "continue", help: "Start the next useful task.", group: "turn", when: (context) => listing(context) && !context.busy },
   { id: "cancel", keys: ["x"], label: "cancel", help: "Cancel the running turn. This drops queued messages.", group: "turn", when: (context) => navigating(context) && context.running },
-  { id: "interrupt", keys: ["I"], label: "interrupt", help: "Stop the active stream and send now.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
+  { id: "interrupt-now", keys: ["I"], label: "interrupt", help: "Stop the active stream and send now.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "steer", keys: ["S"], label: "steer", help: "Queue a message for the next durable boundary.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "follow-up", keys: ["F"], label: "follow-up", help: "Queue a message to start after the active run.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "escape", keys: ["Esc"], label: "back", help: "Return to Navigate mode and close a detail.", group: "view", when: (context) => context.mode === "insert" || context.detailOpen },
