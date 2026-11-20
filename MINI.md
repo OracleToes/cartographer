@@ -89,7 +89,9 @@ tend the Brain.
 
 The agent does not read or write `.brain` directly. This is not a permission
 gate; it is a scoping decision. Direct access would let curiosity fill the
-agent's context with duplicated or stale copies of its own state.
+agent's context with duplicated or stale copies of its own state. It is also
+invisible: the project tree never lists it (§6.1), and no anchor may point
+into it.
 
 > The person named this explicitly as a case where their trust of the agent
 > scopes its capability, rather than a rule the agent must obey.
@@ -281,9 +283,15 @@ to, so the tree is a map of what the agent understands rather than a listing.
 
 The person is willing to pay its cost on large projects.
 
+**`.brain` never renders.** It is skipped in every listing and excluded from the
+aggregated sizes, and an anchor resolving into it, at any depth, is rejected.
+The agent's map does not contain the Brain.
+
 **The agent moves the anchor and the depth.** Attention is part of the present: if
 the agent is working in a subdirectory, that is where the agent is now, and the
 tree shows it. The anchor stays inside the project.
+
+> Confirmed by the person, 2026-11-20: ".brain should be hidden from tree".
 
 ### A brain write is a tool result and a pending change
 
@@ -398,6 +406,21 @@ everywhere it makes sense. A row that trails off is readable in full somewhere.
 row and one cell of padding so the chrome never touches the terminal edge. The
 header is never pushed off screen. The bottom bar takes the whole bottom row.
 
+**The transcript renders everything the model does, Chat or not.** The person's
+lines land where the context places them; the agent's Chat words render as
+Chat. Its reasoning, its plain model text, and its tool calls render too, as
+**foldable cards**: dimmer than Chat, in their own hues, never mistaken for
+Chat. A card streams while the run is in flight — thinking, text, and
+tool-call arguments appear as they are written — inside a limited-height
+window; at the boundary it folds to a one-line header. A click folds or
+unfolds a card; `ctrl+e` toggles every card in view; the wheel over an open
+card scrolls its window. Chat remains the only channel that addresses the
+person.
+
+> Confirmed by the person, 2026-11-20: "Everything visible, chat distinct" —
+> the veil on plain model text is reversed. Reasoning in its own disclosure
+> window and tool calls as foldable streaming cards were the same call.
+
 **The token bar** is always visible. It uses the server's real window as the
 denominator, marks the budget inside the bar, and shows an estimate in a
 different glyph and colour before the first measured request.
@@ -440,7 +463,7 @@ The agent's tools are scoped, unique, and permissive. Tool descriptions are the
 authority on what a tool does; the system prompt carries only what no single
 description can say.
 
-- **chat** — declare something person-facing. Plain model text is not Chat.
+- **chat** — declare something person-facing. Plain model text is not Chat; it, the reasoning, and the tool calls render as foldable cards — visible, dimmer, and their own hues, but never Chat.
 - **atlas** — create or update one source-backed claim node, with optional
   typed edges to other nodes.
 - **ledger** — the agent's working book: goals, notes, questions, instructions,
@@ -451,7 +474,7 @@ description can say.
 - **shell** — run a command inside the project.
 - **tree** — set the project tree's anchor and depth in the state block and
   return the rendered tree; the agent's explicit statement of what it is
-  attending to.
+  attending to. `.brain` is not an anchor and never appears.
 - **collapse** — end the context here and rebuild from the Brain. Rare; the
   escape hatch to a fresh context.
 - **sleep** — end the run; there is nothing left to do.

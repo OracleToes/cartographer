@@ -87,7 +87,7 @@ interface TuiState {
   overlayOpen: boolean;
   overlayHandle: OverlayHandle | undefined;
   /** Live watch on the in-flight partial (`pi.live`); stopped at collapse and shutdown, re-armed on the new session. */
-  liveWatch?: { stop(): Promise<unknown> };
+  liveWatch: { stop(): Promise<unknown> } | undefined;
   rebuilding: boolean;
   /** Cheap change signature so the 1.5s timer does not bust the render cache when nothing moved. */
   sig: string;
@@ -219,6 +219,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     overlayHandle: undefined,
     rebuilding: false,
     sig: "",
+    liveWatch: undefined,
   };
 
   const terminal = new ProcessTerminal();
@@ -430,7 +431,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (watch === undefined) return; // watch unavailable: landed lines still refresh on the timer
     state.liveWatch = watch;
     let hadLive = false;
-    watch.start((call) => {
+    watch.start(async (call) => {
       if (call.kind !== "value") return; // a failed frame keeps the last shown tail
       const live = call.value as LiveState;
       const cards = liveCardsOf(live);
