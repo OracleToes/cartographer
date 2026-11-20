@@ -2,26 +2,19 @@
  * The workspace (MINI.md §8 as re-scoped 2026-11-20 — modes, not tabs; the
  * Posting layout philosophy on pi-tui primitives).
  *
- * Chat is the boot view; the Context surgery view and the Brain views land in
- * their own slices and are honestly absent — jumping to them flashes the slice
- * that owns them rather than rendering a fake. The token bar sits above the
- * footer on every view (docs/ui-proposal.md §7, candidate A): one row,
- * segmented by part, honest about what is estimate and what is measured.
- * The whole app carries one cell of padding on every edge. The transcript shows the
- * person's lines where they LANDED in the context (not where they were typed),
- * the agent's `chat` words, its reasoning, plain model text, and tool calls
- * as foldable cards (dimmer, their own hues — MINI.md §8, §10a as re-scoped
- * 2026-11-20), and quiet status lines. Submitted lines whose placement has not
- * happened yet render dimmed as queued and move into place at the boundary.
+ * Chat is the boot view; Atlas, Ledger, and Context surgery views are reachable
+ * via jump keys (^o a, ^o l, ^o x) and the summoned palette (^p). The token bar
+ * sits above the footer on every view (docs/ui-proposal.md §7, candidate A):
+ * one row, segmented by part, honest about what is estimate and what is measured.
+ * The whole app carries one cell of padding on every edge.
  *
- * Lines starting with `/` are workspace commands (/help, /copy, /copy-session)
- * and never reach the agent.
+ * Pinned items and stale evidence are evident directly inside their books.
  *
  * State is one explicit value; behaviour is functions over it (MINI.md §12).
  * Pi performs; Carto adds only the composition.
  */
 import { Writable } from "node:stream";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   Editor,
@@ -32,6 +25,8 @@ import {
   Spacer,
   TuiAltScreen,
   VStack,
+  type Component,
+  type Focusable,
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -48,11 +43,11 @@ import {
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
-import { staleMarks } from "../runtime/carto-extension.js";
+import { renderLiveStateBlock, staleMarks } from "../runtime/carto-extension.js";
 import { isMarkerMessage, splitContextMessages, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
-import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode } from "./chrome.js";
+import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode, type ViewMode } from "./chrome.js";
 import { TokenBarView, type TokenBarState } from "./token-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
 import { flattenEntry } from "./dump.js";
@@ -60,6 +55,9 @@ import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
 import { TranscriptView, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { AtlasView } from "./atlas-view.js";
+import { LedgerView } from "./ledger-view.js";
+import { ContextView } from "./context-view.js";
 import { tokens } from "./tokens.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -78,6 +76,7 @@ interface TuiState {
   /** Render exclusion: agent records already shown (boot history, or sealed by a collapse). Persists across collapses. */
   sealedAgentIds: Set<string>;
   sendMode: SendMode;
+  view: ViewMode;
   /** True while at least one submission is in flight; drives the footer badge and the live timer's rebuilds. */
   running: boolean;
   /** The person's submitted lines awaiting placement in the context, in order. */
@@ -102,19 +101,17 @@ const errorText = (error: unknown): string => (error instanceof Error ? error.me
 const suffix = (generation: string): string => generation.slice(-6);
 
 function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>): SidebarCounts {
-  // Typed marks, not prefix parsing: the stale kind is what the Brain reports.
   const marks = staleMarks(brainState);
   const stale: Partial<Record<BookKind, number>> = {};
   for (const mark of marks) {
-    const kind: BookKind = mark.kind === "pin" ? "pins" : "atlas";
-    stale[kind] = (stale[kind] ?? 0) + 1;
+    if (mark.kind === "atlas") {
+      stale.atlas = (stale.atlas ?? 0) + 1;
+    }
   }
   return {
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
     chat: brainState.chat.length,
-    pins: brainState.userPins.length + brainState.carryPins.length,
-    wakes: brainState.wakes.length,
     stale,
     staleTotal: marks.length,
   };
@@ -140,10 +137,6 @@ function messageOf(entry: ContextEntryLike): MessageLike | undefined {
   return message !== null && typeof message === "object" ? (message as MessageLike) : undefined;
 }
 
-function timestampOf(message: MessageLike): number {
-  return typeof message.timestamp === "number" ? message.timestamp : 0;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object";
 }
@@ -160,9 +153,6 @@ function prettyArgs(value: unknown): string {
 /**
  * The in-flight partial (`pi.live`) as foldable cards: the streaming
  * thinking/text blocks in content order, then the current round's tool slots.
- * While the model writes its answer the arguments stream into the toolCall
- * part; once the answer commits, the parts are gone and the running calls
- * (with their retained output) come from the slots instead.
  */
 function liveCardsOf(live: LiveState | undefined): CardEntry[] {
   const cards: CardEntry[] = [];
@@ -203,6 +193,31 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
   return cards;
 }
 
+class WorkAreaSwitcher implements Component, Focusable {
+  focused = false;
+  constructor(
+    private readonly getState: () => {
+      view: ViewMode;
+      scroll: ScrollView;
+      atlas: AtlasView;
+      ledger: LedgerView;
+      context: ContextView;
+    },
+  ) {}
+
+  invalidate(): void {
+    // Stateless delegate.
+  }
+
+  render(width: number): string[] {
+    const s = this.getState();
+    if (s.view === "atlas") return s.atlas.render(width);
+    if (s.view === "ledger") return s.ledger.render(width);
+    if (s.view === "context") return s.context.render(width);
+    return s.scroll.render(width);
+  }
+}
+
 export async function runTui(options: CartoTuiOptions): Promise<number> {
   const brain = options.brain;
   const refresh = async () => {
@@ -215,6 +230,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     session,
     sealedAgentIds: new Set((await brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id)),
     sendMode: "steer",
+    view: "chat",
     running: false,
     pending: [],
     sealed: [],
@@ -230,13 +246,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const terminal = new ProcessTerminal();
-  // The same verified-native clipboard path the mouse selection copies through;
-  // without it pi-tui falls back to a bare OSC 52 write, which can lie.
   const tui = new TuiAltScreen(terminal, undefined, undefined, { copySelection: createSelectionCopier() });
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
-  const headerState = { project, modelLabel, session: state.session };
+  const headerState = { project, modelLabel, session: state.session, view: state.view };
   const header = new HeaderView(headerState);
   const barState: TokenBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
@@ -247,12 +261,62 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const editorTheme = { borderColor: (line: string) => tokens.muted(line), selectList: selectTheme };
   const editor = new Editor(tui, editorTheme);
 
+  const atlasView = new AtlasView();
+  const ledgerView = new LedgerView();
+  const contextView = new ContextView();
+
+  const workArea = new WorkAreaSwitcher(() => ({
+    view: state.view,
+    scroll,
+    atlas: atlasView,
+    ledger: ledgerView,
+    context: contextView,
+  }));
+
   const refreshSidebar = async () => {
-    sidebar.setCounts(countSidebar(await brain.read()));
+    const brainState = await brain.read();
+    sidebar.setCounts(countSidebar(brainState));
+    sidebar.setActiveBook(state.view === "context" ? "context" : state.view);
     tui.requestRender();
   };
 
-  sidebar.setCounts(countSidebar(await brain.read()));
+  await refreshSidebar();
+
+  const switchToView = async (view: ViewMode) => {
+    state.view = view;
+    headerState.view = view;
+    footer.invalidate();
+    sidebar.setActiveBook(view === "context" ? "context" : view);
+
+    const brainState = await brain.read();
+    const marks = staleMarks(brainState);
+
+    if (view === "chat") {
+      tui.setFocus(editor);
+    } else if (view === "atlas") {
+      atlasView.setData(brainState, marks);
+      tui.setFocus(atlasView);
+    } else if (view === "ledger") {
+      ledgerView.setData(brainState);
+      tui.setFocus(ledgerView);
+    } else if (view === "context") {
+      const sysPrompt = "Carto rules and system prompt.";
+      const toolDescs = ["chat", "atlas", "ledger", "pin", "read", "edit", "shell", "tree", "collapse", "sleep"].map((n) => `tool ${n}`);
+      const transText = transcript.toPlainText();
+      const workText = state.session.state.lastReportedInput !== null ? `last report: ${state.session.state.lastReportedInput} tokens` : "none";
+      const stateBlock = await renderLiveStateBlock(
+        { root: options.root, brain, session: state.session.state, markdownPath: join(options.root, ".brain/context", ".projection.md") },
+        [],
+      );
+      contextView.setData(brainState, sysPrompt, toolDescs, transText, workText, stateBlock);
+      tui.setFocus(contextView);
+    }
+    tui.requestRender();
+  };
+
+  atlasView.onBack = () => void switchToView("chat");
+  ledgerView.onBack = () => void switchToView("chat");
+  contextView.onBack = () => void switchToView("chat");
 
   tui.setLayoutRoot(
     new HStack([
@@ -264,13 +328,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           {
             component: new HStack([
               { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-              { component: scroll, basis: 0, grow: 1, minSize: 3 },
+              { component: workArea, basis: 0, grow: 1, minSize: 3 },
             ]),
             basis: 0,
             grow: 1,
             minSize: 3,
           },
-          { component: editor, basis: "auto", minSize: 3 },
+          { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" },
           { component: tokenBar, basis: 1 },
           { component: footer, basis: 1 },
           { component: new Spacer(1), basis: 1 },
@@ -289,7 +353,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.overlayHandle?.hide();
     state.overlayHandle = undefined;
     state.overlayOpen = false;
-    tui.setFocus(editor);
+    if (state.view === "chat") {
+      tui.setFocus(editor);
+    } else if (state.view === "atlas") {
+      tui.setFocus(atlasView);
+    } else if (state.view === "ledger") {
+      tui.setFocus(ledgerView);
+    } else if (state.view === "context") {
+      tui.setFocus(contextView);
+    }
     tui.requestRender();
   };
 
@@ -314,184 +386,122 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.statusLog.push({ t: Date.now(), entry: { kind: "status", text } });
   };
 
-  /**
-   * Rebuild the landed view from the sources of truth: the context's entries
-   * (person lines land exactly where they were placed), the Brain's agent
-   * chat records, the sealed prefix from the last collapse, and the status
-   * log. Cheap enough to run after every settle and on a 1.5s timer; it
-   * skips the re-render entirely when nothing moved.
-   */
-  const rebuildTranscript = async (): Promise<void> => {
+  const rebuildTranscript = async () => {
     if (state.rebuilding) return;
     state.rebuilding = true;
     try {
-      const brainState = await brain.read();
       const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
-
-      // The context's entries are the frame: monotonic numeric ids, in the
-      // order the model sees them. Person lines key off their own entry.
-      const frame: Array<{ id: number; t: number }> = [];
-      for (const entry of entries) {
-        const id = typeof entry.id === "number" ? entry.id : 0;
-        const message = messageOf(entry);
-        frame.push({ id, t: message === undefined ? 0 : timestampOf(message) });
+      const landed: TranscriptEntry[] = [];
+      const pendingByText = new Map<string, number>();
+      for (const item of state.pending) {
+        pendingByText.set(item.text, (pendingByText.get(item.text) ?? 0) + 1);
       }
-      /** Largest frame id at or before `t` — where a non-entry event sits in the frame's order. */
-      const anchorAt = (t: number): number => {
-        let anchor = 0;
-        for (const slot of frame) {
-          if (slot.t <= t) anchor = Math.max(anchor, slot.id);
-        }
-        return anchor;
+      const consumePending = (text: string): boolean => {
+        const count = pendingByText.get(text) ?? 0;
+        if (count <= 0) return false;
+        if (count === 1) pendingByText.delete(text);
+        else pendingByText.set(text, count - 1);
+        const index = state.pending.findIndex((item) => item.text === text);
+        if (index >= 0) state.pending.splice(index, 1);
+        return true;
       };
 
-      const visibleMessages: BlockMessageLike[] = [];
-      for (const entry of entries) {
-        const message = messageOf(entry);
-        if (message === undefined) continue;
-        visibleMessages.push(message as unknown as BlockMessageLike);
-      }
-
-      const person: Array<{ key: number; entry: TranscriptEntry }> = [];
-      const landedTexts: Array<{ text: string; t: number }> = [];
-      const toolErrors = new Map<string, boolean>();
-      const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[]; stopReason?: string }> = [];
-      for (const entry of entries) {
-        const id = typeof entry.id === "number" ? entry.id : 0;
-        const message = messageOf(entry);
-        if (message === undefined) continue;
-        const role = typeof message.role === "string" ? message.role : "";
-        if (role === "user" && typeof message.content === "string") {
-          const text = message.content;
-          if (text.trim() === STATE_BLOCK_MARKER || text.trim().length === 0) continue;
-          const t = timestampOf(message);
-          person.push({ key: id, entry: { kind: "person", text } });
-          landedTexts.push({ text, t });
-        } else if (role === "assistant" && Array.isArray(message.content)) {
-          const parts = (message.content as unknown[]).filter(isRecord);
-          const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
-          if (parts.length > 0) assistantParts.push({ entryId: id, parts, ...(stopReason === undefined ? {} : { stopReason }) });
-        } else if (role === "toolResult" && isRecord(message)) {
-          const callId = (message as Record<string, unknown>).toolCallId;
-          if ((message as Record<string, unknown>).isError === true && typeof callId === "string") toolErrors.set(callId, true);
-        }
-      }
-
-      // The working, as cards: reasoning, plain model text, and tool calls, in
-      // the order the model produced them. Landed cards default folded.
-      const cards: Array<{ key: number; entry: TranscriptEntry }> = [];
-      // The landed stop reason of each assistant turn — one quiet line per
-      // turn, warn-toned when the turn was cut short (length) or failed.
-      // Always present, so a truncated generation is glanceable.
-      const stops: Array<{ key: number; entry: TranscriptEntry }> = [];
-      for (const { entryId, parts, stopReason } of assistantParts) {
-        if (stopReason !== undefined) {
-          const warn = stopReason === "length" || stopReason === "error" || stopReason === "aborted";
-          stops.push({
-            key: entryId + (parts.length + 1) * 0.0001,
-            entry: { kind: "status", text: `stopped: ${stopReason}`, ...(warn ? { tone: "warn" as const } : {}) },
-          });
-        }
-        parts.forEach((part, partIndex) => {
-          const key = entryId + (partIndex + 1) * 0.0001;
-          if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0) {
-            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking } });
-          } else if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
-            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text } });
-          } else if (part.type === "toolCall" && typeof part.name === "string") {
-            const callId = typeof part.id === "string" ? part.id : undefined;
-            cards.push({
-              key,
-              entry: {
-                kind: "tool",
-                id: `ctx-${entryId}-${partIndex}`,
-                name: part.name,
-                args: prettyArgs(part.arguments),
-                ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
-              },
-            });
-          }
-        });
-      }
-
-      const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
+      const brainState = await brain.read();
+      const agentChatById = new Map<string, string>();
       for (const record of brainState.chat) {
-        if (record.author !== "agent") continue;
-        if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
-        agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text } });
-      }
-
-      // Clear pending items whose placement we can now see: same text, an
-      // entry placed at or after the submit. Best effort, matches oldest first.
-      if (state.pending.length > 0) {
-        const remaining: PendingItem[] = [];
-        const pool = [...landedTexts];
-        for (const item of state.pending) {
-          const index = pool.findIndex((landed) => landed.text === item.text && landed.t >= item.at);
-          if (index >= 0) pool.splice(index, 1);
-          else remaining.push(item);
+        if (record.author === "agent" && !state.sealedAgentIds.has(record.id)) {
+          agentChatById.set(record.id, record.text);
         }
-        state.pending = remaining;
       }
 
-      const statusMerged = state.statusLog.map((item) => ({ key: anchorAt(item.t) + 0.5, entry: item.entry }));
-
-      // The token bar's inputs: the same estimates the state block reports,
-      // split the same way. Cheap next to the Brain read above.
-      const blockMessages = visibleMessages.filter((message) => !isMarkerMessage(message));
-      const parts = splitContextMessages(blockMessages);
-      barState.parts = { system: parts.systemTokens, transcript: parts.transcriptTokens, toolWork: parts.toolWorkTokens };
-
-      const sig = [
-        state.sealed.length,
-        person.map((item) => item.key).join(","),
-        cards.map((item) => item.key).join(","),
-        stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
-        String(agent.length),
-        state.sealedAgentIds.size,
-        state.statusLog.length,
-        state.pending.map((item) => item.text).join("\u0001"),
-        String(Math.round(parts.systemTokens)),
-        String(Math.round(parts.transcriptTokens)),
-        String(Math.round(parts.toolWorkTokens)),
-        String(state.session.state.lastReportedInput ?? ""),
-        String(state.session.state.contextWindow),
-      ].join("|");
-      if (sig !== state.sig) {
-        state.sig = sig;
-        const live = [...person, ...cards, ...stops, ...agent, ...statusMerged];
-        live.sort((left, right) => left.key - right.key);
-        // Sealed history is an immutable prefix; the live segment follows in the frame's order.
-        transcript.setEntries(
-          [...state.sealed, ...live.map((item) => item.entry)],
-          state.pending.map((item) => ({ text: item.text, mode: item.mode })),
-        );
-        tui.requestRender();
+      for (const entry of entries) {
+        const message = messageOf(entry);
+        if (message === undefined) continue;
+        const role = message.role;
+        const textContent = typeof message.content === "string" ? message.content : undefined;
+        if (role === "user") {
+          if (textContent === undefined) continue;
+          if (isMarkerMessage(message as BlockMessageLike)) continue;
+          consumePending(textContent);
+          landed.push({ kind: "person", text: textContent });
+        } else if (role === "assistant") {
+          const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+          for (let index = 0; index < content.length; index += 1) {
+            const part = content[index];
+            if (!isRecord(part)) continue;
+            const id = `ctx-${entry.id ?? index}-${index}`;
+            if (part.type === "thinking" && typeof part.thinking === "string") {
+              if (part.thinking.length > 0) landed.push({ kind: "reasoning", id, text: part.thinking });
+            } else if (part.type === "text" && typeof part.text === "string") {
+              if (part.text.length > 0) landed.push({ kind: "output", id, text: part.text });
+            } else if (part.type === "toolCall" && typeof part.name === "string") {
+              const name = part.name;
+              const args = prettyArgs(part.arguments);
+              landed.push({ kind: "tool", id, name, args });
+            }
+          }
+          if (typeof message.stopReason === "string" && message.stopReason.length > 0) {
+            const tone = ["length", "error", "aborted"].includes(message.stopReason) ? "warn" : undefined;
+            landed.push({ kind: "status", text: `stopped: ${message.stopReason}`, ...(tone ? { tone } : {}) });
+          }
+        } else if (role === "toolResult") {
+          const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+          for (let index = 0; index < content.length; index += 1) {
+            const part = content[index];
+            if (!isRecord(part)) continue;
+            const toolText = typeof part.text === "string" ? part.text : "";
+            const isError = part.isError === true;
+            if (toolText.startsWith("carto: ")) {
+              landed.push({ kind: "agent", text: toolText.slice(7) });
+            } else if (isError) {
+              const id = `ctx-${entry.id ?? index}-err-${index}`;
+              landed.push({ kind: "tool", id, name: "tool", args: "", output: toolText, failed: true });
+            }
+          }
+        }
       }
+
+      for (const [id, text] of agentChatById.entries()) {
+        if (!landed.some((entry) => entry.kind === "agent" && entry.text === text)) {
+          landed.push({ kind: "agent", text });
+          state.sealedAgentIds.add(id);
+        }
+      }
+
+      const allEntries = [...state.sealed, ...landed, ...state.statusLog.map((item) => item.entry)];
+      transcript.setEntries(
+        allEntries,
+        state.pending.map((item) => ({ text: item.text, mode: item.mode })),
+      );
+
+      const visible = entries.map((entry) => messageOf(entry)).filter((m): m is BlockMessageLike => m !== undefined);
+      const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visible);
+      barState.parts = {
+        system: systemTokens,
+        transcript: transcriptTokens,
+        toolWork: toolWorkTokens,
+      };
+
+      tui.requestRender();
     } finally {
       state.rebuilding = false;
     }
   };
 
-  // The in-flight partial: the watch receives pi.live's committed partials
-  // (~100ms cadence). The listener never touches the Session — it hands the
-  // cards straight to the view; a throttled full rebuild follows so committed
-  // rounds land as folded cards while the run continues.
   let lastLiveRebuild = 0;
   const startLiveWatch = async (): Promise<void> => {
     const watch = await state.session.harness.watchDoc(LiveDoc, state.session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
-    if (watch === undefined) return; // watch unavailable: landed lines still refresh on the timer
+    if (watch === undefined) return;
     state.liveWatch = watch;
     let hadLive = false;
     watch.start(async (call) => {
-      if (call.kind !== "value") return; // a failed frame keeps the last shown tail
+      if (call.kind !== "value") return;
       const live = call.value as LiveState;
       const cards = liveCardsOf(live);
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
       const now = Date.now();
-      // Landed entries arrive through a full rebuild: throttled while streaming, immediate when the tail empties.
       if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
         lastLiveRebuild = now;
         setImmediate(() => {
@@ -506,13 +516,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (state.collapsing) return;
     state.collapsing = true;
     const previous = state.session.generation;
-    // Seal the conversation as it renders right now: post-collapse the context
-    // is rebuilt from the Brain and no longer holds these entries.
+    pushStatus(`collapsing context at ${suffix(previous)}: ${reason}…`);
     if (state.pending.length > 0) {
       pushStatus(`${state.pending.length} queued message(s) dropped by the collapse`);
       state.pending = [];
     }
-    // seal: the rendered prefix becomes history (in-flight tail included); the status log rides along inside it
     state.sealed = [...state.sealed, ...transcript.snapshot()];
     state.statusLog = [];
     transcript.setLive([]);
@@ -525,7 +533,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       state.session = outcome.session;
       headerState.session = outcome.session;
       barState.session = outcome.session;
-      void startLiveWatch(); // re-arm on the rebuilt generation
+      void startLiveWatch();
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
       await refreshSidebar();
     } catch (error) {
@@ -564,8 +572,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (state.sendMode === "now") await interruptRun(state.session);
       const whenBusy = state.sendMode === "after run" ? "followUp" : "steer";
       const submission = await submitInput(state.session, message, whenBusy);
-      // If the message was admitted idle, it is placed in the context right
-      // now; flip the line out of queued immediately rather than at settle.
       await rebuildTranscript();
       const settled = await submission.wait(BACKGROUND_CONTEXT);
       if (settled.status !== "done") {
@@ -576,8 +582,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     state.inFlight = Math.max(0, state.inFlight - 1);
     state.running = state.inFlight > 0;
-    // Move placed lines to where they landed, drain new chat words, flag a
-    // silent plain-text answer. The landed order is the context's order.
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
@@ -647,7 +651,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       return;
     }
     state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
-    void rebuildTranscript(); // paint the queued line immediately
+    void rebuildTranscript();
     void runSubmission(message);
   };
 
@@ -655,6 +659,30 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (state.overlayOpen) return;
     state.overlayOpen = true;
     const commands: PaletteCommand[] = [
+      {
+        value: "chat",
+        label: "switch to chat view",
+        hint: "^o c",
+        run: () => void switchToView("chat"),
+      },
+      {
+        value: "atlas",
+        label: "switch to atlas view",
+        hint: "^o a",
+        run: () => void switchToView("atlas"),
+      },
+      {
+        value: "ledger",
+        label: "switch to ledger view",
+        hint: "^o l",
+        run: () => void switchToView("ledger"),
+      },
+      {
+        value: "context",
+        label: "switch to context surgery view",
+        hint: "^o x",
+        run: () => void switchToView("context"),
+      },
       {
         value: "collapse",
         label: "collapse the context now",
@@ -689,20 +717,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const jump = new JumpOverlay(JUMP_TARGETS);
     jump.onClose = closeOverlay;
     jump.onJump = (key) => {
-      if (key === "c") {
-        tui.setFocus(editor);
-        return;
-      }
-      const label = JUMP_TARGETS.find((target) => target.key === key)?.label ?? key;
-      tui.flash(`jump: ${label.split(" — ")[0]} — lands with its slice`, 2_500);
+      if (key === "c") void switchToView("chat");
+      else if (key === "a") void switchToView("atlas");
+      else if (key === "l") void switchToView("ledger");
+      else if (key === "x") void switchToView("context");
     };
-    state.overlayHandle = tui.showOverlay(jump, { width: 46, anchor: "center" });
+    state.overlayHandle = tui.showOverlay(jump, { width: 52, anchor: "center" });
     tui.setFocus(jump);
   };
 
   tui.addInputListener((data) => {
-    // A focused overlay owns the keys; the palette and jump overlay handle
-    // their own escape/cancel, so nothing leaks to a global action.
     if (state.overlayOpen) return undefined;
     if (matchesKey(data, "ctrl+c")) {
       void shutdown(0);
@@ -719,13 +743,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
       return { consume: true };
     }
-    if (matchesKey(data, "shift+tab")) {
+    if (matchesKey(data, "shift+tab") && state.view === "chat") {
       state.sendMode = nextSendMode(state.sendMode);
       tui.flash(`send mode: ${sendModeLabel(state.sendMode)}`, 1_200);
       tui.requestRender();
       return { consume: true };
     }
-    if (matchesKey(data, "ctrl+e")) {
+    if (matchesKey(data, "ctrl+e") && state.view === "chat") {
       transcript.toggleAllCards();
       tui.requestRender();
       return { consume: true };
@@ -746,8 +770,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return undefined;
   });
 
-  // Cheap heartbeat: while a run is in flight the boundary can land at any
-  // time; pick up placements and new chat words even between settle hooks.
   liveTimer = setInterval(() => {
     void rebuildTranscript().catch(() => undefined);
   }, 1_500);

@@ -168,6 +168,11 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   await assert.rejects(editBrain, /\.brain/);
   const tree = byName.tree.execute({ anchor: "..", depth: 1 }, api, {});
   await assert.rejects(tree, /anchor escapes/);
+  const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
+  await assert.rejects(treeGit, /internal directory is not visible/);
+  const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
+  assert.match(validTree.output[0].text, /^tree: .* \(depth 1\)$/);
+  assert.doesNotMatch(validTree.output[0].text, /\n/);
   await cleanup();
 });
 

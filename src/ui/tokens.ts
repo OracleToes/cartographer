@@ -1,6 +1,6 @@
 /**
  * Semantic colour tokens for the workspace (MINI.md §8; Posting's token
- * vocabulary; the semantic-token display on `main` was right about the shape).
+ * vocabulary; Posting visual hierarchy with background tints and card surfaces).
  *
  * Colours are hex, converted once at first use (after the terminal is up).
  * Roles only: surfaces, text, interaction, feedback. Nothing else in the UI
@@ -24,9 +24,16 @@ const style = (hex: string, extra: Omit<TextStyle, "fg"> = {}) => {
   const color = parseColor(hex);
   return (text: string): string => styleText(text, { fg: color, ...extra }, mode());
 };
+
 const background = (hex: string, extra: Omit<TextStyle, "bg"> = {}) => {
   const color = parseColor(hex);
   return (text: string): string => styleText(text, { bg: color, ...extra }, mode());
+};
+
+const badge = (fgHex: string, bgHex: string) => {
+  const fg = parseColor(fgHex);
+  const bg = parseColor(bgHex);
+  return (text: string): string => styleText(` ${text} `, { fg, bg, bold: true }, mode());
 };
 
 export const tokens = {
@@ -46,8 +53,26 @@ export const tokens = {
   output: style("#9fb3c8"),
   /** Tool cards: the machinery of the work, its own hue. */
   tool: style("#d08a4e"),
-  /** Overlay/panel background. */
+  /** Pin marker / warm amber accent. */
+  pin: style("#e5c07b"),
+
+  /** Surface & Panel backgrounds for Posting visual hierarchy. */
   panel: background("#14181d"),
+  sidebarBg: background("#12161c"),
+  cardBg: background("#181d24"),
+  cardHeaderBg: background("#202630"),
+  selectedBg: background("#243040"),
+  activeRowBg: background("#1d2633"),
+
+  /** Badges / Chips. */
+  handleBadge: badge("#ffffff", "#2c3b4d"),
+  pinBadge: badge("#1a1500", "#e5c07b"),
+  staleBadge: badge("#1a1000", "#e0c56e"),
+  kindBadge: badge("#b0c4de", "#222d3d"),
+  statusBadge: badge("#8fd3a0", "#183022"),
+  closedBadge: badge("#8b939c", "#242a33"),
+  chip: (label: string, fgHex: string, bgHex: string) => badge(fgHex, bgHex)(label),
+
   bold: (text: string) => styleText(text, { bold: true }, mode()),
   italic: (text: string) => styleText(text, { italic: true }, mode()),
 } as const;

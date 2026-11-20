@@ -1,10 +1,10 @@
 /**
  * The chrome: one fixed header row and one fixed footer row (MINI.md §8 —
  * fixed header, fixed footer, one row of padding, nothing touches the
- * terminal edge). The header names the project, the generation, the model,
- * and the active context window; the footer carries the keys that work
- * where you are (Posting's context-sensitive idiom) and the armed send
- * mode, so the mode is never a guess.
+ * terminal edge). The header names the project, the generation, the active
+ * view mode, the model, and the active context window; the footer carries the
+ * keys that work where you are (Posting's context-sensitive idiom) and the armed
+ * send mode when in chat.
  */
 import {
   truncateToWidth,
@@ -14,16 +14,14 @@ import {
 
 import { tokens } from "./tokens.js";
 
+export type ViewMode = "chat" | "atlas" | "ledger" | "context";
 export type SendMode = "steer" | "after run" | "now";
 
-/**
- * Read at render time; the app mutates the session in place (generation
- * re-binds at collapse, the window after a capacity refresh).
- */
 export interface HeaderState {
   project: string;
   readonly session: { generation: string; state: { contextWindow: number } };
   modelLabel: string;
+  view: ViewMode;
 }
 
 export class HeaderView implements Component {
@@ -36,10 +34,11 @@ export class HeaderView implements Component {
   render(width: number): string[] {
     const stateWindow = this.state.session.state.contextWindow;
     const window = stateWindow > 0 ? stateWindow.toLocaleString("en-US") : "window unknown";
+    const modeBadge = `[${this.state.view}]`;
     const right = tokens.muted(`${this.state.modelLabel} · ${window}`);
     const rightWidth = visibleWidth(`${this.state.modelLabel} · ${window}`);
     const left = truncateToWidth(
-      `${tokens.bold(tokens.accent("carto"))} ${tokens.muted("▏")} ${this.state.project} ${tokens.muted(`· ${this.state.session.generation}`)}`,
+      `${tokens.bold(tokens.accent("carto"))} ${tokens.muted("▏")} ${this.state.project} ${tokens.muted(`· ${this.state.session.generation}`)} ${tokens.bold(tokens.accent(modeBadge))}`,
       Math.max(1, width - rightWidth - 2),
       tokens.muted("…"),
     );
@@ -50,6 +49,7 @@ export class HeaderView implements Component {
 }
 
 export interface FooterState {
+  view: ViewMode;
   sendMode: SendMode;
   running: boolean;
   sidebarVisible: boolean;
@@ -75,14 +75,42 @@ export class FooterView implements Component {
 
   render(width: number): string[] {
     const key = (name: string, label: string) => `${tokens.accent(name)} ${tokens.muted(label)}`;
-    const segments = [
-      key("^x", "stop"),
-      `${tokens.accent("⇧tab")} ${tokens.muted("mode")} ${tokens.agent(sendModeLabel(this.state.sendMode))}`,
-      key("^o", "jump"),
-      key("^p", "palette"),
-      key("^h", "sidebar"),
-      key("^c", "quit"),
-    ];
+    const segments: string[] = [];
+
+    if (this.state.view === "chat") {
+      segments.push(
+        key("^x", "stop"),
+        `${tokens.accent("⇧tab")} ${tokens.muted("mode")} ${tokens.agent(sendModeLabel(this.state.sendMode))}`,
+        key("^e", "fold"),
+        key("^o", "jump"),
+        key("^p", "palette"),
+        key("^h", "sidebar"),
+        key("^c", "quit"),
+      );
+    } else if (this.state.view === "atlas" || this.state.view === "ledger") {
+      segments.push(
+        key("j/k", "move"),
+        key("gg/G", "top/end"),
+        key("enter", "expand"),
+        key("/", "filter"),
+        key("esc", "chat"),
+        key("^o", "jump"),
+        key("^p", "palette"),
+        key("^h", "sidebar"),
+        key("^c", "quit"),
+      );
+    } else if (this.state.view === "context") {
+      segments.push(
+        key("j/k", "part"),
+        key("tab", "toggle raw"),
+        key("esc", "chat"),
+        key("^o", "jump"),
+        key("^p", "palette"),
+        key("^h", "sidebar"),
+        key("^c", "quit"),
+      );
+    }
+
     const left = segments.join(tokens.muted("  "));
     const right = this.state.running ? tokens.warn("working…") : "";
     const rightWidth = visibleWidth(right);

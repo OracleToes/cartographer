@@ -6,16 +6,17 @@
  * links to — a map of what the agent understands, not a listing. The agent
  * moves the anchor and the depth; the anchor stays inside the project.
  *
- * Sizes aggregate the whole subtree (lstat, symlinks are leaves). `.brain` is
- * never shown: it is skipped everywhere it would appear, and it may not be an
- * anchor — the agent does not see the Brain (MINI.md §2.3, §7). Gitignored
- * paths are skipped the same way (the project's own `.gitignore` chain —
- * root file, `.git/info/exclude`, nested files below the anchor): no line,
- * no bytes in any aggregate, and ignored directories are pruned, not merely
- * hidden. Rendering is display-bounded by depth; aggregation is not.
+ * Sizes aggregate the whole subtree (lstat, symlinks are leaves). `.brain` and
+ * `.git` are never shown: they are skipped everywhere they would appear, and
+ * they may not be an anchor — the agent does not see the Brain or repository
+ * internals (MINI.md §2.3, §7). Gitignored paths are skipped the same way (the
+ * project's own `.gitignore` chain — root file, `.git/info/exclude`, nested
+ * files below the anchor): no line, no bytes in any aggregate, and ignored
+ * directories are pruned, not merely hidden. Rendering is display-bounded by
+ * depth; aggregation is not.
  *
- * The `tree` tool sets anchor and depth and returns the rendered text; the
- * state block renders the same shape at the tail of every request.
+ * The `tree` tool sets anchor and depth in session state for the state block;
+ * the state block renders the tree at the tail of every request.
  */
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -37,7 +38,7 @@ export interface TreeEntry {
 
 export class AnchorError extends Error {}
 
-/** The internal anchor must stay inside the project root and outside `.brain`, as MINI.md §2.3 and §7 require — the agent does not see the Brain. */
+/** The internal anchor must stay inside the project root and outside `.brain` and `.git`, as MINI.md §2.3 and §7 require. */
 export function containedAnchor(root: string, anchor: string): string {
   const r = resolve(root);
   const resolved = resolve(isAbsolute(anchor) ? anchor : resolve(r, anchor));
@@ -45,8 +46,11 @@ export function containedAnchor(root: string, anchor: string): string {
   if (resolved !== r && (rel === "" || rel.startsWith("..") || isAbsolute(rel))) {
     throw new AnchorError(`anchor escapes the project root: ${anchor}`);
   }
-  if (rel !== "" && rel.split(sep).includes(".brain")) {
-    throw new AnchorError(`\`.brain\` is not visible to the tree: ${anchor}`);
+  if (rel !== "") {
+    const parts = rel.split(sep);
+    if (parts.includes(".brain") || parts.includes(".git")) {
+      throw new AnchorError(`internal directory is not visible to the tree: ${anchor}`);
+    }
   }
   return resolved;
 }
@@ -67,9 +71,9 @@ function scan(absolute: string, name: string, chain: IgnoreChain): TreeEntry {
     // semantics); it was already listed, so no extra syscall is made.
     const childChain = deeperIgnoreChain(chain, absolute, entries.map((entry) => entry.name));
     for (const child of entries) {
-      // The agent does not see the Brain (MINI.md §2.3): skip it wholesale —
-      // no line, and no bytes in any aggregate.
-      if (child.name === ".brain") continue;
+      // The agent does not see the Brain or git repository internals:
+      // skip them wholesale — no line, and no bytes in any aggregate.
+      if (child.name === ".brain" || child.name === ".git") continue;
       const childPath = `${absolute}${sep}${child.name}`;
       // Gitignored paths contribute nothing — not a line, not a byte — and
       // ignored directories are pruned here, so their subtrees are never

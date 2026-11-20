@@ -285,7 +285,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Set the anchor and depth of the project tree in your state block and return the rendered tree. The anchor stays inside the project and never inside `.brain`; `.brain` is never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
+        "Set the anchor and depth of the project tree in your state block. The anchor stays inside the project and never inside `.brain` or `.git`; `.brain` and `.git` are never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
       parameters: obj({
         anchor: opt(str({ minLength: 1 })),
         depth: opt(int({ minimum: 0 })),
@@ -296,8 +296,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         const depth = args.depth ?? session.tree.depth;
         const block = projectTreeBlock(root, anchor, depth, await brain.read());
         session.tree = { anchor: block.root, depth: block.depth };
-        const body = block.lines.length === 0 ? "(nothing below the anchor at depth 0)" : block.lines.join("\n");
-        return textOutput(`tree: ${block.root} (depth ${block.depth})\n${body}`);
+        return textOutput(`tree: ${block.root} (depth ${block.depth})`);
       },
     }),
 
