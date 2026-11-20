@@ -86,7 +86,19 @@ records coverage and gaps, not a score.
   person's order: delete it all; re-doing slice 1 was fine; asking beats
   assuming). Suite shrank from 58 to 15 and regrew to 29 as R1 and R2
   landed, then to 34 with the state block, 40 with the project tree, and
-  50 with R3's tools and live session.
+  50 with R3's tools and live session, 69 with R4's config, capacity,
+  provider, driver, and CLI coverage.
+- As of R4 (2026-11-20): config load/save/override semantics; capacity
+  discovery against injected fakes (field order, strict id match,
+  never-throws, ceiling-can-only-lower); the llama-swap provider's registry
+  output; the headless driver end to end against the faux provider
+  (chat-only person output, the no-chat parenthetical, /collapse, exit at
+  stdin EOF); the capacity refresh lowering the live window after a turn;
+  the CLI end to end with a scratch CARTO_HOME (--help, the missing-config
+  one-liner, config creation, headless boot and clean EOF exit, an
+  unsupported provider failing before any request). Known limits: nothing
+  here proves a real llama-swap server answers — the person verifies.
+  Still no test of a real provider, of wake tasks, or of a screen.
 - As of R3 (2026-11-20): the live session runs against a faux pi-ai provider,
   end to end — a full tool turn with the pending list asserted by handle;
   the `onYield` continuation with the marker asserted present in the store

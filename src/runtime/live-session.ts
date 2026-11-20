@@ -92,7 +92,10 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   await database.exec("PRAGMA secure_delete = ON");
   const storage = await SqliteStorage.open(database, { prefix: "live_" });
 
+  const modelRef = options.model;
+  const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
   const state: LiveSessionState = {
+    contextWindow,
     pending: [],
     tree: { anchor: root, depth: 2 },
     collapseRequested: null,
@@ -101,8 +104,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
     toolWorkAtLastReport: 0,
     toolWorkAtLastRequest: 0,
   };
-  const modelRef = options.model;
-  const contextWindow = options.models.getModel(modelRef.provider, modelRef.modelId)?.contextWindow ?? FALLBACK_CONTEXT_WINDOW;
 
   let harness: Harness | undefined;
   try {
@@ -113,7 +114,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
         brain: options.brain,
         session: state,
         markdownPath: paths.markdown,
-        contextWindow,
         now,
       }),
     );

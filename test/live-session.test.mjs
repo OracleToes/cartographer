@@ -280,7 +280,7 @@ test("stale evidence rides the collapse: the frozen projection carries the marks
     const outcome = await collapseLiveSession(session, options(), reason ?? "person-triggered");
     const { renderLiveStateBlock } = await import("../dist/runtime/carto-extension.js");
     const block = await renderLiveStateBlock(
-      { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, contextWindow: 100_000, now: () => 1_700_000_000_000 },
+      { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, now: () => 1_700_000_000_000 },
       [],
     );
     assert.match(block, /stale:\n  A1 \(evidence changed\)/);

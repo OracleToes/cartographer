@@ -40,6 +40,8 @@ export const CARTO_INSTRUCTIONS = [
 ].join("\n");
 
 export interface LiveSessionState extends ToolSession {
+  /** The active context window; the driver adjusts it when llama-swap advertises capacity. */
+  contextWindow: number;
   lastReportedInput: number | undefined;
   /** Tool-work estimate as of the last provider report. */
   toolWorkAtLastReport: number;
@@ -53,7 +55,6 @@ export interface CartoExtensionOptions {
   session: LiveSessionState;
   /** Absolute path of the frozen projection for this generation. */
   markdownPath: string;
-  contextWindow: number;
   now?: () => number;
 }
 
@@ -103,7 +104,7 @@ export async function renderLiveStateBlock(
     .filter((wake) => wake.status === "armed" || wake.status === "ready")
     .map((wake) => ({ ...wake }));
   return renderStateBlock({
-    contextWindow: options.contextWindow,
+    contextWindow: options.session.contextWindow,
     lastReportedInput: options.session.lastReportedInput,
     systemTokens,
     transcriptTokens,

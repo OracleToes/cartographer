@@ -27,4 +27,4 @@ process.stdout.write(`Installed Carto in ${home}\n`);
 process.stdout.write(`For this shell, run: export PATH="${bin}:$PATH"\n`);
 process.stdout.write("Then run: hash -r\n");
 process.stdout.write(`On first use, run carto --model provider/model to create ${join(home, "config.json")}.\n`);
-process.stdout.write("For keyless llama-swap, use: carto --model llama-swap/Flint --endpoint http://localhost:8888/v1\n");
+process.stdout.write("For keyless llama-swap (ByteShape, 75k), use: carto --model llama-swap/ByteShape --endpoint http://localhost:8888/v1 --context-window 75000\n");

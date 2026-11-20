@@ -249,5 +249,59 @@ The live session and the tools exist and are wired end to end.
   (`isMarkerMessage` is exported for exactly this); the store legitimately
   contains them between collapses.
 
-Not done: R4 (config, llama-swap, the headless driver), R5+ (the interface,
-when the person settles §8's marks).
+## R4 landed, 2026-11-20 (this branch)
+
+The last slice before the interface: the global config, the keyless
+llama-swap provider rewritten fresh, advertised-capacity discovery, and the
+placeholder headless driver.
+
+- **Global config** (`runtime/config.ts`, `runtime/paths.ts`): one file,
+  `~/.carto/config.json` (`CARTO_HOME` overrides the directory). `version: 1`,
+  `model` as `provider/modelId` (split on the first slash — llama-swap model
+  ids contain slashes), optional `llamaSwapEndpoint` and `contextWindow`.
+  Missing file + `--model` creates it; missing file without it fails with the
+  one-liner that creates it. Overrides against an existing file apply in
+  memory only; the file is rewritten only at creation.
+- **The llama-swap provider** (`runtime/llama-swap-model.ts`), rewritten
+  fresh, informed by main's documented approach only: keyless (Pi's client
+  needs a non-empty internal value; `authorization: null` drops the header),
+  OpenAI-compatible `/v1`, openAI-completions API, `max_tokens` field, no
+  developer role / reasoning_effort / store / streamed usage. GBNF
+  enforcement, `/consult` probes, and the prefill machinery were **not**
+  brought over. Other providers fail plainly: this build wires llama-swap
+  only.
+- **Advertised capacity** (`runtime/capacity.ts`): llama-swap knows a model's
+  true capacity only once it has loaded. Discovery GETs `{endpoint}/models`
+  and reads, in order, top-level `context_length`, then `context_window`,
+  then legacy `meta.n_ctx`, strict-matched on the model id (a capacity from
+  another route is never applied). It never throws — any failure leaves the
+  configured ceiling standing. The active window is
+  `min(configured ceiling, advertised)`: discovery can lower, never raise;
+  raising the ceiling is the person's act, by editing config. The headless
+  driver re-discovers after every settled run and adjusts the session's
+  context window (the state block's fullness report) at that point, with a
+  plain line saying so.
+- **The headless driver** (`runtime/headless.ts`), explicitly a placeholder —
+  §8 is the person's to mark. A line-based stdin/stdout loop; person-facing
+  output is only the agent's `chat` tool words (`carto: …`), never plain
+  model text; a turn without a chat call prints `(no chat message)`.
+  `/collapse` runs the ceremony on the spot and prints the plain report;
+  `/quit` ends. The agent's own collapse request is honoured the same way.
+- **CLI** (`src/cli.ts`): real `--help`; `--model`, `--endpoint`,
+  `--context-window`, `--root`; without config it exits 1 with the one-liner.
+  `scripts/install-home.mjs` now names ByteShape in its epilogue.
+- **Reconciliations:**
+  - The provider's `contextWindow` travels through session state
+    (`LiveSessionState.contextWindow`, mutable) so a mid-session discovery
+    can adjust the block's fullness figure without reopening the generation.
+    `session.contextWindow` reports the open-time value.
+  - Capacity matching is strict on the model id; the tempting
+    single-route fallback was rejected (it would apply another route's
+    capacity on a typo) — recorded here so the decision is visible.
+- **Known limits:** untested against a real llama-swap server (the person
+  verifies — endpoint, ByteShape id, and the 75000 ceiling are theirs);
+  the configured ceiling is a ceiling (discovery never raises it); pre-flight
+  discovery at session start will usually find nothing until the model has
+  loaded once.
+
+Not done: R5+ (the interface, when the person settles §8's marks).
