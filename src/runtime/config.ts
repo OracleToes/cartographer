@@ -3,7 +3,7 @@
  *
  * The file names the model and, for llama-swap, where it serves and how much
  * context Carto may use. The llama-swap server advertises the model's true
- * capacity only after it loads (see capacity.ts); the configured
+ * capacity only after it loads; the configured
  * `contextWindow` is the ceiling Carto will not raise on its own.
  *
  * No keys: llama-swap is keyless (main's documented approach, rewritten

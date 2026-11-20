@@ -440,3 +440,53 @@ compact/close` and `openBrain` return promises; call sites in
 `collapse.ts`, `carto-extension.ts`, `tools.ts`, `live-session.ts`,
 `headless.ts` (`drainAgentChat`), `cli.ts`, and the tests follow. The
 Brain's file stays `.brain/brain.sqlite`, separate from the Pi store.
+
+### R4 addendum IV — the dependency-first audit, completed, 2026-11-20
+
+AGENTS.md §2 now records the two pi packages the project directly depends
+on that the table was missing: `@earendil-works/chord` (packages/chord —
+pi-durable's substrate; the Brain store is built on its `sqlite/node`
+facade) and `@earendil-works/pi-schema` (packages/schema — the tool
+argument validators). Both came from pi's own monorepo, both are 1.5.2;
+they are marked `agent`, not `person` — the person gave the TUI/durable/ai
+links, not these.
+
+Sweep results, everything not previously recorded:
+
+- **CLI `readline` vs pi-tui — kept.** pi-tui is a retained-mode TUI
+  renderer for interactive screens; the headless driver is a line-based
+  placeholder over pipes (the interface is the person's to mark, MINI.md
+  §8). pi-ai ships a `cli.js` that is an empty binary stub; nothing in
+  pi parses CLI arguments (`node:util` `parseArgs` stays).
+- **The banner vs pi-tui — nothing to port.** The banner is two plain
+  writes (the placeholder notice; the headless status line). pi-tui
+  renders screens; there is no screen yet.
+- **The token bar — not built yet, and when it is, it is pi-tui's.** By
+  the person's token-bar direction it ships live with an estimate glyph;
+  the live segment may show nothing on the real server, the post-request
+  numbers (payload + provider usage) are the truthful fallback, and no
+  invented figure may be labelled measured. pi-ai exposes usage from
+  provider responses; it has no client-side token estimator — our
+  JSON-length/4 counts (`estimatePart`, state block) are labelled
+  estimates and stay.
+- **sha256 / digests vs pi — kept.** pi ships no file-digest helper
+  (its read/edit/path-utils hash nothing). `digest.ts` (`sha256File`)
+  backs evidence freshness; `workspace.ts` inlines the same hex sha256
+  over bytes it already holds in memory (same format, one-liner,
+  intentional — avoids a second read). MINI.md's digests are product
+  semantics pi has no opinion on.
+- **project-tree vs pi — kept.** An Atlas-linked, display-bounded
+  renderer for the state block (spec §6.1). pi-tui is interactive
+  rendering; nothing pi ships renders a prompt-tail tree.
+- **`config.ts` — stale comment fixed** ("see capacity.ts"; the file was
+  deleted in b89333b). Now points at the advertised-capacity refresh
+  without naming the deleted module.
+- **Everything else in `src/` imports only node builtins and the
+  declared pi packages**, verified by import enumeration across `src/`,
+  `bin/`, and `scripts/`: projection/handles/state-block/freshness/
+  records/brain and the collapse ceremony are MINI.md product semantics;
+  `scripts/install-home.mjs` and the `bin` shims are install plumbing.
+  Generation IDs are hand-made (`gen-<timestamp>Z-<3 random bytes>`) by
+  design — our concept, on `node:crypto`.
+
+No new dependencies introduced; no behavior changed by the sweep itself.
