@@ -100,7 +100,13 @@ kept, and it is not a substitute for a test. See §5.
 
 ## 4. How to work
 
-A **stage** is one unit of work, ending in a push. The order is fixed:
+A **stage** is one unit of work, ending in a push. While the stage is in
+progress — reading, deciding, editing — run nothing: **no `npm run build`, no
+`npx tsc --noEmit`, no `npm test`, no probe.** The build and the tests happen
+once, at the end, when you are ready to submit the code. They are the
+submission, not a way to check your work as you go. If you do not know whether
+something will compile, read the code; do not ask the compiler. The order, when
+it does run, is fixed:
 
 1. **Make every edit you expect the stage to need.** Read the code first.
 2. **Build.** `npm run build` and `npx tsc --noEmit` must both exit zero. The
@@ -109,8 +115,10 @@ A **stage** is one unit of work, ending in a push. The order is fixed:
 4. **Run the tests.** `npm test`, run-only budget: 10 seconds.
 5. **If a test fails, fix it, build, push again, then test again.**
 
-Never run tests in the middle of a stage. Never end a turn with an unpushed
-commit or a dirty tree.
+Never run tests — and never run a build — in the middle of a stage, or before
+the work is ready to submit. Reading the code is how you know what will work;
+the build and tests are how you prove it at the end. Never end a turn with an
+unpushed commit or a dirty tree.
 
 **Keep the branch pushed and current.** This workspace resets to base without
 warning, and the person cannot see anything that is not pushed. Before you
@@ -130,7 +138,8 @@ and `origin` together, and push small and often so a reset costs nothing.
 Tests exist to catch breaks. They are not evidence of intent and not a
 substitute for reading the code.
 
-- The only test command is `npm test`. It runs after the push, never before.
+- The only test command is `npm test`. It runs after the push, and only once
+  the work is ready to submit — not mid-stage, not as a check on progress.
 - **The test run must finish in 10 seconds.** Not the build, not the whole
   command: the run.
 - A test that needs longer must earn it, in a comment on that test, saying what
