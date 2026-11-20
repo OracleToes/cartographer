@@ -183,6 +183,20 @@ test("read reports the digest and range an evidence claim cites", async () => {
   await cleanup();
 });
 
+test("read with no range reads the whole file; one bound alone is an error", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
+  const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  const whole = await byName.read.execute({ path: "src/verify-me.ts" }, api, {});
+  const output = whole.output.map((part) => part.text).join("");
+  assert.match(output, /src\/verify-me\.ts:1-2 \(of 2 lines\)/);
+  assert.match(output, /export const answer = 42;/);
+  assert.match(output, /digest: [0-9a-f]{64}/);
+  await assert.rejects(byName.read.execute({ path: "src/verify-me.ts", startLine: 1 }, api, {}), /pass both/);
+  await cleanup();
+});
+
 test("unknown handles are explicit errors, never guesses", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });

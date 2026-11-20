@@ -57,18 +57,29 @@ export interface ReadRange {
   excerpt: string;
 }
 
-/** Read a line range, with the whole file's digest for evidence. */
-export async function readRange(root: string, path: string, startLine: number, endLine: number): Promise<ReadRange> {
-  if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
-    throw new WorkspaceError(`range must be whole lines with 1 <= start <= end; got ${startLine}-${endLine}`);
+/**
+ * Read a file, or a line range of it, with the whole file's digest for
+ * evidence. Omit both range arguments to read the whole file; pass both to
+ * read a range. One without the other is an error, never a guess.
+ */
+export async function readRange(root: string, path: string, startLine?: number, endLine?: number): Promise<ReadRange> {
+  if ((startLine === undefined) !== (endLine === undefined)) {
+    throw new WorkspaceError("pass both startLine and endLine, or neither to read the whole file");
+  }
+  if (startLine !== undefined && endLine !== undefined) {
+    if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
+      throw new WorkspaceError(`range must be whole lines with 1 <= start <= end; got ${startLine}-${endLine}`);
+    }
   }
   const real = resolveProjectPath(root, path);
   const bytes = await readFile(real);
   const digest = createHash("sha256").update(bytes).digest("hex");
   const lines = bytes.toString("utf8").split("\n");
-  const slice = lines.slice(startLine - 1, endLine);
+  const from = startLine ?? 1;
+  const to = endLine ?? lines.length;
+  const slice = lines.slice(from - 1, to);
   const excerpt = slice.join("\n");
-  return { path, startLine, endLine, totalLines: lines.length, digest, excerpt };
+  return { path, startLine: from, endLine: to, totalLines: lines.length, digest, excerpt };
 }
 
 export interface EditResult {

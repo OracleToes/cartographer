@@ -47,7 +47,10 @@ test("parseConfig rejects a bad version, model, endpoint, and context window", (
   assert.throws(() => parseConfig({ version: 1, model: 42 }), /model must be a string/);
   assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", llamaSwapEndpoint: "not-a-url" }), /not a valid URL/);
   assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", llamaSwapEndpoint: "file:///etc/passwd" }), /must be http/);
-  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 512 }), /at least 1024/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", contextWindow: -1 }), /at least 0/);
+  assert.throws(() => parseConfig({ version: 1, model: "llama-swap/x", contextWindow: "many" }), /integer/);
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 512 }).contextWindow, 512, "the pin is the person's number — any integer ≥ 0 wins");
+  assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 0 }).contextWindow, 0, "0 is the valid 'no pin' pin");
   assert.equal(parseConfig({ version: 1, model: "llama-swap/x", contextWindow: 75_000 }).contextWindow, 75_000);
 });
 

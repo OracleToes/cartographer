@@ -50,8 +50,8 @@ export function parseModelRef(spec: string): ModelRef {
 
 function parseContextWindow(value: unknown, where: string): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1_024) {
-    throw new ConfigError(`${where}: contextWindow must be an integer of at least 1024; got ${JSON.stringify(value)}.`);
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new ConfigError(`${where}: contextWindow must be an integer of at least 0 (0 = no pin — the server's advertised window, or unknown); got ${JSON.stringify(value)}.`);
   }
   return value;
 }

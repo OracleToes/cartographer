@@ -251,11 +251,11 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
 
     defineTool({
       name: "read",
-      description: "Read a line range inside the project root. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
+      description: "Read a file inside the project root. Omit startLine and endLine to read the whole file; pass both to read a line range. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
       parameters: obj({
         path: str({ minLength: 1 }),
-        startLine: int({ minimum: 1 }),
-        endLine: int({ minimum: 1 }),
+        startLine: opt(int({ minimum: 1 })),
+        endLine: opt(int({ minimum: 1 })),
       }),
       replay: "safe",
       execute: async (args) => {

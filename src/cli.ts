@@ -38,7 +38,7 @@ function usage(): string {
     "                              Only the keyless llama-swap provider is wired in this build.",
     "  --endpoint <url>            The llama-swap OpenAI-compatible base URL,",
     "                              e.g. http://localhost:8888/v1.",
-    "  --context-window <n>        Pin the context window (integer ≥ 1024). It always wins — it can raise the server's number;",
+    "  --context-window <n>        Pin the context window (integer ≥ 0). It always wins — it can raise the server's number;",
     "                              without it, the server's advertised capacity is used (unknown until the model loads).",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
     "  --headless                  Run the line driver instead of the TUI.",
@@ -83,8 +83,8 @@ try {
   let contextWindow: number | undefined;
   if (values["context-window"] !== undefined) {
     const parsedNumber = Number(values["context-window"]);
-    if (!Number.isInteger(parsedNumber) || parsedNumber < 1_024) {
-      throw new ConfigError(`--context-window must be an integer of at least 1024; got "${values["context-window"]}".`);
+    if (!Number.isInteger(parsedNumber) || parsedNumber < 0) {
+      throw new ConfigError(`--context-window must be an integer of at least 0 (0 = no pin — the server's advertised window, or unknown); got "${values["context-window"]}".`);
     }
     contextWindow = parsedNumber;
   }

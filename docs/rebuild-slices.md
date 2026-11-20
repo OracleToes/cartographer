@@ -621,3 +621,17 @@ AGENTS.md forbids… including all tools and such"). Findings:
 - **Config floor flagged:** `contextWindow` in `~/.carto/config.json` still
   requires an integer ≥ 1024 (`parseContextWindow`) — an arbitrary sanity
   floor on the person's explicit number; the person decides whether it goes.
+
+### Addendum — read reads whole files; the config floor goes (2026-11-20, person's word)
+
+- **`read` without a range reads the whole file** — `startLine`/`endLine`
+  are optional; omit both for the whole file, pass both for a range, one
+  without the other errors ("pass both startLine and endLine, or neither").
+  The digest is always the whole file's. The tool description states exactly
+  that.
+- **The `contextWindow` ≥ 1024 floor is gone.** It was Carto's invention, not
+  llama.cpp's — nothing in the server enforces it. The config and the
+  `--context-window` flag now require only an integer ≥ 0: 0 is the valid
+  "no pin" (the server's advertised window, or unknown, is used). Garbage is
+  still rejected at parse time; the magnitude of the person's number is
+  theirs.
