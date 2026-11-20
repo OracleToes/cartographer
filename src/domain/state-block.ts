@@ -110,7 +110,7 @@ export interface MessageLike {
   readonly content?: unknown;
   readonly sections?: Record<string, string | null>;
   readonly toolsAdded?: readonly unknown[];
-  readonly [key: string]: unknown;
+  readonly timestamp?: number;
 }
 
 /**
