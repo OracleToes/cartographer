@@ -124,6 +124,18 @@ Possible shapes:
 
 ### The block's schema
 
+**Q7.0b — Is the projection frozen between collapses?** The design implies it: a
+brain write shows as a tool result and a pending-change line, not in the
+projection, which is what keeps the prefix stable. If the projection instead
+updates every request, brain writes cost a prefix invalidation and the pending
+list has no job. *Needs:* confirmation, because it decides whether Pi's section
+patching is used at all.
+
+**Q7.0c — Is there any ceiling on pending changes?** The block growing is the
+signal to collapse. If the agent ignores it, nothing stops it growing. *Needs:*
+whether "the agent should collapse" is the whole enforcement, or whether there is
+a fallback.
+
 **Q7.1 — What fields?** Confirmed contents: staleness, context state, and a
 space breakdown by Brain part and tool calls. *Needs:* the actual field list.
 

@@ -197,6 +197,8 @@ agent reads. It is the agent's own dashboard about its brain and the project.
 It tells the agent:
 
 - what is stale in the Brain;
+- what has changed in the Brain since the projection was built, so the agent is
+  not reading a map it has already superseded;
 - the state of the context, including how full it is;
 - what is taking up space, broken down by Brain part — Ledger, Atlas, Chat — and
   by tool calls, separately from the stable parts such as the system and tool
@@ -204,6 +206,30 @@ It tells the agent:
 
 It is the part of the context expected to change often. Its items carry
 structured IDs.
+
+### The project tree
+
+The block carries the project tree to a depth, anchored at a directory. It shows
+files, directories, and their sizes, and marks which files an Atlas node links
+to, so the tree is a map of what the agent understands rather than a listing.
+
+The person is willing to pay its cost on large projects.
+
+**The agent moves the anchor and the depth.** Attention is part of the present: if
+the agent is working in a subdirectory, that is where the agent is now, and the
+tree shows it. The anchor stays inside the project.
+
+### A brain write is a tool result and a pending change
+
+Between collapses, an Atlas or Ledger write does not enter the projection. It
+exists as the tool's own result, and as a line in the state block saying what is
+pending about the Brain.
+
+This keeps the projection stable, so a brain write does not invalidate the
+prefix the server has already read.
+
+**A long list of pending changes is the signal to collapse.** The block growing
+is how the agent notices that its map and its books have diverged.
 
 ### 6.2 The state block is the continuation
 
