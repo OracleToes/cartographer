@@ -157,6 +157,39 @@ export class AtlasView implements Component, Focusable {
     }
   }
 
+  handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
+    if (event.type === "wheel" && event.wheelDelta) {
+      if (this.focusedPane === "detail") {
+        this.scrollOffset = Math.max(0, this.scrollOffset + (event.wheelDelta > 0 ? 3 : -3));
+      } else {
+        const filtered = this.getFilteredNodes();
+        const delta = event.wheelDelta > 0 ? 1 : -1;
+        this.selectedIndex = Math.max(0, Math.min(filtered.length - 1, this.selectedIndex + delta));
+      }
+      return { handled: true, render: true };
+    }
+    if (event.type === "press") {
+      return { handled: true, focus: true };
+    }
+    if (event.type === "click") {
+      const listWidth = Math.min(36, Math.floor(event.width * 0.4));
+      if (event.x < listWidth) {
+        const listIdx = event.y - 2;
+        const filtered = this.getFilteredNodes();
+        if (listIdx >= 0 && listIdx < filtered.length) {
+          this.selectedIndex = listIdx;
+          this.focusedPane = "list";
+          this.scrollOffset = 0;
+          return { handled: true, render: true };
+        }
+      } else {
+        this.focusedPane = "detail";
+        return { handled: true, render: true };
+      }
+    }
+    return undefined;
+  }
+
   invalidate(): void {
     // Stateless rendering from brain data.
   }

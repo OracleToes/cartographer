@@ -200,31 +200,6 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
   return cards;
 }
 
-class WorkAreaSwitcher implements Component, Focusable {
-  focused = false;
-  constructor(
-    private readonly getState: () => {
-      view: ViewMode;
-      scroll: ScrollView;
-      atlas: AtlasView;
-      ledger: LedgerView;
-      context: ContextView;
-    },
-  ) {}
-
-  invalidate(): void {
-    // Stateless delegate.
-  }
-
-  render(width: number): string[] {
-    const s = this.getState();
-    if (s.view === "atlas") return s.atlas.render(width);
-    if (s.view === "ledger") return s.ledger.render(width);
-    if (s.view === "context") return s.context.render(width);
-    return s.scroll.render(width);
-  }
-}
-
 export async function runTui(options: CartoTuiOptions): Promise<number> {
   const brain = options.brain;
   const refresh = async () => {
@@ -272,13 +247,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const ledgerView = new LedgerView();
   const contextView = new ContextView();
 
-  const workArea = new WorkAreaSwitcher(() => ({
-    view: state.view,
-    scroll,
-    atlas: atlasView,
-    ledger: ledgerView,
-    context: contextView,
-  }));
+  sidebar.onSelect = (book) => void switchToView(book);
 
   const refreshSidebar = async () => {
     const brainState = await brain.read();
@@ -404,7 +373,10 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           {
             component: new HStack([
               { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-              { component: workArea, basis: 0, grow: 1, minSize: 3 },
+              { component: scroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" },
+              { component: atlasView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" },
+              { component: ledgerView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" },
+              { component: contextView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" },
             ]),
             basis: 0,
             grow: 1,

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
+import { TranscriptView } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
@@ -48,7 +49,116 @@ test("Sidebar renders chat, context, atlas, and ledger with tokens and counts", 
   }
 });
 
-test("ContextView navigation, tool folding, and detail scrolling", () => {
+test("Sidebar mouse click switches view", () => {
+  const sidebar = new Sidebar();
+  let selected = "";
+  sidebar.onSelect = (view) => {
+    selected = view;
+  };
+
+  const pressRes = sidebar.handleMouse({
+    type: "press",
+    button: "left",
+    x: 5,
+    y: 3, // chat
+    screenX: 5,
+    screenY: 3,
+    width: 22,
+    height: 12,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(pressRes?.handled);
+
+  const clickRes = sidebar.handleMouse({
+    type: "click",
+    button: "left",
+    x: 5,
+    y: 4, // context
+    screenX: 5,
+    screenY: 4,
+    width: 22,
+    height: 12,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.equal(selected, "context");
+  assert.ok(clickRes?.handled);
+});
+
+test("TranscriptView mouse click folds and unfolds cards", () => {
+  const transcript = new TranscriptView();
+  transcript.setEntries([
+    {
+      kind: "tool",
+      id: "tool-1",
+      name: "read",
+      args: '{"path": "src/index.ts"}',
+      output: "line 1\nline 2\nline 3\nline 4\nline 5",
+    },
+  ]);
+
+  let rendered = transcript.render(80);
+  const initialLineCount = rendered.length;
+
+  // Click on the tool card header (line 0)
+  const pressRes = transcript.handleMouse({
+    type: "press",
+    button: "left",
+    x: 5,
+    y: 0,
+    screenX: 5,
+    screenY: 0,
+    width: 80,
+    height: 10,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(pressRes?.handled);
+
+  const clickRes = transcript.handleMouse({
+    type: "click",
+    button: "left",
+    x: 5,
+    y: 0,
+    screenX: 5,
+    screenY: 0,
+    width: 80,
+    height: 10,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(clickRes?.handled);
+
+  // Now the card is unfolded and line count increased
+  rendered = transcript.render(80);
+  assert.ok(rendered.length > initialLineCount);
+  assert.ok(rendered.join("\n").includes("line 1"));
+
+  // Click again to fold
+  transcript.handleMouse({
+    type: "click",
+    button: "left",
+    x: 5,
+    y: 0,
+    screenX: 5,
+    screenY: 0,
+    width: 80,
+    height: 10,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+
+  rendered = transcript.render(80);
+  assert.equal(rendered.length, initialLineCount);
+});
+
+test("ContextView navigation, tool folding, and mouse interactions", () => {
   const view = new ContextView();
   const brain = emptyBrain();
   view.setData({
@@ -118,9 +228,26 @@ test("ContextView navigation, tool folding, and detail scrolling", () => {
   for (const line of lines) {
     assert.equal(visibleWidth(line), 80);
   }
+
+  // Mouse wheel scroll in context view
+  const wheelRes = view.handleMouse({
+    type: "wheel",
+    button: "wheel-down",
+    wheelDelta: 1,
+    x: 40,
+    y: 5,
+    screenX: 40,
+    screenY: 5,
+    width: 80,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(wheelRes?.handled);
 });
 
-test("AtlasView two-pane navigation and detail scrolling", () => {
+test("AtlasView two-pane navigation, mouse interaction, and detail scrolling", () => {
   const atlas = new AtlasView();
   const brain = emptyBrain();
   brain.atlas.push({
@@ -151,9 +278,26 @@ test("AtlasView two-pane navigation and detail scrolling", () => {
   for (const line of lines) {
     assert.equal(visibleWidth(line), 80);
   }
+
+  // Mouse wheel scrolling
+  const wheelRes = atlas.handleMouse({
+    type: "wheel",
+    button: "wheel-down",
+    wheelDelta: 1,
+    x: 40,
+    y: 5,
+    screenX: 40,
+    screenY: 5,
+    width: 80,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(wheelRes?.handled);
 });
 
-test("LedgerView two-pane navigation and detail scrolling", () => {
+test("LedgerView two-pane navigation, mouse interaction, and detail scrolling", () => {
   const ledger = new LedgerView();
   const brain = emptyBrain();
   brain.ledger.push({
@@ -190,4 +334,21 @@ test("LedgerView two-pane navigation and detail scrolling", () => {
   for (const line of lines) {
     assert.equal(visibleWidth(line), 80);
   }
+
+  // Mouse wheel scrolling
+  const wheelRes = ledger.handleMouse({
+    type: "wheel",
+    button: "wheel-down",
+    wheelDelta: 1,
+    x: 40,
+    y: 5,
+    screenX: 40,
+    screenY: 5,
+    width: 80,
+    height: 20,
+    shift: false,
+    alt: false,
+    ctrl: false,
+  });
+  assert.ok(wheelRes?.handled);
 });

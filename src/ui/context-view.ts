@@ -79,6 +79,7 @@ export class ContextView implements Component, Focusable {
   private scrollOffset = 0;
   private selectedToolIndex = 0;
   private toolExpanded = new Map<string, boolean>();
+  private toolRanges: Array<{ name: string; start: number; end: number }> = [];
   private showRaw = false;
   private parts: ContextPartItem[] = [];
   private totalTokens = 0;
@@ -238,17 +239,57 @@ export class ContextView implements Component, Focusable {
     }
   }
 
+  handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
+    if (event.type === "wheel" && event.wheelDelta) {
+      this.scrollOffset = Math.max(0, this.scrollOffset + (event.wheelDelta > 0 ? 3 : -3));
+      return { handled: true, render: true };
+    }
+    if (event.type === "press") {
+      return { handled: true, focus: true };
+    }
+    if (event.type === "click") {
+      const railWidth = Math.min(32, Math.floor(event.width * 0.35));
+      if (event.x < railWidth) {
+        // Clicked on rail
+        const railIdx = event.y - 2;
+        if (railIdx >= 0 && railIdx < this.parts.length) {
+          this.selectedPartIndex = railIdx;
+          this.focusedPane = "rail";
+          this.scrollOffset = 0;
+          return { handled: true, render: true };
+        }
+      } else {
+        // Clicked on content pane
+        this.focusedPane = "content";
+        const selectedPart = this.parts[this.selectedPartIndex];
+        if (selectedPart?.id === "tools" && !this.showRaw) {
+          const contentY = event.y - 2 + this.scrollOffset;
+          const hitTool = this.toolRanges.find((r) => contentY >= r.start && contentY < r.end);
+          if (hitTool) {
+            const current = this.toolExpanded.get(hitTool.name) ?? true;
+            this.toolExpanded.set(hitTool.name, !current);
+            return { handled: true, render: true };
+          }
+        }
+        return { handled: true, render: true };
+      }
+    }
+    return undefined;
+  }
+
   invalidate(): void {
     // Stateless.
   }
 
   private renderToolsFormatted(tools: ContextToolItem[], width: number): string[] {
     const lines: string[] = [];
+    this.toolRanges = [];
     const title = ` Registered Tools (${tools.length}):`;
     lines.push(tokens.cardBg(padLine(tokens.bold(tokens.muted(title)), width)));
     lines.push(tokens.cardBg(" ".repeat(width)));
 
     tools.forEach((tool, idx) => {
+      const start = lines.length;
       const isSelected = this.focusedPane === "content" && idx === this.selectedToolIndex;
       const isOpen = this.toolExpanded.get(tool.name) ?? true;
       const foldGlyph = isOpen ? "▾" : "▸";
@@ -269,6 +310,8 @@ export class ContextView implements Component, Focusable {
         }
       }
       lines.push(tokens.cardBg(" ".repeat(width)));
+      const end = lines.length;
+      this.toolRanges.push({ name: tool.name, start, end });
     });
 
     return lines;

@@ -258,11 +258,15 @@ export class TranscriptView implements Component {
 
   /** A click folds or unfolds a card. The wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
+    const range = this.rangeAt(event.y);
+    if (range === undefined) return undefined;
+    const card = this.cardById(range.id);
+    if (card === undefined) return undefined;
+
+    if (event.type === "press") {
+      return { handled: true };
+    }
     if (event.type === "click") {
-      const range = this.rangeAt(event.y);
-      if (range === undefined) return undefined;
-      const card = this.cardById(range.id);
-      if (card === undefined) return undefined;
       this.expanded.set(card.id, !this.isExpanded(card));
       this.cacheWidth = -1;
       return { handled: true, render: true };

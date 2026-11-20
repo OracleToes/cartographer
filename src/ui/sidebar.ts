@@ -24,6 +24,7 @@ export const sidebarWidth = 22;
 export class Sidebar implements Component {
   private counts: SidebarCounts = EMPTY;
   private activeItem: BookKind = "chat";
+  onSelect?: (book: BookKind) => void;
 
   setCounts(counts: SidebarCounts): void {
     this.counts = { ...counts, stale: { ...counts.stale } };
@@ -35,6 +36,33 @@ export class Sidebar implements Component {
 
   invalidate(): void {
     // Stateless.
+  }
+
+  handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
+    if (event.type === "press") {
+      if (event.y === 3 || event.y === 4 || event.y === 8 || event.y === 9) {
+        return { handled: true };
+      }
+    }
+    if (event.type === "click") {
+      if (event.y === 3) {
+        this.onSelect?.("chat");
+        return { handled: true, render: true };
+      }
+      if (event.y === 4) {
+        this.onSelect?.("context");
+        return { handled: true, render: true };
+      }
+      if (event.y === 8) {
+        this.onSelect?.("atlas");
+        return { handled: true, render: true };
+      }
+      if (event.y === 9) {
+        this.onSelect?.("ledger");
+        return { handled: true, render: true };
+      }
+    }
+    return undefined;
   }
 
   private row(id: BookKind, label: string, figure: string, badgeText: string, width: number): string {
