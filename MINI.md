@@ -469,7 +469,7 @@ description can say.
 - **ledger** — the agent's working book: goals, notes, questions, instructions,
   progress.
 - **pin** — pin or remove one Brain item. A pin means "keep it here".
-- **inspect** — read a bounded text range inside the project root.
+- **read** — read a line range inside the project root.
 - **edit** — apply one atomic edit to a path inside the project.
 - **shell** — run a command inside the project.
 - **tree** — set the project tree's anchor and depth in the state block and

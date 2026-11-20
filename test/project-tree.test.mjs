@@ -124,15 +124,20 @@ test("a symlinked directory renders as a leaf and is never followed", () => {
   }
 });
 
-test("`.brain` is never listed and never in the aggregated sizes", () => {
+test("`.brain` and `.git` are never listed and never in the aggregated sizes", () => {
   const root = makeProject();
   try {
+    mkdirSync(join(root, ".git/objects"), { recursive: true });
+    writeFileSync(join(root, ".git/config"), Buffer.alloc(1024));
+    writeFileSync(join(root, ".git/objects/pack"), Buffer.alloc(8192));
     const brain = emptyBrain();
     const block = projectTreeBlock(root, root, 10, brain);
     assert.ok(!block.lines.some((line) => line.includes(".brain")), ".brain renders no line");
-    // The Brain's bytes are excluded wholesale: nothing above or below the anchor aggregates them.
+    assert.ok(!block.lines.some((line) => line.includes(".git")), ".git renders no line");
+    // The Brain and .git bytes are excluded wholesale: nothing above or below the anchor aggregates them.
     const scanned = scanTree(root, root);
     assert.equal(scanned.children?.some((child) => child.name === ".brain"), false);
+    assert.equal(scanned.children?.some((child) => child.name === ".git"), false);
     const srcNode = scanned.children?.find((child) => child.name === "src");
     assert.equal(srcNode?.size, 2048);
   } finally {
@@ -140,15 +145,19 @@ test("`.brain` is never listed and never in the aggregated sizes", () => {
   }
 });
 
-test("an anchor into `.brain`, at any depth, is rejected", () => {
+test("an anchor into `.brain` or `.git`, at any depth, is rejected", () => {
   const root = makeProject();
   try {
     const brain = emptyBrain();
     mkdirSync(join(root, "src/.brain"), { recursive: true });
+    mkdirSync(join(root, "src/.git"), { recursive: true });
     assert.throws(() => projectTreeBlock(root, join(root, ".brain"), 1, brain), AnchorError);
     assert.throws(() => projectTreeBlock(root, join(root, ".brain", "context"), 1, brain), AnchorError);
     assert.throws(() => projectTreeBlock(root, join(root, "src", ".brain"), 1, brain), AnchorError);
     assert.throws(() => projectTreeBlock(root, ".brain", 1, brain), AnchorError);
+    assert.throws(() => projectTreeBlock(root, join(root, ".git"), 1, brain), AnchorError);
+    assert.throws(() => projectTreeBlock(root, join(root, "src", ".git"), 1, brain), AnchorError);
+    assert.throws(() => projectTreeBlock(root, ".git", 1, brain), AnchorError);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

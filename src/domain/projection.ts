@@ -13,6 +13,7 @@
  * its graph; the projection never hides a dead reference (§2.1, §2.3).
  */
 import { handleOf } from "./handles.js";
+import { estimateTokens } from "./estimate.js";
 import type { CartoBrain, SourceRef } from "./records.js";
 
 export type ProjectionPartId = "atlas" | "ledger" | "pins" | "wakes";
@@ -34,7 +35,7 @@ export interface Projection {
   sizes: Record<ProjectionPartId, number>;
 }
 
-const tokens = (text: string): number => (text.length === 0 ? 0 : Math.ceil(text.length / 4));
+const tokens = estimateTokens;
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 

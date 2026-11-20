@@ -1,10 +1,12 @@
 /**
  * Global configuration (`~/.carto/config.json`).
  *
- * The file names the model and, for llama-swap, where it serves and how much
- * context Carto may use. The llama-swap server advertises the model's true
- * capacity only after it loads; the configured
- * `contextWindow` is the ceiling Carto will not raise on its own.
+ * The file names the model and, for llama-swap, where it serves and the
+ * window Carto should use. The llama-swap server advertises the model's true
+ * capacity only after it loads; the configured `contextWindow` always wins —
+ * it is a hard override, not a ceiling, and may raise the server's number.
+ * With no `contextWindow`, the advertised capacity is the truth, or unknown
+ * until the server speaks.
  *
  * No keys: llama-swap is keyless (main's documented approach, rewritten
  * fresh). Other providers are not wired in this build and say so plainly.
@@ -20,7 +22,7 @@ export interface GlobalConfig {
   model: string;
   /** The OpenAI-compatible base URL of the llama-swap server, e.g. "http://localhost:8888/v1". */
   llamaSwapEndpoint?: string;
-  /** The ceiling on the active context window; advertised capacity can lower it, never raise it. */
+  /** The pinned context window: it always wins (it can raise the server's advertised capacity). Unset: the server's advertised capacity is used. */
   contextWindow?: number;
 }
 
@@ -48,8 +50,8 @@ export function parseModelRef(spec: string): ModelRef {
 
 function parseContextWindow(value: unknown, where: string): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 1_024) {
-    throw new ConfigError(`${where}: contextWindow must be an integer of at least 1024; got ${JSON.stringify(value)}.`);
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    throw new ConfigError(`${where}: contextWindow must be an integer of at least 0 (0 = no pin — the server's advertised window, or unknown); got ${JSON.stringify(value)}.`);
   }
   return value;
 }

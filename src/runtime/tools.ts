@@ -63,7 +63,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     const digest = await sha256File(real);
     if (digest === null) throw new WorkspaceError(`cannot read ${evidence.path}`);
     if (digest !== evidence.digest) {
-      throw new WorkspaceError(`Evidence for ${evidence.path} changed since it was read. Re-read it with inspect and try again.`);
+      throw new WorkspaceError(`Evidence for ${evidence.path} changed since it was read. Re-read it with read and try again.`);
     }
     return {
       kind: "file",
@@ -93,7 +93,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "atlas",
       description:
-        "Create or update one source-backed claim about the project, with optional typed edges to other nodes. Pass the handle of an existing node to update it, or leave it out to create one. Evidence is a file range you read with inspect; the digest must still match.",
+        "Create or update one source-backed claim about the project, with optional typed edges to other nodes. Pass the handle of an existing node to update it, or leave it out to create one. Evidence is a file range you read with read; the digest must still match.",
       parameters: obj({
         handle: opt(HandleRef),
         title: str({ minLength: 1 }),
@@ -250,12 +250,12 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     }),
 
     defineTool({
-      name: "inspect",
-      description: "Read a line range inside the project root. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
+      name: "read",
+      description: "Read a file inside the project root. Omit both startLine and endLine to read the whole file; pass startLine only to read from that line to the end of the file; pass endLine only to read from line 1 through that line; pass both to read a line range. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
       parameters: obj({
         path: str({ minLength: 1 }),
-        startLine: int({ minimum: 1 }),
-        endLine: int({ minimum: 1 }),
+        startLine: opt(int({ minimum: 1 })),
+        endLine: opt(int({ minimum: 1 })),
       }),
       replay: "safe",
       execute: async (args) => {
@@ -285,7 +285,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Set the anchor and depth of the project tree in your state block and return the rendered tree. The anchor stays inside the project and never inside `.brain`; `.brain` is never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
+        "Set the anchor and depth of the project tree in your state block. The anchor stays inside the project and never inside `.brain` or `.git`; `.brain` and `.git` are never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
       parameters: obj({
         anchor: opt(str({ minLength: 1 })),
         depth: opt(int({ minimum: 0 })),
@@ -296,8 +296,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         const depth = args.depth ?? session.tree.depth;
         const block = projectTreeBlock(root, anchor, depth, await brain.read());
         session.tree = { anchor: block.root, depth: block.depth };
-        const body = block.lines.length === 0 ? "(nothing below the anchor at depth 0)" : block.lines.join("\n");
-        return textOutput(`tree: ${block.root} (depth ${block.depth})\n${body}`);
+        return textOutput(`tree: ${block.root} (depth ${block.depth})`);
       },
     }),
 

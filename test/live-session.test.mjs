@@ -106,12 +106,12 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
   }
 });
 
-test("inspect feeds atlas evidence; the digest verifies end to end", async () => {
+test("read feeds atlas evidence; the digest verifies end to end", async () => {
   const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   const fileDigest = sha256(readFileSync(join(root, "src", "verify-me.ts")));
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("inspect", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-inspect" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       claim: "The answer is 42.",
@@ -161,25 +161,50 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  await assert.rejects(byName.inspect.execute({ path: ".brain/brain.sqlite", startLine: 1, endLine: 1 }, api, {}), /\.brain/);
+  await assert.rejects(byName.read.execute({ path: ".brain/brain.sqlite", startLine: 1, endLine: 1 }, api, {}), /\.brain/);
   const edit = byName.edit.execute({ path: "../escape.txt", oldText: "", newText: "x" }, api, {});
   await assert.rejects(edit, /outside the project root/);
   const editBrain = byName.edit.execute({ path: ".brain/brain.sqlite", oldText: "", newText: "x" }, api, {});
   await assert.rejects(editBrain, /\.brain/);
   const tree = byName.tree.execute({ anchor: "..", depth: 1 }, api, {});
   await assert.rejects(tree, /anchor escapes/);
+  const treeGit = byName.tree.execute({ anchor: ".git", depth: 1 }, api, {});
+  await assert.rejects(treeGit, /internal directory is not visible/);
+  const validTree = await byName.tree.execute({ anchor: "src", depth: 1 }, api, {});
+  assert.match(validTree.output[0].text, /^tree: .* \(depth 1\)$/);
+  assert.doesNotMatch(validTree.output[0].text, /\n/);
   await cleanup();
 });
 
-test("inspect reports the digest and range an evidence claim cites", async () => {
+test("read reports the digest and range an evidence claim cites", async () => {
   const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-y", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
-  const range = await byName.inspect.execute({ path: "src/verify-me.ts", startLine: 1, endLine: 1 }, api, {});
+  const range = await byName.read.execute({ path: "src/verify-me.ts", startLine: 1, endLine: 1 }, api, {});
   const output = range.output.map((part) => part.text).join("");
   assert.match(output, /digest: [0-9a-f]{64}/);
   assert.match(output, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
+  await cleanup();
+});
+
+test("read bounds are independently open: whole file, from a line, through a line", async () => {
+  const { root, brain, cleanup } = await fixture();
+  const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
+  const api = { callId: "call-whole", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  const whole = await byName.read.execute({ path: "src/verify-me.ts" }, api, {});
+  const output = whole.output.map((part) => part.text).join("");
+  assert.match(output, /src\/verify-me\.ts:1-2 \(of 2 lines\)/);
+  assert.match(output, /export const answer = 42;/);
+  assert.match(output, /digest: [0-9a-f]{64}/);
+  const fromStart = await byName.read.execute({ path: "src/verify-me.ts", startLine: 2 }, api, {});
+  const fromStartOut = fromStart.output.map((part) => part.text).join("");
+  assert.match(fromStartOut, /src\/verify-me\.ts:2-2 \(of 2 lines\)/);
+  const throughEnd = await byName.read.execute({ path: "src/verify-me.ts", endLine: 1 }, api, {});
+  const throughEndOut = throughEnd.output.map((part) => part.text).join("");
+  assert.match(throughEndOut, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
+  await assert.rejects(byName.read.execute({ path: "src/verify-me.ts", startLine: 99 }, api, {}), /past the end/);
   await cleanup();
 });
 
@@ -260,7 +285,7 @@ test("stale evidence rides the collapse: the frozen projection carries the marks
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
-    factory(() => fauxAssistantMessage([fauxToolCall("inspect", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-inspect" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("read", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-read" })], { stopReason: "toolUse" })),
     factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
       title: "The answer",
       claim: "The answer is 42.",

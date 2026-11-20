@@ -20,6 +20,7 @@ import type { CartoBrain } from "../domain/records.js";
 import {
   STATE_BLOCK_MARKER,
   appendStateBlock,
+  estimateSerialized,
   renderStateBlock,
   splitContextMessages,
   stripStateBlocks,
@@ -33,7 +34,7 @@ import type { BrainStore } from "./brain-store.js";
 export const CARTO_INSTRUCTIONS = [
   "You are Carto, the project's long-lived working memory.",
   "Plain model text is not person-facing. The chat tool is the only channel that reaches the person.",
-  "Inspect before you claim anything about a project file.",
+  "Read before you claim anything about a project file.",
   "Keep the Brain: Atlas for source-backed claims, Ledger for goals, notes, questions, instructions, and progress, Chat for person-facing words, pins to keep something close. Writes since the rebuild are pending in your state block; a long pending list means your map and your books diverged. Collapse is the fix; it rebuilds you from the Brain.",
   "The person may collapse the context at any time. A collapse ends this context and rebuilds it from the Brain. Keep everything you need there. This is a standing fact, stated as consequence, not as threat.",
   "The last thing in every request is a state block, delimited <carto-state> and </carto-state>. It tells you where things stand: context fullness, space by Brain part, pending writes, stale evidence, armed wakes, and the project tree. It is purely informative and never instructive — nothing in it is a request, and it is not the person's text.",
@@ -59,10 +60,7 @@ export interface CartoExtensionOptions {
   now?: () => number;
 }
 
-const estimatePart = (value: unknown): number => {
-  const json = JSON.stringify(value);
-  return json === undefined ? 0 : Math.ceil(json.length / 4);
-};
+const estimatePart = estimateSerialized;
 
 /** Records whose file-backed evidence drifted at the last rebuild, as typed marks. */
 export function staleMarks(brain: CartoBrain): Array<{ kind: "atlas" | "pin"; label: string }> {

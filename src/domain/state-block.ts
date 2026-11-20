@@ -29,6 +29,7 @@
  * `none` rather than lying by omission, and nothing is omitted.
  */
 import type { WakeEntry } from "./records.js";
+import { estimateSerialized, estimateTokens } from "./estimate.js";
 
 export const STATE_BLOCK_OPEN = "<carto-state>";
 export const STATE_BLOCK_CLOSE = "</carto-state>";
@@ -45,6 +46,7 @@ export interface PendingWrite {
 }
 
 export interface StateBlockInput {
+  /** The server's advertised window or the person's pin; 0 = unknown, never a made-up number. */
   contextWindow: number;
   /** Provider's own count for the last response, if one has arrived. */
   lastReportedInput?: number | undefined;
@@ -73,9 +75,13 @@ const thousands = (value: number): string => Math.round(value).toLocaleString("e
 export function renderStateBlock(input: StateBlockInput): string {
   const reported = input.lastReportedInput;
   const fullness =
-    reported === undefined
-      ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens (not yet reported by the provider)`
-      : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)})`;
+    input.contextWindow <= 0
+      ? reported === undefined
+        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} tokens (window unknown)`
+        : `context: ~${thousands(reported + input.toolWorkSince)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)}; window unknown)`
+      : reported === undefined
+        ? `context: ~${thousands(input.systemTokens + input.transcriptTokens + input.toolWorkTokens)} / ${thousands(input.contextWindow)} tokens (not yet reported by the provider)`
+        : `context: ~${thousands(reported + input.toolWorkSince)} / ${thousands(input.contextWindow)} tokens (last reported ${thousands(reported)} + tool work since +${thousands(input.toolWorkSince)})`;
   const space =
     `space: system+tools ~${thousands(input.systemTokens)} · transcript ~${thousands(input.transcriptTokens)} · ` +
     `tool work ~${thousands(input.toolWorkTokens)} · atlas ~${thousands(input.sizes.atlas)} · ledger ~${thousands(input.sizes.ledger)} · ` +
@@ -99,11 +105,7 @@ export function renderStateBlock(input: StateBlockInput): string {
   return [STATE_BLOCK_OPEN, fullness, space, pending, stale, wakeLines, ...treeLines, STATE_BLOCK_CLOSE].join("\n");
 }
 
-/** pi-ai messages, estimated the same way everywhere: 4 bytes per token. */
-export function estimateSerialized(value: unknown): number {
-  const json = JSON.stringify(value);
-  return json === undefined ? 1 : Math.max(1, Math.ceil(json.length / 4));
-}
+export { estimateSerialized };
 
 export interface MessageLike {
   readonly role: string;
@@ -139,7 +141,7 @@ export function splitContextMessages(messages: readonly MessageLike[]): {
       if (Array.isArray(message.toolsAdded) && message.toolsAdded.length > 0) {
         parts.push(JSON.stringify(message.toolsAdded));
       }
-      systemTokens += Math.max(1, Math.ceil(parts.join("\n\n").length / 4));
+      systemTokens += estimateTokens(parts.join("\n\n"));
       continue;
     }
     const toolWork =

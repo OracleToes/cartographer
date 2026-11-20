@@ -91,6 +91,91 @@ const firstLine = (text: string): string => {
 };
 const memoKey = (text: string): string => `${text.length}:${text.slice(0, 64)}:${text.slice(-64)}`;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+function formatObjectArgs(obj: Record<string, unknown>): string {
+  const entries = Object.entries(obj);
+  if (entries.length === 0) return "{}";
+  const lines: string[] = [];
+  for (const [key, value] of entries) {
+    if (value === undefined) continue;
+    if (typeof value === "string") {
+      if (value.includes("\n")) {
+        lines.push(`${key}:`);
+        for (const line of value.split("\n")) {
+          lines.push(`  ${line}`);
+        }
+      } else {
+        lines.push(`${key}: ${value}`);
+      }
+    } else if (typeof value === "number" || typeof value === "boolean") {
+      lines.push(`${key}: ${value}`);
+    } else if (Array.isArray(value)) {
+      if (value.length === 0) {
+        lines.push(`${key}: []`);
+      } else if (value.every((item) => typeof item === "string" || typeof item === "number")) {
+        lines.push(`${key}: [${value.join(", ")}]`);
+      } else {
+        lines.push(`${key}:`);
+        for (const item of value) {
+          if (isRecord(item)) {
+            const inner = formatObjectArgs(item).split("\n");
+            lines.push(`  - ${inner[0]}`);
+            for (let i = 1; i < inner.length; i++) {
+              lines.push(`    ${inner[i]}`);
+            }
+          } else {
+            lines.push(`  - ${String(item)}`);
+          }
+        }
+      }
+    } else if (isRecord(value)) {
+      lines.push(`${key}:`);
+      const inner = formatObjectArgs(value).split("\n");
+      for (const line of inner) {
+        lines.push(`  ${line}`);
+      }
+    } else {
+      lines.push(`${key}: ${JSON.stringify(value)}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Format tool arguments progressively:
+ * If the tool name is unknown or empty, dump raw JSON text as-is.
+ * Once the tool name is known, format valid parsed JSON fields into human-readable key-values.
+ */
+export function formatToolArgs(args: unknown, name?: string): string {
+  if (args === undefined || args === null) return "";
+  if (!name || name.trim() === "") {
+    if (typeof args === "string") return args;
+    try {
+      return JSON.stringify(args, null, 2);
+    } catch {
+      return String(args);
+    }
+  }
+  if (typeof args === "string") {
+    const trimmed = args.trim();
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (isRecord(parsed)) return formatObjectArgs(parsed);
+      } catch {
+        // Fall back to raw string
+      }
+    }
+    return args;
+  }
+  if (isRecord(args)) {
+    return formatObjectArgs(args);
+  }
+  return String(args);
+}
+
 export class TranscriptView implements Component {
   private items: TranscriptEntry[] = [];
   private queued: Array<{ text: string; mode: string }> = [];
@@ -218,13 +303,15 @@ export class TranscriptView implements Component {
 
   private cardHeader(card: CardEntry, width: number, expanded: boolean): string {
     const glyph = expanded ? "▾" : "▸";
-    const label = kindColor(card)(tokens.bold(kindLabel(card)));
-    const pad = " ".repeat(Math.max(0, PREFIX_WIDTH - visibleWidth(kindLabel(card))));
+    const isTool = card.kind === "tool";
+    const labelText = isTool && card.name ? `tool ${card.name}` : kindLabel(card);
+    const label = kindColor(card)(tokens.bold(labelText));
+    const pad = " ".repeat(Math.max(1, PREFIX_WIDTH - visibleWidth(labelText)));
     const marks: string[] = [];
     if (card.status !== undefined && expanded) marks.push(tokens.muted(`· ${card.status}`));
     if (card.failed === true) marks.push(tokens.danger(tokens.bold("· failed")));
     if (expanded) return `${label}${pad}${glyph}${marks.length > 0 ? ` ${marks.join(" ")}` : ""}`;
-    const summary = card.kind === "tool"
+    const summary = isTool
       ? (card.args.trim().length > 0 ? `${card.name}(${oneLine(card.args)})` : card.name)
       : firstLine(card.text);
     const preview = truncateToWidth(summary.length === 0 ? "…" : summary, Math.max(1, width - PREFIX_WIDTH - 2), "…");
@@ -258,11 +345,15 @@ export class TranscriptView implements Component {
 
   /** A click folds or unfolds a card. The wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
+    const range = this.rangeAt(event.y);
+    if (range === undefined) return undefined;
+    const card = this.cardById(range.id);
+    if (card === undefined) return undefined;
+
+    if (event.type === "press") {
+      return { handled: true };
+    }
     if (event.type === "click") {
-      const range = this.rangeAt(event.y);
-      if (range === undefined) return undefined;
-      const card = this.cardById(range.id);
-      if (card === undefined) return undefined;
       this.expanded.set(card.id, !this.isExpanded(card));
       this.cacheWidth = -1;
       return { handled: true, render: true };

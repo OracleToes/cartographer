@@ -28,8 +28,9 @@ function usage(): string {
     "Reads its global configuration from ~/.carto/config.json (override the directory",
     "with CARTO_HOME). The llama-swap endpoint in that file is where your llama.cpp",
     "server serves; llama-swap advertises the model's true capacity only once it has",
-    "loaded, and Carto drops the active context limit to min(configured, advertised)",
-    "at that point. It never raises the configured ceiling on its own.",
+    "loaded, and Carto uses its advertised capacity as the window. The --context-window",
+    "flag pins the window and always wins (even above advertised). Without either,",
+    "the window is unknown until the model loads.",
     "",
     "Options:",
     "  --model <provider/modelId>  Model to use, e.g. llama-swap/ByteShape. Creates the",
@@ -37,7 +38,8 @@ function usage(): string {
     "                              Only the keyless llama-swap provider is wired in this build.",
     "  --endpoint <url>            The llama-swap OpenAI-compatible base URL,",
     "                              e.g. http://localhost:8888/v1.",
-    "  --context-window <n>        Ceiling on the active context window (integer ≥ 1024).",
+    "  --context-window <n>        Pin the context window (integer ≥ 0). It always wins — it can raise the server's number;",
+    "                              without it, the server's advertised capacity is used (unknown until the model loads).",
     "  --root <dir>                Project root holding .brain/. Default: the current directory.",
     "  --headless                  Run the line driver instead of the TUI.",
     "  -h, --help                  Show this help.",
@@ -81,8 +83,8 @@ try {
   let contextWindow: number | undefined;
   if (values["context-window"] !== undefined) {
     const parsedNumber = Number(values["context-window"]);
-    if (!Number.isInteger(parsedNumber) || parsedNumber < 1_024) {
-      throw new ConfigError(`--context-window must be an integer of at least 1024; got "${values["context-window"]}".`);
+    if (!Number.isInteger(parsedNumber) || parsedNumber < 0) {
+      throw new ConfigError(`--context-window must be an integer of at least 0 (0 = no pin — the server's advertised window, or unknown); got "${values["context-window"]}".`);
     }
     contextWindow = parsedNumber;
   }

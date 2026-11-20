@@ -9,8 +9,9 @@
  * fill is solid (`▮`). The tool-work-since tail is always an estimate, so the
  * numbers carry `~` always — the same phrasing the state block uses. The free
  * region tints warning past 90% used and danger past the window; the
- * denominator is the active context window (min of the configured ceiling and
- * the advertised capacity), never the model's maximum. No other tick is drawn:
+ * denominator is the active context window (the configured pin when set, else
+ * the advertised capacity; "window unknown" until either arrives), never the
+ * model's maximum. No other tick is drawn:
  * this build has no budget below the window, and a mark without a meaning
  * would be an invented figure.
  */
@@ -26,7 +27,7 @@ import { partTokens, tokens } from "./tokens.js";
 export interface TokenBarState {
   session: {
     state: {
-      /** The ACTIVE window: min(configured ceiling, advertised). */
+      /** The ACTIVE window: the configured pin, else the advertised capacity; 0 = unknown. */
       contextWindow: number;
       /** The provider's own input count from the last response, if one has arrived. */
       lastReportedInput?: number | undefined;
@@ -59,21 +60,22 @@ export class TokenBarView implements Component {
   render(width: number): string[] {
     const { contextWindow, lastReportedInput, toolWorkAtLastReport } = this.state.session.state;
     const { system, transcript, toolWork } = this.state.parts;
-    const window = Math.max(1, contextWindow);
+    const unknown = contextWindow <= 0;
+    const window = unknown ? 1 : contextWindow; // guarded denominator; the unknown path never divides by it
     const estimate = Math.max(0, system) + Math.max(0, transcript) + Math.max(0, toolWork);
     const toolWorkSince = Math.max(0, Math.max(0, toolWork) - (toolWorkAtLastReport ?? 0));
     const measured = lastReportedInput !== undefined && lastReportedInput > 0;
     const used = measured ? (lastReportedInput as number) + toolWorkSince : estimate;
-    const key = [width, window, Math.round(used), Math.round(system), Math.round(transcript), Math.round(toolWork), measured].join("|");
+    const key = [width, window, unknown ? "unknown" : "known", Math.round(used), Math.round(system), Math.round(transcript), Math.round(toolWork), measured].join("|");
     if (this.cacheWidth === width && this.cacheKey === key) return this.cacheLines;
 
     const pct = Math.round((used / window) * 100);
-    const numbers = `~${thousands(used)} / ${thousands(window)} · ${pct}%`;
-    const numbersTint = pct >= 100 ? tokens.danger : pct >= 90 ? tokens.warn : tokens.muted;
+    const numbers = unknown ? `~${thousands(used)} tokens · window unknown` : `~${thousands(used)} / ${thousands(contextWindow)} · ${pct}%`;
+    const numbersTint = unknown ? tokens.muted : pct >= 100 ? tokens.danger : pct >= 90 ? tokens.warn : tokens.muted;
     const renderedNumbers = numbersTint(numbers);
     const barWidth = Math.max(4, width - visibleWidth(numbers) - 2);
     const fillGlyph = measured ? "▮" : "▤";
-    const fill = clamp01(used / window) * barWidth;
+    const fill = unknown ? 0 : clamp01(used / window) * barWidth;
 
     // Segment widths: estimated shares of the estimated payload, scaled to the
     // filled length (cumulative rounding keeps the segments additive).

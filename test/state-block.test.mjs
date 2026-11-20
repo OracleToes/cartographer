@@ -48,6 +48,16 @@ test("empty pending, stale and wakes say none; missing provider report is explic
   assert.match(block, /context: ~[\d,]+ \/ 32,768 tokens \(not yet reported by the provider\)/);
 });
 
+test("an unknown window renders as unknown, never as a number; a pin or advertisement renders normally", () => {
+  const unknown = renderStateBlock(input({ contextWindow: 0 }));
+  assert.match(unknown, /context: ~12,410 tokens \(last reported 9,841 \+ tool work since \+2,569; window unknown\)/);
+  assert.doesNotMatch(unknown, /32,768|0 tokens \//);
+  const unknownUnreported = renderStateBlock(input({ contextWindow: 0, lastReportedInput: undefined }));
+  assert.match(unknownUnreported, /context: ~[\d,]+ tokens \(window unknown\)/);
+  const known = renderStateBlock(input({ contextWindow: 131_072 }));
+  assert.match(known, /context: ~12,410 \/ 131,072 tokens/);
+});
+
 test("marker messages are dropped from payloads; everything else survives", () => {
   const messages = [
     { role: "user", content: "a real person message" },

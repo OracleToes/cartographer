@@ -2,26 +2,19 @@
  * The workspace (MINI.md §8 as re-scoped 2026-11-20 — modes, not tabs; the
  * Posting layout philosophy on pi-tui primitives).
  *
- * Chat is the boot view; the Context surgery view and the Brain views land in
- * their own slices and are honestly absent — jumping to them flashes the slice
- * that owns them rather than rendering a fake. The token bar sits above the
- * footer on every view (docs/ui-proposal.md §7, candidate A): one row,
- * segmented by part, honest about what is estimate and what is measured.
- * The whole app carries one cell of padding on every edge. The transcript shows the
- * person's lines where they LANDED in the context (not where they were typed),
- * the agent's `chat` words, its reasoning, plain model text, and tool calls
- * as foldable cards (dimmer, their own hues — MINI.md §8, §10a as re-scoped
- * 2026-11-20), and quiet status lines. Submitted lines whose placement has not
- * happened yet render dimmed as queued and move into place at the boundary.
+ * Chat is the boot view; Atlas, Ledger, and Context surgery views are reachable
+ * via jump keys (^o a, ^o l, ^o x) and the summoned palette (^p). The token bar
+ * sits above the footer on every view (docs/ui-proposal.md §7, candidate A):
+ * one row, segmented by part, honest about what is estimate and what is measured.
+ * The whole app carries one cell of padding on every edge.
  *
- * Lines starting with `/` are workspace commands (/help, /copy, /copy-session)
- * and never reach the agent.
+ * Pinned items and stale evidence are evident directly inside their books.
  *
  * State is one explicit value; behaviour is functions over it (MINI.md §12).
  * Pi performs; Carto adds only the composition.
  */
 import { Writable } from "node:stream";
-import { basename } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   Editor,
@@ -32,10 +25,13 @@ import {
   Spacer,
   TuiAltScreen,
   VStack,
+  type Component,
+  type Focusable,
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
+import { createBashTool } from "@earendil-works/pi-durable/tools";
 
 import {
   closeLiveSession,
@@ -48,18 +44,22 @@ import {
   type LiveSessionOptions,
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
-import { staleMarks } from "../runtime/carto-extension.js";
+import { createTools } from "../runtime/tools.js";
+import { CARTO_INSTRUCTIONS, renderLiveStateBlock, staleMarks } from "../runtime/carto-extension.js";
 import { isMarkerMessage, splitContextMessages, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
-import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode } from "./chrome.js";
+import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode, type ViewMode } from "./chrome.js";
 import { TokenBarView, type TokenBarState } from "./token-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
 import { flattenEntry } from "./dump.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, formatToolArgs, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { AtlasView } from "./atlas-view.js";
+import { LedgerView } from "./ledger-view.js";
+import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
 import { tokens } from "./tokens.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -78,6 +78,7 @@ interface TuiState {
   /** Render exclusion: agent records already shown (boot history, or sealed by a collapse). Persists across collapses. */
   sealedAgentIds: Set<string>;
   sendMode: SendMode;
+  view: ViewMode;
   /** True while at least one submission is in flight; drives the footer badge and the live timer's rebuilds. */
   running: boolean;
   /** The person's submitted lines awaiting placement in the context, in order. */
@@ -101,20 +102,19 @@ interface TuiState {
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
 
-function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>): SidebarCounts {
-  // Typed marks, not prefix parsing: the stale kind is what the Brain reports.
+function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>, contextTokens: number = 0): SidebarCounts {
   const marks = staleMarks(brainState);
-  const stale: Partial<Record<BookKind, number>> = {};
+  const stale: Partial<Record<"atlas" | "ledger", number>> = {};
   for (const mark of marks) {
-    const kind: BookKind = mark.kind === "pin" ? "pins" : "atlas";
-    stale[kind] = (stale[kind] ?? 0) + 1;
+    if (mark.kind === "atlas") {
+      stale.atlas = (stale.atlas ?? 0) + 1;
+    }
   }
   return {
+    chat: brainState.chat.length,
+    contextTokens,
     atlas: brainState.atlas.length,
     ledger: brainState.ledger.length,
-    chat: brainState.chat.length,
-    pins: brainState.userPins.length + brainState.carryPins.length,
-    wakes: brainState.wakes.length,
     stale,
     staleTotal: marks.length,
   };
@@ -160,9 +160,6 @@ function prettyArgs(value: unknown): string {
 /**
  * The in-flight partial (`pi.live`) as foldable cards: the streaming
  * thinking/text blocks in content order, then the current round's tool slots.
- * While the model writes its answer the arguments stream into the toolCall
- * part; once the answer commits, the parts are gone and the running calls
- * (with their retained output) come from the slots instead.
  */
 function liveCardsOf(live: LiveState | undefined): CardEntry[] {
   const cards: CardEntry[] = [];
@@ -179,11 +176,17 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
         if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking });
       } else if (part.type === "text" && typeof part.text === "string") {
         if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text });
-      } else if (part.type === "toolCall" && typeof part.name === "string") {
+      } else if (part.type === "toolCall") {
         const callId = typeof part.id === "string" ? part.id : undefined;
         if (callId !== undefined) seenCalls.add(callId);
         const slot = callId === undefined ? undefined : slots.get(callId);
-        cards.push({ kind: "tool", id, live: true, name: part.name, args: prettyArgs(part.arguments), status: slot?.status ?? "pending" });
+        const name = typeof part.name === "string" ? part.name : (slot?.name ?? "");
+        const rawArgs = typeof (part as Record<string, unknown>).rawArguments === "string"
+          ? ((part as Record<string, unknown>).rawArguments as string)
+          : undefined;
+        const args = rawArgs ?? formatToolArgs(part.arguments, name);
+        const status = slot?.status ?? (name.length > 0 ? "running" : "pending");
+        cards.push({ kind: "tool", id, live: true, name, args, status });
       }
     });
   }
@@ -215,6 +218,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     session,
     sealedAgentIds: new Set((await brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id)),
     sendMode: "steer",
+    view: "chat",
     running: false,
     pending: [],
     sealed: [],
@@ -230,13 +234,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const terminal = new ProcessTerminal();
-  // The same verified-native clipboard path the mouse selection copies through;
-  // without it pi-tui falls back to a bare OSC 52 write, which can lie.
   const tui = new TuiAltScreen(terminal, undefined, undefined, { copySelection: createSelectionCopier() });
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
-  const headerState = { project, modelLabel, session: state.session };
+  const headerState = { project, modelLabel, session: state.session, view: state.view };
   const header = new HeaderView(headerState);
   const barState: TokenBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
   const tokenBar = new TokenBarView(barState);
@@ -247,12 +249,149 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const editorTheme = { borderColor: (line: string) => tokens.muted(line), selectList: selectTheme };
   const editor = new Editor(tui, editorTheme);
 
+  const atlasView = new AtlasView();
+  const ledgerView = new LedgerView();
+  const contextView = new ContextView();
+
+  sidebar.onSelect = (book) => void switchToView(book);
+
   const refreshSidebar = async () => {
-    sidebar.setCounts(countSidebar(await brain.read()));
+    const brainState = await brain.read();
+    const contextTokens = barState.parts.system + barState.parts.transcript + barState.parts.toolWork;
+    sidebar.setCounts(countSidebar(brainState, contextTokens));
+    sidebar.setActiveBook(state.view);
     tui.requestRender();
   };
 
-  sidebar.setCounts(countSidebar(await brain.read()));
+  await refreshSidebar();
+
+  const pushStatus = (text: string) => {
+    state.statusLog.push({ t: Date.now(), entry: { kind: "status", text } });
+  };
+
+  const syncContextView = async (brainState: Awaited<ReturnType<BrainStore["read"]>>) => {
+    const productTools = createTools({
+      root: options.root,
+      brain,
+      session: state.session.state,
+    });
+    const bashTool = createBashTool();
+    const allTools: ContextToolItem[] = [...productTools, bashTool].map((t) => ({
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    }));
+
+    const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
+    const transcriptMessages: ContextDialogueMessage[] = [];
+    const toolWorkItems: ContextWorkItem[] = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!entry) continue;
+      const message = messageOf(entry);
+      if (message === undefined) continue;
+      const role = message.role ?? "user";
+      const id = entry.id ?? i;
+      const ts = message.timestamp;
+      if (role === "user") {
+        const textContent = typeof message.content === "string" ? message.content : undefined;
+        if (textContent && !isMarkerMessage(message as BlockMessageLike)) {
+          transcriptMessages.push({ id, role, text: textContent, timestamp: ts });
+        }
+      } else if (role === "assistant") {
+        const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+        for (let j = 0; j < content.length; j++) {
+          const part = content[j];
+          if (!isRecord(part)) continue;
+          if (part.type === "thinking" && typeof part.thinking === "string") {
+            toolWorkItems.push({ id: `${id}-${j}`, kind: "reasoning", text: part.thinking });
+          } else if (part.type === "text" && typeof part.text === "string") {
+            toolWorkItems.push({ id: `${id}-${j}`, kind: "output", text: part.text });
+          } else if (part.type === "toolCall" && typeof part.name === "string") {
+            if (part.name === "chat") {
+              const textArg = isRecord(part.arguments) && typeof part.arguments.text === "string" ? part.arguments.text : "";
+              transcriptMessages.push({ id: `${id}-${j}`, role: "assistant [chat]", text: textArg, timestamp: ts });
+            } else {
+              toolWorkItems.push({ id: `${id}-${j}`, kind: "toolCall", name: part.name, args: prettyArgs(part.arguments) });
+            }
+          }
+        }
+      } else if (role === "toolResult") {
+        const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+        for (let j = 0; j < content.length; j++) {
+          const part = content[j];
+          if (!isRecord(part)) continue;
+          const toolText = typeof part.text === "string" ? part.text : "";
+          if (!toolText.startsWith("carto: ")) {
+            toolWorkItems.push({ id: `${id}-${j}`, kind: "toolResult", output: toolText });
+          }
+        }
+      }
+    }
+
+    const stateBlock = await renderLiveStateBlock(
+      { root: options.root, brain, session: state.session.state, markdownPath: join(options.root, ".brain/context", ".projection.md") },
+      [],
+    );
+
+    contextView.setData({
+      brain: brainState,
+      systemPrompt: CARTO_INSTRUCTIONS,
+      tools: allTools,
+      transcriptMessages,
+      toolWorkItems,
+      stateBlockText: stateBlock,
+    });
+  };
+
+  const switchToView = async (view: ViewMode) => {
+    state.view = view;
+    headerState.view = view;
+    footer.invalidate();
+    sidebar.setActiveBook(view);
+
+    const brainState = await brain.read();
+    const marks = staleMarks(brainState);
+
+    if (view === "chat") {
+      tui.setFocus(editor);
+    } else if (view === "atlas") {
+      atlasView.setData(brainState, marks);
+      tui.setFocus(atlasView);
+    } else if (view === "ledger") {
+      ledgerView.setData(brainState);
+      tui.setFocus(ledgerView);
+    } else if (view === "context") {
+      await syncContextView(brainState);
+      tui.setFocus(contextView);
+    }
+    tui.requestRender();
+  };
+
+  atlasView.onBack = () => void switchToView("chat");
+  ledgerView.onBack = () => void switchToView("chat");
+  contextView.onBack = () => void switchToView("chat");
+  contextView.onCollapse = () => void runCollapse("context surgery");
+  contextView.onDelete = async (partId, itemId, now) => {
+    if (partId === "transcript") {
+      const brainState = await brain.read();
+      const chatRecord = brainState.chat.find((r) => r.id === itemId || String(r.id) === String(itemId));
+      if (chatRecord) {
+        await brain.apply({ kind: "delete", target: "chat", id: chatRecord.id }, Date.now());
+        pushStatus(`deleted chat record #${chatRecord.id}`);
+      }
+    }
+    if (now) {
+      await runCollapse("context surgery (now)");
+    } else {
+      await rebuildTranscript();
+      const brainState = await brain.read();
+      await syncContextView(brainState);
+      await refreshSidebar();
+    }
+    tui.requestRender();
+  };
 
   tui.setLayoutRoot(
     new HStack([
@@ -264,13 +403,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           {
             component: new HStack([
               { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-              { component: scroll, basis: 0, grow: 1, minSize: 3 },
+              { component: scroll, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "chat" },
+              { component: atlasView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "atlas" },
+              { component: ledgerView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "ledger" },
+              { component: contextView, basis: 0, grow: 1, minSize: 3, visible: () => state.view === "context" },
             ]),
             basis: 0,
             grow: 1,
             minSize: 3,
           },
-          { component: editor, basis: "auto", minSize: 3 },
+          { component: editor, basis: "auto", minSize: 3, visible: () => state.view === "chat" },
           { component: tokenBar, basis: 1 },
           { component: footer, basis: 1 },
           { component: new Spacer(1), basis: 1 },
@@ -289,7 +431,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.overlayHandle?.hide();
     state.overlayHandle = undefined;
     state.overlayOpen = false;
-    tui.setFocus(editor);
+    if (state.view === "chat") {
+      tui.setFocus(editor);
+    } else if (state.view === "atlas") {
+      tui.setFocus(atlasView);
+    } else if (state.view === "ledger") {
+      tui.setFocus(ledgerView);
+    } else if (state.view === "context") {
+      tui.setFocus(contextView);
+    }
     tui.requestRender();
   };
 
@@ -308,10 +458,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.liveWatch = undefined;
     await closeLiveSession(state.session);
     resolveRun?.(code);
-  };
-
-  const pushStatus = (text: string) => {
-    state.statusLog.push({ t: Date.now(), entry: { kind: "status", text } });
   };
 
   /**
@@ -355,6 +501,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const person: Array<{ key: number; entry: TranscriptEntry }> = [];
       const landedTexts: Array<{ text: string; t: number }> = [];
       const toolErrors = new Map<string, boolean>();
+      const toolOutputs = new Map<string, string>();
       const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[]; stopReason?: string }> = [];
       for (const entry of entries) {
         const id = typeof entry.id === "number" ? entry.id : 0;
@@ -373,7 +520,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           if (parts.length > 0) assistantParts.push({ entryId: id, parts, ...(stopReason === undefined ? {} : { stopReason }) });
         } else if (role === "toolResult" && isRecord(message)) {
           const callId = (message as Record<string, unknown>).toolCallId;
-          if ((message as Record<string, unknown>).isError === true && typeof callId === "string") toolErrors.set(callId, true);
+          if (typeof callId === "string") {
+            if ((message as Record<string, unknown>).isError === true) toolErrors.set(callId, true);
+            let out = "";
+            if (Array.isArray(message.content)) {
+              for (const p of message.content) {
+                if (isRecord(p) && typeof p.text === "string") out += p.text;
+              }
+            } else if (typeof message.content === "string") {
+              out = message.content;
+            }
+            if (out.length > 0) toolOutputs.set(callId, out);
+          }
         }
       }
 
@@ -400,13 +558,15 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
             cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text } });
           } else if (part.type === "toolCall" && typeof part.name === "string") {
             const callId = typeof part.id === "string" ? part.id : undefined;
+            const output = callId !== undefined ? toolOutputs.get(callId) : undefined;
             cards.push({
               key,
               entry: {
                 kind: "tool",
                 id: `ctx-${entryId}-${partIndex}`,
                 name: part.name,
-                args: prettyArgs(part.arguments),
+                args: formatToolArgs(part.arguments, part.name),
+                ...(output !== undefined ? { output } : {}),
                 ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
               },
             });
@@ -428,15 +588,23 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         const pool = [...landedTexts];
         for (const item of state.pending) {
           const index = pool.findIndex((landed) => landed.text === item.text && landed.t >= item.at - 5_000);
-          if (index >= 0) pool.splice(index, 1);
-          else remaining.push(item);
+          if (index !== -1) {
+            pool.splice(index, 1);
+          } else {
+            remaining.push(item);
+          }
         }
         state.pending = remaining;
       }
 
-      const statusMerged = state.statusLog.map((item) => ({ key: anchorAt(item.t) + 0.5, entry: item.entry }));
+      // Status lines key off their own insertion timestamp.
+      const statusMerged: Array<{ key: number; entry: TranscriptEntry }> = state.statusLog.map((item) => ({
+        key: anchorAt(item.t) + 0.25,
+        entry: item.entry,
+      }));
 
-      // The token bar's inputs: the same estimates the state block reports,
+      // Token estimates: split context messages into system, transcript,
+      // toolWork — strictly matching the same estimates the state block reports,
       // split the same way. Cheap next to the Brain read above.
       const blockMessages = visibleMessages.filter((message) => !isMarkerMessage(message));
       const parts = splitContextMessages(blockMessages);
@@ -468,30 +636,29 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         );
         tui.requestRender();
       }
+
+      if (state.view === "context") {
+        await syncContextView(brainState);
+      }
     } finally {
       state.rebuilding = false;
     }
   };
 
-  // The in-flight partial: the watch receives pi.live's committed partials
-  // (~100ms cadence). The listener never touches the Session — it hands the
-  // cards straight to the view; a throttled full rebuild follows so committed
-  // rounds land as folded cards while the run continues.
   let lastLiveRebuild = 0;
   const startLiveWatch = async (): Promise<void> => {
     const watch = await state.session.harness.watchDoc(LiveDoc, state.session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
-    if (watch === undefined) return; // watch unavailable: landed lines still refresh on the timer
+    if (watch === undefined) return;
     state.liveWatch = watch;
     let hadLive = false;
     watch.start(async (call) => {
-      if (call.kind !== "value") return; // a failed frame keeps the last shown tail
+      if (call.kind !== "value") return;
       const live = call.value as LiveState;
       const cards = liveCardsOf(live);
       transcript.setLive(cards);
       tui.requestRender();
       const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
       const now = Date.now();
-      // Landed entries arrive through a full rebuild: throttled while streaming, immediate when the tail empties.
       if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
         lastLiveRebuild = now;
         setImmediate(() => {
@@ -506,13 +673,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (state.collapsing) return;
     state.collapsing = true;
     const previous = state.session.generation;
-    // Seal the conversation as it renders right now: post-collapse the context
-    // is rebuilt from the Brain and no longer holds these entries.
+    pushStatus(`collapsing context at ${suffix(previous)}: ${reason}…`);
     if (state.pending.length > 0) {
       pushStatus(`${state.pending.length} queued message(s) dropped by the collapse`);
       state.pending = [];
     }
-    // seal: the rendered prefix becomes history (in-flight tail included); the status log rides along inside it
     state.sealed = [...state.sealed, ...transcript.snapshot()];
     state.statusLog = [];
     transcript.setLive([]);
@@ -525,7 +690,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       state.session = outcome.session;
       headerState.session = outcome.session;
       barState.session = outcome.session;
-      void startLiveWatch(); // re-arm on the rebuilt generation
+      void startLiveWatch();
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
       await refreshSidebar();
     } catch (error) {
@@ -564,8 +729,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       if (state.sendMode === "now") await interruptRun(state.session);
       const whenBusy = state.sendMode === "after run" ? "followUp" : "steer";
       const submission = await submitInput(state.session, message, whenBusy);
-      // If the message was admitted idle, it is placed in the context right
-      // now; flip the line out of queued immediately rather than at settle.
       await rebuildTranscript();
       const settled = await submission.wait(BACKGROUND_CONTEXT);
       if (settled.status !== "done") {
@@ -576,8 +739,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
     state.inFlight = Math.max(0, state.inFlight - 1);
     state.running = state.inFlight > 0;
-    // Move placed lines to where they landed, drain new chat words, flag a
-    // silent plain-text answer. The landed order is the context's order.
     await rebuildTranscript();
     const reason = state.session.takeCollapseRequest();
     if (reason !== null) await runCollapse(reason);
@@ -611,7 +772,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           `# carto session dump — ${new Date().toISOString()}`,
           `project: ${options.root}`,
           `generation: ${state.session.generation}`,
-          `model: ${modelLabel} · window ${state.session.contextWindow.toLocaleString("en-US")}`,
+          `model: ${modelLabel} · ${state.session.state.contextWindow > 0 ? `window ${state.session.state.contextWindow.toLocaleString("en-US")}` : "window unknown"}`,
           `last provider report: ${state.session.state.lastReportedInput?.toLocaleString("en-US") ?? "none"} + tool work since +${state.session.state.toolWorkAtLastReport.toLocaleString("en-US")}`,
           `atlas ${brainState.atlas.length} · ledger ${brainState.ledger.length} · chat ${brainState.chat.length} · pins ${brainState.userPins.length + brainState.carryPins.length} · wakes ${brainState.wakes.length}`,
           "",
@@ -647,7 +808,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       return;
     }
     state.pending.push({ text: message, at: Date.now(), mode: state.sendMode });
-    void rebuildTranscript(); // paint the queued line immediately
+    void rebuildTranscript();
     void runSubmission(message);
   };
 
@@ -655,6 +816,30 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     if (state.overlayOpen) return;
     state.overlayOpen = true;
     const commands: PaletteCommand[] = [
+      {
+        value: "chat",
+        label: "switch to chat view",
+        hint: "^o c",
+        run: () => void switchToView("chat"),
+      },
+      {
+        value: "atlas",
+        label: "switch to atlas view",
+        hint: "^o a",
+        run: () => void switchToView("atlas"),
+      },
+      {
+        value: "ledger",
+        label: "switch to ledger view",
+        hint: "^o l",
+        run: () => void switchToView("ledger"),
+      },
+      {
+        value: "context",
+        label: "switch to context surgery view",
+        hint: "^o x",
+        run: () => void switchToView("context"),
+      },
       {
         value: "collapse",
         label: "collapse the context now",
@@ -689,20 +874,16 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     const jump = new JumpOverlay(JUMP_TARGETS);
     jump.onClose = closeOverlay;
     jump.onJump = (key) => {
-      if (key === "c") {
-        tui.setFocus(editor);
-        return;
-      }
-      const label = JUMP_TARGETS.find((target) => target.key === key)?.label ?? key;
-      tui.flash(`jump: ${label.split(" — ")[0]} — lands with its slice`, 2_500);
+      if (key === "c") void switchToView("chat");
+      else if (key === "a") void switchToView("atlas");
+      else if (key === "l") void switchToView("ledger");
+      else if (key === "x") void switchToView("context");
     };
-    state.overlayHandle = tui.showOverlay(jump, { width: 46, anchor: "center" });
+    state.overlayHandle = tui.showOverlay(jump, { width: 52, anchor: "center" });
     tui.setFocus(jump);
   };
 
   tui.addInputListener((data) => {
-    // A focused overlay owns the keys; the palette and jump overlay handle
-    // their own escape/cancel, so nothing leaks to a global action.
     if (state.overlayOpen) return undefined;
     if (matchesKey(data, "ctrl+c")) {
       void shutdown(0);
@@ -719,13 +900,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       }
       return { consume: true };
     }
-    if (matchesKey(data, "shift+tab")) {
+    if (matchesKey(data, "shift+tab") && state.view === "chat") {
       state.sendMode = nextSendMode(state.sendMode);
       tui.flash(`send mode: ${sendModeLabel(state.sendMode)}`, 1_200);
       tui.requestRender();
       return { consume: true };
     }
-    if (matchesKey(data, "ctrl+e")) {
+    if (matchesKey(data, "ctrl+e") && state.view === "chat") {
       transcript.toggleAllCards();
       tui.requestRender();
       return { consume: true };
@@ -746,8 +927,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     return undefined;
   });
 
-  // Cheap heartbeat: while a run is in flight the boundary can land at any
-  // time; pick up placements and new chat words even between settle hooks.
   liveTimer = setInterval(() => {
     void rebuildTranscript().catch(() => undefined);
   }, 1_500);

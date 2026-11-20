@@ -1,8 +1,6 @@
 /**
  * Jump mode (Posting's idiom): one key, a label per addressable region, one
- * keystroke to land. Spatial one-key-per-widget labels need per-widget render
- * geometry we do not have yet, so this is the contract without the pixels:
- * type a letter, land on the mode. Esc leaves untouched.
+ * keystroke to land. Esc leaves untouched.
  */
 import {
   matchesKey,
@@ -19,12 +17,10 @@ export interface JumpTarget {
 }
 
 export const JUMP_TARGETS: JumpTarget[] = [
-  { key: "c", label: "chat" },
+  { key: "c", label: "chat — conversation & cards" },
+  { key: "a", label: "atlas — source-backed claims & graph" },
+  { key: "l", label: "ledger — goals, notes, questions & progress" },
   { key: "x", label: "context — the surgery view" },
-  { key: "a", label: "atlas" },
-  { key: "l", label: "ledger" },
-  { key: "p", label: "pins" },
-  { key: "w", label: "wakes" },
 ];
 
 export class JumpOverlay implements Component, Focusable {
@@ -61,7 +57,7 @@ export class JumpOverlay implements Component, Focusable {
       `   ${tokens.muted("esc to stay")}`,
       "",
     ];
-    const inner = Math.max(24, Math.min(width, 44));
+    const inner = Math.max(24, Math.min(width, 52));
     return lines.map((line) => tokens.panel(line.padEnd(inner)));
   }
 }

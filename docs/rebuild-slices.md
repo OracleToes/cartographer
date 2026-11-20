@@ -591,3 +591,61 @@ AGENTS.md forbids… including all tools and such"). Findings:
 - Estimate glyphs (`▤`), the state block's omission-free rendering, the
   token bar's segment estimates: unchanged — they are labelled estimates,
   never enforced bounds.
+
+### Addendum — ceiling removal, tool rename, shell kept (2026-11-20, person's word)
+
+- **The artificial ceiling is gone.** Until this addendum, the active window
+  was `min(configured ceiling, advertised)` with a 32,768 uninformed default —
+  Carto's invention, not the server's truth, and not the person's. The person
+  ruled: the configured `--context-window` **always wins** (a hard override,
+  even above advertised capacity); with no pin, the server's advertised
+  capacity is the truth; with neither, the window is **0 — unknown**, and the
+  UI renders "window unknown" (the token bar draws an empty hatched bar with
+  `<used> tokens · window unknown`, the state block's fullness line carries
+  `(window unknown)`, the header and `/copy-session` say so) — never a
+  made-up number. pi treats `contextWindow <= 0` as unclamped; the declared
+  `maxTokens` becomes int32-max (`UNKNOWN_MAX_TOKENS`), which llama.cpp
+  honours as "until done or context exhausted". MINI.md §8 already specified
+  the server's real window as the bar's denominator; the code now obeys it.
+  `--context-window` survives by the person's explicit choice, as the
+  always-wins pin (integer ≥ 1024 — that sanity floor is Carto's, flagged
+  here, not removed unasked).
+- **`inspect` is now `read`** (person's word, 2026-11-20): named for an
+  assumption never confirmed. All references follow — tool name,
+  instructions, descriptions, tests, living docs, MINI.md §10a ("bounded"
+  dropped there with the limits audit; the tool reads any line range).
+- **Pi's built-in bash is the shell, kept** (person's call): pi's ~2000-line /
+  50 KB tail and spill-to-temp diagnostic stay as they are; no Carto wrapper
+  is built. Anyone reading this addendum later should not re-propose it
+  without the person raising it.
+- **Config floor flagged:** `contextWindow` in `~/.carto/config.json` still
+  requires an integer ≥ 1024 (`parseContextWindow`) — an arbitrary sanity
+  floor on the person's explicit number; the person decides whether it goes.
+
+### Addendum — read reads whole files; the config floor goes (2026-11-20, person's word)
+
+- **`read` without a range reads the whole file** — `startLine`/`endLine`
+  are optional; omit both for the whole file, pass both for a range, one
+  without the other errors ("pass both startLine and endLine, or neither").
+  The digest is always the whole file's. The tool description states exactly
+  that.
+- **The `contextWindow` ≥ 1024 floor is gone.** It was Carto's invention, not
+  llama.cpp's — nothing in the server enforces it. The config and the
+  `--context-window` flag now require only an integer ≥ 0: 0 is the valid
+  "no pin" (the server's advertised window, or unknown, is used). Garbage is
+  still rejected at parse time; the magnitude of the person's number is
+  theirs.
+
+### Addendum — read bounds, second pass (2026-11-20, person's word)
+
+- **startLine alone reads to EOF** (person's word): each bound is
+  independently open — omit both for the whole file, startLine only to end
+  of file, endLine only from line 1 (the symmetric case — if the person
+  meant only the startLine case to exist, say so and endLine-only errors
+  again), both for a range. startLine past EOF errors explicitly. The tool
+  description states the four cases exactly; tests cover them.
+- **Full audit pass, same day:** no schema-visible arbitrary limits remain
+  in `src/` (sweep: numeric literals, slice/clamp/truncate, subprocess
+  timeouts, config validation). Findings needing a person's ruling or a
+  decision are listed in the session reply this date — nothing from the
+  audit is fixed silently.

@@ -15,9 +15,10 @@
  * agent asks to collapse (the collapse tool), the driver performs the
  * ceremony at once and says what happened.
  *
- * If `capacity` is given, advertised capacity is re-discovered after every
- * settled run; the active window drops to min(ceiling, advertised) when the
- * server has loaded and is telling the truth. The ceiling never rises here.
+ * If `capacity` is given, the window is re-discovered after every settled run;
+ * the active window follows the provider's catalog — the configured pin
+ * always wins; without one, the advertised capacity (unknown until the
+ * server has loaded and is telling the truth).
  */
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
@@ -41,8 +42,9 @@ export interface HeadlessOptions extends LiveSessionOptions {
    * When true, Pi's provider-catalog refresh runs before the session opens
    * and after every settled run (llama-swap advertises a model's capacity
    * only once it has loaded). The active window then follows the provider's
-   * catalog, which the llama-swap provider caps at the configured ceiling.
-   * Refresh failures are silent by design — the ceiling stands.
+   * catalog: a configured pin always wins; without one, the advertised
+   * capacity is used. Refresh failures are silent by design — the last
+   * known window stands.
    */
   refreshCapacity?: boolean;
 }
@@ -68,7 +70,7 @@ async function drainAgentChat(brain: LiveSessionOptions["brain"], seen: Set<stri
   return lines;
 }
 
-/** Exported for the tests. The provider's catalog is the single source of the active window; the llama-swap provider caps it at the configured ceiling. */
+/** Exported for the tests. The provider's catalog is the single source of the active window: the configured pin, else the advertised capacity, else 0 (unknown). */
 export async function applyCapacityRefresh(
   session: LiveSession,
   refresh: () => Promise<void>,
@@ -80,7 +82,12 @@ export async function applyCapacityRefresh(
   await refresh();
   const next = models.getModel(providerId, modelId)?.contextWindow;
   if (next === undefined || next === session.state.contextWindow) return;
-  writeLine(output, `context limit ${session.state.contextWindow.toLocaleString()} → ${next.toLocaleString()} (advertised by the server)`);
+  const from = session.state.contextWindow > 0 ? session.state.contextWindow.toLocaleString() : "unknown";
+  if (next > 0) {
+    writeLine(output, `context window ${from} → ${next.toLocaleString()} (advertised by the server)`);
+  } else {
+    writeLine(output, `context window ${from} → unknown (the server stopped advertising one)`);
+  }
   session.state.contextWindow = next;
 }
 
@@ -95,7 +102,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   const output = options.output;
   const error = options.error ?? options.output;
   const refresh = async () => {
-    // Silent on failure: an unreachable server leaves the ceiling standing.
+    // Silent on failure: an unreachable server leaves the last known window standing.
     await options.models.refresh({ providers: [options.model.provider] }).catch(() => undefined);
   };
   if (options.refreshCapacity === true) await refresh();

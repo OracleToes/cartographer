@@ -14,8 +14,11 @@
  *   its fullness line on the last reported input.
  * - llama.cpp accepts system messages but not the developer role,
  *   reasoning_effort, or store; max_tokens field, not max_completion_tokens;
- * - the context window is min(configured ceiling, advertised capacity) —
- *   the configured ceiling can only be lowered, never raised, by the server.
+ * - the window: the person's configured `contextWindow` always wins — it is
+ *   a hard override, not a ceiling, and may raise the server's number. With
+ *   no config, the server's advertised capacity is the truth. With neither,
+ *   the window is 0 — unknown; pi treats contextWindow <= 0 as unclamped,
+ *   and the UI renders "window unknown", never a made-up number.
  *
  * Catalog dynamics go through Pi's own machinery, not a hand-rolled probe:
  * `refreshModelsAuth: "configured"` (a keyless server is configured when its
@@ -37,8 +40,31 @@ import { ConfigError, type GlobalConfig, type ModelRef } from "./config.js";
 
 export const LLAMA_SWAP_PROVIDER_ID = "llama-swap";
 
-/** Used only when the config names no contextWindow. */
-export const DEFAULT_CONTEXT_WINDOW = 32_768;
+/**
+ * pi's Model requires maxTokens and always sends max_tokens; with an unknown
+ * window (contextWindow <= 0) pi skips its clamp, so this sentinel — int32
+ * max — means "as many tokens as the server's real context allows", which
+ * llama.cpp honours by generating until done or context exhausted.
+ */
+export const UNKNOWN_MAX_TOKENS = 2_147_483_647;
+
+/**
+ * The active context window. The person's configured number always wins —
+ * it may raise the server's advertised capacity (a hard override, the
+ * reverse of a ceiling). With no config, the server's advertised capacity is
+ * the truth. With neither, 0 — unknown.
+ */
+export function resolveContextWindow(configured?: number, advertised?: number): number {
+  if (configured !== undefined && configured > 0) return configured;
+  if (advertised !== undefined && advertised > 0) return advertised;
+  return 0;
+}
+
+/** pi's maxTokens for a window; the sentinel when the window is unknown. */
+export function maxTokensFor(window: number): number {
+  return window > 0 ? window : UNKNOWN_MAX_TOKENS;
+}
+
 export const LLAMA_SWAP_COMPAT = {
   supportsDeveloperRole: false,
   supportsReasoningEffort: false,
@@ -72,32 +98,28 @@ export function advertisedCapacityOf(entry: unknown): { capacity: number; source
 
 /**
  * One server-listing entry as a Model, or undefined when it names no usable
- * id. The context window is min(ceiling, advertised ?? ceiling): the server
- * can lower the ceiling, never raise it.
+ * id. The window is the configured pin when the person set one, else the
+ * advertised capacity, else 0 (unknown).
  */
-export function catalogModel(entry: unknown, ceiling: number, endpoint: string): Model<"openai-completions"> | undefined {
+export function catalogModel(entry: unknown, configured: number | undefined, endpoint: string): Model<"openai-completions"> | undefined {
   if (typeof entry !== "object" || entry === null) return undefined;
   const record = entry as Record<string, unknown>;
   if (typeof record.id !== "string" || record.id.trim() === "") return undefined;
   const advertised = advertisedCapacityOf(record);
+  const contextWindow = resolveContextWindow(configured, advertised?.capacity);
   return {
     id: record.id,
     name: record.id,
     api: "openai-completions",
     provider: LLAMA_SWAP_PROVIDER_ID,
     baseUrl: endpoint,
-    contextWindow: activeContextWindow(ceiling, advertised?.capacity),
-    maxTokens: activeContextWindow(ceiling, advertised?.capacity),
+    contextWindow,
+    maxTokens: maxTokensFor(contextWindow),
     input: ["text"],
     reasoning: false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     compat: { ...LLAMA_SWAP_COMPAT },
   };
-}
-
-/** The configured ceiling is a ceiling: advertised capacity can only lower the active window. */
-export function activeContextWindow(configured: number, advertised?: number): number {
-  return advertised !== undefined && advertised > 0 ? Math.min(configured, advertised) : configured;
 }
 
 export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: LlamaSwapDeps = {}): Provider {
@@ -114,7 +136,8 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
     );
   }
 
-  const ceiling = config.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+  const configured = config.contextWindow;
+  const baselineWindow = resolveContextWindow(configured, undefined);
   const endpoint = config.llamaSwapEndpoint;
   const fetchImpl: FetchLike = deps.fetchImpl ?? (fetch as unknown as FetchLike);
   const baseline = {
@@ -123,11 +146,11 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
     api: "openai-completions" as const,
     provider: LLAMA_SWAP_PROVIDER_ID,
     baseUrl: endpoint,
-    contextWindow: ceiling,
-    // Unbounded on purpose: pi clamps this to the room left in the window on
-    // every request (simple-options.ts clampMaxTokensToContext), so the model
-    // generates until it finishes or the context is full. No artificial cap.
-    maxTokens: ceiling,
+    contextWindow: baselineWindow,
+    // pi clamps this to the room left in the window on every request (when
+    // the window is unknown, pi sends this as-is — the sentinel). No
+    // artificial cap of Carto's.
+    maxTokens: maxTokensFor(baselineWindow),
     input: ["text" as const],
     reasoning: false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -165,7 +188,7 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
         throw new Error("llama-swap /models did not return a data array");
       }
       return data
-        .map((entry) => catalogModel(entry, ceiling, endpoint))
+        .map((entry) => catalogModel(entry, configured, endpoint))
         .filter((candidate): candidate is Model<"openai-completions"> => candidate !== undefined);
     },
     api: openAICompletionsApi(),

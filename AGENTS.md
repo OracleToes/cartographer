@@ -1,8 +1,9 @@
 # AGENTS.md
 
 This file tells an agent how to work in this repository. It is written for the
-agent, not for the person: read it before touching a file, and follow it over any
-habit you brought with you.
+agent, not for the person: **you must read this file at the start of every single turn**,
+before reading other files or touching any code, and follow it over any habit you
+brought with you.
 
 The person is `OracleToes`. They own this project. When their word and this file
 disagree, their word wins and this file is wrong until it is fixed.
@@ -121,36 +122,40 @@ kept, and it is not a substitute for a test. See §5.
 
 ## 4. How to work
 
-A **stage** is one unit of work, ending in a submission push. While the
-stage is in progress — reading, deciding, editing — run nothing: **no
-`npm run build`, no `npx tsc --noEmit`, no `npm test`, no probe.** The build
-and the tests happen once, at the very end, when you are ready to submit the
-code. They are the submission, not a way to check your work as you go. If you
-do not know whether something will compile, read the code; do not ask the
-compiler.
+A **stage** is one complete unit of work that ends when you are ready to tell the
+person it is done. While the stage is in progress — reading, deciding, editing — run
+nothing: **no `npm run build`, no `npx tsc --noEmit`, no `npm test`, no probe.** Tests
+are not a sanity check, an iterative aid, or a way to help you write code.
 
-Pushes are not only at the end. Commit and push as you go, half-finished if
-that is where you are — a push mid-stage is how work survives a workspace
-reset, and it implies no verification of any kind: no build, no tests, no
-gate. The submission sequence, when the work is ready, is fixed:
+The build and the tests happen strictly once, at the very end of the stage, right
+before you stop to tell the person the work is done.
+
+Pushes are not only at the end. Commit and push as you go mid-stage if needed — a
+push mid-stage is how work survives a workspace reset, and it implies no verification:
+no build, no tests, no gate. The submission sequence, when you have finished all edits
+and are ready to report done, is fixed:
 
 1. **Make every edit you expect the stage to need.** Read the code first.
+   Make surgical edits to existing files; never overwrite or rewrite entire
+   files without the person's express permission.
 2. **Build.** `npm run build` and `npx tsc --noEmit` must both exit zero. The
    build is the gate: it is what lets you say you are confident.
 3. **Commit and push.** Before you run a single test.
-4. **Run the tests.** `npm test`, run-only budget: 10 seconds.
+4. **Run the tests.** `npm test`, run-only budget: 10 seconds. Tests exist to reveal
+   breaks in the code before you report done, not as a progress check.
 5. **If a test fails, fix it, build, push again, then test again.**
 
-Never run tests — and never run a build — in the middle of a stage, or before
-the work is ready to submit. Reading the code is how you know what will work;
-the build and tests are how you prove it at the end. Never end a turn with an
-unpushed commit or a dirty tree.
+Never run tests — and never run a build — in the middle of a stage, or as a
+check on your progress while working. Reading the code is how you know what will
+work; the build and tests are how you prove it at the very end when you are about to
+tell the person it is done. Never end a turn with an unpushed commit or a dirty tree.
 
 **Keep the branch pushed and current.** This workspace resets to base without
 warning, and the person cannot see anything that is not pushed. A push
 mid-stage is expected and claims nothing; only the end-of-stage sequence
 submits. Before you touch a file:
 
+- **Read `AGENTS.md` first at the start of every single turn.**
 - `git fetch` and check whether `origin` has moved ahead.
 - If the workspace has reset, your local commits may be gone while `origin`
   still holds them. Replay your work onto `origin`, push, and say in the same
@@ -253,6 +258,7 @@ assumption, or a statement, the response is an answer — not work.
 
 ## 9. Do not
 
+- Do not overwrite entire files without the person's express permission. Make surgical edits to specific sections; whole-file replacement risks wiping existing functionality, comments, and structure.
 - Do not record your inference as intent.
 - Do not present a plan, a glossary, or a definition as agreed before it is.
 - Do not run tests during a stage, or run a test suite that cannot fit the run
@@ -286,10 +292,11 @@ the base commit while the working tree kept everything as untracked files.
 The remote tip is the source of truth. Expect it, and repair it when found:
 
 - Treat the local branch as possibly stale. At the START of every turn —
-  before any edit, build, or test, not only when git misbehaves —
-  `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
-  `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
-  on the base; it happened once and cost one misplaced commit.
+  before any edit, build, or test, not only when git misbehaves:
+  - **Read `AGENTS.md` first.** This is mandatory on every single turn.
+  - `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
+    `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
+    on the base; it happened once and cost one misplaced commit.
 - If the branch pointer trails the remote tip, move it forward with
   `git reset --mixed origin/<current-branch>` (working tree untouched; the
   reflog keeps the old value). Never force-push; never pull rewrites onto a
