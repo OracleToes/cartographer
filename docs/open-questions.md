@@ -11,16 +11,14 @@ earlier entries constrain later ones.
 
 ## §1. Reading discipline (settle first, it changes every answer)
 
-**Q1.1 — Should Carto be this large?** The person asked for "an elegant rebuild
-of the main branch's core features". The old specification was 467 lines of
-mechanism. The rewrite above is shorter, but if elegance means fewer mechanisms
-rather than better ones, more of it should go. *Needs:* whether "lightweight"
-caps the feature count, or only the implementation weight.
+**Q1.1 — Should Carto be this large?** *Resolved 2026-11-20:* decided per
+mechanism — each mechanism must justify itself in review, or it is flagged
+for removal. Elegance is neither a feature count nor an implementation weight;
+it is a per-mechanism justification.
 
-**Q1.2 — Is novelty a requirement or a description?** The person said Carto is
-"novel in a useful way". Read as a requirement, every design must be
-unfamiliar-but-useful. Read as a description, novelty is allowed and not
-demanded. *Needs:* which.
+**Q1.2 — Is novelty a requirement or a description?** *Resolved 2026-11-20:*
+a description. Novelty is allowed, never demanded; conventional is fine when
+it works.
 
 ## §2. The Brain's record set — resolved
 
@@ -119,10 +117,13 @@ record moves between collapses. See `docs/intent.md` §19.
 
 **Q7.0 — Resolved.** The block is injected per request and never persisted.
 `onYield` continues a text-only reply with a byte-sized marker user message;
-`beforeProviderRequest` strips markers from every payload and appends the
-freshly rendered block at the tail. The model sees exactly one current block;
-the store keeps only markers until the generation ends. Approved by the person.
-See `docs/intent.md` §20.
+the payload carries exactly one current block at the tail, and the store keeps
+only markers until the generation ends. Approved by the person.
+Hook naming *resolved 2026-11-20:* injection happens at `beforeRequest`, not
+the spec's `beforeProviderRequest` — the payload is provider-native and a
+splice would reimplement provider specifics for the same wire result. Kept
+by the person after the trade was shown. See `docs/intent.md` §20 and
+`docs/rebuild-slices.md`.
 
 ### The block's schema
 
@@ -215,13 +216,16 @@ definition if the capability gate depends on it.
 
 **Q9.1 — Where do the measured numbers come from?** The old spec asserted a
 `prompt_progress` payload with `{total, cache, processed}`. This was never
-verified against a provider and may be invented. *Needs:* whether the person's
-server actually reports progress, and in what shape.
+verified against a provider and may be invented. *Resolved 2026-11-20:* the
+person chose to ship a live bar anyway. The `prompt_progress` shape remains
+unverified against the real server; if it is absent, the live segment shows
+nothing.
 
-**Q9.2 — If it is invented, what replaces it?** The confirmed truth is the
-`beforeProviderRequest` payload plus provider `Usage`. That gives exact numbers
-after a request but no live progress during one. *Needs:* whether a bar without
-live progress is acceptable, or whether progress must come from somewhere else.
+**Q9.2 — If it is invented, what replaces it?** *Resolved 2026-11-20 (same
+decision):* the bar ships with the live segment unverified; the exact numbers
+(request payload plus provider usage) are always available after a request
+and are the truthful floor. The bar must never present an invented figure as
+measured — the live segment is estimate-glyphed until measurement exists.
 
 ## §10. Turn control — resolved
 

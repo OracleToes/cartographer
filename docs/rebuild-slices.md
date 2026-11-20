@@ -304,4 +304,35 @@ placeholder headless driver.
   discovery at session start will usually find nothing until the model has
   loaded once.
 
+### Addendum — the person's answers, 2026-11-20 (same day)
+
+- **Per-mechanism review (Q1.1).** Elegance is decided mechanism by
+  mechanism: each mechanism must justify itself in review, or it is flagged
+  for removal. Decided in conversation, binds future work.
+- **Novelty (Q1.2).** Novelty is a description, not a requirement. Conventional
+  is fine when it works; unfamiliar must be useful, and is not demanded.
+- **`beforeRequest` ratified (Q7.0 naming).** The spec's hook name
+  `beforeProviderRequest` stays overridden: injection happens at
+  `beforeRequest`, for the same wire result, without reimplementing
+  provider specifics. The person kept it after the trade was shown.
+- **Token bar (§9): ship a live bar anyway.** The person chose this after
+  being shown that main's `prompt_progress` shape was never verified and
+  may be invented. Agreed consequence, recorded verbatim: the live segment
+  of the bar may show nothing on the real server; the exact post-request
+  numbers (payload + provider usage) remain the truthful fallback, and the
+  bar must never display an invented figure as if it were measured.
+- **The headless driver could not take input.** The person ran R4 and got
+  the banner and silence — stdin at EOF (not a terminal) ends the loop
+  silently. Fixed: readline runs in terminal mode when stdin is a TTY, and
+  a non-terminal stdin that carried no lines announces itself on the error
+  stream instead of exiting without a word. Verified under a pty and with
+  stdin from /dev/null. 70/70.
+- **The shell tool's bounded rules were never discussed with the person.**
+  They are not spec: no timeout clamp, no output tail cap, no exec buffer
+  ceiling, no kill-on-timeout may be assumed as approved. Presented to the
+  person verbatim; disposition pending their answer. Related and open:
+  the `shell` tool bypasses the ".brain is not yours" line that `inspect`
+  and `edit` enforce (a command like `cat .brain/brain.sqlite` runs); the
+  spec line is the person's, the bypass decide is also pending.
+
 Not done: R5+ (the interface, when the person settles §8's marks).

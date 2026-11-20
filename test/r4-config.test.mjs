@@ -175,6 +175,21 @@ const fauxFor = (contextWindow = 100_000) => {
 };
 const inputFrom = (lines) => Readable.from([lines.join("\n") + "\n"]);
 
+test("stdin that is not a terminal and carries no lines announces itself instead of dying silently", async () => {
+  const { root, brain, cleanup } = headlessFixture();
+  const { models, ref } = fauxFor();
+  const out = captureStream();
+  const err = captureStream();
+  try {
+    // Readable.from with an immediately-ended stream, like a closed stdin:
+    const code = await runHeadless({ root, brain, models, model: ref, input: Readable.from([]), output: out.stream, error: err.stream, now: FIXED_NOW });
+    assert.equal(code, 0);
+    assert.match(err.text(), /stdin is not a terminal/);
+  } finally {
+    cleanup();
+  }
+});
+
 test("a person line comes back only as chat words, prefixed; a bare reply says so", async () => {
   const { root, brain, cleanup } = headlessFixture();
   const { faux, models, ref } = fauxFor();

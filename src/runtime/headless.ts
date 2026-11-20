@@ -96,9 +96,15 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   writeLine(output, `carto · headless · ${options.model.provider}/${options.model.modelId} · project ${options.root}`);
   writeLine(output, HELP);
 
-  const rl = createInterface({ input: options.input, terminal: false });
+  const inputIsTTY = (options.input as Readable & { isTTY?: boolean }).isTTY === true;
+  // Interactive mode on a TTY: readline manages the terminal (echo, line
+  // editing); without it a person may reach a promptless screen with no way
+  // to type. Piped use stays non-terminal.
+  const rl = createInterface({ input: options.input, terminal: inputIsTTY });
+  let linesSeen = 0;
   try {
     for await (const raw of rl) {
+      linesSeen += 1;
       const line = raw.trim();
       if (line === "") continue;
       if (line === "/quit" || line === "/exit") break;
@@ -135,6 +141,9 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
     }
   } finally {
     await closeLiveSession(session);
+  }
+  if (linesSeen === 0 && !inputIsTTY) {
+    writeLine(error, "(stdin is not a terminal and carried no lines; there was nothing to type into. Pipe input on stdin, or run carto interactively.)");
   }
   return 0;
 }

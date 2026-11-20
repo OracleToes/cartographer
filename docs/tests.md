@@ -87,7 +87,9 @@ records coverage and gaps, not a score.
   assuming). Suite shrank from 58 to 15 and regrew to 29 as R1 and R2
   landed, then to 34 with the state block, 40 with the project tree, and
   50 with R3's tools and live session, 69 with R4's config, capacity,
-  provider, driver, and CLI coverage.
+  provider, driver, and CLI coverage, and 70 with the interactive-terminal
+  fix (readline in terminal mode on a TTY; a non-terminal stdin with no
+  lines announces itself instead of exiting silently).
 - As of R4 (2026-11-20): config load/save/override semantics; capacity
   discovery against injected fakes (field order, strict id match,
   never-throws, ceiling-can-only-lower); the llama-swap provider's registry
