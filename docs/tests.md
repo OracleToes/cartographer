@@ -99,7 +99,7 @@ records coverage and gaps, not a score.
   implementation definition; replaced with a nothing-is-omitted guard —
   all 50 ledger entries render in the frozen text); a dead `linked`
   fixture map and its no-op assertion in the project-tree symlink test; a
-  duplicated `.brain` rejection in the live-session inspect test (the
+  duplicated `.brain` rejection in the live-session read test (the
   shared wall is guarded by "the boundary holds").
 - Strengthened in place: `splitContextMessages` now asserts exclusive
   bucket attribution (an empty bucket reports zero, not a share of the
@@ -142,7 +142,7 @@ records coverage and gaps, not a score.
 - As of R3 (2026-11-20): the live session runs against a faux pi-ai provider,
   end to end — a full tool turn with the pending list asserted by handle;
   the `onYield` continuation with the marker asserted present in the store
-  and absent from the payload; `inspect` feeding `atlas` evidence digests;
+  and absent from the payload; `read` feeding `atlas` evidence digests;
   the `tree` tool moving the anchor; an agent-triggered collapse through the
   ceremony with stale-evidence marks riding the rebuild; a person-triggered
   collapse with no run in flight. Known limit: a tool-calling reply only

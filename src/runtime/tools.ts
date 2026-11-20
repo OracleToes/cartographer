@@ -63,7 +63,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     const digest = await sha256File(real);
     if (digest === null) throw new WorkspaceError(`cannot read ${evidence.path}`);
     if (digest !== evidence.digest) {
-      throw new WorkspaceError(`Evidence for ${evidence.path} changed since it was read. Re-read it with inspect and try again.`);
+      throw new WorkspaceError(`Evidence for ${evidence.path} changed since it was read. Re-read it with read and try again.`);
     }
     return {
       kind: "file",
@@ -93,7 +93,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "atlas",
       description:
-        "Create or update one source-backed claim about the project, with optional typed edges to other nodes. Pass the handle of an existing node to update it, or leave it out to create one. Evidence is a file range you read with inspect; the digest must still match.",
+        "Create or update one source-backed claim about the project, with optional typed edges to other nodes. Pass the handle of an existing node to update it, or leave it out to create one. Evidence is a file range you read with read; the digest must still match.",
       parameters: obj({
         handle: opt(HandleRef),
         title: str({ minLength: 1 }),
@@ -250,7 +250,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     }),
 
     defineTool({
-      name: "inspect",
+      name: "read",
       description: "Read a line range inside the project root. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
       parameters: obj({
         path: str({ minLength: 1 }),
