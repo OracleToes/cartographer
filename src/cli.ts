@@ -48,6 +48,7 @@ function usage(): string {
     "With a terminal attached, carto boots the workspace; the agent's words reach you through the chat tool only.",
     "  ctrl+x      stop the run now · shift+tab cycles the send mode (steer / after run / now)",
     "  ctrl+o      jump mode · ctrl+p command palette · ctrl+h sidebar · ctrl+c quit",
+    "  /help       (TUI) list the in-workspace commands — /copy, /copy-session",
     "  /collapse   (headless) collapse the context now (the Brain rebuilds it)",
     "  /quit       (headless) end the session",
     "  --headless  force the line driver even on a terminal",
