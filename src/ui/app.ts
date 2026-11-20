@@ -130,6 +130,8 @@ interface MessageLike {
   role?: string;
   content?: unknown;
   timestamp?: number;
+  /** pi-ai's stop reason for the landed assistant turn: stop, length, toolUse, error, aborted… */
+  stopReason?: string;
 }
 
 function messageOf(entry: ContextEntryLike): MessageLike | undefined {
@@ -353,7 +355,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const person: Array<{ key: number; entry: TranscriptEntry }> = [];
       const landedTexts: Array<{ text: string; t: number }> = [];
       const toolErrors = new Map<string, boolean>();
-      const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[] }> = [];
+      const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[]; stopReason?: string }> = [];
       for (const entry of entries) {
         const id = typeof entry.id === "number" ? entry.id : 0;
         const message = messageOf(entry);
@@ -367,7 +369,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           landedTexts.push({ text, t });
         } else if (role === "assistant" && Array.isArray(message.content)) {
           const parts = (message.content as unknown[]).filter(isRecord);
-          if (parts.length > 0) assistantParts.push({ entryId: id, parts });
+          const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
+          if (parts.length > 0) assistantParts.push({ entryId: id, parts, ...(stopReason === undefined ? {} : { stopReason }) });
         } else if (role === "toolResult" && isRecord(message)) {
           const callId = (message as Record<string, unknown>).toolCallId;
           if ((message as Record<string, unknown>).isError === true && typeof callId === "string") toolErrors.set(callId, true);
@@ -377,7 +380,18 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       // The working, as cards: reasoning, plain model text, and tool calls, in
       // the order the model produced them. Landed cards default folded.
       const cards: Array<{ key: number; entry: TranscriptEntry }> = [];
-      for (const { entryId, parts } of assistantParts) {
+      // The landed stop reason of each assistant turn — one quiet line per
+      // turn, warn-toned when the turn was cut short (length) or failed.
+      // Always present, so a truncated generation is glanceable.
+      const stops: Array<{ key: number; entry: TranscriptEntry }> = [];
+      for (const { entryId, parts, stopReason } of assistantParts) {
+        if (stopReason !== undefined) {
+          const warn = stopReason === "length" || stopReason === "error" || stopReason === "aborted";
+          stops.push({
+            key: entryId + (parts.length + 1) * 0.0001,
+            entry: { kind: "status", text: `stopped: ${stopReason}`, ...(warn ? { tone: "warn" as const } : {}) },
+          });
+        }
         parts.forEach((part, partIndex) => {
           const key = entryId + (partIndex + 1) * 0.0001;
           if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0) {
@@ -432,6 +446,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         state.sealed.length,
         person.map((item) => item.key).join(","),
         cards.map((item) => item.key).join(","),
+        stops.map((item) => `${String(item.key)}:${item.entry.kind === "status" ? item.entry.text : ""}`).join(","),
         String(agent.length),
         state.sealedAgentIds.size,
         state.statusLog.length,
@@ -444,7 +459,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       ].join("|");
       if (sig !== state.sig) {
         state.sig = sig;
-        const live = [...person, ...cards, ...agent, ...statusMerged];
+        const live = [...person, ...cards, ...stops, ...agent, ...statusMerged];
         live.sort((left, right) => left.key - right.key);
         // Sealed history is an immutable prefix; the live segment follows in the frame's order.
         transcript.setEntries(

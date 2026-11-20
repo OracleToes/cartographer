@@ -47,7 +47,7 @@ export function resolveProjectPath(root: string, path: string): string {
   return real;
 }
 
-export interface BoundedRange {
+export interface ReadRange {
   /** The path as the agent wrote it. */
   path: string;
   startLine: number;
@@ -55,32 +55,20 @@ export interface BoundedRange {
   totalLines: number;
   digest: string;
   excerpt: string;
-  truncated: boolean;
 }
 
-export const MAX_RANGE_LINES = 400;
-export const MAX_EXCERPT_CHARS = 24_000;
-
-/** Read a bounded line range, with the whole file's digest for evidence. */
-export async function readBoundedRange(root: string, path: string, startLine: number, endLine: number): Promise<BoundedRange> {
+/** Read a line range, with the whole file's digest for evidence. */
+export async function readRange(root: string, path: string, startLine: number, endLine: number): Promise<ReadRange> {
   if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 1 || endLine < startLine) {
     throw new WorkspaceError(`range must be whole lines with 1 <= start <= end; got ${startLine}-${endLine}`);
-  }
-  if (endLine - startLine + 1 > MAX_RANGE_LINES) {
-    throw new WorkspaceError(`range too wide: ${endLine - startLine + 1} lines; read at most ${MAX_RANGE_LINES} lines at a time`);
   }
   const real = resolveProjectPath(root, path);
   const bytes = await readFile(real);
   const digest = createHash("sha256").update(bytes).digest("hex");
   const lines = bytes.toString("utf8").split("\n");
   const slice = lines.slice(startLine - 1, endLine);
-  let excerpt = slice.join("\n");
-  let truncated = false;
-  if (excerpt.length > MAX_EXCERPT_CHARS) {
-    excerpt = `${excerpt.slice(0, MAX_EXCERPT_CHARS)}\n[...truncated]`;
-    truncated = true;
-  }
-  return { path, startLine, endLine, totalLines: lines.length, digest, excerpt, truncated };
+  const excerpt = slice.join("\n");
+  return { path, startLine, endLine, totalLines: lines.length, digest, excerpt };
 }
 
 export interface EditResult {

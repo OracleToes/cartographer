@@ -37,7 +37,7 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 
-import { statusLine, tokens } from "./tokens.js";
+import { statusLine, statusWarnLine, tokens } from "./tokens.js";
 
 type CardBase = {
   /** Stable across rebuilds while it lives: `ctx-<entryId>-<part>` landed, `live-<attempt>-<part>` in flight. */
@@ -57,7 +57,7 @@ export type CardEntry =
 export type TranscriptEntry =
   | { kind: "person"; text: string }
   | { kind: "agent"; text: string }
-  | { kind: "status"; text: string }
+  | { kind: "status"; text: string; tone?: "warn" }
   | CardEntry;
 
 export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
@@ -305,7 +305,7 @@ export class TranscriptView implements Component {
         gap();
         if (entry.kind === "person") lines.push(...this.block("you", entry.text, width));
         else if (entry.kind === "agent") lines.push(...this.block("carto", entry.text, width));
-        else lines.push(...wrapTextWithAnsi(statusLine(entry.text), width));
+        else lines.push(...wrapTextWithAnsi(entry.tone === "warn" ? statusWarnLine(entry.text) : statusLine(entry.text), width));
       }
     }
     for (const card of this.liveCards) pushCard(card);

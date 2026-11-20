@@ -562,13 +562,25 @@ AGENTS.md forbids… including all tools and such"). Findings:
   The real guard in edit is the unique-occurrence rule; the real wall in
   inspect/edit/shell is root confinement with symlink rejection; the real
   check on evidence is the digest. None of those count characters.
-- **Kept, spec'd or ratified:** inspect's bounded range (400 lines,
-  24,000-char excerpt) — MINI.md §10a says "a bounded text range"; the
-  numbers are ours, flagged for the person to mark. The advertised-capacity
-  ceiling behaviour, the one-collapse archive retention (§4), the
-  no-`.brain` line, pi's bash designed tail (ratified "C"), pi's own
-  compaction declined (ours is collapse), and the LIVE_TAIL 8 display
-  bound (the person's own display semantics).
+- **inspect has NO limits, person's word 2026-11-20**: "NO LIMITS ON
+  THE INSPECT TOOL" — the 400-line / 24,000-char excerpt bounds, the
+  range-width rejection, and the `[...truncated]` marker were mine, built
+  on the "bounded text range" reading of §10a, which the person never
+  ratified. Removed; `readBoundedRange` is `readRange`, the return's
+  `truncated` field is gone. MINI.md §10a still says "a bounded text
+  range" — the person's doc, untouched; amendment flagged for their word.
+  Whether the tool should be renamed (`read`?) is asked and unanswered.
+- **Kept:** the advertised-capacity ceiling behaviour (spec'd: the
+  ceiling only lowers), the one-collapse archive retention (§4), the
+  no-`.brain` line, pi's bash designed tail (pi-durable's built-in; the
+  person chose it as the shell; uncapping = owning a wrapper, their call),
+  pi's own compaction declined (ours is collapse), and the LIVE_TAIL 8
+  display bound (the person's own display semantics).
+- **Stop reasons are visible, person's word 2026-11-20** ("2. yes fix
+  it"): every landed assistant turn renders a quiet `stopped: <reason>`
+  line after its cards — warn-toned for `length`/`error`/`aborted`,
+  muted otherwise; `/copy` dumps carry it too. Always present, never
+  conditional, so a cut-short generation is glanceable.
 - **Noted, not changed:** the `onYield` continuation is the spec's own
   mechanism (§6.2 — after a text-only reply the run continues with the
   marker). It fires unconditionally, including on a `length`-stopped

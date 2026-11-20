@@ -15,7 +15,7 @@ import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
 import { sha256File } from "./digest.js";
-import { applyAtomicEdit, readBoundedRange, resolveProjectPath, WorkspaceError, MAX_RANGE_LINES } from "./workspace.js";
+import { applyAtomicEdit, readRange, resolveProjectPath, WorkspaceError } from "./workspace.js";
 import type { PendingWrite } from "../domain/state-block.js";
 
 export interface ToolSession {
@@ -251,7 +251,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
 
     defineTool({
       name: "inspect",
-      description: `Read a bounded text range inside the project root. ${MAX_RANGE_LINES} lines at a time at most; returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.`,
+      description: "Read a line range inside the project root. Returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.",
       parameters: obj({
         path: str({ minLength: 1 }),
         startLine: int({ minimum: 1 }),
@@ -259,7 +259,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       }),
       replay: "safe",
       execute: async (args) => {
-        const range = await readBoundedRange(root, args.path, args.startLine, args.endLine);
+        const range = await readRange(root, args.path, args.startLine, args.endLine);
         return textOutput(
           `${range.path}:${range.startLine}-${range.endLine} (of ${range.totalLines} lines)\ndigest: ${range.digest}\n\n${range.excerpt}`,
         );

@@ -54,6 +54,7 @@ export const tokens = {
 
 /** Dim full-line helper for status/flash-style lines. */
 export const statusLine = (text: string): string => tokens.muted(tokens.italic(`· ${text}`));
+export const statusWarnLine = (text: string): string => tokens.warn(tokens.italic(`· ${text}`));
 
 /** The token bar's parts: muted, distinguishable — estimate hue per part (ui-proposal.md §7). */
 export const partTokens = {

@@ -48,5 +48,7 @@ export function flattenEntry(entry: { kind?: string; id?: number; model?: unknow
   } else {
     body = JSON.stringify(content);
   }
+  const stopReason = typeof message.stopReason === "string" ? message.stopReason : undefined;
+  if (role === "assistant" && stopReason !== undefined) body = `stopped: ${stopReason}\n${body}`;
   return { id, kind, role, ...(timestamp === undefined ? {} : { timestamp }), body };
 }
