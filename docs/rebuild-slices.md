@@ -378,7 +378,7 @@ against the installed packages, none resolved by fiat:
   "delete means delete") are not what they model, and the Brain is separate
   from Pi storage by the person's own §4.2 confirmation. Kept, flagged.
   Per-mechanism review (Q1.1) applies; the person can order it redesigned
-  onto pi's document machinery.
+  onto pi's document machinery. **Superseded by addendum III below.**
 - `runtime/tools.ts` `inspect`/`edit` vs pi's `createReadTool`/
   `createEditTool` — **reviewed and kept.** Pi's read has no `.brain`
   wall, no bounded lines (400), no digest; pi's edit has no
@@ -401,3 +401,42 @@ Known seam carried forward unchanged: §6.2's `beforeProviderRequest` vs the
 shipped `beforeRequest` (person kept it), the pinned-to-archive export
 (person), the `.brain` archive line (person's answer: the shell needed
 nothing special; inspect/edit keep the wall).
+
+### R4 addendum III — brain-store rebuilt on pi's SQLite machinery, 2026-11-20
+
+The person reversed the "kept, flagged" call in so many words: if pi is
+already doing it, tear it out and rebuild it, and stop asking for
+confirmation of settled decisions. Finding first, then the rebuild.
+
+**pi does not already do it.** pi-durable's session singleton documents
+(`defineDoc({ scope: "session" })`) nearly match one row per project, but
+every commit stores the change — as a delta from a base, or as a complete
+base when `checkpointWhen` says so — and old incarnations are retained
+forever; `retireDoc` stamps `retiredAt`, it is a tombstone, and no
+document-layer operation deletes stored history. The Brain's confirmed
+semantics (current state only, single-step delete, no audit trail) are
+the opposite of that model, and §4.2 keeps the Brain out of Pi storage
+regardless. chord's `store` (tables stamped with commit seqs, an outbox,
+row history, archives) is Durable's commit substrate — same story one
+layer down, with a claims/migration protocol far beyond a one-document
+Brain. Using either would bury the Brain's "delete means delete" under
+history it must not keep.
+
+**pi does already do the layer that was hand-rolled.** chord's
+`sqlite/node` facade — `openNodeSqliteDatabase`, the same one pi-durable's
+own adapters sit on — is node:sqlite with WAL, synchronous=NORMAL, a
+5,000 ms busy timeout, `BEGIN IMMEDIATE` transactions with
+rollback-with-same-error, a prepared-statement cache, and a WAL
+checkpoint(TRUNCATE) at close. That is exactly what the hand-rolled
+adapter reimplemented inline. The Brain store is now built on it: same
+one-row, one-document overwrite, same decode-or-throw, same
+`secure_delete` pragma (asked for on open, pi does not set it), same
+`VACUUM` at `compact()`, plus the facade's checkpointing `close()`.
+`history: "latest"` remains by construction: one row, overwritten in
+place, no audit trail — now on pi's SQLite, not on `node:sqlite` directly.
+
+**Cost:** every store operation is now async. `BrainStore.read/apply/
+compact/close` and `openBrain` return promises; call sites in
+`collapse.ts`, `carto-extension.ts`, `tools.ts`, `live-session.ts`,
+`headless.ts` (`drainAgentChat`), `cli.ts`, and the tests follow. The
+Brain's file stays `.brain/brain.sqlite`, separate from the Pi store.

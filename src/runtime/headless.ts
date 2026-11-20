@@ -58,9 +58,9 @@ function writeLine(stream: Writable, line: string): void {
 }
 
 /** New agent-authored chat records since `seen`; adds them to `seen`. */
-function drainAgentChat(brain: LiveSessionOptions["brain"], seen: Set<string>): string[] {
+async function drainAgentChat(brain: LiveSessionOptions["brain"], seen: Set<string>): Promise<string[]> {
   const lines: string[] = [];
-  for (const record of brain.read().chat) {
+  for (const record of (await brain.read()).chat) {
     if (record.author !== "agent" || seen.has(record.id)) continue;
     seen.add(record.id);
     lines.push(record.text);
@@ -100,7 +100,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
   };
   if (options.refreshCapacity === true) await refresh();
   let session = await openLiveSession(options);
-  const seenChat = new Set<string>(options.brain.read().chat.filter((record) => record.author === "agent").map((record) => record.id));
+  const seenChat = new Set<string>((await options.brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id));
 
   writeLine(output, `carto · headless · ${options.model.provider}/${options.model.modelId} · project ${options.root}`);
   writeLine(output, HELP);
@@ -123,7 +123,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       }
       if (line === "/collapse") {
         session = await runCollapse(session, options, output, "person requested (/collapse)");
-        for (const text of drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
+        for (const text of await drainAgentChat(options.brain, seenChat)) writeLine(output, `carto: ${text}`);
         continue;
       }
 
@@ -136,7 +136,7 @@ export async function runHeadless(options: HeadlessOptions): Promise<number> {
       } catch (err) {
         writeLine(error, `(the run failed: ${err instanceof Error ? err.message : String(err)})`);
       }
-      const said = drainAgentChat(options.brain, seenChat);
+      const said = await drainAgentChat(options.brain, seenChat);
       if (said.length === 0) writeLine(output, "(no chat message)");
       else for (const text of said) writeLine(output, `carto: ${text}`);
 

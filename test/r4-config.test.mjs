@@ -189,13 +189,13 @@ test("a failed refresh retains the previous catalog (pi's retain-on-failure)", a
 
 // ---------- the headless driver (faux provider, scripted) ----------
 
-const headlessFixture = () => {
+const headlessFixture = async () => {
   const root = tempDir();
   mkdirSync(join(root, ".brain"), { recursive: true });
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 42;\n");
-  const brain = openBrain(join(root, ".brain", "brain.sqlite"));
-  return { root, brain, cleanup: () => { brain.close(); rmSync(root, { recursive: true, force: true }); } };
+  const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  return { root, brain, cleanup: async () => { await brain.close(); rmSync(root, { recursive: true, force: true }); } };
 };
 const fauxFor = (contextWindow = 100_000) => {
   const faux = fauxProvider({ provider: "faux-test", models: [{ id: "faux-model", contextWindow }] });
@@ -206,7 +206,7 @@ const fauxFor = (contextWindow = 100_000) => {
 const inputFrom = (lines) => Readable.from([lines.join("\n") + "\n"]);
 
 test("stdin that is not a terminal and carries no lines announces itself instead of dying silently", async () => {
-  const { root, brain, cleanup } = headlessFixture();
+  const { root, brain, cleanup } = await headlessFixture();
   const { models, ref } = fauxFor();
   const out = captureStream();
   const err = captureStream();
@@ -216,12 +216,12 @@ test("stdin that is not a terminal and carries no lines announces itself instead
     assert.equal(code, 0);
     assert.match(err.text(), /stdin is not a terminal/);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 test("a person line comes back only as chat words, prefixed; a bare reply says so", async () => {
-  const { root, brain, cleanup } = headlessFixture();
+  const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   const factory = (build) => (context) => build(context);
   faux.setResponses([
@@ -235,12 +235,12 @@ test("a person line comes back only as chat words, prefixed; a bare reply says s
     assert.match(out.text(), /carto: hello person/);
     assert.match(out.text(), /carto · headless · faux-test\/faux-model/);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 test("a turn with no chat tool call reports (no chat message), never model prose", async () => {
-  const { root, brain, cleanup } = headlessFixture();
+  const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   faux.setResponses([
     (context) => fauxAssistantMessage([{ type: "text", text: "some plain prose the person must not see" }]),
@@ -252,12 +252,12 @@ test("a turn with no chat tool call reports (no chat message), never model prose
     assert.match(out.text(), /\(no chat message\)/);
     assert.doesNotMatch(out.text(), /some plain prose/);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 test("/collapse runs the ceremony on the spot and reports it; /quit ends before later lines", async () => {
-  const { root, brain, cleanup } = headlessFixture();
+  const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor();
   void faux;
   const out = captureStream();
@@ -267,12 +267,12 @@ test("/collapse runs the ceremony on the spot and reports it; /quit ends before 
     assert.match(out.text(), /context collapsed and rebuilt from the Brain/);
     assert.match(out.text(), /sealed gen-/);
   } finally {
-    cleanup();
+    await cleanup();
   }
 });
 
 test("applyCapacityRefresh follows the provider catalog: lowers the window, prints one line, idempotent", async () => {
-  const { root, brain, cleanup } = headlessFixture();
+  const { root, brain, cleanup } = await headlessFixture();
   const { faux, models, ref } = fauxFor(100_000);
   const session = await openLiveSession({ root, brain, models, model: ref, now: FIXED_NOW });
   assert.equal(session.state.contextWindow, 100_000);
@@ -291,7 +291,7 @@ test("applyCapacityRefresh follows the provider catalog: lowers the window, prin
     assert.equal(out.text().match(/context limit/g).length, 1, "no repeat line while nothing changes");
   } finally {
     await closeLiveSession(session);
-    cleanup();
+    await cleanup();
   }
 });
 

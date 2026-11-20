@@ -88,7 +88,7 @@ try {
   const model = parseModelRef(config.model);
 
   const root = resolveProjectRoot(values.root);
-  const brain = openBrain(brainDatabasePath(root));
+  const brain = await openBrain(brainDatabasePath(root));
   if (created) {
     process.stderr.write(`carto: wrote ${configPath} (model ${config.model})\n`);
   }
@@ -106,7 +106,7 @@ try {
     error: process.stderr,
     ...(refreshCapacity === undefined ? {} : { refreshCapacity }),
   });
-  brain.close();
+  await brain.close();
   process.exitCode = code;
 } catch (error) {
   if (error instanceof ConfigError) {

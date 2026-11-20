@@ -88,7 +88,7 @@ export async function renderLiveStateBlock(
   options: CartoExtensionOptions,
   visibleMessages: readonly import("../domain/state-block.js").MessageLike[],
 ): Promise<string> {
-  const brain = options.brain.read();
+  const brain = await options.brain.read();
   const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visibleMessages);
   options.session.toolWorkAtLastRequest = toolWorkTokens;
   let tree: { root: string; depth: number; lines: string[] };
@@ -142,7 +142,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
        */
       section(
         "carto-context",
-        async () => readFile(options.markdownPath, "utf8").catch(() => projectContext(options.brain.read()).text),
+        async () => readFile(options.markdownPath, "utf8").catch(async () => projectContext(await options.brain.read()).text),
         { tag: false },
       ),
     ],

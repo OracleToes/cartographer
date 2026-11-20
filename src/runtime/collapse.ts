@@ -207,7 +207,7 @@ export interface CollapseReport {
  */
 export async function collapse(root: string, brain: BrainStore, options: CollapseOptions = {}): Promise<CollapseReport> {
   const now = Date.now();
-  const refreshed = await refreshFreshness(root, brain.read(), brain.apply.bind(brain), now);
+  const refreshed = await refreshFreshness(root, await brain.read(), brain.apply.bind(brain), now);
   const projection = projectContext(refreshed);
 
   const discovered = discoverGenerations(root);
@@ -245,6 +245,6 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
     await exports(extra.generation, brain);
     removeGenerationFiles(root, extra);
   }
-  brain.compact();
+  await brain.compact();
   return { generation, sealed: live.generation, purged };
 }

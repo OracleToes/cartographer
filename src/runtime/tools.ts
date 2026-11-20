@@ -10,7 +10,7 @@ import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-s
 import type { ToolExecutionResult, ToolRegistration } from "@earendil-works/pi-durable";
 import { defineTool } from "@earendil-works/pi-durable";
 
-import type { SourceRef } from "../domain/records.js";
+import type { CartoBrain, SourceRef } from "../domain/records.js";
 import { findByHandle, handleOf } from "../domain/handles.js";
 import { projectTreeBlock } from "./project-tree.js";
 import type { BrainStore } from "./brain-store.js";
@@ -40,7 +40,7 @@ const HandleRef = str({ minLength: 1, maxLength: 8 });
 
 const normalizeHandle = (handle: string): string => handle.trim().toUpperCase();
 
-function resolveKnown(brain: ReturnType<BrainStore["read"]>, handle: string, kinds: readonly string[], what: string): { kind: string; id: string } {
+function resolveKnown(brain: CartoBrain, handle: string, kinds: readonly string[], what: string): { kind: string; id: string } {
   const found = findByHandle(brain.handles, normalizeHandle(handle));
   if (found === undefined || !kinds.includes(found.kind)) {
     throw new Error(`The handle ${normalizeHandle(handle)} does not name ${what}. Use a handle from the current context.`);
@@ -84,7 +84,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       replay: "safe",
       execute: async (args, api) => {
         const id = `chat:${api.callId}`;
-        brain.apply({ kind: "chat.record", record: { id, author: "agent", text: args.text, createdAt: api.now(), updatedAt: api.now() } }, api.now());
+        await brain.apply({ kind: "chat.record", record: { id, author: "agent", text: args.text, createdAt: api.now(), updatedAt: api.now() } }, api.now());
         pendingWrite(session, { kind: "chat", action: "record", id });
         return textOutput("Chat message saved.");
       },
@@ -121,7 +121,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       replay: "safe",
       execute: async (args, api) => {
         const evidence = await Promise.all(args.evidence.map(verifyFileEvidence));
-        const current = brain.read();
+        const current = await brain.read();
         const handleArg = args.handle;
         const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["atlas"], "an Atlas record");
         const previous = updateTarget === undefined ? undefined : current.atlas.find((node) => node.id === updateTarget.id);
@@ -133,7 +133,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           kind: edge.kind,
           target: resolveKnown(current, edge.handle, ["atlas"], "an Atlas record").id,
         }));
-        const next = brain.apply(
+        const next = await brain.apply(
           {
             kind: "atlas.upsert",
             node: {
@@ -167,7 +167,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       }),
       replay: "safe",
       execute: async (args, api) => {
-        const current = brain.read();
+        const current = await brain.read();
         const handleArg = args.handle;
         const updateTarget = handleArg === undefined ? undefined : resolveKnown(current, handleArg, ["ledger"], "a Ledger record");
         const previous = updateTarget === undefined ? undefined : current.ledger.find((entry) => entry.id === updateTarget.id);
@@ -181,7 +181,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           throw new Error(`Unknown handle(s): ${missing.join(", ")}.`);
         }
         const evidenceIds = resolvedEvidence.map((entry) => entry!.id);
-        const next = brain.apply(
+        const next = await brain.apply(
           {
             kind: "ledger.upsert",
             entry: {
@@ -226,7 +226,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       ]),
       replay: "safe",
       execute: async (args, api) => {
-        const current = brain.read();
+        const current = await brain.read();
         if (args.action === "remove") {
           const found = findByHandle(current.handles, normalizeHandle(args.handle));
           if (found === undefined || found.kind !== "pin") {
@@ -235,7 +235,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
           if (current.userPins.some((pin) => pin.id === found.id)) {
             throw new Error(`Pin ${normalizeHandle(args.handle)} belongs to the person. Only the person can remove it.`);
           }
-          brain.apply({ kind: "pin.remove", id: found.id }, api.now());
+          await brain.apply({ kind: "pin.remove", id: found.id }, api.now());
           pendingWrite(session, { kind: "pin", action: "remove", id: found.id });
           return textOutput(`Pin ${normalizeHandle(args.handle)} removed.`);
         }
@@ -244,7 +244,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
             ? await verifyFileEvidence(args.source)
             : { kind: "context", contextId: session.generation, excerpt: args.source.excerpt, freshness: "fresh" };
         const id = `carry:${api.callId}`;
-        const next = brain.apply({ kind: "pin.add", layer: "carry", pin: { id, item: args.item, reason: args.reason, source, createdAt: api.now() } }, api.now());
+        const next = await brain.apply({ kind: "pin.add", layer: "carry", pin: { id, item: args.item, reason: args.reason, source, createdAt: api.now() } }, api.now());
         pendingWrite(session, { kind: "pin", action: "add", id });
         return textOutput(`Carry pin ${handleOf(next.handles, "pin", id) ?? "record"} saved.`);
       },
@@ -295,7 +295,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       execute: async (args) => {
         const anchor = args.anchor ?? session.tree.anchor;
         const depth = args.depth ?? session.tree.depth;
-        const block = projectTreeBlock(root, anchor, depth, brain.read());
+        const block = projectTreeBlock(root, anchor, depth, await brain.read());
         session.tree = { anchor: block.root, depth: block.depth };
         const body = block.lines.length === 0 ? "(nothing below the anchor at depth 0)" : block.lines.join("\n");
         return textOutput(`tree: ${block.root} (depth ${block.depth})\n${body}`);

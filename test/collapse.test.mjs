@@ -83,14 +83,14 @@ test("collapse seals the live store, creates the new generation, and purges the 
   try {
     const live = fakeGeneration(root, "gen-20261116T020000Z-live001", 1_700_000_100);
     const archive = fakeGeneration(root, "gen-20261116T010000Z-gone999", 1_700_000_000);
-    const store = openBrain(join(root, ".brain", "brain.sqlite"));
-    store.apply({ kind: "chat.record", record: { id: "c1", author: "user", text: "before collapse", createdAt: at(1), updatedAt: at(1) } }, at(1));
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
+    await store.apply({ kind: "chat.record", record: { id: "c1", author: "user", text: "before collapse", createdAt: at(1), updatedAt: at(1) } }, at(1));
 
     const log = [];
     const report = await collapse(root, store, {
-      exportPinnedArchiveRecords: (generation, brainStore) => {
+      exportPinnedArchiveRecords: async (generation, brainStore) => {
         // The export must see the archive's files still present.
-        log.push([generation, existsSync(archive.store), brainStore.read().chat.length]);
+        log.push([generation, existsSync(archive.store), (await brainStore.read()).chat.length]);
       },
     });
 
@@ -108,7 +108,7 @@ test("collapse seals the live store, creates the new generation, and purges the 
     assert.equal(existsSync(newPaths.markdown), true);
     const markdown = readFileSync(newPaths.markdown, "utf8");
     assert.match(markdown, /Ledger|Atlas|Pins|Wakes|\(the Brain is empty\)/);
-    store.close();
+    await store.close();
   } finally {
     chmodSync(join(root, ".brain", "context", "gen-20261116T020000Z-live001.sqlite"), 0o644);
     chmodSync(join(root, ".brain", "context", "gen-20261116T020000Z-live001.projection.md"), 0o644);
@@ -121,7 +121,7 @@ test("the frozen snapshot is byte-stable and sealed with its store at collapse",
   const root = tempRoot();
   try {
     fakeGeneration(root, "gen-20261116T020000Z-live002", 1_700_000_100);
-    const store = openBrain(join(root, ".brain", "brain.sqlite"));
+    const store = await openBrain(join(root, ".brain", "brain.sqlite"));
     const report = await collapse(root, store);
     chmodSync(join(root, ".brain", "context", `${report.sealed}.sqlite`), 0o644);
     chmodSync(join(root, ".brain", "context", `${report.sealed}.projection.md`), 0o644);
@@ -132,7 +132,7 @@ test("the frozen snapshot is byte-stable and sealed with its store at collapse",
     const again = readFileSync(join(root, ".brain", "context", `${report.generation}.projection.md`), "utf8");
     assert.equal(again, first);
     assert.notEqual(second.generation, report.generation);
-    store.close();
+    await store.close();
   } finally {
     for (const name of ["gen-20261116T020000Z-live002.sqlite", "gen-20261116T020000Z-live002.projection.md", "gen-20261116T020000Z-live002.projection.json"]) {
       try { chmodSync(join(root, ".brain", "context", name), 0o644); } catch { /* sealed already or gone */ }

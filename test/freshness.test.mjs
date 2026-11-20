@@ -36,14 +36,14 @@ test("a refresh at rebuild flips changed evidence to stale and keeps handles", a
   try {
     const cited = join(directory, "cited.md");
     writeFileSync(cited, "content");
-    const store = openBrain(join(directory, "brain.sqlite"));
-    store.apply({ kind: "atlas.upsert", node: { id: "a1", title: "t", claim: "c", evidence: [{ kind: "file", path: cited, startLine: 1, endLine: 1, digest: "not-the-digest", excerpt: "e", freshness: "unknown" }], edges: [], createdAt: at(1), updatedAt: at(1) } }, at(1));
+    const store = await openBrain(join(directory, "brain.sqlite"));
+    await store.apply({ kind: "atlas.upsert", node: { id: "a1", title: "t", claim: "c", evidence: [{ kind: "file", path: cited, startLine: 1, endLine: 1, digest: "not-the-digest", excerpt: "e", freshness: "unknown" }], edges: [], createdAt: at(1), updatedAt: at(1) } }, at(1));
 
-    const handleBefore = store.read().handles.entries.find((entry) => entry.id === "a1")?.handle;
-    const refreshed = await refreshFreshness(directory, store.read(), store.apply.bind(store), at(2));
+    const handleBefore = (await store.read()).handles.entries.find((entry) => entry.id === "a1")?.handle;
+    const refreshed = await refreshFreshness(directory, await store.read(), store.apply.bind(store), at(2));
     assert.equal(refreshed.atlas[0].evidence[0].freshness, "stale");
     assert.equal(refreshed.handles.entries.find((entry) => entry.id === "a1")?.handle, handleBefore);
-    store.close();
+    await store.close();
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

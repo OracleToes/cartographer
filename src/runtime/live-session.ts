@@ -84,7 +84,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
   } else {
     const stamp = new Date(now());
     generation = newGenerationId(stamp);
-    const projection = projectContext(options.brain.read());
+    const projection = projectContext(await options.brain.read());
     writeSnapshot(root, generation, projection, stamp.getTime());
   }
   const paths = generationPaths(root, generation);

@@ -16,13 +16,13 @@ import { STATE_BLOCK_MARKER } from "../dist/domain/state-block.js";
 
 const sha256 = (buffer) => createHash("sha256").update(buffer).digest("hex");
 
-const fixture = () => {
+const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "carto-live-"));
   mkdirSync(join(root, ".brain"), { recursive: true });
   mkdirSync(join(root, "src"), { recursive: true });
   writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 42;\n");
-  const brain = openBrain(join(root, ".brain", "brain.sqlite"));
-  return { root, brain, cleanup: () => { brain.close(); rmSync(root, { recursive: true, force: true }); } };
+  const brain = await openBrain(join(root, ".brain", "brain.sqlite"));
+  return { root, brain, cleanup: async () => { await brain.close(); rmSync(root, { recursive: true, force: true }); } };
 };
 const fauxSetup = () => {
   const faux = fauxProvider({ provider: "faux-test", models: [{ id: "faux-model", contextWindow: 100_000 }] });
@@ -40,7 +40,7 @@ const blockOf = (messages) => messages.find((message) => message.role === "user"
 const flatten = (messages) => JSON.stringify(messages);
 
 test("a full turn: chat tool writes the Brain, pending lists it, the block is trailing and marker-free", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("chat", { text: "hello person" }, { id: "call-1" })], { stopReason: "toolUse" })),
@@ -52,7 +52,7 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done");
 
-    const records = brain.read().chat;
+    const records = (await brain.read()).chat;
     assert.equal(records.length, 1);
     assert.equal(records[0].text, "hello person");
     assert.equal(records[0].author, "agent");
@@ -74,12 +74,12 @@ test("a full turn: chat tool writes the Brain, pending lists it, the block is tr
     assert.ok(!flatten(captured[1]).includes(STATE_BLOCK_MARKER), "marker never reaches the provider");
   } finally {
     await closeLiveSession(session);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("the continuation loop: a text-only answer is continued with a marker, stripped on the next request", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxText("first pass, no tools")], {}, )),
@@ -102,12 +102,12 @@ test("the continuation loop: a text-only answer is continued with a marker, stri
     assert.ok(!raw.includes("<carto-state>\\ncontext:"), "the store never held the block");
   } finally {
     await closeLiveSession(session);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("inspect feeds atlas evidence; the digest verifies end to end", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   const fileDigest = sha256(readFileSync(join(root, "src", "verify-me.ts")));
   faux.setResponses([
@@ -124,19 +124,19 @@ test("inspect feeds atlas evidence; the digest verifies end to end", async () =>
     const submission = await submitInput(session, "remember this fact");
     const settled = await submission.wait(BACKGROUND_CONTEXT);
     assert.equal(settled.status, "done");
-    const nodes = brain.read().atlas;
+    const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
     assert.equal(nodes[0].evidence[0].digest, fileDigest);
     assert.equal(nodes[0].evidence[0].freshness, "fresh");
     assert.match(blockOf(captured[2]).content, /pending:\n  A1 · atlas create/);
   } finally {
     await closeLiveSession(session);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("the tree tool moves the anchor and the block renders it there", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("tree", { anchor: "src", depth: 1 }, { id: "call-tree" })], { stopReason: "toolUse" })),
@@ -152,12 +152,12 @@ test("the tree tool moves the anchor and the block renders it there", async () =
     assert.match(blockOf(captured[1]).content, new RegExp(`tree: ${join(realpathSync(root), "src").replace(/[/\\]/g, "\\$&")} \\(depth 1\\)`));
   } finally {
     await closeLiveSession(session);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("the boundary holds: .brain is unreadable, escapes are rejected", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-x", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -168,11 +168,11 @@ test("the boundary holds: .brain is unreadable, escapes are rejected", async () 
   await assert.rejects(editBrain, /\.brain/);
   const tree = byName.tree.execute({ anchor: "..", depth: 1 }, api, {});
   await assert.rejects(tree, /anchor escapes/);
-  cleanup();
+  await cleanup();
 });
 
 test("inspect reports .brain access as an explicit failure", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-y", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -181,11 +181,11 @@ test("inspect reports .brain access as an explicit failure", async () => {
   const output = range.output.map((part) => part.text).join("");
   assert.match(output, /digest: [0-9a-f]{64}/);
   assert.match(output, /src\/verify-me\.ts:1-1 \(of 2 lines\)/);
-  cleanup();
+  await cleanup();
 });
 
 test("unknown handles are explicit errors, never guesses", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const tools = createTools({ root, brain, session: { pending: [], tree: { anchor: root, depth: 2 }, collapseRequested: null, generation: "gen-test" } });
   const api = { callId: "call-z", now: () => 1_700_000_000_000, conversationId: "c", taskId: "t" };
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
@@ -198,11 +198,11 @@ test("unknown handles are explicit errors, never guesses", async () => {
     byName.pin.execute({ action: "remove", handle: "Q4" }, api, {}),
     /does not name/,
   );
-  cleanup();
+  await cleanup();
 });
 
 test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh context carries the Brain", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
@@ -230,10 +230,10 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     assert.equal(outcome.report.sealed, previousGeneration);
     assert.equal(outcome.report.purged, undefined);
     // The Brain survived; handles were rebuilt, not carried over.
-    const nodes = brain.read().atlas;
+    const nodes = (await brain.read()).atlas;
     assert.equal(nodes.length, 1);
     const { handleOf } = await import("../dist/domain/handles.js");
-    assert.equal(handleOf(brain.read().handles, "atlas", nodes[0].id), "A1");
+    assert.equal(handleOf((await brain.read()).handles, "atlas", nodes[0].id), "A1");
     // The fresh session starts empty and its tree wiring is the root again.
     assert.deepEqual(outcome.session.state.pending, []);
     assert.equal(outcome.session.state.tree.anchor, realpathSync(root));
@@ -252,12 +252,12 @@ test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh co
     await closeLiveSession(outcome.session);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("stale evidence rides the collapse: the frozen projection carries the marks", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   faux.setResponses([
@@ -292,12 +292,12 @@ test("stale evidence rides the collapse: the frozen projection carries the marks
     await closeLiveSession(fresh);
   } finally {
     await closeLiveSession(session).catch(() => undefined);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("a person-triggered collapse with no run in flight: interrupt is a no-op and the rebuild happens", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, ref } = fauxSetup();
   const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
   void faux;
@@ -309,11 +309,11 @@ test("a person-triggered collapse with no run in flight: interrupt is a no-op an
   assert.notEqual(outcome.session.generation, previousGeneration);
   assert.deepEqual(outcome.session.state.pending, []);
   await closeLiveSession(outcome.session);
-  cleanup();
+  await cleanup();
 });
 
 test("the bash tool runs through the conversation's environment: a real command, real stdout", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, captured, factory, ref } = fauxSetup();
   faux.setResponses([
     factory(() => fauxAssistantMessage([fauxToolCall("bash", { command: "printf carto-bash-ok" }, { id: "call-bash-1" })], { stopReason: "toolUse" })),
@@ -328,12 +328,12 @@ test("the bash tool runs through the conversation's environment: a real command,
     assert.match(flat, /carto-bash-ok/, "the tool result carries the command's stdout");
   } finally {
     await closeLiveSession(session).catch(() => undefined);
-    cleanup();
+    await cleanup();
   }
 });
 
 test("interrupting a run whose bash call is open settles the run instead of orphaning the command", async () => {
-  const { root, brain, cleanup } = fixture();
+  const { root, brain, cleanup } = await fixture();
   const { faux, models, factory, ref } = fauxSetup();
   // bash sleeps 30s; the interrupt must cut the run at its boundary instead.
   faux.setResponses([
@@ -351,6 +351,6 @@ test("interrupting a run whose bash call is open settles the run instead of orph
     assert.ok(Date.now() - started < 20_000, "the interrupt cut the run; it did not wait out the sleep");
   } finally {
     await closeLiveSession(session).catch(() => undefined);
-    cleanup();
+    await cleanup();
   }
 });
