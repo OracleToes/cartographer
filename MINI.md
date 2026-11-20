@@ -257,7 +257,9 @@ It tells the agent:
   directories, sizes, and which files an Atlas node links to.
 
 It is the part of the context expected to change often. Its items carry
-structured IDs.
+structured IDs. An evidence file whose digest has changed since the claim was
+written is marked stale at rebuild — a gentle signal to update the Brain,
+never a block on anything.
 
 > Confirmed by the person.
 
@@ -295,6 +297,14 @@ A run ends when a reply carries no tool call. To continue the agent's work, the
 state block is delivered as the next turn. The agent reads the current state and
 acts on it. The old design kept these apart: a dashboard and a synthetic
 continuation. They are one mechanism.
+
+The user's work comes first. The agent keeps its Brain in between and during
+tasks; the less there is to do, the more imperative keeping the Brain is. There
+is no ceiling on the pending list and no forced collapse — the growing list and
+the fullness number are the pressure, and the person collapsing at any time is
+the backstop.
+
+> Confirmed by the person.
 
 **The block must arrive as a user-role message.** A new request is only made when
 the context ends in a user message or a tool result. A section in the system

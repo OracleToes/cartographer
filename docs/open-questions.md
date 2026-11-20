@@ -129,10 +129,9 @@ See `docs/intent.md` §20.
 **Q7.0b — Resolved.** The projection is frozen between collapses, confirmed
 by the person. See `docs/intent.md` §19.
 
-**Q7.0c — Is there any ceiling on pending changes?** The block growing is the
-signal to collapse. If the agent ignores it, nothing stops it growing. *Needs:*
-whether "the agent should collapse" is the whole enforcement, or whether there is
-a fallback.
+**Q7.0c — Resolved.** No ceiling and no fallback. The user's work comes first;
+the Brain is kept in between and during tasks; the growing list and the
+fullness number are the pressure. See `docs/intent.md` §27.
 
 **Q7.1 — Resolved.** The six confirmed contents: context state, space by
 Brain part, pending changes, stale items, wakes, and the project tree. See
@@ -270,9 +269,9 @@ matches "current state, not audit history", but it has not been checked that Pi
 supports it for this document type in this version. *Needs:* a check before it is
 relied on.
 
-**Q13.5 — Atlas evidence digests.** The old spec made a changed digest mark a
-record stale. That mechanism was not questioned and is probably right, but it was
-also never confirmed. *Needs:* confirmation.
+**Q13.5 — Resolved.** Confirmed by the person: a changed digest marks the
+record stale — a gentle signal to update the Brain, never a block. See
+`docs/intent.md` §28.
 
 ## §14. Matters of taste, low stakes
 

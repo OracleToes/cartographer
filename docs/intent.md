@@ -418,3 +418,25 @@ ledger, pin, inspect, edit, shell, tree, sleep. Wake is deferred.
 **Established by.** The person chose "yes, dedicated tool" when asked to choose
 between a dedicated tool, `inspect` re-anchoring implicitly, and `shell`
 emulating it.
+
+
+## 27. No ceiling on pending changes; the user's work comes first
+
+**Decision.** Nothing mechanically caps the pending list or forces a collapse.
+The agent executes the user's work first; it keeps the Brain in between and
+during tasks. The less there is to do in a project, the more imperative keeping
+the Brain is. The growing pending list and the fullness number are the
+pressure; the person collapsing at any time is the backstop.
+
+**Established by.** "correct. the less things there are to do in a project, the
+more keeping the brain will be imperative, they execute user tasks first, and
+keep the brain in between and during."
+
+## 28. Digest drift is a gentle signal
+
+**Decision.** An Atlas claim whose evidence file's digest has changed since the
+claim was written is marked stale at rebuild. It gently informs the agent to
+update its Brain; it blocks nothing and deletes nothing.
+
+**Established by.** "i think so? it gebtly informs the agent to update its
+brain."
