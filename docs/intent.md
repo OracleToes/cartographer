@@ -548,3 +548,54 @@ docs/open-questions.md) are dropped with it.
 
 **Established by.** The person, in one line and the timer semantics stated
 with it in the same message: "wakes = only the sleep tool".
+
+## 38. Context edits are edits to the source of truth — never an overlay
+
+**Decision.** In the workspace's Context view, the person's actions are real
+edits to the underlying truth, not a private annotation layer. Brain-backed
+content is edited in the Brain, and the edit is everywhere the record
+appears: the record, the state block's pending-changes line, the next
+collapse. Ephemeral parts — tool calls, reasoning, the state block — never
+reach the Brain by themselves; only what is intentionally kept becomes part
+of it. Collapse is what makes staged changes part of what the model sees.
+Applying immediately ("Now") forces a prefill, and the person takes it
+knowing the cost. An earlier proposal of an ephemeral per-generation overlay
+("surgery changes what the model sees, never what the Brain remembers") was
+rejected by the person explicitly and is not to be built.
+
+**Established by.** The person, objecting to the overlay design: edits must
+be what happens everywhere — "what the model sees, the record, EVERYWHERE";
+"Collapse is how we make those changes. what we do to the brain before that
+is a queue on what's about to happen at collapse, unless we specifically
+perform an action Now."
+
+## 39. The token bar renders candidate A
+
+**Decision.** The R5 token bar is the single-row design segmented by context
+part (colour per part, hatched/muted estimate fill versus solid measured
+fill, `┊` budget tick, right-aligned numbers). Candidate B (bar plus a
+breakdown line) is rejected; the per-part detail lives in the Context view's
+rail.
+
+**Established by.** The person, one word: "token bar: A".
+
+## 40. Posting's philosophy and structure are the UI's reference
+
+**Decision.** R5 is designed after the Posting source: keyboard-first
+dense screen, jump mode, context-sensitive footer, summoned command palette,
+semantic colour tokens. pi-tui first wherever it does what is wanted;
+hand-rolled the minimum for Posting-level elegance (disclosure folds, the
+bar, the parts rail); nothing else without the person's word.
+
+**Established by.** The person, confirming the R5 design direction:
+"posting philosophy confirmed".
+
+## 41. The person tests Carto; testing gates nothing
+
+**Decision.** The person tests Carto at their own pace and reports issues as
+they come across them. No slice is gated on the person's testing; it is not
+a condition for building, pushing, or moving on, and it is not to be raised
+to the person again. Issues reported by the person are fixed as reported.
+
+**Established by.** The person, directly: "i will test carto thoroughly and
+report any issues as i come across them."

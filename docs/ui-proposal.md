@@ -135,10 +135,13 @@ avoid: a pretty report *about* the context (the old `context.parts` accounting
 rows were that — correct numbers, prose shape), and an editor disconnected
 from the real payload.
 
-**What it is.** The exact, ordered contents of the next request, grouped:
+**What it is.** The exact, ordered contents of the context the model is
+reading — the frozen projection plus the live tail — grouped by part. What
+you change here is staged for the rebuild (or applied immediately via
+**Now**); staged changes are shown as staged, never hidden:
 
 ```
-SYSTEM  · 1 part · ~5,900 tokens                    (editable: overlay text)
+SYSTEM  · 1 part · ~5,900 tokens
   carto-rules …
   carto-context (the frozen projection; rebuilt at collapse) … ~9,800
 TOOLS   · 12 entries · ~12,300 tokens · chat, atlas, ledger, pin, …
@@ -163,31 +166,40 @@ BLOCK   · the state block, ~1,700 tokens · never removed, never shown raw
   same strip-then-append assembly, read-only. If it cannot render, the request
   cannot be sent; that is the feature.
 
-**What you can do to it** (all as an *overlay on a frozen truth* — the Pi
-store is append-only and stays so):
+**What you can do to it** — edits here are real edits to the source of
+truth, not a private annotation layer:
 
-| Action | Keys (proposed) | Mechanism |
+| Action | Keys (proposed) | What actually happens |
 | --- | --- | --- |
-| Remove an item from the context window | `x` | `exclude` overlay: durable entry id; consulted at payload assembly. The Brain is untouched. |
-| Bring it back | `x` again | remove exclusion |
-| Reorder (e.g., the person moves a file fact higher) | `<` / `>` | overlay order list; applied at assembly |
-| Edit an item's text (e.g., compress the agent's ramble) | `e` | overlay text replacement for that entry |
-| Insert free content at a position | `a` | overlay block, addressed as its own entry |
-| Collapse now | `c` | the existing `/collapse` ceremony |
+| Delete a Brain-backed item (an atlas node, a ledger entry, a chat line, a pin) | `d` + confirm | The record is deleted. One step; delete means delete; no undo, no pending state (§2 of the questions, confirmed). |
+| Remove an ephemeral item (tool work, a reasoning line) | `d` | Dropped from the context that gets rebuilt at the next collapse — and gone for the rest of this generation if you take **Now**. |
+| Edit an item's text | `e` | An edit to the underlying item. Brain-backed items are edited in the Brain; the change is everywhere the record appears. |
+| Reorder | `<` / `>` | Open — §10, Q3: order is a collapse-time convention (§6.1); what a person-set order persists as is for you to decide. |
+| Insert content | `a` | Open — §10, Q2: what inserted content becomes (a person-authored record? which kind?). |
+| Collapse / **Now** | `c` | The collapse ceremony (agent-triggered or person-triggered; MINI.md §32) — this is what makes staged changes part of what the model sees. Immediate application outside collapse forces a prefill; you take it knowing the cost. Whether **Now** is simply the person-triggered collapse or a distinct lighter action is §10, Q1. |
 
-- **The overlay lives in the generation, is cleared at collapse** (like the
-  pending list), and is *not* Brain state — surgery changes what the model
-  sees, never what the Brain remembers. This is the honest split: the Brain
-  is the books; the context is this generation's working set.
-- **Removing things is cheap and reversible** (until the generation ends);
-  adding things is explicit text, so nothing silently enters the prompt.
+- **How changes land:** the Brain is the books and is sticky by default —
+  only what you add to it intentionally becomes part of it. Edits to Brain
+  records are real and permanent the moment you make them: the record, the
+  state block's pending-changes line (which lists pending Brain writes
+  since the projection was rebuilt — machinery that already exists), and
+  every listing. What changes hands at **collapse** is the *projection*: the
+  frozen bytes the model is reading catch up to the Brain when the context
+  is rebuilt. Collapse is how your gardening becomes what the model sees.
+- **Now** exists for when you will not wait for the collapse: it applies
+  everything you have staged to the live context immediately, and it costs a
+  prefill — you take the action knowing that, and that agreement is yours to
+  give, not something the UI does for you.
+- **The ephemeral parts** are the tool calls, the reasoning, the state
+  block's contents — nothing else. They never reach the Brain by themselves.
+- **Editing whose text?** Brain-backed content edits write through to the
+  Brain. Ephemeral content has no record to write through; the honest
+  operation there is removal (now, or at collapse). Whether ephemeral
+  content can be *text-edited in place* — and where that edit would live —
+  is folded into §10, Q2 rather than invented here.
 - The state block itself is never removable or editable (spec); the marker is
-  never rendered. The projection is edited by editing *Brain records* (§6) —
-  the projection is a view of the Brain, never edited directly.
-- **Crash-safety**: the overlay is ephemeral session memory. A crash drops
-  unapplied surgery — acceptable, because the Brain is untouched and the new
-  generation re-derives everything; losing an exclusion is loseable, losing a
-  Brain record is not.
+  never rendered. The projection is never edited directly — you edit Brain
+  records, and the projection is rebuilt from them at collapse.
 
 ## 6. The Brain views
 
@@ -205,16 +217,18 @@ sees the consequence in one place.
 - **Pins** — user layer above carry layer; each pin shows source + freshness.
 - **Wakes** — armed wakes with their reason and, for time-wakes, the countdown
   (the sleep-tool wake, §11 below).
-- Read-only in v1. Edit (atlas node text, ledger status, pin removal) comes
-  after the person has used the lists; no gate exists until then.
+- Editable as of the corrected doctrine: an edit here is an edit to the
+  record itself, everywhere. Delete is one step (no undo). Which actions
+  ship in which R5 stage is a build-order question, not a doctrine one.
 
 ## 7. The token bar (required; redesigned prefill visual)
 
 The old `meter-bar` concept (one row: kept `▰`, reading `▨`, free `▱`, budget
 mark `┊`, estimate by glyph `▤`) was the right idea in the wrong dress. Two
-candidates — the person picks by eye:
+**Chosen 2026-11-20: A.** (B is struck; the breakdown line rides along as
+the Context view's parts rail instead of living in the bar's row.)
 
-**A — one row, segmented by part** (recommended):
+**A — one row, segmented by part**:
 
 ```
 ▮▮▮▮▮▮▮▮▮▮▮░░▮▮▮░░░▮░░░░░░░░░░░░░  ~41.8k / 65,536 · 64% · ┊ 48k
@@ -225,15 +239,6 @@ One colour per part (muted, distinguishable), estimate = hatched/muted fill,
 server-measured = solid fill; the budget tick is `┊`; past the tick the free
 region tints warning; past the window it tints danger. Right-aligned numbers,
 always. One glance = "what is this window made of."
-
-**B — two rows: the bar, then the breakdown line**
-
-```
-▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▤▱▱▱▱▱▱▱▱▱  ~41.8k / 65,536 · 64%
-sys 5.9k · tools 12.3k · proj 9.8k · work 10.8k · block 1.7k · free 23.7k
-```
-
-More information, costs a second row; identical honesty rules either way.
 
 Standing rules (from the token-bar decision, 2026-11-20): live bar ships;
 before the first measured response it is estimate-glyphed (`▤` family); the
@@ -263,10 +268,9 @@ gets no default key yet — the person marks it or it gets one in the palette.
 
 1. **R5a — shell + Chat view** (`TuiAltScreen`, layout, footer, jump mode,
    palette, transcript from the live session; faux-provider scripted and
-   bootable). You boot it; this is also **R4's verification** — the same build
-   against your llama-swap.
-2. **R5b — token bar**, your pick of A/B, estimate-glyphed.
-3. **R5c — Brain views** (read-only lists + folded records).
+   bootable). You boot it.
+2. **R5b — token bar**, candidate A, estimate-glyphed.
+3. **R5c — Brain views** (lists + folded records, editable).
 4. **R5d — Context surgery view**, read-only accurate rendering first
    (rail + panes + real/human toggle).
 5. **R5e — surgery edits** (exclude → reorder → edit → insert), each behind
@@ -278,19 +282,51 @@ Everything pi-tui provides is used, not reimplemented; everything hand-rolled
 is listed in §3 and is small; the `1.4k tok/s`-style invented status numbers
 do not come back.
 
-## 10. Person's marks requested
+## 10. Person's marks and open questions
 
-1. **Layout**: modes-not-tabs (recommended) or literal three tabs?
-2. **Bar**: A or B?
-3. **Sidebar**: visible by default? What's the default view on boot — Chat?
-4. **Keys**: the interrupt binding; steer/follow-up bindings; any keys you
+**Marked this round:** token bar → **A**. Posting philosophy/structure →
+confirmed (pi-tui first, hand-rolled minimum only). Surgery semantics → the
+corrected doctrine above (the ephemeral overlay I proposed is rejected and
+will not be built). R4 testing → you will test Carto yourself, at your own
+pace, and report issues as you come across them; nothing is gated on your
+testing and this file will not raise it again.
+
+**Open, sharp:**
+
+1. **Now (Q1):** is "apply now" simply the person-triggered collapse
+   (MINI.md §32's person path — the full ceremony: seal, purge, fresh
+   generation), or a distinct lighter action that rebuilds the context in
+   place and keeps the generation? My lean: Now *is* the person-triggered
+   collapse — one ceremony, one meaning; the prefill warning is the cost
+   ack you described.
+2. **Insert target (Q2):** when you add content that isn't a Brain record
+   yet, what should it become — a person-authored Ledger entry, a new
+   record type, or something else? My lean: a person-authored Ledger
+   entry; no new record type without you asking for one. Same question
+   covers whether ephemeral tool-work text can be edited in place and
+   where that edit would live.
+3. **Reorder persistence (Q3):** §6.1 makes order a collapse-time
+   convention. If you reorder in the view, should that order be remembered
+   (a person-set standing arrangement the next rebuild respects — which
+   means new Brain-side state), or is reorder meaningful only for a Now?
+   My lean: Now-only; a standing order is new machinery and needs your
+   word.
+4. **Layout:** modes-not-tabs (recommended) or literal three tabs?
+5. **Sidebar & boot:** visible by default? Default view on boot — Chat?
+6. **Keys:** the interrupt binding; steer/follow-up bindings; any keys you
    want guaranteed.
-5. **Surgery semantics**: per-generation overlay cleared at collapse
-   (recommended) — confirm or change.
-6. **Brain views read-only v1** — confirm.
-7. Anything in §5–§8 that misreads what you want.
+7. Anything above that misreads what you want.
 
 ## 11. Confirmed since the plan was written (not open)
+
+- **Token bar: A**, chosen 2026-11-20.
+- **Posting's design philosophy and structure are the UI's reference**,
+  confirmed 2026-11-20; pi-tui first, hand-rolled the minimum.
+- **R4 is not gated on your testing and will not be raised again**; you
+  test Carto at your own pace and report what you find.
+- **Context edits are source-of-truth edits** (record or tombstone), never
+  an ephemeral overlay; collapse makes them part of the model's context,
+  Now applies them at prefill cost. Confirmed by objection, 2026-11-20.
 
 - **Wakes are the sleep tool's wake**: the agent calls `sleep` — with no time,
   until you wake it; with a timer, it wakes when the timer fires. Nothing
