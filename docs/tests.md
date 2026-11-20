@@ -85,10 +85,21 @@ records coverage and gaps, not a score.
 - `src/` and `test/` were deleted in full and rebuilt from `MINI.md` (the
   person's order: delete it all; re-doing slice 1 was fine; asking beats
   assuming). Suite shrank from 58 to 15 and regrew to 29 as R1 and R2
-  landed. Gaps as of this stage: no integration coverage of a real
-  pi-durable store driving the collapse; no tests yet for the tools, the
-  state block, or the live session — those are R3 and R4 and will bring
-  their own.
+  landed, then to 34 with the state block, 40 with the project tree, and
+  50 with R3's tools and live session.
+- As of R3 (2026-11-20): the live session runs against a faux pi-ai provider,
+  end to end — a full tool turn with the pending list asserted by handle;
+  the `onYield` continuation with the marker asserted present in the store
+  and absent from the payload; `inspect` feeding `atlas` evidence digests;
+  the `tree` tool moving the anchor; an agent-triggered collapse through the
+  ceremony with stale-evidence marks riding the rebuild; a person-triggered
+  collapse with no run in flight. Known limit: a tool-calling reply only
+  enters a tool round with stopReason `toolUse` — the faux scripts set it,
+  and real providers do the same. The ten-second budget is still unaddressed;
+  the live-session tests are fast (faux, no waits) but nothing measures them.
+- Still open: no test of a real provider, no integration coverage of wake
+  tasks (deferred by §10a), nothing about a screen. R4 (config, llama-swap,
+  the headless driver) brings its own.
 
 ### Stage: UI teardown, 2026-11-16
 

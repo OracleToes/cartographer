@@ -31,9 +31,12 @@ import { projectContext } from "../domain/projection.js";
 import { createCartoExtension, CARTO_INSTRUCTIONS, type LiveSessionState } from "./carto-extension.js";
 import type { BrainStore } from "./brain-store.js";
 import {
+  collapse,
   generationPaths,
   newGenerationId,
   reconcileGenerations,
+  type CollapseOptions,
+  type CollapseReport,
 } from "./collapse.js";
 import { writeSnapshot } from "./projection-files.js";
 
@@ -56,6 +59,8 @@ export interface LiveSession {
   readonly contextWindow: number;
   readonly harness: Harness;
   readonly conversation: Conversation;
+  /** The underlying database handle; closed by closeLiveSession. */
+  readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>;
   /** The mutable present; named fields, no hidden state (MINI.md §12). */
   readonly state: LiveSessionState;
   /** Set when a run ends with a requested collapse; the host performs it (see collapse request handling). */
@@ -130,6 +135,7 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       contextWindow,
       harness,
       conversation,
+      database,
       state,
       takeCollapseRequest() {
         const reason = state.collapseRequested;
@@ -165,5 +171,36 @@ export async function sessionTranscript(session: LiveSession) {
 
 export async function closeLiveSession(session: LiveSession): Promise<void> {
   await session.harness.close(BACKGROUND_CONTEXT);
+  await session.database.close().catch(() => undefined);
+}
+
+export interface CollapseOutcome {
+  /** The fresh session on the new generation; the old session must not be used again. */
+  readonly session: LiveSession;
+  /** What collapse did: the new generation, the sealed archive, the purged one. */
+  readonly report: CollapseReport;
+  /** Why the collapse happened: the agent's reason, or the person's act. */
+  readonly reason: string;
+}
+
+/**
+ * Collapse the live session (MINI.md §5): interrupt the run at its boundary,
+ * close the store, run the ceremony — freshness marks, new snapshot from the
+ * Brain, seal the old store as the archive, export-then-delete the archive
+ * whose grace expired, VACUUM — and reopen on the new generation. The
+ * person's path passes any reason (or none); no boundary, no warning. The
+ * caller shows the plain report afterwards.
+ */
+export async function collapseLiveSession(
+  session: LiveSession,
+  options: LiveSessionOptions,
+  reason: string,
+  ceremony: CollapseOptions = {},
+): Promise<CollapseOutcome> {
+  await interruptRun(session);
+  await closeLiveSession(session);
+  const report = await collapse(session.root, options.brain, ceremony);
+  const next = await openLiveSession(options);
+  return { session: next, report, reason };
 }
 

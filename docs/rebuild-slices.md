@@ -201,3 +201,53 @@ The frozen projection and the collapse ceremony exist and are tested.
 Not done: R3 (tools, live session, state block), R4 (config, llama-swap,
 driver). The collapse exists but nothing triggers it yet; the live session
 wires the trigger in R3.
+## R3 landed, 2026-11-20 (`755f1c7` and the R3c commits)
+
+The live session and the tools exist and are wired end to end.
+
+- **Tools** (`runtime/tools.ts`): `chat`, `atlas`, `ledger`, `pin`, `inspect`,
+  `edit`, `shell`, `tree`, `collapse`, `sleep` — the confirmed §10a surface,
+  nothing more (`wake` stays the deferred tool). pi-schema validators;
+  handles are the only record references; unknown handles are explicit
+  errors at the call site. Atlas evidence is verified against the file's
+  current digest. The agent removes carry pins only; the person's pins are
+  theirs. The boundary: every path resolves inside the project root, a
+  symlink that escapes is rejected, `.brain` is untouchable by Carto tools.
+- **Live session** (`runtime/live-session.ts`, `runtime/carto-extension.ts`):
+  Pi Durable harness, one store per generation under `.brain/context/`,
+  reconciled at open; the frozen projection rides as a byte-stable
+  untagged section; a fresh snapshot is written from the Brain when no live
+  generation exists. `beforeRequest` strips markers and appends the fresh
+  state block as the trailing user-role message; `onYield` continues a
+  text-only reply with the byte-sized `<carto-state/>` marker;
+  `afterResponse` folds the provider's input count; Pi compaction is declined
+  (a declined compaction asks for a collapse instead). Collapse is signalled
+  by the `collapse` tool (`control.terminate`) or by the person at any time;
+  `collapseLiveSession` interrupts at the boundary, runs the ceremony, and
+  reopens on the new generation.
+- **The block** is rendered from the Brain and the session, never persisted:
+  context fullness (last provider report + tool work since), space by Brain
+  part, one line per pending write named by handle (ephemeral, cleared at
+  collapse), stale evidence named by handle, armed wakes, the tree anchored
+  where the agent's attention is with Atlas-linked files marked.
+- **Fixed in passing:** the collapse ceremony now creates the new generation's
+  store (empty, valid) at snapshot time — without it an open-time reconcile
+  would treat the frozen-but-storeless generation as a crash remainder and
+  delete it, or adopt the sealed archive as live. Found wiring R3c; R2's
+  invariants were verified before touching it.
+- **Reconciliations a person should see:**
+  - §6.2 names `beforeProviderRequest` as the injection hook. Injection happens
+    at `beforeRequest` instead: the payload is pi-ai's provider-native format,
+    and a payload-level splice would reimplement provider specifics §11
+    forbids, for the same wire result. The model sees one block at the tail;
+    the store keeps only markers; both were verified in the tests.
+  - Tool-calling replies only enter a tool round with stopReason `toolUse`;
+    the faux provider scripts set it, as real providers do.
+- **Known seam, still open:** the pinned-to-archive export (unchanged from R2);
+  the marker shape for it is a question for the recovery tooling.
+- **Owed to R5:** the person-facing transcript must hide marker messages
+  (`isMarkerMessage` is exported for exactly this); the store legitimately
+  contains them between collapses.
+
+Not done: R4 (config, llama-swap, the headless driver), R5+ (the interface,
+when the person settles §8's marks).

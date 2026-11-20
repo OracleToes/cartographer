@@ -200,3 +200,114 @@ test("unknown handles are explicit errors, never guesses", async () => {
   );
   cleanup();
 });
+
+test("an agent-triggered collapse: the run ends, the ceremony runs, the fresh context carries the Brain", async () => {
+  const { root, brain, cleanup } = fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
+      title: "The answer",
+      claim: "The answer is 42.",
+      evidence: [{ path: "src/verify-me.ts", startLine: 1, endLine: 1, digest: sha256(readFileSync(join(root, "src", "verify-me.ts"))), excerpt: "export const answer = 42;" }],
+    }, { id: "call-atlas" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "the map and the books diverged" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession(options());
+  const previousGeneration = session.generation;
+  try {
+    const submission = await submitInput(session, "remember this, then reset");
+    const settled = await submission.wait(BACKGROUND_CONTEXT);
+    assert.equal(settled.status, "done", "the collapse tool ends the run; no continuation follows a terminate");
+    assert.equal(session.state.collapseRequested, "the map and the books diverged");
+    const reason = session.takeCollapseRequest();
+    assert.equal(reason, "the map and the books diverged");
+
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    const outcome = await collapseLiveSession(session, options(), reason);
+    assert.equal(outcome.reason, reason);
+    assert.notEqual(outcome.report.generation, previousGeneration);
+    assert.equal(outcome.report.sealed, previousGeneration);
+    assert.equal(outcome.report.purged, undefined);
+    // The Brain survived; handles were rebuilt, not carried over.
+    const nodes = brain.read().atlas;
+    assert.equal(nodes.length, 1);
+    const { handleOf } = await import("../dist/domain/handles.js");
+    assert.equal(handleOf(brain.read().handles, "atlas", nodes[0].id), "A1");
+    // The fresh session starts empty and its tree wiring is the root again.
+    assert.deepEqual(outcome.session.state.pending, []);
+    assert.equal(outcome.session.state.tree.anchor, realpathSync(root));
+    assert.equal(outcome.session.markdownPath.includes(outcome.report.generation), true);
+    assert.equal(readFileSync(outcome.session.markdownPath, "utf8").includes("A1 The answer"), true);
+    // The old store is sealed read-only.
+    const { generationPaths } = await import("../dist/runtime/collapse.js");
+    const oldStore = generationPaths(root, previousGeneration).store;
+    assert.equal((await import("node:fs")).statSync(oldStore).mode & 0o444, 0o444);
+    // The fresh session is functional.
+    faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-2" })], { stopReason: "toolUse" }))]);
+    const second = await submitInput(outcome.session, "still here?");
+    const secondSettled = await second.wait(BACKGROUND_CONTEXT);
+    assert.equal(secondSettled.status, "done");
+    assert.equal(captured.length, 3, "one request per scripted response, across the collapse");
+    await closeLiveSession(outcome.session);
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    cleanup();
+  }
+});
+
+test("stale evidence rides the collapse: the frozen projection carries the marks", async () => {
+  const { root, brain, cleanup } = fixture();
+  const { faux, models, captured, factory, ref } = fauxSetup();
+  const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  faux.setResponses([
+    factory(() => fauxAssistantMessage([fauxToolCall("inspect", { path: "src/verify-me.ts", startLine: 1, endLine: 1 }, { id: "call-inspect" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("atlas", {
+      title: "The answer",
+      claim: "The answer is 42.",
+      evidence: [{ path: "src/verify-me.ts", startLine: 1, endLine: 1, digest: sha256(readFileSync(join(root, "src", "verify-me.ts"))), excerpt: "export const answer = 42;" }],
+    }, { id: "call-atlas" })], { stopReason: "toolUse" })),
+    factory(() => fauxAssistantMessage([fauxToolCall("collapse", { reason: "rebuild" }, { id: "call-collapse" })], { stopReason: "toolUse" })),
+  ]);
+  const session = await openLiveSession(options());
+  try {
+    const first = await submitInput(session, "learn this");
+    await first.wait(BACKGROUND_CONTEXT);
+    // The evidence file drifts after the claim was written.
+    writeFileSync(join(root, "src", "verify-me.ts"), "export const answer = 43;\n");
+    const reason = session.takeCollapseRequest();
+    const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+    const outcome = await collapseLiveSession(session, options(), reason ?? "person-triggered");
+    const { renderLiveStateBlock } = await import("../dist/runtime/carto-extension.js");
+    const block = await renderLiveStateBlock(
+      { root, brain, session: outcome.session.state, markdownPath: outcome.session.markdownPath, contextWindow: 100_000, now: () => 1_700_000_000_000 },
+      [],
+    );
+    assert.match(block, /stale:\n  A1 \(evidence changed\)/);
+    const fresh = outcome.session;
+    faux.setResponses([factory(() => fauxAssistantMessage([fauxToolCall("sleep", {}, { id: "call-sleep-3" })], { stopReason: "toolUse" }))]);
+    const again = await submitInput(fresh, "and now?");
+    await again.wait(BACKGROUND_CONTEXT);
+    assert.match(blockOf(captured.at(-1)).content, /stale:\n  A1 \(evidence changed\)/);
+    await closeLiveSession(fresh);
+  } finally {
+    await closeLiveSession(session).catch(() => undefined);
+    cleanup();
+  }
+});
+
+test("a person-triggered collapse with no run in flight: interrupt is a no-op and the rebuild happens", async () => {
+  const { root, brain, cleanup } = fixture();
+  const { faux, models, ref } = fauxSetup();
+  const options = () => ({ root, brain, models, model: ref, now: () => 1_700_000_000_000 });
+  void faux;
+  const session = await openLiveSession(options());
+  const previousGeneration = session.generation;
+  const { collapseLiveSession } = await import("../dist/runtime/live-session.js");
+  const outcome = await collapseLiveSession(session, options(), "person pressed collapse");
+  assert.equal(outcome.report.sealed, previousGeneration);
+  assert.notEqual(outcome.session.generation, previousGeneration);
+  assert.deepEqual(outcome.session.state.pending, []);
+  await closeLiveSession(outcome.session);
+  cleanup();
+});

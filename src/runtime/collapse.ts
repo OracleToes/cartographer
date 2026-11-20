@@ -26,6 +26,7 @@ import { randomBytes } from "node:crypto";
 import { freshnessMarks } from "../domain/freshness.js";
 import { projectContext } from "../domain/projection.js";
 import type { CartoBrain } from "../domain/records.js";
+import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import type { BrainStore } from "./brain-store.js";
 import { sha256File, resolveInsideRoot } from "./digest.js";
 import { contextDirectory, removeSnapshot, sealSnapshot, snapshotPaths, unsealSnapshot, writeSnapshot } from "./projection-files.js";
@@ -217,6 +218,12 @@ export async function collapse(root: string, brain: BrainStore, options: Collaps
   // 1. Snapshot first: no store exists for the new generation until the
   //    bytes are frozen on disk.
   writeSnapshot(root, generation, projection, now);
+  // 1b. The generation exists only when its store does: an empty, valid
+  //     database, so an open-time reconcile cannot mistake the frozen
+  //     snapshot for a crash remainder and delete it, or adopt the sealed
+  //     archive as live. Pi creates its tables on first open.
+  const created = await openNodeSqliteDatabase(generationPaths(root, generation).store);
+  await created.close();
   // 2. The old store becomes the archive, sealed read-only with its snapshot.
   chmodBestEffort(live.store, 0o444);
   try {
