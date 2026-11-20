@@ -87,7 +87,7 @@ export function catalogModel(entry: unknown, ceiling: number, endpoint: string):
     provider: LLAMA_SWAP_PROVIDER_ID,
     baseUrl: endpoint,
     contextWindow: activeContextWindow(ceiling, advertised?.capacity),
-    maxTokens: 4_096,
+    maxTokens: activeContextWindow(ceiling, advertised?.capacity),
     input: ["text"],
     reasoning: false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -124,7 +124,10 @@ export function modelsForConfig(config: GlobalConfig, model: ModelRef, deps: Lla
     provider: LLAMA_SWAP_PROVIDER_ID,
     baseUrl: endpoint,
     contextWindow: ceiling,
-    maxTokens: 4_096,
+    // Unbounded on purpose: pi clamps this to the room left in the window on
+    // every request (simple-options.ts clampMaxTokensToContext), so the model
+    // generates until it finishes or the context is full. No artificial cap.
+    maxTokens: ceiling,
     input: ["text" as const],
     reasoning: false,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

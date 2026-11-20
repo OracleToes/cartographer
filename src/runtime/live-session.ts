@@ -136,7 +136,6 @@ export async function openLiveSession(options: LiveSessionOptions): Promise<Live
       instructions: CARTO_INSTRUCTIONS,
       // The context is gardened by collapse, never by Pi rewriting the transcript.
       compaction: { enabled: false },
-      maxTurns: 16,
       cwd: root,
     };
     const conversation = await harness.root(BACKGROUND_CONTEXT, { agent });

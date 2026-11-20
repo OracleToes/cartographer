@@ -91,16 +91,11 @@ export interface EditResult {
   bytes: number;
 }
 
-export const MAX_EDIT_CHARS = 100_000;
-
 /**
  * One atomic edit: create a missing file (oldText must be empty), or replace
  * a unique occurrence of oldText in an existing file. Atomic via temp+rename.
  */
 export async function applyAtomicEdit(root: string, path: string, oldText: string, newText: string): Promise<EditResult> {
-  if (newText.length > MAX_EDIT_CHARS) {
-    throw new WorkspaceError(`newText too large: ${newText.length} chars; the bound is ${MAX_EDIT_CHARS}`);
-  }
   const rootReal = realpathSync(root);
   const candidate = resolve(rootReal, path);
   lexicalContainment(rootReal, candidate);

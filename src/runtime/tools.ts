@@ -35,8 +35,8 @@ export interface ToolDeps {
   session: ToolSession;
 }
 
-const Text = str({ minLength: 1, maxLength: 24_000 });
-const HandleRef = str({ minLength: 1, maxLength: 8 });
+const Text = str({ minLength: 1 });
+const HandleRef = str({ minLength: 1 });
 
 const normalizeHandle = (handle: string): string => handle.trim().toUpperCase();
 
@@ -96,17 +96,17 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         "Create or update one source-backed claim about the project, with optional typed edges to other nodes. Pass the handle of an existing node to update it, or leave it out to create one. Evidence is a file range you read with inspect; the digest must still match.",
       parameters: obj({
         handle: opt(HandleRef),
-        title: str({ minLength: 1, maxLength: 240 }),
+        title: str({ minLength: 1 }),
         claim: Text,
         evidence: arr(
           obj({
-            path: str({ minLength: 1, maxLength: 4096 }),
+            path: str({ minLength: 1 }),
             startLine: int({ minimum: 1 }),
             endLine: int({ minimum: 1 }),
-            digest: str({ minLength: 1, maxLength: 128 }),
+            digest: str({ minLength: 1 }),
             excerpt: Text,
           }),
-          { minItems: 1, maxItems: 12 },
+          { minItems: 1 },
         ),
         edges: opt(
           arr(
@@ -114,7 +114,6 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
               kind: oneOf(["replaces", "depends-on", "contradicts"] as const),
               handle: HandleRef,
             }),
-            { maxItems: 32 },
           ),
         ),
       }),
@@ -163,7 +162,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
         text: Text,
         status: oneOf(["open", "answered", "closed"] as const),
         answer: opt(Text),
-        evidence: opt(arr(HandleRef, { maxItems: 32 })),
+        evidence: opt(arr(HandleRef)),
       }),
       replay: "safe",
       execute: async (args, api) => {
@@ -208,15 +207,15 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       parameters: union([
         obj({
           action: lit("add"),
-          item: str({ minLength: 1, maxLength: 500 }),
-          reason: str({ minLength: 1, maxLength: 1000 }),
+          item: str({ minLength: 1 }),
+          reason: str({ minLength: 1 }),
           source: union([
             obj({
               kind: lit("file"),
-              path: str({ minLength: 1, maxLength: 4096 }),
+              path: str({ minLength: 1 }),
               startLine: int({ minimum: 1 }),
               endLine: int({ minimum: 1 }),
-              digest: str({ minLength: 1, maxLength: 128 }),
+              digest: str({ minLength: 1 }),
               excerpt: Text,
             }),
             obj({ kind: lit("context"), excerpt: Text }),
@@ -254,7 +253,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       name: "inspect",
       description: `Read a bounded text range inside the project root. ${MAX_RANGE_LINES} lines at a time at most; returns the path, the range, the total lines, the file's digest, and the excerpt. Digests are what evidence cites.`,
       parameters: obj({
-        path: str({ minLength: 1, maxLength: 4096 }),
+        path: str({ minLength: 1 }),
         startLine: int({ minimum: 1 }),
         endLine: int({ minimum: 1 }),
       }),
@@ -270,11 +269,11 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "edit",
       description:
-        "Apply one atomic edit to a path inside the project. To create a file, pass oldText \"\" (its parent directory must exist). To change one, pass the exact text to replace — it must appear exactly once. Large newText is rejected; keep edits small.",
+        "Apply one atomic edit to a path inside the project. To create a file, pass oldText \"\" (its parent directory must exist). To change one, pass the exact text to replace — it must appear exactly once.",
       parameters: obj({
-        path: str({ minLength: 1, maxLength: 4096 }),
-        oldText: str({ maxLength: 100_000 }),
-        newText: str({ maxLength: 100_000 }),
+        path: str({ minLength: 1 }),
+        oldText: str(),
+        newText: str(),
       }),
       replay: "unsafe",
       execute: async (args) => {
@@ -288,8 +287,8 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       description:
         "Set the anchor and depth of the project tree in your state block and return the rendered tree. The anchor stays inside the project and never inside `.brain`; `.brain` is never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
       parameters: obj({
-        anchor: opt(str({ minLength: 1, maxLength: 4096 })),
-        depth: opt(int({ minimum: 0, maximum: 12 })),
+        anchor: opt(str({ minLength: 1 })),
+        depth: opt(int({ minimum: 0 })),
       }),
       replay: "safe",
       execute: async (args) => {
@@ -306,7 +305,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
       name: "collapse",
       description:
         "End this context and rebuild it from the Brain. Rare, and never for ordinary work: call this when the map and the books have diverged past what the context can work with. No approval is involved, from either side. Chat anything the person must see first.",
-      parameters: obj({ reason: str({ minLength: 1, maxLength: 1000 }) }),
+      parameters: obj({ reason: str({ minLength: 1 }) }),
       replay: "safe",
       execute: async (args) => {
         session.collapseRequested = args.reason.trim();
