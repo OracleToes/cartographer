@@ -6,9 +6,10 @@
  * their own slices and are honestly absent — jumping to them flashes the slice
  * that owns them rather than rendering a fake. The transcript shows the
  * person's lines where they LANDED in the context (not where they were typed),
- * the agent's `chat` words, and quiet status lines; plain model text never
- * appears (MINI.md §10a). Submitted lines whose placement has not happened yet
- * render dimmed as queued and move into place at the boundary.
+ * the agent's `chat` words, its reasoning, plain model text, and tool calls
+ * as foldable cards (dimmer, their own hues — MINI.md §8, §10a as re-scoped
+ * 2026-11-20), and quiet status lines. Submitted lines whose placement has not
+ * happened yet render dimmed as queued and move into place at the boundary.
  *
  * Lines starting with `/` are workspace commands (/help, /copy, /copy-session)
  * and never reach the agent.
@@ -30,6 +31,7 @@ import {
   type OverlayHandle,
 } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { LiveDoc, type LiveState } from "@earendil-works/pi-durable";
 
 import {
   closeLiveSession,
@@ -52,7 +54,7 @@ import { flattenEntry } from "./dump.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { tokens } from "./tokens.js";
 
 export interface CartoTuiOptions extends LiveSessionOptions {
@@ -68,8 +70,6 @@ interface PendingItem {
 
 interface TuiState {
   session: LiveSession;
-  /** Warning watermark: agent record ids observed since the last collapse reset; drives the plain-text-answer detection. */
-  seenChat: Set<string>;
   /** Render exclusion: agent records already shown (boot history, or sealed by a collapse). Persists across collapses. */
   sealedAgentIds: Set<string>;
   sendMode: SendMode;
@@ -86,8 +86,8 @@ interface TuiState {
   sidebarVisible: boolean;
   overlayOpen: boolean;
   overlayHandle: OverlayHandle | undefined;
-  /** Watermark into context assistant entries, for the plain-text-answer warning. */
-  assistantWatermark: number;
+  /** Live watch on the in-flight partial (`pi.live`); stopped at collapse and shutdown, re-armed on the new session. */
+  liveWatch?: { stop(): Promise<unknown> };
   rebuilding: boolean;
   /** Cheap change signature so the 1.5s timer does not bust the render cache when nothing moved. */
   sig: string;
@@ -95,11 +95,6 @@ interface TuiState {
 
 const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const suffix = (generation: string): string => generation.slice(-6);
-
-async function agentChatSeen(brain: BrainStore): Promise<Set<string>> {
-  const state = await brain.read();
-  return new Set(state.chat.filter((record) => record.author === "agent").map((record) => record.id));
-}
 
 function countSidebar(brainState: Awaited<ReturnType<BrainStore["read"]>>): SidebarCounts {
   // Typed marks, not prefix parsing: the stale kind is what the Brain reports.
@@ -142,9 +137,63 @@ function timestampOf(message: MessageLike): number {
   return typeof message.timestamp === "number" ? message.timestamp : 0;
 }
 
-function hasTextPart(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  return content.some((part) => part !== null && typeof part === "object" && (part as Record<string, unknown>).type === "text" && String((part as Record<string, unknown>).text ?? "").trim().length > 0);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+/** Tool arguments pretty-printed for the card body; a partial object stringifies to the partial JSON, never a throw. */
+function prettyArgs(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2) ?? "{}";
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * The in-flight partial (`pi.live`) as foldable cards: the streaming
+ * thinking/text blocks in content order, then the current round's tool slots.
+ * While the model writes its answer the arguments stream into the toolCall
+ * part; once the answer commits, the parts are gone and the running calls
+ * (with their retained output) come from the slots instead.
+ */
+function liveCardsOf(live: LiveState | undefined): CardEntry[] {
+  const cards: CardEntry[] = [];
+  if (live === undefined) return cards;
+  const attempt = live.generation?.attempt ?? 0;
+  const slots = new Map((live.tools ?? []).map((slot) => [slot.callId, slot]));
+  const seenCalls = new Set<string>();
+  const message = live.generation?.message as { content?: unknown } | undefined;
+  if (message !== undefined && Array.isArray(message.content)) {
+    (message.content as unknown[]).forEach((part, index) => {
+      if (!isRecord(part)) return;
+      const id = `live-${attempt}-${index}`;
+      if (part.type === "thinking" && typeof part.thinking === "string") {
+        if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking });
+      } else if (part.type === "text" && typeof part.text === "string") {
+        if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text });
+      } else if (part.type === "toolCall" && typeof part.name === "string") {
+        const callId = typeof part.id === "string" ? part.id : undefined;
+        if (callId !== undefined) seenCalls.add(callId);
+        const slot = callId === undefined ? undefined : slots.get(callId);
+        cards.push({ kind: "tool", id, live: true, name: part.name, args: prettyArgs(part.arguments), status: slot?.status ?? "pending" });
+      }
+    });
+  }
+  for (const slot of live.tools ?? []) {
+    if (seenCalls.has(slot.callId)) continue;
+    const output = typeof slot.output === "string" && slot.output.length > 0 ? slot.output : undefined;
+    cards.push({
+      kind: "tool",
+      id: `livetool-${slot.callId}`,
+      live: true,
+      name: slot.name,
+      args: "",
+      ...(output === undefined ? {} : { output }),
+      status: slot.status,
+    });
+  }
+  return cards;
 }
 
 export async function runTui(options: CartoTuiOptions): Promise<number> {
@@ -157,8 +206,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const session = await openLiveSession(options);
   const state: TuiState = {
     session,
-    seenChat: await agentChatSeen(brain),
-    sealedAgentIds: await agentChatSeen(brain),
+    sealedAgentIds: new Set((await brain.read()).chat.filter((record) => record.author === "agent").map((record) => record.id)),
     sendMode: "steer",
     running: false,
     pending: [],
@@ -169,7 +217,6 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     sidebarVisible: true,
     overlayOpen: false,
     overlayHandle: undefined,
-    assistantWatermark: 0,
     rebuilding: false,
     sig: "",
   };
@@ -235,6 +282,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     shutdownRequested = true;
     if (liveTimer !== undefined) clearInterval(liveTimer);
     tui.stop();
+    await state.liveWatch?.stop().catch(() => undefined);
+    state.liveWatch = undefined;
     await closeLiveSession(state.session);
     resolveRun?.(code);
   };
@@ -275,9 +324,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       };
 
       const person: Array<{ key: number; entry: TranscriptEntry }> = [];
-      let sawPlainTextSinceWatermark = false;
-      let watermark = state.assistantWatermark;
       const landedTexts: Array<{ text: string; t: number }> = [];
+      const toolErrors = new Map<string, boolean>();
+      const assistantParts: Array<{ entryId: number; parts: Record<string, unknown>[] }> = [];
       for (const entry of entries) {
         const id = typeof entry.id === "number" ? entry.id : 0;
         const message = messageOf(entry);
@@ -289,27 +338,46 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           const t = timestampOf(message);
           person.push({ key: id, entry: { kind: "person", text } });
           landedTexts.push({ text, t });
-        } else if (role === "assistant") {
-          if (id > watermark) watermark = id;
-          if (hasTextPart(message.content) && id > state.assistantWatermark) sawPlainTextSinceWatermark = true;
+        } else if (role === "assistant" && Array.isArray(message.content)) {
+          const parts = (message.content as unknown[]).filter(isRecord);
+          if (parts.length > 0) assistantParts.push({ entryId: id, parts });
+        } else if (role === "toolResult" && isRecord(message)) {
+          const callId = (message as Record<string, unknown>).toolCallId;
+          if ((message as Record<string, unknown>).isError === true && typeof callId === "string") toolErrors.set(callId, true);
         }
       }
-      state.assistantWatermark = watermark;
+
+      // The working, as cards: reasoning, plain model text, and tool calls, in
+      // the order the model produced them. Landed cards default folded.
+      const cards: Array<{ key: number; entry: TranscriptEntry }> = [];
+      for (const { entryId, parts } of assistantParts) {
+        parts.forEach((part, partIndex) => {
+          const key = entryId + (partIndex + 1) * 0.0001;
+          if (part.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim().length > 0) {
+            cards.push({ key, entry: { kind: "reasoning", id: `ctx-${entryId}-${partIndex}`, text: part.thinking } });
+          } else if (part.type === "text" && typeof part.text === "string" && part.text.trim().length > 0) {
+            cards.push({ key, entry: { kind: "output", id: `ctx-${entryId}-${partIndex}`, text: part.text } });
+          } else if (part.type === "toolCall" && typeof part.name === "string") {
+            const callId = typeof part.id === "string" ? part.id : undefined;
+            cards.push({
+              key,
+              entry: {
+                kind: "tool",
+                id: `ctx-${entryId}-${partIndex}`,
+                name: part.name,
+                args: prettyArgs(part.arguments),
+                ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
+              },
+            });
+          }
+        });
+      }
 
       const agent: Array<{ key: number; entry: TranscriptEntry }> = [];
-      const freshAgentIds: string[] = [];
       for (const record of brainState.chat) {
         if (record.author !== "agent") continue;
-        if (!state.seenChat.has(record.id)) {
-          state.seenChat.add(record.id);
-          freshAgentIds.push(record.id);
-        }
         if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
         agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text } });
-      }
-
-      if (sawPlainTextSinceWatermark && freshAgentIds.length === 0) {
-        pushStatus("the agent answered in plain text — nothing renders here by design (§10a); ask it to say it in chat");
       }
 
       // Clear pending items whose placement we can now see: same text, an
@@ -330,6 +398,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const sig = [
         state.sealed.length,
         person.map((item) => item.key).join(","),
+        cards.map((item) => item.key).join(","),
         String(agent.length),
         state.sealedAgentIds.size,
         state.statusLog.length,
@@ -337,7 +406,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       ].join("|");
       if (sig !== state.sig) {
         state.sig = sig;
-        const live = [...person, ...agent, ...statusMerged];
+        const live = [...person, ...cards, ...agent, ...statusMerged];
         live.sort((left, right) => left.key - right.key);
         // Sealed history is an immutable prefix; the live segment follows in the frame's order.
         transcript.setEntries(
@@ -351,6 +420,35 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     }
   };
 
+  // The in-flight partial: the watch receives pi.live's committed partials
+  // (~100ms cadence). The listener never touches the Session — it hands the
+  // cards straight to the view; a throttled full rebuild follows so committed
+  // rounds land as folded cards while the run continues.
+  let lastLiveRebuild = 0;
+  const startLiveWatch = async (): Promise<void> => {
+    const watch = await state.session.harness.watchDoc(LiveDoc, state.session.conversation.id, BACKGROUND_CONTEXT).catch(() => undefined);
+    if (watch === undefined) return; // watch unavailable: landed lines still refresh on the timer
+    state.liveWatch = watch;
+    let hadLive = false;
+    watch.start((call) => {
+      if (call.kind !== "value") return; // a failed frame keeps the last shown tail
+      const live = call.value as LiveState;
+      const cards = liveCardsOf(live);
+      transcript.setLive(cards);
+      tui.requestRender();
+      const hasLive = cards.length > 0 || live.generation !== undefined || (live.tools?.length ?? 0) > 0;
+      const now = Date.now();
+      // Landed entries arrive through a full rebuild: throttled while streaming, immediate when the tail empties.
+      if (now - lastLiveRebuild >= 400 || (hadLive && !hasLive)) {
+        lastLiveRebuild = now;
+        setImmediate(() => {
+          void rebuildTranscript();
+        });
+      }
+      hadLive = hasLive;
+    });
+  };
+
   const runCollapse = async (reason: string) => {
     if (state.collapsing) return;
     state.collapsing = true;
@@ -361,16 +459,19 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       pushStatus(`${state.pending.length} queued message(s) dropped by the collapse`);
       state.pending = [];
     }
-    // seal: the rendered prefix becomes history; the status log rides along inside it
+    // seal: the rendered prefix becomes history (in-flight tail included); the status log rides along inside it
     state.sealed = [...state.sealed, ...transcript.snapshot()];
     state.statusLog = [];
+    transcript.setLive([]);
+    await state.liveWatch?.stop().catch(() => undefined);
+    state.liveWatch = undefined;
     try {
       const before = await brain.read();
       for (const record of before.chat) if (record.author === "agent") state.sealedAgentIds.add(record.id);
       const outcome = await collapseLiveSession(state.session, options, reason);
       state.session = outcome.session;
       headerState.session = outcome.session;
-      state.assistantWatermark = 0;
+      void startLiveWatch(); // re-arm on the rebuilt generation
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
       await refreshSidebar();
     } catch (error) {
@@ -436,7 +537,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     "/copy — copy the transcript to the clipboard (also a /tmp fallback file)",
     "/copy-session — full diagnostic dump: transcript, context, counts (clipboard + /tmp)",
     "these are the only slash commands; anything else starting with / is not sent to the agent",
-    "keys: ctrl+x stop · shift+tab send mode · ctrl+o jump · ctrl+p palette · ctrl+h sidebar · ctrl+c quit",
+    "keys: ctrl+x stop · shift+tab send mode · ctrl+e fold cards · ctrl+o jump · ctrl+p palette · ctrl+h sidebar · ctrl+c quit",
   ].join("\n");
 
   const runSlash = async (raw: string) => {
@@ -570,6 +671,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       tui.requestRender();
       return { consume: true };
     }
+    if (matchesKey(data, "ctrl+e")) {
+      transcript.toggleAllCards();
+      tui.requestRender();
+      return { consume: true };
+    }
     if (matchesKey(data, "ctrl+o")) {
       showJump();
       return { consume: true };
@@ -592,6 +698,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     void rebuildTranscript().catch(() => undefined);
   }, 1_500);
 
+  void startLiveWatch();
   await rebuildTranscript();
   return runDone;
 }

@@ -286,7 +286,7 @@ export function createTools(deps: ToolDeps): ToolRegistration[] {
     defineTool({
       name: "tree",
       description:
-        "Set the anchor and depth of the project tree in your state block and return the rendered tree. The anchor stays inside the project; move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
+        "Set the anchor and depth of the project tree in your state block and return the rendered tree. The anchor stays inside the project and never inside `.brain`; `.brain` is never listed. Move it where your attention is. Depth 0 shows only the anchor line. The tree marks files an Atlas node links.",
       parameters: obj({
         anchor: opt(str({ minLength: 1, maxLength: 4096 })),
         depth: opt(int({ minimum: 0, maximum: 12 })),

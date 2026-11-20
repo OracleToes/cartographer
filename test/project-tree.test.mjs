@@ -20,6 +20,11 @@ const makeProject = () => {
   writeFileSync(join(root, "src/cli.ts"), Buffer.alloc(512));
   writeFileSync(join(root, "src/domain/records.ts"), Buffer.alloc(1536));
   symlinkSync(join(root, "src/domain"), join(root, "linked-dir"), "dir");
+  // The agent does not see the Brain: present once here so the skip is tested
+  // against a populated store, including an unreadable-looking WAL.
+  mkdirSync(join(root, ".brain/context"), { recursive: true });
+  writeFileSync(join(root, ".brain/brain.sqlite"), Buffer.alloc(4096));
+  writeFileSync(join(root, ".brain/context/live.sqlite"), Buffer.alloc(1024));
   return root;
 };
 
@@ -114,6 +119,36 @@ test("a symlinked directory renders as a leaf and is never followed", () => {
     const scanned = scanTree(root, root);
     const symlink = scanned.children.find((child) => child.name === "linked-dir");
     assert.equal(symlink.directory, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("`.brain` is never listed and never in the aggregated sizes", () => {
+  const root = makeProject();
+  try {
+    const brain = emptyBrain();
+    const block = projectTreeBlock(root, root, 10, brain);
+    assert.ok(!block.lines.some((line) => line.includes(".brain")), ".brain renders no line");
+    // The Brain's bytes are excluded wholesale: nothing above or below the anchor aggregates them.
+    const scanned = scanTree(root, root);
+    assert.equal(scanned.children?.some((child) => child.name === ".brain"), false);
+    const srcNode = scanned.children?.find((child) => child.name === "src");
+    assert.equal(srcNode?.size, 2048);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an anchor into `.brain`, at any depth, is rejected", () => {
+  const root = makeProject();
+  try {
+    const brain = emptyBrain();
+    mkdirSync(join(root, "src/.brain"), { recursive: true });
+    assert.throws(() => projectTreeBlock(root, join(root, ".brain"), 1, brain), AnchorError);
+    assert.throws(() => projectTreeBlock(root, join(root, ".brain", "context"), 1, brain), AnchorError);
+    assert.throws(() => projectTreeBlock(root, join(root, "src", ".brain"), 1, brain), AnchorError);
+    assert.throws(() => projectTreeBlock(root, ".brain", 1, brain), AnchorError);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -6,9 +6,10 @@
  * links to — a map of what the agent understands, not a listing. The agent
  * moves the anchor and the depth; the anchor stays inside the project.
  *
- * Sizes aggregate the whole subtree (lstat, symlinks are leaves). Nothing is
- * hidden: every entry inside the anchor renders, including dotfiles. Rendering
- * is display-bounded by depth; aggregation is not.
+ * Sizes aggregate the whole subtree (lstat, symlinks are leaves). `.brain` is
+ * never shown: it is skipped everywhere it would appear, and it may not be an
+ * anchor — the agent does not see the Brain (MINI.md §2.3, §7). Rendering is
+ * display-bounded by depth; aggregation is not.
  *
  * The `tree` tool sets anchor and depth and returns the rendered text; the
  * state block renders the same shape at the tail of every request.
@@ -32,13 +33,16 @@ export interface TreeEntry {
 
 export class AnchorError extends Error {}
 
-/** The internal anchor must stay inside the project root, as MINI.md §6.1 requires. */
+/** The internal anchor must stay inside the project root and outside `.brain`, as MINI.md §2.3 and §7 require — the agent does not see the Brain. */
 export function containedAnchor(root: string, anchor: string): string {
   const r = resolve(root);
   const resolved = resolve(isAbsolute(anchor) ? anchor : resolve(r, anchor));
   const rel = relative(r, resolved);
   if (resolved !== r && (rel === "" || rel.startsWith("..") || isAbsolute(rel))) {
     throw new AnchorError(`anchor escapes the project root: ${anchor}`);
+  }
+  if (rel !== "" && rel.split(sep).includes(".brain")) {
+    throw new AnchorError(`\`.brain\` is not visible to the tree: ${anchor}`);
   }
   return resolved;
 }
@@ -55,6 +59,9 @@ function scan(absolute: string, name: string): TreeEntry {
   let total = 0;
   try {
     for (const child of readdirSync(absolute, { withFileTypes: true })) {
+      // The agent does not see the Brain (MINI.md §2.3): skip it wholesale —
+      // no line, and no bytes in any aggregate.
+      if (child.name === ".brain") continue;
       const childPath = `${absolute}${sep}${child.name}`;
       try {
         const scanned = scan(childPath, child.name);

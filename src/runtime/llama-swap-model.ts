@@ -6,9 +6,14 @@
  *   needs a non-empty internal value, and the `authorization: null` header
  *   removes the resulting Authorization header before the request leaves;
  * - OpenAI-compatible `/v1` endpoint, openAI-completions API;
+ * - llama.cpp's OpenAI-compatible server accepts streamed usage: it honours
+ *   `stream_options.include_usage` and finishes the stream with a `usage`
+ *   chunk (prompt/completion tokens) — verified against ggml-org/llama.cpp's
+ *   own server test suite (tools/server/tests) on 2026-11-20. llama-swap
+ *   proxies that chunk through; pi-ai parses it, and the state block anchors
+ *   its fullness line on the last reported input.
  * - llama.cpp accepts system messages but not the developer role,
- *   reasoning_effort, store, or streamed usage; max_tokens field, not
- *   max_completion_tokens;
+ *   reasoning_effort, or store; max_tokens field, not max_completion_tokens;
  * - the context window is min(configured ceiling, advertised capacity) —
  *   the configured ceiling can only be lowered, never raised, by the server.
  *
@@ -38,7 +43,7 @@ export const LLAMA_SWAP_COMPAT = {
   supportsDeveloperRole: false,
   supportsReasoningEffort: false,
   supportsStore: false,
-  supportsUsageInStreaming: false,
+  supportsUsageInStreaming: true,
   maxTokensField: "max_tokens",
 } as const;
 

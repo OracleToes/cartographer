@@ -40,6 +40,12 @@ export const tokens = {
   warn: style("#e0c56e"),
   /** Danger: destructive keys, over-window marks. */
   danger: style("#e07a6a"),
+  /** Reasoning: the agent at work, never addressing the person. */
+  reasoning: style("#c9a0f0"),
+  /** Non-chat model text: visible, dimmer and greyer than either voice. */
+  output: style("#9fb3c8"),
+  /** Tool cards: the machinery of the work, its own hue. */
+  tool: style("#d08a4e"),
   /** Overlay/panel background. */
   panel: background("#14181d"),
   bold: (text: string) => styleText(text, { bold: true }, mode()),
