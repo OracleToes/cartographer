@@ -276,3 +276,27 @@ assumption, or a statement, the response is an answer — not work.
   off in so many words. Dropped means restated never, deferred never, smuggled
   back under a new name never. If the work genuinely needs the answer, do what
   the documents tell you and say what you did, once, or stop.
+
+## 10. The Arena workspace resets
+
+Something in this environment intermittently resets the repository between
+turns: the working tree is left intact, but `node_modules`/`dist` vanish, and
+on one occasion the local branch pointer `arena/<branch>` was moved back to
+the base commit while the working tree kept everything as untracked files.
+The remote tip is the source of truth. Expect it, and repair it when found:
+
+- Treat the local branch as possibly stale. Before trusting `git status` or
+  cutting a diff, `git fetch origin <current-branch>`; compare
+  `git rev-parse HEAD` with `origin/<branch>`.
+- If the branch pointer trails the remote tip, move it forward with
+  `git reset --mixed origin/<current-branch>` (working tree untouched; the
+  reflog keeps the old value). Never force-push; never pull rewrites onto a
+  tree you have not checked.
+- If `node_modules`/`dist` are missing, `npm ci` then `npm run build`.
+- The person owns pulls: do not fetch-and-merge to "get ahead"; the fetches
+  in the two points above are for staleness detection and pointer repair, not
+  for changing content.
+- Report every repair in one line at the end of the turn — what was reset,
+  what was restored, what is now true.
+- If a repair fails or the tree contains something neither side explains,
+  stop and ask; do not improvise a recovery.

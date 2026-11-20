@@ -47,7 +47,8 @@ import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode } from "./chrome.js";
-import { copyText, flattenEntry } from "./copy.js";
+import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
+import { flattenEntry } from "./dump.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
@@ -67,8 +68,10 @@ interface PendingItem {
 
 interface TuiState {
   session: LiveSession;
-  /** Agent chat record ids already merged into the view; persists across collapses (sealed history holds them). */
+  /** Warning watermark: agent record ids observed since the last collapse reset; drives the plain-text-answer detection. */
   seenChat: Set<string>;
+  /** Render exclusion: agent records already shown (boot history, or sealed by a collapse). Persists across collapses. */
+  sealedAgentIds: Set<string>;
   sendMode: SendMode;
   /** True while at least one submission is in flight; drives the footer badge and the live timer's rebuilds. */
   running: boolean;
@@ -155,6 +158,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const state: TuiState = {
     session,
     seenChat: await agentChatSeen(brain),
+    sealedAgentIds: await agentChatSeen(brain),
     sendMode: "steer",
     running: false,
     pending: [],
@@ -171,7 +175,9 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   };
 
   const terminal = new ProcessTerminal();
-  const tui = new TuiAltScreen(terminal);
+  // The same verified-native clipboard path the mouse selection copies through;
+  // without it pi-tui falls back to a bare OSC 52 write, which can lie.
+  const tui = new TuiAltScreen(terminal, undefined, undefined, { copySelection: createSelectionCopier() });
 
   const project = basename(options.root.replace(/[/\\]+$/, ""));
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
@@ -294,9 +300,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const freshAgentIds: string[] = [];
       for (const record of brainState.chat) {
         if (record.author !== "agent") continue;
-        if (state.seenChat.has(record.id)) continue; // already shown (sealed) or pre-boot history
-        state.seenChat.add(record.id);
-        freshAgentIds.push(record.id);
+        if (!state.seenChat.has(record.id)) {
+          state.seenChat.add(record.id);
+          freshAgentIds.push(record.id);
+        }
+        if (state.sealedAgentIds.has(record.id)) continue; // shown already (boot burst or sealed by a collapse)
         agent.push({ key: anchorAt(record.createdAt) + 0.5, entry: { kind: "agent", text: record.text } });
       }
 
@@ -323,7 +331,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         state.sealed.length,
         person.map((item) => item.key).join(","),
         String(agent.length),
-        state.seenChat.size,
+        state.sealedAgentIds.size,
         state.statusLog.length,
         state.pending.map((item) => item.text).join("\u0001"),
       ].join("|");
@@ -357,6 +365,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
     state.sealed = [...state.sealed, ...transcript.snapshot()];
     state.statusLog = [];
     try {
+      const before = await brain.read();
+      for (const record of before.chat) if (record.author === "agent") state.sealedAgentIds.add(record.id);
       const outcome = await collapseLiveSession(state.session, options, reason);
       state.session = outcome.session;
       headerState.session = outcome.session;
@@ -437,8 +447,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         pushStatus(slashHelp);
       } else if (command === "copy") {
         const text = transcript.toPlainText();
-        const result = await copyText(text, "transcript");
-        pushStatus(`copied the transcript (${text.split("\n").length} lines) — if the paste is empty, your terminal drops OSC 52; fallback file: ${result.path}`);
+        const result = await copyWithFallback(text, "transcript");
+        pushStatus(`/copy — ${result.where} (${text.split("\n").length} lines) · fallback file: ${result.fallbackPath}`);
       } else if (command === "copy-session") {
         const brainState = await brain.read();
         const entries = (await sessionTranscript(state.session)) as unknown as ContextEntryLike[];
@@ -462,8 +472,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
           lines.push("", `#${flat.id} ${flat.kind} · role ${flat.role} · ${flat.timestamp === undefined ? "?" : new Date(flat.timestamp).toISOString()}`, flat.body);
         }
         const text = lines.join("\n");
-        const result = await copyText(text, "session");
-        pushStatus(`session dump copied (${text.split("\n").length} lines) — fallback file: ${result.path}`);
+        const result = await copyWithFallback(text, "session");
+        pushStatus(`/copy-session — ${result.where} (${text.split("\n").length} lines) · fallback file: ${result.fallbackPath}`);
       } else {
         pushStatus(`unknown command /${command} — /help lists them`);
       }

@@ -1,30 +1,7 @@
 /**
- * `/copy` and `/copy-session` (the person's logs, 2026-11-20).
- *
- * pi-tui's own selection-copy uses OSC 52, which lies on terminals that do
- * not pass it through (macOS Terminal.app, tmux without `set-clipboard on`);
- * there is no reliable in-band acknowledgement, so the copy always goes two
- * ways: an OSC 52 write to the terminal (the clipboard when it works) and a
- * plain file under the temp directory (the fallback that always works). The
- * status line names both.
+ * The /copy-session context flattening (the person's diagnostic logs).
+ * One persisted entry → plain text, including the frozen projection verbatim.
  */
-import { writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
-export interface CopyResult {
-  /** Where the fallback file landed. */
-  path: string;
-  bytes: number;
-}
-
-/** Write `text` to the clipboard (OSC 52) and to a temp file; both, always. */
-export async function copyText(text: string, stem: string): Promise<CopyResult> {
-  process.stdout.write(`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`);
-  const path = join(tmpdir(), `carto-${stem}-${Date.now()}.txt`);
-  await writeFile(path, text, "utf8");
-  return { path, bytes: Buffer.byteLength(text, "utf8") };
-}
 
 /** Plain-text dump of one context entry as far as the session shows it. */
 export interface ContextDumpEntry {
@@ -39,6 +16,7 @@ function partText(part: unknown): string {
   if (part === null || typeof part !== "object") return String(part);
   const value = part as Record<string, unknown>;
   if (value.type === "text" && typeof value.text === "string") return value.text;
+  if (value.type === "thinking" && typeof value.thinking === "string") return `[thinking] ${value.thinking}`;
   if (value.type === "toolCall") {
     const name = typeof value.name === "string" ? value.name : "tool";
     return `→ ${name}(${JSON.stringify(value.arguments ?? {})})`;
