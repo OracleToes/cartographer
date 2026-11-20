@@ -54,9 +54,9 @@ session is rebuilt from the Brain alone, which the person asked about directly
 something happens, right?" — yes). See `docs/intent.md` §17 and `MINI.md`
 §4.2.
 
-The mechanics below are derived from the person's stated intention, not from
-what is easiest, because the person delegated the choice and does not know
-which is best. Derived, not confirmed — the person can veto any line of it.
+The mechanics below were derived from the person's stated intention, not from
+what is easiest, because the person delegated the choice and did not know
+which was best. Confirmed by the person: Blessed.
 
 **The archive is the sealed previous generation's Pi store.** At collapse the
 old store is sealed read-only and becomes the archive; the new generation gets
@@ -79,6 +79,8 @@ after loses only what was never pinned.
 **The Brain grows only by what is explicitly kept.** `.brain` gains records
 only through the agent's writes and the purge's pinned exports — nothing else
 enters it, so it cannot balloon. One sealed generation exists at a time.
+
+See `docs/intent.md` §29.
 
 ## §4. Recover
 

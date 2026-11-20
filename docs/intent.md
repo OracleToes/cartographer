@@ -440,3 +440,17 @@ update its Brain; it blocks nothing and deletes nothing.
 
 **Established by.** "i think so? it gebtly informs the agent to update its
 brain."
+
+
+## 29. The archive is the sealed previous generation's store
+
+**Decision.** At collapse the previous generation's Pi store is sealed
+read-only and becomes the archive; the new generation gets a fresh store. No
+copy and no export is written at collapse. Recovery opens the sealed store
+read-only; the agent cannot read it and does not know it exists. Pin markers
+for the archive live in the Brain; at the next collapse the purge first
+exports pinned-to-archive records into the Brain, flushes, and only then
+deletes the sealed store. Unpinned material leaves with the file. The Brain
+grows only by what is explicitly kept.
+
+**Established by.** Blessed by the person: 'Blessed.'

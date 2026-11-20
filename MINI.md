@@ -179,8 +179,9 @@ snapshots.
 > Confirmed by the person: "i want deleted text really gone", and "a fresh
 > store per generation" when choosing between storage shapes, with the person's
 > expectation that a session can be rebuilt from the Brain store if something
-> happens. Archive mechanics are derived from intention in
-`docs/open-questions.md` §3, pending the person's veto.
+> happens. The archive is the sealed previous generation's Pi store; at the
+next collapse the purge first exports pinned-to-archive records into the
+Brain, then deletes the store. See `docs/intent.md` §29.
 
 ## 5. Collapse
 
