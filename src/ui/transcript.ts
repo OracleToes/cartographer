@@ -10,10 +10,13 @@
  * the live tail in a limited-height window (8 lines); when the run settles,
  * the landed assistant entry renders as the same cards, folded by default.
  * A card folds to its header — a click on it (or `ctrl+e` for all of them)
- * toggles it back; the wheel over an open card scrolls the window when the
- * content is taller than the window. Landed cards default folded; cards from
- * the in-flight partial default open, so streaming is always watchable and
- * settle folds everything automatically.
+ * toggles it back. An open LANDED card emits every retained row into the
+ * page — the one scrolling owner is the page (MINI.md §8); the wheel is the
+ * page's everywhere, so scrolling up suspends the tail-follow and the person
+ * scrolls the rest themselves. An open LIVE card keeps the bounded tail: a
+ * growing stream must stay bounded or the page could not keep up with it.
+ * Landed cards default folded; cards from the in-flight partial default open,
+ * so streaming is always watchable and settle folds everything automatically.
  *
  * Order is the context's order, not the arrival order of the person's lines:
  * a line shows up where it actually landed in the context (the Brain, and the
@@ -61,7 +64,7 @@ export const isCard = (entry: TranscriptEntry): entry is CardEntry =>
   entry.kind === "reasoning" || entry.kind === "output" || entry.kind === "tool";
 
 const PREFIX_WIDTH = 7; // matches the person/agent blocks; gutter column starts here
-const WINDOW = 8; // lines an open card shows before the wheel takes over
+const LIVE_TAIL = 8; // lines an in-flight card shows; a settled open card emits every retained row
 const GUTTER = "│ ";
 
 interface CardRange {
@@ -93,7 +96,6 @@ export class TranscriptView implements Component {
   private queued: Array<{ text: string; mode: string }> = [];
   private liveCards: CardEntry[] = [];
   private expanded = new Map<string, boolean>();
-  private scrolled = new Map<string, number>();
   private wrapMemo = new Map<string, WrapMemo>();
   private ranges: CardRange[] = [];
   private cacheWidth = -1;
@@ -124,7 +126,6 @@ export class TranscriptView implements Component {
     this.queued = [];
     this.liveCards = [];
     this.expanded.clear();
-    this.scrolled.clear();
     this.wrapMemo.clear();
     this.cacheWidth = -1;
   }
@@ -165,7 +166,6 @@ export class TranscriptView implements Component {
   private pruneState(): void {
     const present = new Set(this.cardIds());
     for (const id of [...this.expanded.keys()]) if (!present.has(id)) this.expanded.delete(id);
-    for (const id of [...this.scrolled.keys()]) if (!present.has(id)) this.scrolled.delete(id);
     for (const id of [...this.wrapMemo.keys()]) if (!present.has(id)) this.wrapMemo.delete(id);
   }
 
@@ -238,16 +238,16 @@ export class TranscriptView implements Component {
     if (!expanded) return lines;
     const body = this.wrapBody(card, width);
     const total = body.length;
-    const maxOffset = Math.max(0, total - WINDOW);
-    const offset = Math.min(Math.max(0, this.scrolled.get(card.id) ?? 0), maxOffset);
-    this.scrolled.set(card.id, offset);
     const indent = " ".repeat(PREFIX_WIDTH);
-    for (const line of body.slice(offset, offset + WINDOW)) {
-      lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
+    if (card.live === true && total > LIVE_TAIL) {
+      lines.push(`${indent}${tokens.muted(GUTTER)}${tokens.muted(`⋯ ${total - LIVE_TAIL} earlier lines — bounded while it streams`)}`);
+      for (const line of body.slice(total - LIVE_TAIL)) {
+        lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
+      }
+      return lines;
     }
-    if (total > WINDOW) {
-      const shown = Math.min(WINDOW, total - offset);
-      lines.push(`${indent}${tokens.muted(GUTTER)}${tokens.muted(`⋯ ${total - shown - offset} more — wheel over the card scrolls`)}`);
+    for (const line of body) {
+      lines.push(`${indent}${tokens.muted(GUTTER)}${line}`);
     }
     return lines;
   }
@@ -256,24 +256,8 @@ export class TranscriptView implements Component {
     return this.ranges.find((range) => y >= range.start && y < range.end);
   }
 
-  /** Wheel over an open card scrolls its window; a click folds or unfolds it. Anything else falls through to the page. */
+  /** A click folds or unfolds a card. The wheel is never consumed here — the page owns it (scrolling up suspends the tail-follow; the person scrolls themselves). */
   handleMouse(event: import("@earendil-works/pi-tui").TuiMouseEvent): import("@earendil-works/pi-tui").TuiMouseEventResult | undefined {
-    if (event.type === "wheel" && event.wheelDelta !== undefined && event.wheelDelta !== 0) {
-      const range = this.rangeAt(event.y);
-      if (range === undefined) return undefined;
-      const card = this.cardById(range.id);
-      if (card === undefined || !this.isExpanded(card)) return undefined;
-      const total = this.wrapBody(card, event.width).length;
-      const maxOffset = Math.max(0, total - WINDOW);
-      if (maxOffset === 0) return undefined;
-      const delta = event.wheelDelta < 0 ? -1 : 1;
-      const current = this.scrolled.get(card.id) ?? 0;
-      const next = Math.min(Math.max(0, current + delta), maxOffset);
-      this.scrolled.set(card.id, next);
-      if (next !== current) this.cacheWidth = -1;
-      // Consumed either way: the window is the card's, not the page's.
-      return { handled: true, render: true };
-    }
     if (event.type === "click") {
       const range = this.rangeAt(event.y);
       if (range === undefined) return undefined;

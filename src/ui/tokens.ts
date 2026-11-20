@@ -54,3 +54,13 @@ export const tokens = {
 
 /** Dim full-line helper for status/flash-style lines. */
 export const statusLine = (text: string): string => tokens.muted(tokens.italic(`· ${text}`));
+
+/** The token bar's parts: muted, distinguishable — estimate hue per part (ui-proposal.md §7). */
+export const partTokens = {
+  /** System prompt + tool declarations. */
+  system: style("#6e7a86"),
+  /** The conversation so far. */
+  transcript: style("#4e6a8a"),
+  /** Tool results and tool-calling rounds. */
+  toolWork: style("#8a6a4e"),
+} as const;

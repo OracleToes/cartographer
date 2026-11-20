@@ -4,7 +4,10 @@
  *
  * Chat is the boot view; the Context surgery view and the Brain views land in
  * their own slices and are honestly absent — jumping to them flashes the slice
- * that owns them rather than rendering a fake. The transcript shows the
+ * that owns them rather than rendering a fake. The token bar sits above the
+ * footer on every view (docs/ui-proposal.md §7, candidate A): one row,
+ * segmented by part, honest about what is estimate and what is measured.
+ * The whole app carries one cell of padding on every edge. The transcript shows the
  * person's lines where they LANDED in the context (not where they were typed),
  * the agent's `chat` words, its reasoning, plain model text, and tool calls
  * as foldable cards (dimmer, their own hues — MINI.md §8, §10a as re-scoped
@@ -26,6 +29,7 @@ import {
   matchesKey,
   ProcessTerminal,
   ScrollView,
+  Spacer,
   TuiAltScreen,
   VStack,
   type OverlayHandle,
@@ -45,10 +49,11 @@ import {
 } from "../runtime/live-session.js";
 import { applyCapacityRefresh } from "../runtime/headless.js";
 import { staleMarks } from "../runtime/carto-extension.js";
-import { STATE_BLOCK_MARKER } from "../domain/state-block.js";
+import { isMarkerMessage, splitContextMessages, STATE_BLOCK_MARKER, type MessageLike as BlockMessageLike } from "../domain/state-block.js";
 import type { BrainStore } from "../runtime/brain-store.js";
 
 import { FooterView, HeaderView, nextSendMode, sendModeLabel, type SendMode } from "./chrome.js";
+import { TokenBarView, type TokenBarState } from "./token-bar.js";
 import { copyWithFallback, createSelectionCopier } from "./clipboard.js";
 import { flattenEntry } from "./dump.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
@@ -231,6 +236,8 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   const modelLabel = `${options.model.provider}/${options.model.modelId}`;
   const headerState = { project, modelLabel, session: state.session };
   const header = new HeaderView(headerState);
+  const barState: TokenBarState = { session: headerState.session, parts: { system: 0, transcript: 0, toolWork: 0 } };
+  const tokenBar = new TokenBarView(barState);
   const footer = new FooterView(state);
   const transcript = new TranscriptView();
   const sidebar = new Sidebar();
@@ -246,19 +253,31 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
   sidebar.setCounts(countSidebar(await brain.read()));
 
   tui.setLayoutRoot(
-    new VStack([
-      { component: header, basis: "auto" },
+    new HStack([
+      { component: new Spacer(0), basis: 1 },
       {
-        component: new HStack([
-          { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
-          { component: scroll, basis: 0, grow: 1, minSize: 3 },
+        component: new VStack([
+          { component: new Spacer(1), basis: 1 },
+          { component: header, basis: "auto" },
+          {
+            component: new HStack([
+              { component: sidebar, basis: sidebarWidth, visible: () => state.sidebarVisible },
+              { component: scroll, basis: 0, grow: 1, minSize: 3 },
+            ]),
+            basis: 0,
+            grow: 1,
+            minSize: 3,
+          },
+          { component: editor, basis: "auto", minSize: 3 },
+          { component: tokenBar, basis: 1 },
+          { component: footer, basis: 1 },
+          { component: new Spacer(1), basis: 1 },
         ]),
         basis: 0,
         grow: 1,
         minSize: 3,
       },
-      { component: editor, basis: "auto", minSize: 3 },
-      { component: footer, basis: 1 },
+      { component: new Spacer(0), basis: 1 },
     ]),
   );
   tui.start();
@@ -323,6 +342,13 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         }
         return anchor;
       };
+
+      const visibleMessages: BlockMessageLike[] = [];
+      for (const entry of entries) {
+        const message = messageOf(entry);
+        if (message === undefined) continue;
+        visibleMessages.push(message as unknown as BlockMessageLike);
+      }
 
       const person: Array<{ key: number; entry: TranscriptEntry }> = [];
       const landedTexts: Array<{ text: string; t: number }> = [];
@@ -396,6 +422,12 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
 
       const statusMerged = state.statusLog.map((item) => ({ key: anchorAt(item.t) + 0.5, entry: item.entry }));
 
+      // The token bar's inputs: the same estimates the state block reports,
+      // split the same way. Cheap next to the Brain read above.
+      const blockMessages = visibleMessages.filter((message) => !isMarkerMessage(message));
+      const parts = splitContextMessages(blockMessages);
+      barState.parts = { system: parts.systemTokens, transcript: parts.transcriptTokens, toolWork: parts.toolWorkTokens };
+
       const sig = [
         state.sealed.length,
         person.map((item) => item.key).join(","),
@@ -404,6 +436,11 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
         state.sealedAgentIds.size,
         state.statusLog.length,
         state.pending.map((item) => item.text).join("\u0001"),
+        String(Math.round(parts.systemTokens)),
+        String(Math.round(parts.transcriptTokens)),
+        String(Math.round(parts.toolWorkTokens)),
+        String(state.session.state.lastReportedInput ?? ""),
+        String(state.session.state.contextWindow),
       ].join("|");
       if (sig !== state.sig) {
         state.sig = sig;
@@ -472,6 +509,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
       const outcome = await collapseLiveSession(state.session, options, reason);
       state.session = outcome.session;
       headerState.session = outcome.session;
+      barState.session = outcome.session;
       void startLiveWatch(); // re-arm on the rebuilt generation
       pushStatus(`collapsed and rebuilt from the Brain (${suffix(previous)} → ${suffix(outcome.report.generation)})`);
       await refreshSidebar();

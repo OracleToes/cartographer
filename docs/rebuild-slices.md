@@ -490,3 +490,43 @@ Sweep results, everything not previously recorded:
   design — our concept, on `node:crypto`.
 
 No new dependencies introduced; no behavior changed by the sweep itself.
+
+## R5a and R5b landed, 2026-11-20 (this branch)
+
+**R5a** (`58e06a7`…`c90f39d`) — the workspace shell and the Chat view: one
+alternate screen, modes not tabs, jump mode, palette, sidebar, footer, the
+transcript from the live session. Field-verified by the person.
+
+**R5b** (this branch) — the token bar (§9; docs/ui-proposal.md §7,
+candidate A). One row, always visible, segmented by part (system+tools /
+transcript / tool work), one muted hue per part; the numbers are always
+`~`-marked (the tool-work-since tail is an estimate, the same phrasing the
+state block uses); the fill is hatched (`▤`) until the first provider
+report lands and solid (`▮`) after. The denominator is the ACTIVE window
+(min of the configured ceiling and the advertised capacity), never the
+model's maximum. Warning tint past 90% used, danger past the window. No
+`┊` budget tick is drawn: this build has no budget below the window, and
+a mark without a meaning is an invented figure. The breakdown line does
+not ride in the bar (it lands with the Context view's parts rail, R5d).
+The estimates are the state block's own arithmetic (`splitContextMessages`,
+4 bytes/token), computed in the workspace rebuild — never persisted, never
+relabelled.
+
+Also landed with R5b:
+- **One cell of padding on every edge** — the chrome never touches the
+  terminal edge (the ui-proposal frame's first promise, applied).
+- **The wheel is the page's everywhere.** An open LANDED card emits every
+  retained row into the page (the one scroll owner — scrolling up suspends
+  the tail-follow, the person scrolls themselves; scrolling back to the
+  bottom resumes it). An open LIVE card keeps the bounded tail
+  (`LIVE_TAIL = 8`): a growing stream that never folded would bury the
+  composer. `ctrl+e` and click fold/unfold; copy exports everything.
+- **docs/ui-redesign.md** — the main-era UI-redesign prompt
+  (`prompts/UIDesignPrompt.md`, recovered from git history at the person's
+  direction) applied to the rebuilt project under Posting's design
+  philosophy, pillar by pillar, with the rejections recorded (no modals, no
+  backend ceremony, no chrome on the edge). MINI.md unchanged.
+
+Not done: R5c+ — the Brain views, the Context surgery view (read-only,
+then edits), and prefill measurement only if the server ever sends
+`prompt_progress`.
