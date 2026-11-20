@@ -63,13 +63,10 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
     }
 
     case "atlas.upsert": {
-      const ids = new Set(brain.atlas.map((node) => node.id));
-      ids.add(write.node.id);
-      for (const edge of write.node.edges) {
-        if (!ids.has(edge.target)) {
-          throw new BrainError("An Atlas edge names a node that does not exist.");
-        }
-      }
+      // Edges are stored as written (MINI.md §2.3, confirmed): the graph is
+      // the agent's garden and permissive by intent — a flood of unconnected
+      // nodes or an edge to a vanished target is the agent's to tend, not
+      // the runtime's to validate away.
       const exists = brain.atlas.some((node) => node.id === write.node.id);
       const atlas = exists
         ? brain.atlas.map((node) => (node.id === write.node.id ? write.node : node))
@@ -126,8 +123,10 @@ function doApplyWrite(brain: CartoBrain, write: BrainWrite, now: number): CartoB
         case "atlas": {
           const atlas = brain.atlas.filter((node) => node.id !== write.id);
           if (atlas.length === brain.atlas.length) throw new BrainError("No Atlas node is named by that handle.");
-          const cleaned = atlas.map((node) => ({ ...node, edges: node.edges.filter((edge) => edge.target !== write.id) }));
-          return { ...brain, atlas: cleaned };
+          // No cascade: edges naming the deleted node stay as they are. The
+          // agent tends its own graph (§2.1, §2.3); a dead reference is
+          // something it can see and repair, not something to hide.
+          return { ...brain, atlas };
         }
         case "user-pin": {
           const userPins = brain.userPins.filter((pin) => pin.id !== write.id);

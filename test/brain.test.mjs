@@ -34,14 +34,13 @@ test("ledger.upsert creates then replaces; instructions and progress are Ledger 
   assert.equal(ledger("p1", "progress", "made progress", at(3)).kind, "progress");
 });
 
-test("atlas.upsert rejects an edge to a missing node; floats unconnected freely", () => {
-  assert.throws(
-    () => applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "title", "claim", at(1), [{ kind: "depends-on", target: "ghost" }]) }, at(1)),
-    BrainError,
-  );
-  const brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "title", "claim", at(1)) }, at(1));
-  assert.equal(brain.atlas.length, 1);
-  assert.equal(brain.atlas[0].edges.length, 0);
+test("atlas.upsert stores edges as written; unconnected nodes float freely", () => {
+  const brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "title", "claim", at(1), [{ kind: "depends-on", target: "ghost" }]) }, at(1));
+  assert.equal(brain.atlas[0].edges.length, 1);
+  assert.equal(brain.atlas[0].edges[0].target, "ghost");
+  const floating = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "solo", "claim", at(2)) }, at(2));
+  assert.equal(floating.atlas.length, 2);
+  assert.equal(floating.atlas[1].edges.length, 0);
 });
 
 test("contradicts edges resolve symmetric by convention, not by schema", () => {
@@ -55,8 +54,10 @@ test("pins in both layers; delete removes edges to the deleted node", () => {
   let brain = applyWrite(emptyBrain(), { kind: "atlas.upsert", node: node("a1", "one", "c", at(1)) }, at(1));
   brain = applyWrite(brain, { kind: "atlas.upsert", node: node("a2", "two", "c", at(2), [{ kind: "depends-on", target: "a1" }]) }, at(2));
   brain = applyWrite(brain, { kind: "delete", target: "atlas", id: "a1" }, at(3));
+  // No cascade: the edge to the deleted node stays as written; the agent tends it.
   assert.equal(brain.atlas.length, 1);
-  assert.equal(brain.atlas[0].edges.length, 0);
+  assert.equal(brain.atlas[0].edges.length, 1);
+  assert.equal(brain.atlas[0].edges[0].target, "a1");
 
   brain = applyWrite(brain, { kind: "pin.add", layer: "user", pin: { id: "p1", item: "a2", reason: "keep", source: source(), createdAt: at(4) } }, at(4));
   brain = applyWrite(brain, { kind: "pin.add", layer: "carry", pin: { id: "p2", item: "a2 claim", reason: "keep", source: source(), createdAt: at(5) } }, at(5));
