@@ -54,6 +54,25 @@ Deleting a Brain record is a single step with no undo state.
 
 The Brain is the only durable storage. Nothing else in Carto is durable.
 
+### 2.3 The Atlas graph
+
+Nodes are source-backed claims with evidence. Edges between nodes are optional
+and typed; nothing requires a node to connect to another node. A node, or a
+sub-graph of nodes, may float unconnected from the rest of the Atlas and from
+the project tree. The tools are permissive and easy to use, by intent — the
+graph's usefulness comes from the agent tending it, not from validation.
+
+Edge types (directed, except `contradicts` which is symmetric):
+
+- **`replaces`** — this node supersedes that one. The decay instrument: a dead
+  claim that says so.
+- **`depends-on`** — this claim rests on that one. The verification path: walk
+  down what a claim stands on.
+- **`contradicts`** — the two cannot both hold. Resolve or explicitly hedge;
+  never act on both.
+
+> Confirmed by the person.
+
 ### 2.1 The agent owns its Brain
 
 The agent modifies everything in its Brain without approval. The Brain is its own

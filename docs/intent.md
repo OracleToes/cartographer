@@ -390,3 +390,19 @@ understanding hung on it.
 
 **Established by.** "so the atlas serves the dual purpose of giving the tree
 leaves ... and of mapping out meaningful structure."
+
+
+## 25. Atlas edges are optional and typed
+
+**Decision.** Atlas nodes may link to other Atlas nodes with one of three edge
+types: `replaces` (this supersedes that), `depends-on` (this rests on that), and
+`contradicts` (symmetric; the two cannot both hold). No node is required to be
+connected to anything. Nodes and sub-graphs may float unconnected to the rest of
+the Atlas and to the tree. The Atlas and the other tools are permissive and
+easy to use; the graph's value comes from the agent tending it, not from
+structural validation.
+
+**Established by.** The person agreed to the small typed edge set and directed:
+"we should not require a node to be connected to another node, so an edge is not
+always required, we want the atlas (and the other tools) to be permissive and
+easy to use, so a node or cluster can exist unconnected."
