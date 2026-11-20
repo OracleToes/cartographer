@@ -77,7 +77,7 @@ export function referenceRows(state: FrameState, width: number, maxHeight: numbe
 function chatEditLines(): string[] {
   return [
     token.warning("Chat edit selected. Press i to replace its text."),
-    token.muted("d marks it for deletion at collapse; D removes it now."),
+    token.muted("d deletes it. Delete cannot be undone."),
     token.muted("Esc closes the edit and keeps the Chat as it is."),
   ];
 }

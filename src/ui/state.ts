@@ -9,13 +9,13 @@ import { token } from "./tokens.js";
  * words, with the number that matters most right now.
  *
  * The order of the tests is the order of priority. A failure outranks a run,
- * because a run cannot continue past it; a paused turn outranks a run for the
- * same reason. A recent reading outlives the run by a few seconds only, so the
- * person can see how long the server took to read the prompt.
+ * because a run cannot continue past it. A recent reading outlives the run by
+ * a few seconds only, so the person can see how long the server took to read
+ * the prompt.
  */
 
 export interface StatusInput {
-  view: Pick<ProjectView, "turn" | "brain" | "activity">;
+  view: Pick<ProjectView, "turn" | "activity" | "error">;
   /** The live documents, when a frame read them; absent while cached. */
   live?: Pick<LiveSessionView, "busy">;
   prefill?: PrefillState;
@@ -24,7 +24,7 @@ export interface StatusInput {
   runStartedAt?: number | undefined;
   /** The last finished prefill, kept for a short while. */
   lastReading?: { fresh: number; ms: number; at: number } | undefined;
-  /** A local action is in flight (a person command, a pause, a resume). */
+  /** A local action is in flight (a person command, an interrupt, a continue). */
   applying: boolean;
   /** A frame could not read the project. */
   error?: string | undefined;
@@ -49,19 +49,8 @@ export function statusLine(input: StatusInput): StatusText {
   const { view, prefill } = input;
   const turn = view.turn.state;
   if (input.error !== undefined) return { mark: "!", text: input.error, spinning: false, style: token.danger };
-  if (view.brain.activity.kind === "error") {
-    return { mark: "!", text: view.brain.activity.detail ?? "The last run failed.", spinning: false, style: token.danger };
-  }
-  if (turn === "paused") {
-    return { mark: "⏸", text: "paused · r edits the draft · x cancels", spinning: false, style: token.warning };
-  }
-  if (view.brain.activity.kind === "waiting-for-collapse") {
-    return {
-      mark: "●",
-      text: "collapse requested · a shows the commands · Esc closes",
-      spinning: false,
-      style: token.warning,
-    };
+  if (view.error !== null) {
+    return { mark: "!", text: view.error, spinning: false, style: token.danger };
   }
   if (input.applying) {
     // A person command commits to the Brain; the run, if any, is not moving.

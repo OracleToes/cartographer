@@ -1,5 +1,4 @@
 export type RecordId = string;
-export type GenerationId = string;
 
 export type Freshness = "fresh" | "stale" | "unknown";
 
@@ -39,12 +38,23 @@ export interface LedgerEntry {
   updatedAt: number;
 }
 
+export type AtlasEdgeKind = "replaces" | "depends-on" | "contradicts";
+
+/**
+ * A typed, optional edge to another Atlas node. Nothing requires an edge;
+ * a node, or a whole sub-graph, may float unconnected.
+ */
+export interface AtlasEdge {
+  kind: AtlasEdgeKind;
+  target: RecordId;
+}
+
 export interface AtlasNode {
   id: RecordId;
   title: string;
   claim: string;
   evidence: SourceRef[];
-  links: RecordId[];
+  edges: AtlasEdge[];
   createdAt: number;
   updatedAt: number;
 }
@@ -65,16 +75,6 @@ export interface UserPin {
   createdAt: number;
 }
 
-export interface Handoff {
-  intent: string;
-  activeLedgerIds: RecordId[];
-  openQuestionIds: RecordId[];
-  relevantAtlasIds: RecordId[];
-  nextAction: string;
-  note: string;
-  updatedAt: number;
-}
-
 export interface WakeEntry {
   id: RecordId;
   kind: "time" | "path";
@@ -84,48 +84,13 @@ export interface WakeEntry {
   createdAt: number;
 }
 
-export interface ChangeProposal {
-  id: RecordId;
-  rationale: string;
-  patch: string;
-  base: Array<{ path: string; digest: string }>;
-  status: "proposed" | "approved" | "rejected" | "applied" | "conflicted";
-  createdAt: number;
-  resolvedAt: number | null;
-}
-
 export type DeletionRecordTarget = "chat" | "ledger" | "atlas";
 export type DeletionTarget =
   | { target: DeletionRecordTarget; id: RecordId }
   | { target: "user-pin"; id: RecordId }
   | { target: "carry-pin"; id: RecordId };
 
-export type DeletionMark = DeletionTarget & {
-  markedAt: number;
-};
-
-export type ActivityKind =
-  | "idle"
-  | "thinking"
-  | "reading"
-  | "waiting-for-collapse"
-  | "waiting-for-approval"
-  | "applying-change"
-  | "sleeping"
-  | "woken"
-  | "error";
-
-export interface Activity {
-  kind: ActivityKind;
-  detail: string | null;
-}
-
-export interface ContextGenerations {
-  liveGeneration: GenerationId | null;
-  archiveGeneration: GenerationId | null;
-}
-
-export type HandleKind = "ledger" | "chat" | "atlas" | "pin" | "handoff" | "wake" | "change" | "deletion";
+export type HandleKind = "ledger" | "chat" | "atlas" | "pin" | "wake";
 
 /**
  * One short, type-prefixed public handle for one durable record. Carto keeps
@@ -135,7 +100,7 @@ export interface RecordHandle {
   kind: HandleKind;
   /** The private durable ID. It is never rendered to the agent. */
   id: RecordId;
-  /** A short public handle such as `L1`, `C10`, `A1`, `P1`, or `H1`. */
+  /** A short public handle such as `L1`, `C10`, `A1`, `P1`, or `W1`. */
   handle: string;
   /** Creation time for display order and public metadata. */
   timestamp: number;
@@ -161,13 +126,7 @@ export interface CartoBrain {
   atlas: AtlasNode[];
   userPins: UserPin[];
   carryPins: CarryPin[];
-  handoff: Handoff | null;
   wakes: WakeEntry[];
-  changes: ChangeProposal[];
-  deletionMarks: DeletionMark[];
   /** Generation-local public handles. Rebuilt on every collapse. */
   handles: HandleTable;
-  context: ContextGenerations;
-  activity: Activity;
 }
-

@@ -140,6 +140,10 @@ function parseLegacyAtlas(value: unknown, now: number, warnings: string[]): Atla
   }
 
   const idByName = new Map(candidates.map((candidate) => [candidate.name, candidate.id]));
+  const linked = candidates.some((candidate) => candidate.links.length > 0);
+  if (linked) {
+    warnings.push("Imported legacy Atlas links as depends-on edges. Atlas edges are typed now; review them.");
+  }
   return candidates.map((candidate) => {
     const excerpt = [
       "Imported legacy Atlas record. It is stale until Carto checks current project evidence.",
@@ -154,7 +158,9 @@ function parseLegacyAtlas(value: unknown, now: number, warnings: string[]): Atla
       title: candidate.title,
       claim: candidate.claim,
       evidence: [{ kind: "context", contextId: "legacy-import", excerpt, freshness: "stale" }],
-      links: [...new Set(candidate.links.map(normalizedName).map((name) => idByName.get(name)).filter(isString))],
+      edges: [
+        ...new Set(candidate.links.map(normalizedName).map((name) => idByName.get(name)).filter(isString)),
+      ].map((target) => ({ kind: "depends-on" as const, target })),
       createdAt: candidate.createdAt,
       updatedAt: candidate.updatedAt,
     };

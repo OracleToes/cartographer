@@ -9,41 +9,32 @@ import type { CartoProject } from "../runtime/project.js";
  * fallback.
  */
 
+export type AtlasEdgeKind = "replaces" | "depends-on" | "contradicts";
+
 export type UiCommand =
   | { kind: "collapse" }
-  | { kind: "confirm-collapse" }
-  | { kind: "cancel-collapse" }
   | { kind: "refresh" }
-  | { kind: "delete"; handle: string; now: boolean }
-  | { kind: "undelete"; handle: string }
-  | { kind: "unpin"; handle: string; now: boolean }
+  | { kind: "delete"; handle: string }
+  | { kind: "unpin"; handle: string }
   | { kind: "pin"; item: string; reason: string }
   | { kind: "pin-file"; path: string; startLine: number; endLine: number; item: string; reason: string }
   | { kind: "agent-chat"; text: string }
   | { kind: "ledger"; handle: string | null; kindName: "goal" | "note" | "question"; status: "open" | "answered" | "closed"; text: string; answer: string | null; evidence: string[] }
-  | { kind: "atlas"; handle: string | null; title: string; claim: string; path: string; startLine: number; endLine: number; links: string[] }
-  | { kind: "handoff"; intent: string; nextAction: string; note: string }
-  | { kind: "clear-handoff" }
+  | { kind: "atlas"; handle: string | null; title: string; claim: string; path: string; startLine: number; endLine: number; edges: Array<{ kind: AtlasEdgeKind; handle: string }> }
   | { kind: "wake"; handle: string | null; wakeKind: "time" | "path"; condition: string; reason: string }
-  | { kind: "cancel-wake"; handle: string; reason: string }
-  | { kind: "approve" | "reject"; handle: string };
+  | { kind: "cancel-wake"; handle: string; reason: string };
 
 function isHandle(value: string): boolean {
-  return /^[LCAPHWXD]\d+$/i.test(value.trim());
+  return /^[LCAPW]\d+$/i.test(value.trim());
 }
 
 export function parseCommand(text: string): UiCommand | undefined {
   if (!text.startsWith("/")) return undefined;
   const [name, rest] = splitFirst(text.slice(1).trim());
   if (name === "collapse" && rest === "") return { kind: "collapse" };
-  if (name === "confirm-collapse" && rest === "") return { kind: "confirm-collapse" };
-  if (name === "cancel-collapse" && rest === "") return { kind: "cancel-collapse" };
   if (name === "refresh" && rest === "") return { kind: "refresh" };
-  if (name === "clear-handoff" && rest === "") return { kind: "clear-handoff" };
-  if ((name === "approve" || name === "reject") && isHandle(rest)) return { kind: name, handle: rest };
-  if ((name === "delete" || name === "delete-now") && isHandle(rest)) return { kind: "delete", handle: rest, now: name === "delete-now" };
-  if (name === "undelete" && isHandle(rest)) return { kind: "undelete", handle: rest };
-  if ((name === "unpin" || name === "unpin-now") && isHandle(rest)) return { kind: "unpin", handle: rest, now: name === "unpin-now" };
+  if (name === "delete" && isHandle(rest)) return { kind: "delete", handle: rest };
+  if (name === "unpin" && isHandle(rest)) return { kind: "unpin", handle: rest };
   if (name === "agent-chat" && rest !== "") return { kind: "agent-chat", text: rest };
   if (name === "pin") {
     const [item, reason] = splitBars(rest, 2) ?? [];
@@ -70,16 +61,12 @@ export function parseCommand(text: string): UiCommand | undefined {
   if (name === "atlas") {
     const parts = splitParts(rest);
     const handle = isHandle(parts[0] ?? "") ? (parts.shift() as string) : null;
-    const [title, claim, range, links] = parts;
+    const [title, claim, range, edges] = parts;
     const parsed = range === undefined ? undefined : parseLineRange(range);
     if (title !== undefined && claim !== undefined && parsed !== undefined) {
-      return { kind: "atlas", handle, title, claim, ...parsed, links: links === undefined ? [] : links.split(",").map((link) => link.trim()).filter(Boolean) };
+      return { kind: "atlas", handle, title, claim, ...parsed, edges: parseEdges(edges) };
     }
-    throw new Error("Use /atlas [A#] | TITLE | CLAIM | path:start-end [| link-handle,link-handle].");
-  }
-  if (name === "handoff") {
-    const [intent, nextAction, note] = splitBars(rest, 3) ?? [];
-    if (intent !== undefined && nextAction !== undefined) return { kind: "handoff", intent, nextAction, note: note ?? "" };
+    throw new Error("Use /atlas [A#] | TITLE | CLAIM | path:start-end [| replaces:A1,depends-on:A2].");
   }
   if (name === "wake") {
     const parts = splitParts(rest);
@@ -103,21 +90,13 @@ export function parseCommand(text: string): UiCommand | undefined {
 export async function runCommand(project: CartoProject, command: UiCommand): Promise<void> {
   switch (command.kind) {
     case "collapse":
-      return project.requestCollapse();
-    case "confirm-collapse":
-      return project.confirmCollapse();
-    case "cancel-collapse":
-      return project.cancelCollapse();
+      return project.collapse();
     case "refresh":
       return project.refreshEvidence();
     case "delete":
-      if (command.now) return project.deleteHandleNow(command.handle);
-      return project.markHandleForDeletion(command.handle);
-    case "undelete":
-      return project.undeleteHandle(command.handle);
+      return project.deleteHandleNow(command.handle);
     case "unpin":
-      if (command.now) return project.removePinHandleNow(command.handle);
-      return project.removePinHandleAtCollapse(command.handle);
+      return project.removePinHandleNow(command.handle);
     case "pin":
       return project.addUserContextPin(command.item, command.reason);
     case "pin-file":
@@ -143,20 +122,14 @@ export async function runCommand(project: CartoProject, command: UiCommand): Pro
         path: command.path,
         startLine: command.startLine,
         endLine: command.endLine,
-        links: await project.resolveIds(command.links, undefined),
+        edges: await Promise.all(
+          command.edges.map(async (edge) => {
+            const target = await project.resolveTarget(edge.handle, ["atlas"]);
+            return { kind: edge.kind, target: target.id };
+          }),
+        ),
       });
     }
-    case "handoff":
-      return project.setHandoff({
-        intent: command.intent,
-        activeLedgerIds: [],
-        openQuestionIds: [],
-        relevantAtlasIds: [],
-        nextAction: command.nextAction,
-        note: command.note,
-      });
-    case "clear-handoff":
-      return project.setHandoff(null);
     case "wake": {
       const previous = command.handle === null ? undefined : await project.resolveTarget(command.handle, ["wake"]);
       return project.armWake({ id: previous?.id ?? `wake:person:${globalThis.crypto.randomUUID()}`, kind: command.wakeKind, condition: command.condition, reason: command.reason });
@@ -164,11 +137,6 @@ export async function runCommand(project: CartoProject, command: UiCommand): Pro
     case "cancel-wake": {
       const target = await project.resolveTarget(command.handle, ["wake"]);
       return project.cancelWake(target.id, command.reason);
-    }
-    case "approve":
-    case "reject": {
-      const target = await project.resolveTarget(command.handle, ["change"]);
-      return command.kind === "approve" ? project.approveChange(target.id) : project.rejectChange(target.id);
     }
   }
 }
@@ -185,6 +153,23 @@ function splitParts(text: string): string[] {
 function splitBars(text: string, minimum: number): string[] | undefined {
   const parts = text.split("|").map((part) => part.trim());
   return parts.length >= minimum - 1 && parts.every((part) => part !== "") ? parts : undefined;
+}
+
+const EDGE_KINDS: readonly AtlasEdgeKind[] = ["replaces", "depends-on", "contradicts"];
+
+function parseEdges(value: string | undefined): Array<{ kind: AtlasEdgeKind; handle: string }> {
+  if (value === undefined) return [];
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part !== "")
+    .map((part) => {
+      const match = /^([a-z-]+):([LCAPW]\d+)$/i.exec(part);
+      if (match === null) throw new Error(`An edge is KIND:HANDLE, for example replaces:A1: ${part}.`);
+      const kind = (match[1] ?? "").toLowerCase() as AtlasEdgeKind;
+      if (!EDGE_KINDS.includes(kind)) throw new Error(`An edge kind is replaces, depends-on, or contradicts: ${part}.`);
+      return { kind, handle: match[2] ?? "" };
+    });
 }
 
 function parseLineRange(value: string): { path: string; startLine: number; endLine: number } | undefined {

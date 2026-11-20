@@ -1,7 +1,6 @@
 import { distribute, findNode, flatten, type ContextTree, type TreeNode } from "../domain/prompt-tree.js";
 import type { ProjectView } from "../runtime/project.js";
 import { projectContext, renderContextPlan } from "../domain/context.js";
-import { mergeCarryPins } from "../domain/context.js";
 import { row } from "./chrome.js";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { token } from "./tokens.js";
@@ -140,7 +139,6 @@ export function selectableOf(rows: readonly TreeRow[]): string[] {
 export function unconfirmedRows(view: ProjectView, folds: Folds, selected: number, columns: number): TreeRow[] {
   const plan = projectContext(view.brain, {
     budget: view.context.budget,
-    carryPins: mergeCarryPins(view.liveCarryPins, view.brain.carryPins),
   });
   const text = renderContextPlan(plan);
   const rows: TreeRow[] = [
@@ -201,14 +199,10 @@ function groupBlocks(plan: ReturnType<typeof projectContext>): Array<{ title: st
 
 function sectionTitle(section: string): string {
   const names: Record<string, string> = {
-    rules: "Rules",
     ledger: "Ledger",
-    chat: "Chat",
     atlas: "Atlas",
     pin: "Pins",
-    handoff: "Handoff",
-    active: "Active state",
-    message: "Current input",
+    wake: "Wakes",
   };
   return names[section] ?? section;
 }

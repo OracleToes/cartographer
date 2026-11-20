@@ -35,7 +35,7 @@ test("a model override creates the global configuration and later loads it", asy
     const later = await loadGlobalConfig({ home });
     const written = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
 
-    assert.deepEqual(first, { version: 1, model: "faux/faux-1", collapseMode: "request" });
+    assert.deepEqual(first, { version: 1, model: "faux/faux-1" });
     assert.deepEqual(override, { ...first, model: "faux/faux-2" });
     assert.deepEqual(later, first);
     assert.deepEqual(written, first);
@@ -69,7 +69,6 @@ test("a llama-swap model persists its endpoint and registers with Pi", async () 
       version: 1,
       model: "llama-swap/Flint",
       llamaSwapEndpoint: "http://localhost:8888/v1",
-      collapseMode: "request",
     });
     assert.deepEqual(later, first);
     assert.equal(model.baseUrl, "http://localhost:8888/v1");
@@ -104,7 +103,6 @@ test("a corrected model override repairs a legacy endpoint saved as a model", as
       version: 1,
       model: "llama-swap/Flint",
       llamaSwapEndpoint: "http://localhost:8888/v1",
-      collapseMode: "request",
     });
     assert.deepEqual(written, recovered);
   } finally {
@@ -137,7 +135,6 @@ test("a llama-swap request has no Authorization header and uses llama.cpp-compat
       version: 1,
       model: "llama-swap/Flint",
       llamaSwapEndpoint: `http://127.0.0.1:${address.port}/v1`,
-      collapseMode: "request",
     });
     const models = modelsForConfig(config, parseModelRef(config.model));
     const model = models.getModel("llama-swap", "Flint");
@@ -171,7 +168,7 @@ test("a llama-swap request has no Authorization header and uses llama.cpp-compat
 test("model URLs and llama-swap endpoints with a non-llama-swap model are rejected", () => {
   assert.throws(() => parseModelRef("http://localhost:8888/v1/Flint"), ConfigError);
   assert.throws(
-    () => parseConfig({ version: 1, model: "openai/gpt-4.1", llamaSwapEndpoint: "http://localhost:8888/v1", collapseMode: "request" }),
+    () => parseConfig({ version: 1, model: "openai/gpt-4.1", llamaSwapEndpoint: "http://localhost:8888/v1" }),
     ConfigError,
   );
 });
@@ -181,15 +178,13 @@ test("Pi Durable stores one current Carto Brain document", async () => {
   const path = join(root, ".brain", "brain.sqlite");
   const store = await BrainStore.open(path);
   try {
-    await store.apply({ kind: "context.initialize", liveGeneration: "g1" });
     await store.apply({
       kind: "chat.record",
-      record: { id: "chat-1", author: "user", text: "hello", createdAt: 1 },
+      record: { id: "chat-1", author: "user", text: "hello", createdAt: 1, updatedAt: 1 },
     });
     await store.vacuum();
     const brain = await store.read();
 
-    assert.equal(brain.context.liveGeneration, "g1");
     assert.deepEqual(brain.chat.map((entry) => entry.text), ["hello"]);
   } finally {
     await store.close();
@@ -197,15 +192,14 @@ test("Pi Durable stores one current Carto Brain document", async () => {
   }
 });
 
-test("a Brain document without a handle table upgrades to an empty table", async () => {
+test("a Brain document without a handle table starts with an empty one", async () => {
   const root = await temporaryDirectory("carto-handle-upgrade-");
   const path = join(root, ".brain", "brain.sqlite");
   const store = await BrainStore.open(path);
   try {
-    // Simulate a stored version-one Brain written before handles existed.
-    await store.apply({ kind: "context.initialize", liveGeneration: "g1" });
-    const before = await store.read();
-    assert.deepEqual(before.handles, { counters: {}, entries: [] });
+    await store.apply({ kind: "handles.sync" });
+    const brain = await store.read();
+    assert.deepEqual(brain.handles, { counters: {}, entries: [] });
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

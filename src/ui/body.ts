@@ -1,8 +1,6 @@
 import type { ChatRecord } from "../domain/types.js";
 import type { ContextBlock } from "../domain/context.js";
-import { visibleAtlas, visibleChat, visibleLedger } from "../domain/brain.js";
-import { mergeCarryPins } from "../domain/context.js";
-import { deletionHandleId, handleOf } from "../domain/handles.js";
+import { handleOf } from "../domain/handles.js";
 import type { ProjectView } from "../runtime/project.js";
 import type { LiveActivity } from "../runtime/live-session.js";
 import { clock, oneLine, short, width, wrap } from "./text.js";
@@ -41,7 +39,7 @@ export interface BodyRow {
 export function chatBody(input: BodyInput): BodyRow[] {
   const { view, columns } = input;
   const rows: BodyRow[] = [];
-  const chat = visibleChat(view.brain);
+  const chat = view.brain.chat;
   rows.push({ text: head("DURABLE CHAT", String(chat.length), columns, input.tab === "chat") });
   if (chat.length === 0) {
     rows.push(...emptyState(["No deliberate Chat yet.", "Press i to write one."], columns));
@@ -85,7 +83,7 @@ export function brainBody(input: BodyInput): BodyRow[] {
   const rows: BodyRow[] = [];
   const records = brainRecords(view);
   rows.push({ text: head("BRAIN", String(records.length), columns, input.tab === "brain") });
-  if (records.length === 0) rows.push(...emptyState(["No Ledger, Atlas, change, or wake records.", "The agent adds them as work agrees."], columns));
+  if (records.length === 0) rows.push(...emptyState(["No Ledger, Atlas, or wake records.", "The agent adds them as work agrees."], columns));
   for (const [index, record] of records.entries()) {
     const selected = index === input.selected;
     rows.push({
@@ -93,14 +91,6 @@ export function brainBody(input: BodyInput): BodyRow[] {
       selectable: index,
     });
     if (record.text !== "") for (const line of wrap(record.text, columns - 4)) rows.push({ text: `${rail(false)}    ${line}`, selectable: index });
-  }
-  if (view.brain.deletionMarks.length > 0) {
-    rows.push({ text: "" });
-    rows.push({ text: head("PENDING AT COLLAPSE", String(view.brain.deletionMarks.length), columns, false) });
-    for (const mark of view.brain.deletionMarks) {
-      const handle = handleOf(view.brain.handles, "deletion", deletionHandleId(mark)) ?? "D?";
-      rows.push({ text: `  ${token.warning(handle)}  ${mark.target} · ${clock(mark.markedAt)}` });
-    }
   }
   return rows;
 }
@@ -140,7 +130,7 @@ export function contextBody(input: BodyInput): BodyRow[] {
   }
   // Pins are already blocks in the projection, so they are not listed twice.
   const pins = allPins(view);
-  if (view.brain.context.archiveGeneration !== null) {
+  if (view.archivePresent) {
     rows.push({ text: "" });
     rows.push({ text: `  ${token.warning("The archive expires at the next collapse unless you pin an item.")}` });
   }
@@ -153,7 +143,7 @@ export function contextBody(input: BodyInput): BodyRow[] {
 
 /** The number of rows a body would have, so the selection can be clamped. */
 export function selectableCount(tab: "chat" | "brain" | "context", view: ProjectView): number {
-  if (tab === "chat") return visibleChat(view.brain).length + view.activity.length;
+  if (tab === "chat") return view.brain.chat.length + view.activity.length;
   if (tab === "brain") return brainRecords(view).length;
   // Pins are part of the projection, so a pin is selected as a block.
   return view.context.blocks.length;
@@ -162,7 +152,7 @@ export function selectableCount(tab: "chat" | "brain" | "context", view: Project
 /** A one-line summary of the selected row, for a detail or the header. */
 export function selectedLabel(tab: "chat" | "brain" | "context", view: ProjectView, selected: number): string | undefined {
   if (tab === "chat") {
-    const chat = visibleChat(view.brain);
+    const chat = view.brain.chat;
     const entry = chat[selected];
     if (entry !== undefined) return `Chat ${handleOf(view.brain.handles, "chat", entry.id) ?? ""}`.trim();
     const activity = view.activity[selected - chat.length];
@@ -188,7 +178,7 @@ function activityHead(item: LiveActivity, selected: boolean, columns: number): s
 
 function brainRecords(view: ProjectView): Array<{ handle: string; kind: string; at: number; title: string; detail: string; text: string }> {
   const records: Array<{ handle: string; kind: string; at: number; title: string; detail: string; text: string }> = [];
-  for (const entry of visibleLedger(view.brain)) {
+  for (const entry of view.brain.ledger) {
     records.push({
       handle: handleOf(view.brain.handles, "ledger", entry.id) ?? "L?",
       kind: `Ledger · ${entry.kind} · ${entry.status}`,
@@ -198,7 +188,7 @@ function brainRecords(view: ProjectView): Array<{ handle: string; kind: string; 
       text: entry.answer?.text ?? "",
     });
   }
-  for (const node of visibleAtlas(view.brain)) {
+  for (const node of view.brain.atlas) {
     const evidence = node.evidence
       .map((source) => (source.kind === "file" ? `${source.path}:${source.startLine}-${source.endLine}` : "selected context"))
       .join(", ");
@@ -211,16 +201,6 @@ function brainRecords(view: ProjectView): Array<{ handle: string; kind: string; 
       text: evidence === "" ? "" : `Evidence ${evidence}`,
     });
   }
-  for (const change of view.brain.changes) {
-    records.push({
-      handle: handleOf(view.brain.handles, "change", change.id) ?? "X?",
-      kind: `Change · ${change.status}`,
-      at: change.resolvedAt ?? change.createdAt,
-      title: oneLine(change.rationale),
-      detail: "",
-      text: "",
-    });
-  }
   for (const wake of view.brain.wakes) {
     records.push({
       handle: handleOf(view.brain.handles, "wake", wake.id) ?? "W?",
@@ -229,16 +209,6 @@ function brainRecords(view: ProjectView): Array<{ handle: string; kind: string; 
       title: oneLine(wake.condition),
       detail: "",
       text: oneLine(wake.reason),
-    });
-  }
-  if (view.brain.handoff !== null) {
-    records.push({
-      handle: handleOf(view.brain.handles, "handoff", "handoff") ?? "H1",
-      kind: "Handoff",
-      at: view.brain.handoff.updatedAt,
-      title: oneLine(view.brain.handoff.nextAction),
-      detail: "",
-      text: oneLine(view.brain.handoff.intent),
     });
   }
   return records;
@@ -289,7 +259,6 @@ function summarizeBlock(view: ProjectView, block: ContextBlock, columns: number)
   // section head and the action already say both of those things.
   // A deferred removal reads as `Deferred removal Target: C1`: the tail is
   // the fact, and the sentence around it is the same on every such row.
-  if (block.section === "active") return text.replace(/\. It is removed at collapse\.$/, "");
   if (block.section !== "pin") return text;
   // A pin block's id is `user-pin:<id>` or `carry-pin:<id>`, and a stale one
   // carries `:stale`, so the record's id is the middle of it.
@@ -306,22 +275,14 @@ function summarizeBlock(view: ProjectView, block: ContextBlock, columns: number)
 /** A section's name in the person's words, not the projection's key. */
 function sectionLabel(section: string): string {
   switch (section) {
-    case "rules":
-      return "Rules";
     case "ledger":
       return "Ledger";
-    case "chat":
-      return "Chat";
     case "atlas":
       return "Atlas";
     case "pin":
       return "Pins";
-    case "handoff":
-      return "Handoff";
-    case "active":
-      return "Active";
-    case "message":
-      return "Now";
+    case "wake":
+      return "Wakes";
     default:
       return section;
   }
@@ -350,7 +311,7 @@ function emptyState(lines: readonly string[], columns: number): BodyRow[] {
 }
 
 function allPins(view: ProjectView) {
-  return [...view.brain.userPins, ...mergeCarryPins(view.liveCarryPins, view.brain.carryPins)];
+  return [...view.brain.userPins, ...view.brain.carryPins];
 }
 
 function styleActivity(kind: LiveActivity["kind"], text: string): string {

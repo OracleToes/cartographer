@@ -32,8 +32,6 @@ export interface ActionContext {
   recordOpen: boolean;
   /** The agent or a local action is working. */
   busy: boolean;
-  /** A turn is paused. */
-  paused: boolean;
   /** A turn is running. */
   running: boolean;
 }
@@ -86,13 +84,11 @@ export const ACTIONS: readonly Action[] = [
   { id: "edit", keys: ["e"], label: "edit", help: "Open edit detail for the selected Chat item.", group: "chat", when: (context) => chatting(context) && context.chatSelected },
   { id: "disclosure", keys: ["o"], label: "open", help: "Expand or fold the selected live disclosure.", group: "chat", when: (context) => chatting(context) && context.activitySelected },
   { id: "agent-chat", keys: ["A"], label: "agent chat", help: "Open the input to add person-authored Agent Chat.", group: "chat", when: (context) => chatting(context) && !context.busy },
-  { id: "delete", keys: ["d"], label: "delete at collapse", help: "Mark the selected Chat item for removal at the next collapse.", group: "chat", when: (context) => chatting(context) && context.chatSelected && !context.busy },
-  { id: "delete-now", keys: ["D"], label: "delete now", help: "Remove the selected Chat item now. This starts a fresh live context.", group: "chat", when: (context) => chatting(context) && context.chatSelected && !context.busy },
-  { id: "unpin", keys: ["u"], label: "remove at collapse", help: "Remove the selected pin at the next collapse.", group: "context", when: (context) => onContext(context) && context.pinSelected && !context.busy },
-  { id: "unpin-now", keys: ["U"], label: "remove now", help: "Remove the selected pin now and restart from a fresh context.", group: "context", when: (context) => onContext(context) && context.pinSelected && !context.busy },
-  { id: "pause", keys: ["p"], label: "pause", help: "Stop at a durable boundary and keep an editable draft.", group: "turn", when: (context) => navigating(context) && context.running },
-  { id: "resume", keys: ["r"], label: "resume", help: "Edit the paused draft, or start the next useful task when idle.", group: "turn", when: (context) => listing(context) && (context.paused || !context.busy) },
-  { id: "cancel", keys: ["x"], label: "cancel", help: "Cancel the running or paused turn.", group: "turn", when: (context) => navigating(context) && (context.running || context.paused) },
+  { id: "delete", keys: ["d"], label: "delete", help: "Delete the selected Chat item. Delete cannot be undone.", group: "chat", when: (context) => chatting(context) && context.chatSelected && !context.busy },
+  { id: "unpin", keys: ["u"], label: "unpin", help: "Remove the selected pin. Cannot be undone.", group: "context", when: (context) => onContext(context) && context.pinSelected && !context.busy },
+  { id: "interrupt", keys: ["p"], label: "interrupt", help: "Stop the run at its Pi Durable boundary. Queued messages stay.", group: "turn", when: (context) => navigating(context) && context.running },
+  { id: "continue", keys: ["r"], label: "continue", help: "Start the next useful task.", group: "turn", when: (context) => listing(context) && !context.busy },
+  { id: "cancel", keys: ["x"], label: "cancel", help: "Cancel the running turn. This drops queued messages.", group: "turn", when: (context) => navigating(context) && context.running },
   { id: "interrupt", keys: ["I"], label: "interrupt", help: "Stop the active stream and send now.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "steer", keys: ["S"], label: "steer", help: "Queue a message for the next durable boundary.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },
   { id: "follow-up", keys: ["F"], label: "follow-up", help: "Queue a message to start after the active run.", group: "turn", when: (context) => navigating(context) && !context.busy, hidden: true },

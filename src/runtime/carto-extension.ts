@@ -2,17 +2,15 @@ import { arr, int, lit, obj, oneOf, opt, str, union } from "@earendil-works/pi-s
 import { CompactionTask, defineExtension, defineTool, GenerationTask, hook, section } from "@earendil-works/pi-durable";
 import type { AnyTask } from "@earendil-works/pi-durable";
 
-import { mergeCarryPins, projectContext, renderContextPlan } from "../domain/context.js";
+import { projectContext, renderContextPlan } from "../domain/context.js";
 import {
   handleOf,
   resolveHandle,
   resolveHandleOfKind,
   resolveHandlesOfKind,
 } from "../domain/handles.js";
-import type { SourceRef, WakeEntry } from "../domain/types.js";
+import type { AtlasEdge, AtlasEdgeKind, SourceRef, WakeEntry } from "../domain/types.js";
 import { BrainStore } from "./brain-store.js";
-import { LiveCarryDocument, readLiveCarry } from "./live-carry.js";
-import { parseUnifiedPatch } from "./patch.js";
 import { pathFingerprint } from "./path-wake-task.js";
 import { parseTimeWakeCondition } from "./wake.js";
 import { digestProjectFile, inspectProjectFile, resolveProjectWatchPath } from "./workspace.js";
@@ -72,6 +70,12 @@ export interface CartoExtensionOptions {
    * the generation hooks keep it current.
    */
   promptStore?: import("./prompt-store.js").PromptStore;
+  /**
+   * Called when the agent's collapse tool or a declined compaction asks for a
+   * collapse. The project decides when to rotate; nothing here mutates the
+   * Brain or touches the live store.
+   */
+  onCollapseRequest?: () => void;
 }
 
 export function createCartoExtension(options: CartoExtensionOptions) {
@@ -80,15 +84,9 @@ export function createCartoExtension(options: CartoExtensionOptions) {
     sections: [
       section(
         "carto-context",
-        async (input, context) => {
+        async () => {
           const brain = await options.brain.read();
-          const stored = await input.read.snapshot(LiveCarryDocument, input.conversationId, context);
-          return renderContextPlan(
-            projectContext(brain, {
-              budget: options.contextBudget,
-              carryPins: mergeCarryPins(readLiveCarry(stored), brain.carryPins),
-            }),
-          );
+          return renderContextPlan(projectContext(brain, { budget: options.contextBudget }));
         },
         { tag: false },
       ),
@@ -97,10 +95,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
     hooks: [
       hook(CompactionTask, {
         beforeCompact: async () => {
-          await options.brain.apply({
-            kind: "collapse.request",
-            detail: "The live context needs a collapse before more model work.",
-          });
+          // Compaction is declined: the context is gardened by collapse, not
+          // by Pi rewriting the transcript. The project rotates when the run
+          // ends.
+          options.onCollapseRequest?.();
           return { decline: true };
         },
       }),
@@ -200,7 +198,15 @@ export function createCartoExtension(options: CartoExtensionOptions) {
             }),
             { minItems: 1, maxItems: 12 },
           ),
-          links: opt(arr(HandleRef, { maxItems: 32 })),
+          edges: opt(
+            arr(
+              obj({
+                kind: oneOf(["replaces", "depends-on", "contradicts"] as const),
+                handle: HandleRef,
+              }),
+              { maxItems: 32 },
+            ),
+          ),
         }),
         replay: "safe",
         execute: async (args, api) => {
@@ -208,7 +214,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           const brain = await options.brain.read();
           const previous = args.handle === undefined ? undefined : findAtlas(brain, args.handle);
           const id = previous?.id ?? `atlas:${api.callId}`;
-          const links = resolveHandlesOfKind(brain.handles, args.links ?? [], "atlas");
+          const edges: AtlasEdge[] = (args.edges ?? []).map((edge) => {
+            const resolved = resolveHandleOfKind(brain.handles, edge.handle, ["atlas"]);
+            return { kind: edge.kind as AtlasEdgeKind, target: resolved.id };
+          });
           await options.brain.apply({
             kind: "atlas.upsert",
             node: {
@@ -216,7 +225,7 @@ export function createCartoExtension(options: CartoExtensionOptions) {
               title: args.title,
               claim: args.claim,
               evidence,
-              links,
+              edges,
               createdAt: previous?.createdAt ?? api.now(),
               updatedAt: api.now(),
             },
@@ -243,18 +252,21 @@ export function createCartoExtension(options: CartoExtensionOptions) {
       defineTool({
         name: "pin",
         description:
-          "Add or remove one agent carry pin. A file source needs exact inspected evidence. A context source keeps a selected current-context item for one collapse period. Remove a pin by its short handle.",
+          "Add or remove one agent carry pin. A file source needs exact inspected evidence. A context source keeps a selected current-context item across collapses until you remove it. Remove a pin by its short handle.",
         parameters: PinRequest,
         replay: "safe",
         execute: async (args, api) => {
           if (args.action === "remove") {
             const brain = await options.brain.read();
             const resolved = resolveHandleOfKind(brain.handles, args.handle, ["pin"]);
-            // A pin handle can name a user pin or a carry pin. Mark the correct
-            // target so the collapse removes the record the agent named.
-            const target = brain.userPins.some((pin) => pin.id === resolved.id) ? "user-pin" : "carry-pin";
-            await options.brain.apply({ kind: "deletion.mark", mark: { target, id: resolved.id, markedAt: api.now() } });
-            return textOutput(`Pin ${args.handle.toUpperCase()} is marked for removal at collapse.`);
+            if (brain.userPins.some((pin) => pin.id === resolved.id)) {
+              throw new Error(`Pin ${args.handle.toUpperCase()} belongs to the person. Only the person can remove it.`);
+            }
+            if (!brain.carryPins.some((pin) => pin.id === resolved.id)) {
+              throw new Error(`Carto does not know the pin ${args.handle.toUpperCase()}. Use a handle from the current context.`);
+            }
+            await options.brain.apply({ kind: "record.delete", target: { target: "carry-pin", id: resolved.id } });
+            return textOutput(`Pin ${args.handle.toUpperCase()} removed.`);
           }
           const source: SourceRef =
             args.source.kind === "file"
@@ -267,41 +279,6 @@ export function createCartoExtension(options: CartoExtensionOptions) {
           });
           const handle = handleOf((await options.brain.read()).handles, "pin", id);
           return textOutput(handle === undefined ? "Carry pin saved." : `Carry pin ${handle} saved.`);
-        },
-      }),
-      defineTool({
-        name: "propose_change",
-        description: "Store a patch for person review. This tool cannot apply the patch.",
-        parameters: obj({
-          rationale: Text,
-          patch: Text,
-          base: arr(obj({ path: str({ minLength: 1, maxLength: 4096 }), digest: str({ minLength: 1, maxLength: 128 }) }), {
-            maxItems: 128,
-          }),
-        }),
-        replay: "safe",
-        execute: async (args, api) => {
-          parseUnifiedPatch(args.patch);
-          const base = await Promise.all(
-            args.base.map(async (entry) => {
-              const current = await digestProjectFile(options.projectRoot, entry.path);
-              if (current.digest !== entry.digest) throw new Error(`The proposed base changed for ${entry.path}.`);
-              return current;
-            }),
-          );
-          await options.brain.apply({
-            kind: "change.upsert",
-            change: {
-              id: `change:${api.callId}`,
-              rationale: args.rationale,
-              patch: args.patch,
-              base,
-              status: "proposed",
-              createdAt: api.now(),
-              resolvedAt: null,
-            },
-          });
-          return textOutput("Change proposal saved for review.");
         },
       }),
       defineTool({
@@ -356,43 +333,25 @@ export function createCartoExtension(options: CartoExtensionOptions) {
         },
       }),
       defineTool({
-        name: "request_collapse",
-        description: "Request a Carto context collapse when the current live context is no longer useful. Do not call this for ordinary work.",
+        name: "collapse",
+        description:
+          "End the live context and rebuild it from the Brain. Rare, and never for ordinary work: call this only when the map and the books have diverged past what the context can work with. The person may collapse at any time; so may you. No approval is involved on either path.",
         parameters: obj({ reason: str({ minLength: 1, maxLength: 1000 }) }),
         replay: "safe",
         execute: async (args) => {
-          await options.brain.apply({ kind: "collapse.request", detail: args.reason });
-          return textOutput("Collapse request saved.");
+          options.onCollapseRequest?.();
+          return textOutput(
+            `Collapse noted: ${args.reason.trim()}. Finish this run; the context rebuilds from the Brain when it ends. Chat anything the person must see before then.`,
+          );
         },
       }),
       defineTool({
         name: "sleep",
-        description: "Store a short handoff and enter the sleeping state.",
-        parameters: obj({
-          intent: Text,
-          activeLedger: arr(HandleRef, { maxItems: 32 }),
-          openQuestions: arr(HandleRef, { maxItems: 32 }),
-          relevantAtlas: arr(HandleRef, { maxItems: 32 }),
-          nextAction: Text,
-          note: opt(str({ maxLength: 4000 })),
-        }),
+        description: "End the run. There is nothing left to do until the person or a wake says otherwise.",
+        parameters: obj({}),
         replay: "safe",
-        execute: async (args, api) => {
-          const brain = await options.brain.read();
-          await options.brain.apply({
-            kind: "handoff.set",
-            handoff: {
-              intent: args.intent,
-              activeLedgerIds: resolveHandlesOfKind(brain.handles, args.activeLedger, "ledger"),
-              openQuestionIds: resolveHandlesOfKind(brain.handles, args.openQuestions, "ledger"),
-              relevantAtlasIds: resolveHandlesOfKind(brain.handles, args.relevantAtlas, "atlas"),
-              nextAction: args.nextAction,
-              note: args.note ?? "",
-              updatedAt: api.now(),
-            },
-          });
-          await options.brain.apply({ kind: "activity.set", activity: { kind: "sleeping", detail: null } });
-          return textOutput("Carto is sleeping.");
+        execute: async () => {
+          return textOutput("Carto is asleep.");
         },
       }),
     ],

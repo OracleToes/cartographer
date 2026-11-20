@@ -1,4 +1,3 @@
-import { visibleChat } from "../domain/brain.js";
 import type { ContextMeter } from "../domain/meter.js";
 import { contextMeter } from "../domain/meter.js";
 import type { Text } from "@earendil-works/pi-tui";
@@ -246,7 +245,7 @@ export function detailLines(state: FrameState, inner: number): string[] {
   if (state.detail === "chat") {
     return [
       token.warning("Chat edit selected. Press i to replace its text."),
-      token.muted("d marks it for deletion at collapse; D removes it now."),
+      token.muted("d deletes it. A delete cannot be undone."),
       token.muted("Esc closes the edit and keeps the Chat as it is."),
     ];
   }
@@ -326,7 +325,7 @@ function modeLine(state: FrameState): string {
 export function actionContextOf(state: FrameState): ActionContext {
   const selection = clampSelection(state);
   // Chat rows come first in the Chat tab, then the live disclosure.
-  const chatCount = visibleChat(state.view.brain).length;
+  const chatCount = state.view.brain.chat.length;
   const chatSelected = state.tab === "chat" && selection < chatCount;
   const activitySelected = state.tab === "chat" && selection >= chatCount && state.view.activity.length > 0;
   const pinStart = state.view.context.blocks.length;
@@ -343,7 +342,6 @@ export function actionContextOf(state: FrameState): ActionContext {
     detailOpen: state.detail !== null && state.detail !== "record",
     recordOpen: state.detail === "record",
     busy: state.applying || state.view.turn.state === "cancelling",
-    paused: state.view.turn.state === "paused",
     running: state.view.turn.state === "running",
   };
 }
@@ -382,24 +380,21 @@ export function helpLines(state: FrameState, columns: number): string[] {
   }
   lines.push("");
   lines.push(token.muted("Commands start with / and name records by their short handle."));
-  lines.push(token.muted("Examples: /delete C2 · /unpin P3 · /approve X1 · /wake W1 | time | …"));
+  lines.push(token.muted("Examples: /delete C2 · /unpin P3 · /wake W1 | time | …"));
   return lines;
 }
 
 /** The `a` reference: the commands, one line each, with the key that opens the input. */
 export function actionLines(state: FrameState): string[] {
   const lines = [token.sectionActive("Actions"), ""];
-  lines.push(`${token.accent("/collapse")} ${token.muted("request a context collapse")} · ${token.accent("/confirm-collapse")} ${token.muted("do it")}`);
-  lines.push(`${token.accent("/delete HANDLE")} ${token.muted("mark a record; /delete-now removes it now; /undelete cancels")}`);
+  lines.push(`${token.accent("/collapse")} ${token.muted("collapse the context now; the Brain keeps its records")}`);
+  lines.push(`${token.accent("/delete HANDLE")} ${token.muted("delete a record; cannot be undone")}`);
   lines.push(`${token.accent("/pin ITEM | REASON")} · ${token.accent("/pin-file path:1-9 | ITEM | REASON")}`);
-  lines.push(`${token.accent("/unpin P#")} ${token.muted("at collapse")} · ${token.accent("/unpin-now P#")} ${token.muted("now")}`);
+  lines.push(`${token.accent("/unpin P#")} ${token.muted("remove a pin; cannot be undone")}`);
   lines.push(`${token.accent("/ledger [L#] | goal|note|question | open|answered|closed | TEXT [| ANSWER]")}`);
-  lines.push(`${token.accent("/atlas [A#] | TITLE | CLAIM | path:1-9 [| LINK,LINK]")}`);
-  lines.push(`${token.accent("/handoff INTENT | NEXT ACTION [| NOTE]")} · ${token.accent("/clear-handoff")}`);
+  lines.push(`${token.accent("/atlas [A#] | TITLE | CLAIM | path:1-9 [| EDGE:TARGET,EDGE:TARGET]")}`);
   lines.push(`${token.accent("/wake [W#] | time|path | CONDITION | REASON")} · ${token.accent("/cancel-wake W# [| REASON]")}`);
-  lines.push(`${token.accent("/approve X#")} · ${token.accent("/reject X#")} · ${token.accent("/refresh")}`);
-  if (state.view.turn.state === "paused") lines.push("");
-  if (state.view.turn.state === "paused") lines.push(token.warning("A paused draft is ready: press r and edit it."));
+  lines.push(`${token.accent("/refresh")}`);
   lines.push("");
   lines.push(token.muted("Esc closes this. i opens the input."));
   return lines;

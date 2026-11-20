@@ -1,7 +1,5 @@
 import type {
   CartoBrain,
-  CarryPin,
-  DeletionMark,
   HandleKind,
   HandleTable,
   RecordHandle,
@@ -22,17 +20,14 @@ export interface ResolvedHandle {
 }
 
 /** All handle kinds in their fixed allocation order. */
-export const HANDLE_KINDS: readonly HandleKind[] = ["ledger", "chat", "atlas", "pin", "handoff", "wake", "change", "deletion"];
+export const HANDLE_KINDS: readonly HandleKind[] = ["ledger", "chat", "atlas", "pin", "wake"];
 
 const PREFIX: Record<HandleKind, string> = {
   ledger: "L",
   chat: "C",
   atlas: "A",
   pin: "P",
-  handoff: "H",
   wake: "W",
-  change: "X",
-  deletion: "D",
 };
 
 export function emptyHandleTable(): HandleTable {
@@ -41,11 +36,6 @@ export function emptyHandleTable(): HandleTable {
 
 export function handleKey(kind: HandleKind, id: string): string {
   return `${kind}:${id}`;
-}
-
-/** A deletion mark is addressed by its target and the record's durable ID. */
-export function deletionHandleId(mark: Pick<DeletionMark, "target" | "id">): string {
-  return `${mark.target}:${mark.id}`;
 }
 
 /**
@@ -78,35 +68,27 @@ function nextHandle(counters: Record<string, number>, kind: HandleKind): string 
 }
 
 /** The canonical record list. Its order matches the order of fresh context. */
-export function collectHandleRecords(brain: CartoBrain, carryPins: readonly CarryPin[] = brain.carryPins): HandleRecord[] {
+export function collectHandleRecords(brain: CartoBrain): HandleRecord[] {
   const records: HandleRecord[] = [];
   for (const entry of byCreatedAt(brain.ledger)) records.push({ kind: "ledger", id: entry.id, timestamp: entry.createdAt });
   for (const entry of byCreatedAt(brain.chat)) records.push({ kind: "chat", id: entry.id, timestamp: entry.createdAt });
   for (const entry of byCreatedAt(brain.atlas)) records.push({ kind: "atlas", id: entry.id, timestamp: entry.createdAt });
   for (const pin of byCreatedAt(brain.userPins)) records.push({ kind: "pin", id: pin.id, timestamp: pin.createdAt });
-  for (const pin of byCreatedAt(carryPins)) records.push({ kind: "pin", id: pin.id, timestamp: pin.createdAt });
-  if (brain.handoff !== null) records.push({ kind: "handoff", id: "handoff", timestamp: brain.handoff.updatedAt });
+  for (const pin of byCreatedAt(brain.carryPins)) records.push({ kind: "pin", id: pin.id, timestamp: pin.createdAt });
   for (const wake of byCreatedAt(brain.wakes)) {
     if (wake.status === "armed" || wake.status === "ready") records.push({ kind: "wake", id: wake.id, timestamp: wake.createdAt });
-  }
-  for (const change of byCreatedAt(brain.changes)) {
-    if (change.status === "proposed" || change.status === "approved") {
-      records.push({ kind: "change", id: change.id, timestamp: change.createdAt });
-    }
-  }
-  for (const mark of [...brain.deletionMarks].sort((first, second) => first.markedAt - second.markedAt)) {
-    records.push({ kind: "deletion", id: deletionHandleId(mark), timestamp: mark.markedAt });
   }
   return records;
 }
 
 /** Bring the stored table up to date without renumbering any known record. */
-export function ensureHandles(
-  table: HandleTable | undefined,
-  brain: CartoBrain,
-  carryPins: readonly CarryPin[] = brain.carryPins,
-): HandleTable {
-  return assignHandles(table, collectHandleRecords(brain, carryPins));
+export function ensureHandles(table: HandleTable | undefined, brain: CartoBrain): HandleTable {
+  return assignHandles(table, collectHandleRecords(brain));
+}
+
+/** The table a new live generation starts with, numbered from 1. */
+export function freshHandles(brain: CartoBrain): HandleTable {
+  return assignHandles(undefined, collectHandleRecords(brain));
 }
 
 export function handleOf(table: HandleTable | undefined, kind: HandleKind, id: string): string | undefined {

@@ -106,5 +106,4 @@ export const INPUT_TITLE = {
   send: (mode: string): string => `send ${mode}`,
   editChat: (handle: string): string => `edit Chat ${handle}`,
   agentChat: (): string => "add Agent Chat",
-  resume: (): string => "edit the paused draft",
 } as const;

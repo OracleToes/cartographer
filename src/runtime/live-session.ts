@@ -19,18 +19,15 @@ import {
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 
-import type { CarryPin, SourceRef } from "../domain/types.js";
 import { BrainStore } from "./brain-store.js";
-import { createPatchApplyTask, PATCH_APPLY_TASK_NAME } from "./change-task.js";
 import type { GlobalConfig, ModelRef } from "./config.js";
 import { modelsForConfig } from "./llama-swap-model.js";
-import { LiveCarryDocument, readLiveCarry } from "./live-carry.js";
 import { createCartoExtension } from "./carto-extension.js";
 import { createPathWakeTask, PATH_WAKE_TASK_NAME, pathFingerprint } from "./path-wake-task.js";
 import type { PromptStore } from "./prompt-store.js";
 import { createPrefillMonitor, type PrefillMonitor, type PrefillState } from "./prefill.js";
 import { createTimeWakeTask, TIME_WAKE_TASK_NAME } from "./wake-task.js";
-import { digestProjectFile, resolveProjectWatchPath } from "./workspace.js";
+import { resolveProjectWatchPath } from "./workspace.js";
 
 export const CONTEXT_BUDGET = 16_000;
 
@@ -39,8 +36,6 @@ const CARTO_INSTRUCTIONS = [
   "Do not treat plain model text as a person-facing message.",
   "Inspect before you make a claim about a project file.",
   "Use Ledger and Atlas for durable records.",
-  "Propose a change before an approved patch applies it.",
-  "Use request_collapse when the live context must rotate.",
 ].join("\n");
 
 export interface LiveSessionOptions {
@@ -53,11 +48,16 @@ export interface LiveSessionOptions {
   /** Test or host-provided Pi model catalog. Normal starts use the built-in catalog. */
   models?: Models;
   contextBudget?: number;
-  initialCarryPins?: CarryPin[];
   /** A monitor for the server's prompt reading; created for llama-swap when absent. */
   prefill?: PrefillMonitor;
   /** Where the assembled prompt is recorded, so the screen can show it. */
   promptStore?: PromptStore;
+  /**
+   * Called when the agent's `collapse` tool or a declined compaction asks for
+   * a collapse. The project decides when to rotate; nothing here mutates the
+   * Brain.
+   */
+  onCollapseRequest?: () => void;
 }
 
 export type LiveActivityKind = "reasoning" | "model" | "tool-call" | "tool-output" | "warning" | "error";
@@ -76,6 +76,8 @@ export interface LiveSessionView {
   busy: boolean;
   queued: Array<{ id: string; mode: "steer" | "follow-up"; text: string }>;
   activity: LiveActivity[];
+  /** The newest submission's error, if the run ended in one. Ephemeral. */
+  error: string | null;
 }
 
 export class LiveSession {
@@ -90,8 +92,13 @@ export class LiveSession {
     private readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>,
     private readonly timeWakeTask: ReturnType<typeof createTimeWakeTask>,
     private readonly pathWakeTask: ReturnType<typeof createPathWakeTask>,
-    private readonly patchApplyTask: ReturnType<typeof createPatchApplyTask>,
+    private lastError: string | null = null,
   ) {}
+
+  /** Record why the newest run failed. Shown transiently; cleared on the next submission. */
+  noteError(message: string): void {
+    this.lastError = message;
+  }
 
   static async open(options: LiveSessionOptions): Promise<LiveSession> {
     await mkdir(dirname(options.path), { recursive: true });
@@ -111,7 +118,6 @@ export class LiveSession {
       const registry = createRegistry();
       const timeWakeTask = createTimeWakeTask(options.brain);
       const pathWakeTask = createPathWakeTask(options.projectRoot, options.brain);
-      const patchApplyTask = createPatchApplyTask(options.projectRoot, options.brain);
       registry.install(
         createCartoExtension({
           ...(options.promptStore === undefined ? {} : { promptStore: options.promptStore }),
@@ -119,7 +125,8 @@ export class LiveSession {
           projectRoot: options.projectRoot,
           contextId: basename(options.path, ".sqlite"),
           contextBudget: options.contextBudget ?? CONTEXT_BUDGET,
-          durableTasks: [timeWakeTask, pathWakeTask, patchApplyTask],
+          durableTasks: [timeWakeTask, pathWakeTask],
+          ...(options.onCollapseRequest === undefined ? {} : { onCollapseRequest: options.onCollapseRequest }),
         }),
       );
 
@@ -139,12 +146,6 @@ export class LiveSession {
       };
       const root = await harness.root(BACKGROUND_CONTEXT, { agent });
       await root.configure(agent, BACKGROUND_CONTEXT);
-      await root.commit(async (transaction) => {
-        const document = await transaction.doc(LiveCarryDocument, root.id);
-        if (options.initialCarryPins !== undefined) {
-          document.pins = JSON.parse(JSON.stringify(options.initialCarryPins));
-        }
-      }, BACKGROUND_CONTEXT);
       harness.resume();
       return new LiveSession(
         options.projectRoot,
@@ -155,7 +156,6 @@ export class LiveSession {
         database,
         timeWakeTask,
         pathWakeTask,
-        patchApplyTask,
       );
     } catch (error) {
       if (harness === undefined) await database.close();
@@ -165,6 +165,7 @@ export class LiveSession {
   }
 
   async submit(text: string, requestId: string, whenBusy: "steer" | "followUp" = "followUp"): Promise<void> {
+    this.lastError = null;
     const submission = await this.root.submit({ type: "input", content: text, requestId, whenBusy }, BACKGROUND_CONTEXT);
     await submission.wait(BACKGROUND_CONTEXT);
   }
@@ -198,40 +199,24 @@ export class LiveSession {
   }
 
   /**
-   * Pi cannot resume an arbitrary provider socket after an edit. Start a new
-   * model request at a durable boundary and mark it as Carto continuation data,
-   * not a deliberate Person Chat record.
+   * Interrupt stops the current run at its Pi Durable boundary. Queued Steer
+   * and Follow-up inputs are left in the inbox untouched.
    */
-  async resumeFromDraft(draft: string, requestId: string): Promise<void> {
-    const content = [
-      "Continue the interrupted response. The person edited the partial draft below.",
-      "Keep useful text, correct it when needed, and continue after it. Do not call this a person message.",
-      "",
-      "Edited partial draft:",
-      draft,
-    ].join("\n");
-    const submission = await this.root.submit(
-      { type: "input", content, requestId, entry: { kind: "carto.resume", data: { edited: true } } },
-      BACKGROUND_CONTEXT,
-    );
-    await submission.wait(BACKGROUND_CONTEXT);
-  }
-
-  async cancel(): Promise<void> {
-    await this.root.abort(BACKGROUND_CONTEXT);
-  }
-
-  async pause(): Promise<string> {
+  async interrupt(): Promise<void> {
     const live = await this.harness.snapshot(LiveDoc, this.root.id, BACKGROUND_CONTEXT);
-    const message = live?.generation?.message;
-    const draft = message === undefined ? "" : assistantDraft(message);
-    // Abort the live generation task, not the whole conversation. This keeps
-    // queued Steer and Follow-up inputs intact while the person edits a draft.
     if (live?.run !== undefined) {
       await this.harness.abortTask(live.run.taskId, BACKGROUND_CONTEXT);
       await this.harness.waitForTask(live.run.taskId, BACKGROUND_CONTEXT);
     }
-    return draft;
+  }
+
+  /**
+   * Cancel is interrupt plus dropping the queue. Pi's conversation abort
+   * withdraws every queued input of the conversation in one commit, so this is
+   * one call.
+   */
+  async cancel(): Promise<void> {
+    await this.root.abort(BACKGROUND_CONTEXT);
   }
 
   /** How far the newest prompt reading is, or undefined before the first request. */
@@ -345,7 +330,7 @@ export class LiveSession {
         }
       }
     }
-    return { busy: live?.run !== undefined, queued, activity };
+    return { busy: live?.run !== undefined, queued, activity, error: this.lastError };
   }
 
   private async activeEntries(): Promise<Array<{ model?: readonly unknown[] }>> {
@@ -357,20 +342,6 @@ export class LiveSession {
       cursor = page.next;
     } while (cursor !== undefined);
     return entries;
-  }
-
-  async liveCarryPins(): Promise<CarryPin[]> {
-    return readLiveCarry(await this.harness.snapshot(LiveCarryDocument, this.root.id, BACKGROUND_CONTEXT));
-  }
-
-  async refreshCarryPins(): Promise<void> {
-    const current = await this.liveCarryPins();
-    const refreshed = await Promise.all(current.map((pin) => refreshCarryPin(this.projectRoot, pin)));
-    if (sameJson(current, refreshed)) return;
-    await this.root.commit(async (transaction) => {
-      const document = await transaction.doc(LiveCarryDocument, this.root.id);
-      document.pins = JSON.parse(JSON.stringify(refreshed));
-    }, BACKGROUND_CONTEXT);
   }
 
   async ensureTimeWake(wakeId: string, until: number): Promise<void> {
@@ -417,23 +388,6 @@ export class LiveSession {
       ({ record }) => record.kind === PATH_WAKE_TASK_NAME && isPathWakeInput(record.input, wakeId),
     );
     await Promise.all(matching.map(({ record }) => this.harness.abortTask(record.id, BACKGROUND_CONTEXT)));
-  }
-
-  async ensurePatchApply(changeId: string): Promise<void> {
-    const matching = (await this.harness.inspect(BACKGROUND_CONTEXT)).tasks.filter(
-      ({ record }) => record.kind === PATCH_APPLY_TASK_NAME && isPatchApplyInput(record.input, changeId),
-    );
-    const existing = matching[0]?.record.id;
-    const taskId =
-      existing ??
-      (await this.root.commit(async (transaction) => {
-        return transaction.createTask(this.patchApplyTask, { changeId }, {
-          ownership: { kind: "conversation" },
-          background: true,
-        });
-      }, BACKGROUND_CONTEXT));
-    this.harness.resume();
-    await this.harness.waitForTask(taskId, BACKGROUND_CONTEXT);
   }
 
   async close(): Promise<void> {
@@ -529,35 +483,6 @@ function safeJson(value: unknown): string {
   }
 }
 
-function assistantDraft(message: unknown): string {
-  if (message === null || typeof message !== "object" || !("content" in message)) return "";
-  const content = (message as { content?: unknown }).content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((item): item is { type: string; text?: string; thinking?: string } => item !== null && typeof item === "object" && "type" in item)
-    .map((item) => (item.type === "text" ? item.text ?? "" : item.type === "thinking" ? item.thinking ?? "" : ""))
-    .join("");
-}
-
-async function refreshCarryPin(root: string, pin: CarryPin): Promise<CarryPin> {
-  return { ...pin, source: await refreshCarrySource(root, pin.source) };
-}
-
-async function refreshCarrySource(root: string, source: SourceRef): Promise<SourceRef> {
-  if (source.kind !== "file") return source;
-  try {
-    const current = await digestProjectFile(root, source.path);
-    return { ...source, freshness: current.digest === source.digest ? "fresh" : "stale" };
-  } catch {
-    return { ...source, freshness: "stale" };
-  }
-}
-
-function sameJson(first: unknown, second: unknown): boolean {
-  return JSON.stringify(first) === JSON.stringify(second);
-}
-
 function isPathWakeInput(value: unknown, wakeId: string): value is { wakeId: string; condition: string; baseline: string } {
   return (
     value !== null &&
@@ -569,10 +494,6 @@ function isPathWakeInput(value: unknown, wakeId: string): value is { wakeId: str
     typeof value.condition === "string" &&
     typeof value.baseline === "string"
   );
-}
-
-function isPatchApplyInput(value: unknown, changeId: string): value is { changeId: string } {
-  return value !== null && typeof value === "object" && "changeId" in value && value.changeId === changeId;
 }
 
 function isTimeWakeInput(value: unknown, wakeId: string): value is { wakeId: string; until: number } {

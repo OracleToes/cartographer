@@ -12,8 +12,6 @@ import {
   type StackEntry,
 } from "@earendil-works/pi-tui";
 
-import { visibleChat } from "../domain/brain.js";
-import { mergeCarryPins } from "../domain/context.js";
 import { handleOf } from "../domain/handles.js";
 import type { CartoProject, ProjectView, SendMode } from "./project.js";
 import type { LiveActivity } from "./live-session.js";
@@ -78,7 +76,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
   let applying = false;
   let quitting = false;
   let sendMode: SendMode = "follow-up";
-  let insertAction: "send" | "edit-chat" | "agent-chat" | "resume" | "edit-record" = "send";
+  let insertAction: "send" | "edit-chat" | "agent-chat" | "edit-record" = "send";
   /**
    * The record the input box is editing, when the box was opened by `e` on a
    * Context node.
@@ -288,7 +286,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
    */
   const promptTree = (snapshot: { payload: import("./prompt-store.js").ProviderPayload; at: number; usage?: { input: number } | undefined }) => {
     const hints: RecordHint[] = [
-      ...visibleChat(view.brain).map((entry) => ({
+      ...view.brain.chat.map((entry) => ({
         kind: "chat" as const,
         id: entry.id,
         handle: handleOf(view.brain.handles, "chat", entry.id) ?? "C?",
@@ -406,7 +404,6 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     }
     if (insertAction === "edit-record" && editing !== undefined) return `edit ${editing.handle}`;
     if (insertAction === "agent-chat") return INPUT_TITLE.agentChat();
-    if (insertAction === "resume") return INPUT_TITLE.resume();
     return INPUT_TITLE.send(sendMode);
   };
 
@@ -556,10 +553,6 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
       await work(() => project.addAgentChat(value));
       return;
     }
-    if (action === "resume") {
-      await work(() => project.resumeTurn(value));
-      return;
-    }
     let command: UiCommand | undefined;
     try {
       command = parseCommand(value);
@@ -591,7 +584,7 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
 
   const enterInsert = (
     seed = "",
-    action: "send" | "edit-chat" | "agent-chat" | "resume" | "edit-record" = "send",
+    action: "send" | "edit-chat" | "agent-chat" | "edit-record" = "send",
     record?: { kind: "chat" | "ledger" | "atlas"; handle: string; id: string },
   ): void => {
     mode = "insert";
@@ -864,22 +857,21 @@ export async function runCartoUi(project: CartoProject): Promise<void> {
     if ((data === "d" || data === "D") && tab === "chat") {
       const entry = selectedChat(view, clampSelection({ tab, view, selected }));
       const handle = entry === undefined ? undefined : handleOf(view.brain.handles, "chat", entry.id);
-      if (handle !== undefined) void work(() => (data === "D" ? project.deleteHandleNow(handle) : project.markHandleForDeletion(handle)));
+      if (handle !== undefined) void work(() => project.deleteHandleNow(handle));
       return { consume: true };
     }
     if ((data === "u" || data === "U") && tab === "context") {
       const pin = selectedPin(view, clampSelection({ tab, view, selected }));
       const handle = pin === undefined ? undefined : handleOf(view.brain.handles, "pin", pin.id);
-      if (handle !== undefined) void work(() => (data === "U" ? project.removePinHandleNow(handle) : project.removePinHandleAtCollapse(handle)));
+      if (handle !== undefined) void work(() => project.removePinHandleNow(handle));
       return { consume: true };
     }
     if (data === "p") {
-      void work(() => project.pauseTurn());
+      void work(() => project.interruptTurn());
       return { consume: true };
     }
     if (data === "r") {
-      if (view.turn.state === "paused") enterInsert(view.turn.pausedDraft ?? "", "resume");
-      else void work(() => project.continueTurn());
+      void work(() => project.continueTurn());
       return { consume: true };
     }
     if (data === "x") {
@@ -968,15 +960,13 @@ function detailLines(state: FrameState, columns: number): string[] {
     return [
       "",
       token.sectionActive("Commands"),
-      `${token.accent("/collapse")} ${token.muted("request a collapse")} · ${token.accent("/confirm-collapse")} · ${token.accent("/cancel-collapse")}`,
-      `${token.accent("/delete HANDLE")} · ${token.accent("/delete-now HANDLE")} · ${token.accent("/undelete HANDLE")}`,
-      `${token.accent("/unpin P#")} · ${token.accent("/unpin-now P#")} · ${token.accent("/pin ITEM | REASON")}`,
+      `${token.accent("/collapse")} ${token.muted("collapse the context now")}`,
+      `${token.accent("/delete HANDLE")} ${token.muted("delete a record; cannot be undone")}`,
+      `${token.accent("/unpin P#")} · ${token.accent("/pin ITEM | REASON")}`,
       `${token.accent("/pin-file path:1-9 | ITEM | REASON")} · ${token.accent("/refresh")}`,
       `${token.accent("/ledger [L#] | goal|note|question | open|answered|closed | TEXT [| ANSWER]")}`,
-      `${token.accent("/atlas [A#] | TITLE | CLAIM | path:1-9 [| LINK,LINK]")}`,
-      `${token.accent("/handoff INTENT | NEXT ACTION [| NOTE]")} · ${token.accent("/clear-handoff")}`,
+      `${token.accent("/atlas [A#] | TITLE | CLAIM | path:1-9 [| depends-on:A1]")}`,
       `${token.accent("/wake [W#] | time|path | CONDITION | REASON")} · ${token.accent("/cancel-wake W# [| REASON]")}`,
-      `${token.accent("/approve X#")} · ${token.accent("/reject X#")}`,
       "",
       token.muted(`Esc closes. Handles are short and local to this context${context.busy ? "; Carto is working now." : "."}`),
     ];
@@ -985,18 +975,18 @@ function detailLines(state: FrameState, columns: number): string[] {
     return [
       "",
       token.warning("Chat edit selected. Press i to replace its text."),
-      token.muted("d marks it for deletion at collapse; D removes it now."),
+      token.muted("d deletes it. Delete cannot be undone."),
     ];
   }
   return [];
 }
 
 function selectedChat(view: ProjectView, selected: number) {
-  return visibleChat(view.brain)[selected];
+  return view.brain.chat[selected];
 }
 
 function selectedActivity(view: ProjectView, selected: number): LiveActivity | undefined {
-  return view.activity[selected - visibleChat(view.brain).length];
+  return view.activity[selected - view.brain.chat.length];
 }
 
 /**
@@ -1011,7 +1001,7 @@ function selectedPin(view: ProjectView, selected: number) {
 }
 
 function allPins(view: ProjectView) {
-  return [...view.brain.userPins, ...mergeCarryPins(view.liveCarryPins, view.brain.carryPins)];
+  return [...view.brain.userPins, ...view.brain.carryPins];
 }
 
 

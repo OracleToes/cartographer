@@ -1,50 +1,50 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { CartoProject } from "../dist/runtime/project.js";
 
-const config = { version: 1, model: "openai/gpt-4.1-mini", collapseMode: "request" };
+const config = { version: 1, model: "openai/gpt-4.1-mini" };
 
-test("a project rotates one live context into one archive on confirmed collapse", async () => {
+test("a collapse seals the previous store as the archive and rotates the live generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-project-"));
   const project = await CartoProject.open(root, config);
   try {
     const first = await project.view();
-    assert.ok(first.brain.context.liveGeneration);
-    assert.equal(first.brain.context.archiveGeneration, null);
+    assert.equal(first.archivePresent, false);
+    const firstGeneration = project.liveGeneration;
 
-    await project.requestCollapse();
-    assert.equal((await project.view()).brain.activity.kind, "waiting-for-collapse");
-
-    await project.confirmCollapse();
+    await project.collapse();
     const second = await project.view();
-    assert.ok(second.brain.context.liveGeneration);
-    assert.notEqual(second.brain.context.liveGeneration, first.brain.context.liveGeneration);
-    assert.equal(second.brain.context.archiveGeneration, first.brain.context.liveGeneration);
-    assert.equal(second.brain.activity.kind, "idle");
+    assert.notEqual(project.liveGeneration, firstGeneration);
+    assert.equal(second.archivePresent, true);
 
     const files = await readdir(join(root, ".brain", "context"));
     assert.equal(files.filter((name) => name.endsWith(".sqlite")).length, 2);
+    // The archive is sealed read-only; the live store is not.
+    const { mode } = await import("node:fs/promises").then(({ stat }) => stat(join(root, ".brain", "context", `${firstGeneration}.sqlite`)));
+    assert.equal(mode & 0o222, 0);
   } finally {
     await project.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("agent collapse mode rotates without a person confirmation", async () => {
-  const root = await mkdtemp(join(tmpdir(), "carto-agent-collapse-"));
-  const project = await CartoProject.open(root, { ...config, collapseMode: "agent" });
+test("a collapse keeps the Brain and renumbers handles from 1", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-collapse-handles-"));
+  const project = await CartoProject.open(root, config);
   try {
-    const before = await project.view();
-    await project.requestCollapse("The agent needs a new live context.");
-    const after = await project.view();
-    assert.notEqual(after.brain.context.liveGeneration, before.brain.context.liveGeneration);
-    assert.equal(after.brain.context.archiveGeneration, before.brain.context.liveGeneration);
-    assert.equal(after.brain.activity.kind, "idle");
+    await project.upsertLedger({ id: "ledger:keep", kind: "goal", status: "open", text: "Keep this goal", answer: null });
+    await project.collapse();
+    const view = await project.view();
+    assert.equal(view.brain.ledger.length, 1);
+    assert.deepEqual(
+      view.context.blocks.filter((block) => block.section === "ledger").map((block) => block.handle),
+      ["L1"],
+    );
   } finally {
     await project.close();
     await rm(root, { recursive: true, force: true });
@@ -57,27 +57,11 @@ test("a llama-swap model opens and rotates durable local sessions", async () => 
     version: 1,
     model: "llama-swap/Flint",
     llamaSwapEndpoint: "http://localhost:8888/v1",
-    collapseMode: "agent",
   });
   try {
-    const before = await project.view();
-    await project.requestCollapse("Rotate the local model session.");
-    const after = await project.view();
-    assert.notEqual(after.brain.context.liveGeneration, before.brain.context.liveGeneration);
-  } finally {
-    await project.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("a pending requested collapse blocks new messages until the person confirms or cancels it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "carto-collapse-request-"));
-  const project = await CartoProject.open(root, config);
-  try {
-    await project.requestCollapse();
-    await assert.rejects(() => project.sendUserMessage("Continue working."), /Confirm or cancel/);
-    await project.cancelCollapse();
-    assert.equal((await project.view()).brain.activity.kind, "idle");
+    const before = project.liveGeneration;
+    await project.collapse();
+    assert.notEqual(project.liveGeneration, before);
   } finally {
     await project.close();
     await rm(root, { recursive: true, force: true });
@@ -104,16 +88,49 @@ test("opening a project removes an orphaned context SQLite sidecar", async () =>
   }
 });
 
-test("a project restart refuses to replace a missing referenced live context", async () => {
+test("a missing live store rebuilds from the Brain instead of failing", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-missing-live-context-"));
   const first = await CartoProject.open(root, config);
-  const generation = (await first.view()).brain.context.liveGeneration;
+  await first.upsertLedger({ id: "ledger:keep", kind: "goal", status: "open", text: "Survives the file loss", answer: null });
+  const generation = first.liveGeneration;
   await first.close();
   await rm(join(root, ".brain", "context", `${generation}.sqlite`));
 
+  const reopened = await CartoProject.open(root, config);
   try {
-    await assert.rejects(() => CartoProject.open(root, config), /referenced live context is missing/);
+    const view = await reopened.view();
+    assert.equal(view.brain.ledger.length, 1);
+    assert.notEqual(reopened.liveGeneration, generation);
   } finally {
+    await reopened.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("opening a project purges context stores beyond the live one and its archive", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-beyond-grace-"));
+  const context = join(root, ".brain", "context");
+  const project = await CartoProject.open(root, config);
+  const live = project.liveGeneration;
+  await project.close();
+  // Two older generations from crashes, both beyond one collapse of grace.
+  const { utimes, writeFile } = await import("node:fs/promises");
+  const staleA = "00000000-0000-4000-8000-00000000000a";
+  const staleB = "00000000-0000-4000-8000-00000000000b";
+  await writeFile(join(context, `${staleA}.sqlite`), "", "utf8");
+  await writeFile(join(context, `${staleB}.sqlite`), "", "utf8");
+  await utimes(join(context, `${staleA}.sqlite`), new Date(1_000_000_000_000), new Date(1_000_000_000_000));
+  await utimes(join(context, `${staleB}.sqlite`), new Date(1_500_000_000_000), new Date(1_500_000_000_000));
+
+  const reopened = await CartoProject.open(root, config);
+  try {
+    const files = await readdir(context);
+    assert.equal(files.includes(`${live}.sqlite`), true);
+    // Only the two newest survive; one of the stale pair, or the live one,
+    // is kept as the potential archive. The other is gone.
+    assert.equal(files.filter((name) => name.endsWith(".sqlite")).length, 2);
+  } finally {
+    await reopened.close();
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -121,37 +138,33 @@ test("a project restart refuses to replace a missing referenced live context", a
 test("a project restart reopens its current live generation", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-restart-project-"));
   const first = await CartoProject.open(root, config);
-  const generation = (await first.view()).brain.context.liveGeneration;
+  const generation = first.liveGeneration;
   await first.close();
 
   const reopened = await CartoProject.open(root, config);
   try {
-    const view = await reopened.view();
-    assert.equal(view.brain.context.liveGeneration, generation);
-    assert.equal(view.brain.context.archiveGeneration, null);
+    assert.equal(reopened.liveGeneration, generation);
+    assert.equal((await reopened.view()).archivePresent, false);
   } finally {
     await reopened.close();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("a project restart retains the carry selection of its current live generation", async () => {
+test("a carry pin persists across a restart and reaches the projection", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-reopen-carry-project-"));
   const first = await CartoProject.open(root, config);
   try {
-    const contextId = (await first.view()).brain.context.liveGeneration;
     await first.brainStore.apply({
       kind: "pin.carry.add",
       pin: {
         id: "carry:restart",
         item: "Keep this selected context item.",
         reason: "It must survive the restart.",
-        source: { kind: "context", contextId, excerpt: "Exact selected text.", freshness: "fresh" },
+        source: { kind: "context", contextId: first.liveGeneration, excerpt: "Exact selected text.", freshness: "fresh" },
         createdAt: Date.now(),
       },
     });
-    await first.requestCollapse();
-    await first.confirmCollapse();
   } finally {
     await first.close();
   }
@@ -159,7 +172,7 @@ test("a project restart retains the carry selection of its current live generati
   const reopened = await CartoProject.open(root, config);
   try {
     const view = await reopened.view();
-    assert.deepEqual(view.liveCarryPins.map((pin) => pin.id), ["carry:restart"]);
+    assert.deepEqual(view.brain.carryPins.map((pin) => pin.id), ["carry:restart"]);
     assert.ok(view.context.blocks.some((block) => block.id === "carry-pin:carry:restart" && block.text.includes("Exact selected text.")));
   } finally {
     await reopened.close();
@@ -167,27 +180,20 @@ test("a project restart retains the carry selection of its current live generati
   }
 });
 
-test("the next confirmed collapse removes the older archive and keeps a user archive pin", async () => {
+test("the next collapse removes the older archive and keeps its Pins", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-retention-project-"));
   const project = await CartoProject.open(root, config);
   try {
-    const initial = await project.view();
-    const firstLive = initial.brain.context.liveGeneration;
-    assert.ok(firstLive);
+    const firstLive = project.liveGeneration;
 
-    await project.requestCollapse();
-    await project.confirmCollapse();
-    const afterFirst = await project.view();
-    const secondLive = afterFirst.brain.context.liveGeneration;
-    assert.equal(afterFirst.brain.context.archiveGeneration, firstLive);
-    await project.addUserContextPin("Keep this archive item", "The person selected it before expiry.");
+    await project.collapse();
+    const secondLive = project.liveGeneration;
+    assert.notEqual(secondLive, firstLive);
+    await project.addUserContextPin("Keep this item", "The person pinned it.");
 
-    await project.requestCollapse();
-    await project.confirmCollapse();
-    const afterSecond = await project.view();
-    assert.equal(afterSecond.brain.context.archiveGeneration, secondLive);
-    assert.notEqual(afterSecond.brain.context.liveGeneration, secondLive);
-    assert.equal(afterSecond.brain.userPins.length, 1);
+    await project.collapse();
+    assert.notEqual(project.liveGeneration, secondLive);
+    assert.equal((await project.view()).brain.userPins.length, 1);
 
     const files = await readdir(join(root, ".brain", "context"));
     assert.ok(!files.includes(`${firstLive}.sqlite`));
@@ -198,111 +204,26 @@ test("the next confirmed collapse removes the older archive and keeps a user arc
   }
 });
 
-test("a carry pin is selected into one new live generation only", async () => {
+test("a carry pin is a Brain record: it survives collapses until explicitly removed", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-carry-project-"));
   const project = await CartoProject.open(root, config);
   try {
-    const source = {
-      kind: "context",
-      contextId: (await project.view()).brain.context.liveGeneration,
-      excerpt: "Keep this selected context item.",
-      freshness: "fresh",
-    };
     await project.brainStore.apply({
       kind: "pin.carry.add",
       pin: {
-        id: "carry:one-cycle",
+        id: "carry:keep",
         item: "Selected context item",
-        reason: "It is needed in the next live generation.",
-        source,
+        reason: "It is needed until further notice.",
+        source: { kind: "context", contextId: project.liveGeneration, excerpt: "Keep this selected context item.", freshness: "fresh" },
         createdAt: Date.now(),
       },
     });
 
-    await project.requestCollapse();
-    await project.confirmCollapse();
-    const first = await project.view();
-    assert.equal(first.brain.carryPins.length, 0);
-    assert.deepEqual(first.liveCarryPins.map((pin) => pin.id), ["carry:one-cycle"]);
-    assert.ok(first.context.blocks.some((block) => block.id === "carry-pin:carry:one-cycle"));
-
-    await project.requestCollapse();
-    await project.confirmCollapse();
-    const second = await project.view();
-    assert.deepEqual(second.liveCarryPins, []);
-  } finally {
-    await project.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("an approved patch applies only after its stored approval", async () => {
-  const root = await mkdtemp(join(tmpdir(), "carto-patch-project-"));
-  await writeFile(join(root, "note.txt"), "before\n", "utf8");
-  const project = await CartoProject.open(root, config);
-  try {
-    const base = createHash("sha256").update("before\n").digest("hex");
-    const patch = [
-      "diff --git a/note.txt b/note.txt",
-      "index 3e17f77..9c39ca6 100644",
-      "--- a/note.txt",
-      "+++ b/note.txt",
-      "@@ -1 +1 @@",
-      "-before",
-      "+after",
-      "",
-    ].join("\n");
-    await project.recordChangeProposal({
-      id: "change:test",
-      rationale: "Update the note.",
-      patch,
-      base: [{ path: "note.txt", digest: base }],
-      status: "proposed",
-      createdAt: Date.now(),
-      resolvedAt: null,
-    });
-    assert.equal(await readFile(join(root, "note.txt"), "utf8"), "before\n");
-
-    await project.approveChange("change:test");
-    assert.equal(await readFile(join(root, "note.txt"), "utf8"), "after\n");
-    assert.equal((await project.view()).brain.changes[0]?.status, "applied");
-  } finally {
-    await project.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("an approved patch becomes conflicted when its saved base changes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "carto-conflict-project-"));
-  await writeFile(join(root, "note.txt"), "before\n", "utf8");
-  const project = await CartoProject.open(root, config);
-  try {
-    const base = createHash("sha256").update("before\n").digest("hex");
-    const patch = [
-      "diff --git a/note.txt b/note.txt",
-      "index 3e17f77..9c39ca6 100644",
-      "--- a/note.txt",
-      "+++ b/note.txt",
-      "@@ -1 +1 @@",
-      "-before",
-      "+after",
-      "",
-    ].join("\n");
-    await project.recordChangeProposal({
-      id: "change:conflict",
-      rationale: "Update the note.",
-      patch,
-      base: [{ path: "note.txt", digest: base }],
-      status: "proposed",
-      createdAt: Date.now(),
-      resolvedAt: null,
-    });
-    await writeFile(join(root, "note.txt"), "changed elsewhere\n", "utf8");
-
-    await project.approveChange("change:conflict");
-
-    assert.equal(await readFile(join(root, "note.txt"), "utf8"), "changed elsewhere\n");
-    assert.equal((await project.view()).brain.changes[0]?.status, "conflicted");
+    await project.collapse();
+    await project.collapse();
+    const view = await project.view();
+    assert.equal(view.brain.carryPins.length, 1);
+    assert.ok(view.context.blocks.some((block) => block.id === "carry-pin:carry:keep"));
   } finally {
     await project.close();
     await rm(root, { recursive: true, force: true });
@@ -327,32 +248,27 @@ test("changed file evidence becomes stale before the next context projection", a
   }
 });
 
-test("Delete now starts a fresh context and discards old live and archive files", async () => {
+test("delete is a single step and does not touch the live context", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-delete-now-project-"));
   const project = await CartoProject.open(root, config);
   try {
     await project.brainStore.apply({
       kind: "chat.record",
-      record: { id: "chat:remove", author: "agent", text: "Remove this now.", createdAt: 1, updatedAt: 1 },
+      record: { id: "chat:remove", author: "agent", text: "Remove this.", createdAt: 1, updatedAt: 1 },
     });
-    const first = await project.view();
-    const firstLive = first.brain.context.liveGeneration;
-    await project.requestCollapse();
-    await project.confirmCollapse();
-    const second = await project.view();
-    const secondLive = second.brain.context.liveGeneration;
-    assert.equal(second.brain.context.archiveGeneration, firstLive);
+    await project.collapse();
+    const secondLive = project.liveGeneration;
+    const archived = (await readdir(join(root, ".brain", "context"))).filter((name) => name.endsWith(".sqlite")).length;
+    assert.equal(archived, 2);
 
     await project.deleteNow("chat", "chat:remove");
     const after = await project.view();
-    const files = await readdir(join(root, ".brain", "context"));
 
-    assert.notEqual(after.brain.context.liveGeneration, secondLive);
-    assert.equal(after.brain.context.archiveGeneration, null);
+    assert.equal(project.liveGeneration, secondLive);
     assert.equal(after.brain.chat.some((entry) => entry.id === "chat:remove"), false);
-    assert.equal(files.includes(`${firstLive}.sqlite`), false);
-    assert.equal(files.includes(`${secondLive}.sqlite`), false);
-    assert.equal(files.filter((name) => name.endsWith(".sqlite")).length, 1);
+    // The frozen projection still names the record until the next collapse.
+    const files = await readdir(join(root, ".brain", "context"));
+    assert.equal(files.filter((name) => name.endsWith(".sqlite")).length, 2);
   } finally {
     await project.close();
     await rm(root, { recursive: true, force: true });
@@ -377,35 +293,20 @@ test("the person can edit deliberate Agent Chat before a later context projectio
   }
 });
 
-test("a pin removal handle defers to collapse and Remove now restarts the live context", async () => {
+test("a pin is removed in one step, selected by its short handle", async () => {
   const root = await mkdtemp(join(tmpdir(), "carto-pin-handle-project-"));
   const project = await CartoProject.open(root, config);
   try {
     await project.addUserContextPin("Pinned item", "Keep this for now.");
     const before = await project.view();
-    const pin = before.brain.userPins[0];
-    assert.ok(pin);
     const handle = before.brain.handles.entries.find((entry) => entry.kind === "pin")?.handle;
     assert.equal(handle, "P1");
+    const liveBefore = project.liveGeneration;
 
-    await project.removePinHandleAtCollapse("p1");
-    const marked = await project.view();
-    assert.equal(marked.brain.userPins.length, 1);
-    assert.equal(marked.brain.deletionMarks.length, 1);
-    assert.equal(marked.context.blocks.some((block) => block.section === "pin"), false);
-
-    await project.requestCollapse();
-    await project.confirmCollapse();
-    assert.equal((await project.view()).brain.userPins.length, 0);
-
-    await project.addUserContextPin("Second pin", "Remove it now.");
-    const liveBefore = (await project.view()).brain.context.liveGeneration;
-    const secondHandle = (await project.view()).brain.handles.entries.find((entry) => entry.kind === "pin")?.handle;
-    assert.equal(secondHandle, "P1");
-    await project.removePinHandleNow("P1");
+    await project.removePinHandleNow("p1");
     const after = await project.view();
     assert.equal(after.brain.userPins.length, 0);
-    assert.notEqual(after.brain.context.liveGeneration, liveBefore);
+    assert.equal(project.liveGeneration, liveBefore);
     assert.equal(after.brain.handles.entries.filter((entry) => entry.kind === "pin").length, 0);
   } finally {
     await project.close();
@@ -443,6 +344,46 @@ test("short handles are durable across a project restart and unchanged by edits"
     );
   } finally {
     await project.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a carry pin refresh marks a changed file source stale, and survives a reopen", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-carry-stale-"));
+  const text = "original carry source\n";
+  await writeFile(join(root, "carry.txt"), text, "utf8");
+  const project = await CartoProject.open(root, config);
+  try {
+    await project.brainStore.apply({
+      kind: "pin.carry.add",
+      pin: {
+        id: "carry:test",
+        item: "Original carry fact",
+        reason: "Keep it.",
+        source: {
+          kind: "file",
+          path: "carry.txt",
+          startLine: 1,
+          endLine: 1,
+          digest: createHash("sha256").update(text).digest("hex"),
+          excerpt: text.trim(),
+          freshness: "fresh",
+        },
+        createdAt: Date.now(),
+      },
+    });
+    await writeFile(join(root, "carry.txt"), "revised carry source\n", "utf8");
+    await project.refreshEvidence();
+    assert.equal((await project.view()).brain.carryPins[0]?.source.freshness, "stale");
+  } finally {
+    await project.close();
+  }
+
+  const reopened = await CartoProject.open(root, config);
+  try {
+    assert.equal((await reopened.view()).brain.carryPins[0]?.source.freshness, "stale");
+  } finally {
+    await reopened.close();
     await rm(root, { recursive: true, force: true });
   }
 });

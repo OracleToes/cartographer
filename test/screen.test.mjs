@@ -114,7 +114,7 @@ test("the spinner advances a frame every 100 ms", () => {
 
 test("the status line names the state, and only a live state spins", () => {
   const idle = statusLine({
-    view: { turn: { state: "idle" }, brain: { activity: { kind: "idle" } }, activity: [] },
+    view: { turn: { state: "idle" }, activity: [], error: null },
     now: 0,
     applying: false,
   });
@@ -122,7 +122,7 @@ test("the status line names the state, and only a live state spins", () => {
   assert.equal(idle.text, "idle");
 
   const reading = statusLine({
-    view: { turn: { state: "running" }, brain: { activity: { kind: "thinking" } }, activity: [] },
+    view: { turn: { state: "running" }, activity: [], error: null },
     prefill: { phase: "reading", total: 10_000, cache: 2_000, processed: 6_000, ms: 1_000, began: 0, updatedAt: 0 },
     now: 1_000,
     applying: false,
@@ -130,16 +130,16 @@ test("the status line names the state, and only a live state spins", () => {
   assert.equal(reading.spinning, true);
   assert.match(reading.text, /reading 50%/);
 
-  const paused = statusLine({
-    view: { turn: { state: "paused" }, brain: { activity: { kind: "idle" } }, activity: [] },
+  const stopping = statusLine({
+    view: { turn: { state: "cancelling" }, activity: [], error: null },
     now: 0,
     applying: false,
   });
-  assert.equal(paused.spinning, false);
-  assert.match(paused.text, /paused/);
+  assert.equal(stopping.spinning, true);
+  assert.match(stopping.text, /stopping/);
 
   const failed = statusLine({
-    view: { turn: { state: "idle" }, brain: { activity: { kind: "error", detail: "model refused" } }, activity: [] },
+    view: { turn: { state: "idle" }, activity: [], error: "model refused" },
     now: 0,
     applying: false,
   });

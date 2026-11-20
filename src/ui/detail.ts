@@ -1,5 +1,4 @@
 import type { ProjectView } from "../runtime/project.js";
-import { visibleAtlas, visibleChat, visibleLedger } from "../domain/brain.js";
 import { handleOf } from "../domain/handles.js";
 import { token } from "./tokens.js";
 import { clock, short, wrap } from "./text.js";
@@ -10,10 +9,9 @@ import type { Tab } from "./frame.js";
  *
  * A row on Brain or Context is a summary by design: one row per record keeps a
  * list scannable. The defect that made this file necessary is that the summary
- * was the *only* view, so a `…` on screen was the end of the record. `R1`, the
- * Carto rules, is eight lines of protocol text; on one row it read
- * `R1 Carto rules …` and pressing Enter answered with a footer message instead
- * of the text.
+ * was the *only* view, so a `…` on screen was the end of the record. A long
+ * claim or a long wake reason is many lines of prose; on one row it read as a
+ * stub and pressing Enter answered with a footer message instead of the text.
  *
  * A detail is therefore a page, not a wider row: it is the body's own scrolling
  * region swapped for a record view, so the token bar, the status row, and the
@@ -39,7 +37,7 @@ export interface RecordDetail {
 export function recordDetail(tab: Tab, view: ProjectView, selected: number): RecordDetail | undefined {
   if (tab === "brain") return brainDetail(view, selected);
   if (tab === "context") return contextDetail(view, selected);
-  const chat = visibleChat(view.brain);
+  const chat = view.brain.chat;
   const entry = chat[selected];
   if (entry === undefined) return undefined;
   return {
@@ -52,7 +50,7 @@ export function recordDetail(tab: Tab, view: ProjectView, selected: number): Rec
 /** The Brain list's own order, so the index means the same row in both views. */
 function brainDetail(view: ProjectView, selected: number): RecordDetail | undefined {
   let index = 0;
-  for (const entry of visibleLedger(view.brain)) {
+  for (const entry of view.brain.ledger) {
     if (index++ !== selected) continue;
     const answer = entry.answer === null ? [] : ["", `Answer: ${entry.answer.text}`];
     return {
@@ -61,23 +59,25 @@ function brainDetail(view: ProjectView, selected: number): RecordDetail | undefi
       lines: [...entry.text.split("\n"), ...answer],
     };
   }
-  for (const node of visibleAtlas(view.brain)) {
+  for (const node of view.brain.atlas) {
     if (index++ !== selected) continue;
     const evidence = node.evidence.map((source) =>
       source.kind === "file" ? `  ${source.path}:${source.startLine}-${source.endLine}` : "  selected context",
     );
+    const edges = node.edges.map((edge) => {
+      const target = handleOf(view.brain.handles, "atlas", edge.target) ?? "(missing)";
+      return `  ${edge.kind} ${target}`;
+    });
     return {
       handle: handleOf(view.brain.handles, "atlas", node.id) ?? "A?",
       kind: `Atlas · ${clock(node.updatedAt)}`,
-      lines: [node.title, "", node.claim, ...(evidence.length === 0 ? [] : ["", "Evidence", ...evidence])],
-    };
-  }
-  for (const change of view.brain.changes) {
-    if (index++ !== selected) continue;
-    return {
-      handle: handleOf(view.brain.handles, "change", change.id) ?? "X?",
-      kind: `Change · ${change.status} · ${clock(change.resolvedAt ?? change.createdAt)}`,
-      lines: change.rationale.split("\n"),
+      lines: [
+        node.title,
+        "",
+        node.claim,
+        ...(evidence.length === 0 ? [] : ["", "Evidence", ...evidence]),
+        ...(edges.length === 0 ? [] : ["", "Edges", ...edges]),
+      ],
     };
   }
   for (const wake of view.brain.wakes) {
@@ -86,14 +86,6 @@ function brainDetail(view: ProjectView, selected: number): RecordDetail | undefi
       handle: handleOf(view.brain.handles, "wake", wake.id) ?? "W?",
       kind: `Wake · ${wake.status} · ${clock(wake.createdAt)}`,
       lines: [wake.condition, "", `Reason: ${wake.reason}`],
-    };
-  }
-  if (view.brain.handoff !== null) {
-    if (index++ !== selected) return undefined;
-    return {
-      handle: handleOf(view.brain.handles, "handoff", "handoff") ?? "H1",
-      kind: `Handoff · ${clock(view.brain.handoff.updatedAt)}`,
-      lines: [`Intent: ${view.brain.handoff.intent}`, "", `Next action: ${view.brain.handoff.nextAction}`],
     };
   }
   return undefined;
@@ -119,14 +111,10 @@ function contextDetail(view: ProjectView, selected: number): RecordDetail | unde
 
 function sectionName(section: string): string {
   const names: Record<string, string> = {
-    rules: "Rules",
     ledger: "Ledger",
-    chat: "Chat",
     atlas: "Atlas",
     pin: "Pin",
-    handoff: "Handoff",
-    active: "Active state",
-    message: "Message",
+    wake: "Wake",
   };
   return names[section] ?? section;
 }

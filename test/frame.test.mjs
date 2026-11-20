@@ -14,7 +14,6 @@ const config = {
   version: 1,
   model: "llama-swap/Flint",
   llamaSwapEndpoint: "http://127.0.0.1:8888/v1",
-  collapseMode: "request",
 };
 
 async function withProject(run) {
@@ -120,8 +119,8 @@ test("the hint table hides a key that cannot act now", async () => {
       pinSelected: false,
       brainSelected: false,
       detailOpen: false,
+      recordOpen: false,
       busy: false,
-      paused: false,
       running: false,
     };
     const hints = available(chatOnly).map((action) => action.id);
@@ -132,12 +131,11 @@ test("the hint table hides a key that cannot act now", async () => {
     const pinSelected = { ...chatOnly, tab: "context", chatSelected: false, pinSelected: true };
     const pinHints = available(pinSelected).map((action) => action.id);
     assert.ok(pinHints.includes("unpin"));
-    assert.ok(pinHints.includes("unpin-now"));
     assert.equal(pinHints.includes("fold"), false);
 
     const busy = { ...chatOnly, busy: true, running: true };
     const busyHints = available(busy).map((action) => action.id);
-    assert.ok(busyHints.includes("pause"));
+    assert.ok(busyHints.includes("interrupt"));
     assert.ok(busyHints.includes("cancel"));
     assert.equal(busyHints.includes("delete"), false, "the Brain cannot change while a run holds it");
   });
@@ -155,8 +153,8 @@ test("the footer drops hints that do not fit rather than cutting one in half", a
       pinSelected: false,
       brainSelected: false,
       detailOpen: false,
+      recordOpen: false,
       busy: false,
-      paused: false,
       running: false,
     };
     for (const cells of [12, 30, 48, 120]) {
@@ -209,13 +207,14 @@ test("a narrow terminal keeps the bar, shortens the tabs, and drops the tail of 
   });
 });
 
-test("a paused turn says so, and its footer offers resume rather than pause", async () => {
+test("a cancelling turn says so, and its footer offers interrupt and cancel", async () => {
   await withProject(async (project) => {
     const view = await project.view();
-    const frame = renderFrame(stateOf(project, { view: { ...view, turn: { ...view.turn, state: "paused", pausedDraft: "half" } } }), 96);
+    const running = { ...view, turn: { ...view.turn, state: "running" } };
+    const frame = renderFrame(stateOf(project, { view: running }), 96);
     const text = plain(frame.top.join("\n"));
-    assert.match(text, /⏸ paused · r edits the draft · x cancels/);
-    assert.doesNotMatch(text, /reading \d+%/);
+    assert.match(text, /⠹|⠙|⠋|⠸|⠼|⠴|⠦|⠧|⠇|⠏/);
+    assert.doesNotMatch(text, /paused/);
   });
 });
 
@@ -316,16 +315,17 @@ test("a reference opens in the body band, so the token bar and footer stay visib
 test("Enter opens the selected Brain and Context record whole, not a footer message", async () => {
   const { recordDetail, recordDetailRows } = await import("../dist/ui/detail.js");
   await withProject(async (project) => {
+    await project.upsertLedger({ id: "ledger:goal", kind: "goal", status: "open", text: "First line\nSecond line\nThird line", answer: null });
     const view = await project.view();
-    // The defect: `R1 Carto rules …` was the whole view of an eight-line record,
-    // and Enter answered "R1 is selected" instead of showing it.
-    const rules = recordDetail("context", view, 0);
-    assert.ok(rules !== undefined, "the rules block must open");
-    assert.equal(rules.handle, "R1");
-    // Every line the block holds is in the page, not just its first.
-    const page = plain(recordDetailRows(rules, 100).join("\n"));
-    assert.ok(rules.lines.length > 1, "R1 is more than one line");
-    for (const line of rules.lines.filter((value) => value.trim() !== "")) {
+    // The defect: a record's first line was the whole view, and Enter answered
+    // with a footer message instead of showing the record.
+    const block = recordDetail("context", view, 0);
+    assert.ok(block !== undefined, "the context record must open");
+    assert.equal(block.handle, "L1");
+    // Every line the record holds is in the page, not just its first.
+    const page = plain(recordDetailRows(block, 100).join("\n"));
+    assert.ok(block.lines.length > 1, "L1 is more than one line");
+    for (const line of block.lines.filter((value) => value.trim() !== "")) {
       assert.ok(page.includes(line.slice(0, 40)), `the page dropped a line: ${JSON.stringify(line.slice(0, 40))}`);
     }
     // The page holds the record, not a copy of the key list: the footer under
@@ -333,7 +333,8 @@ test("Enter opens the selected Brain and Context record whole, not a footer mess
     assert.doesNotMatch(page, /Esc (or Backspace )?returns to the list/);
     // A Brain row opens too, and its handle matches the list's.
     const brain = recordDetail("brain", view, 0);
-    assert.ok(brain === undefined || /^[LXAWH]/.test(brain.handle));
+    assert.ok(brain !== undefined);
+    assert.match(brain.handle, /^L1$/);
   });
 });
 

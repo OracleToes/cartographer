@@ -3,12 +3,9 @@ import { dirname } from "node:path";
 
 import { cartoConfigPath, cartoHome } from "./paths.js";
 
-export type CollapseMode = "request" | "agent";
-
 export interface GlobalConfig {
   version: 1;
   model: string;
-  collapseMode: CollapseMode;
   /** The OpenAI-compatible endpoint used only by llama-swap. */
   llamaSwapEndpoint?: string;
 }
@@ -40,7 +37,6 @@ export async function loadGlobalConfig(options: {
     const config = parseConfig({
       version: 1,
       model: options.modelOverride,
-      collapseMode: "request",
       ...(options.llamaSwapEndpointOverride === undefined ? {} : { llamaSwapEndpoint: options.llamaSwapEndpointOverride }),
     });
     await saveGlobalConfig(config, home);
@@ -81,10 +77,6 @@ export function parseConfig(value: unknown): GlobalConfig {
   const input = value as Record<string, unknown>;
   if (input.version !== 1) throw new ConfigError("Carto configuration version must be 1.");
   if (typeof input.model !== "string") throw new ConfigError("Carto configuration needs a model.");
-  if (input.collapseMode !== "request" && input.collapseMode !== "agent") {
-    throw new ConfigError("Carto configuration collapseMode must be request or agent.");
-  }
-
   const model = validateModel(input.model);
   const provider = parseModelRef(model).provider;
   const llamaSwapEndpoint = input.llamaSwapEndpoint === undefined ? undefined : validateLlamaSwapEndpoint(input.llamaSwapEndpoint);
@@ -95,8 +87,8 @@ export function parseConfig(value: unknown): GlobalConfig {
     throw new ConfigError("llamaSwapEndpoint is valid only with a llama-swap/model value.");
   }
   return llamaSwapEndpoint === undefined
-    ? { version: 1, model, collapseMode: input.collapseMode }
-    : { version: 1, model, collapseMode: input.collapseMode, llamaSwapEndpoint };
+    ? { version: 1, model }
+    : { version: 1, model, llamaSwapEndpoint };
 }
 
 function applyOverrides(
@@ -111,7 +103,6 @@ function applyOverrides(
   return parseConfig({
     version: 1,
     model,
-    collapseMode: config.collapseMode,
     ...(llamaSwapEndpoint === undefined ? {} : { llamaSwapEndpoint }),
   });
 }
@@ -126,7 +117,6 @@ function recoverLegacyEndpointModelConfig(
   const input = value as Record<string, unknown>;
   if (
     input.version !== 1 ||
-    (input.collapseMode !== "request" && input.collapseMode !== "agent") ||
     typeof input.model !== "string" ||
     !input.model.includes("://")
   ) {
@@ -135,7 +125,6 @@ function recoverLegacyEndpointModelConfig(
   return parseConfig({
     version: 1,
     model: options.modelOverride,
-    collapseMode: input.collapseMode,
     ...(options.llamaSwapEndpointOverride === undefined ? {} : { llamaSwapEndpoint: options.llamaSwapEndpointOverride }),
   });
 }

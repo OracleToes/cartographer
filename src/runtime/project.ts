@@ -1,27 +1,23 @@
 import { randomUUID } from "node:crypto";
-import { access, lstat, mkdir, readdir, rm } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 
-import { mergeCarryPins, projectContext } from "../domain/context.js";
+import { projectContext } from "../domain/context.js";
 import { ensureHandles, resolveHandle, resolveHandleOfKind } from "../domain/handles.js";
 import type {
   AtlasNode,
-  CarryPin,
-  ChangeProposal,
   DeletionTarget,
   CartoBrain,
-  Handoff,
   SourceRef,
   WakeEntry,
 } from "../domain/types.js";
 import { PromptStore } from "./prompt-store.js";
 import { BrainStore } from "./brain-store.js";
-import type { CollapseMode, GlobalConfig } from "./config.js";
+import type { GlobalConfig } from "./config.js";
 import { parseModelRef } from "./config.js";
 import { CONTEXT_BUDGET, LiveSession, type LiveActivity, type LiveSessionView } from "./live-session.js";
-import { parseUnifiedPatch } from "./patch.js";
 import { brainDatabasePath, contextDatabasePath, contextDirectory, isContextGenerationName } from "./paths.js";
 import { parseTimeWakeCondition } from "./wake.js";
 import { digestProjectFile, inspectProjectFile, resolveProjectWatchPath } from "./workspace.js";
@@ -31,24 +27,34 @@ export class ProjectError extends Error {}
 export interface ProjectView {
   brain: CartoBrain;
   context: ReturnType<typeof projectContext>;
-  liveCarryPins: CarryPin[];
   turn: TurnView;
   activity: LiveActivity[];
+  /** The transient error of the newest failed run, if any. Ephemeral. */
+  error: string | null;
+  /** Whether an archive exists beyond the live store. Transient; derived at open and collapse. */
+  archivePresent: boolean;
 }
 
 export type SendMode = "interruption" | "steer" | "follow-up";
 
 export interface TurnView {
-  state: "idle" | "running" | "paused" | "cancelling";
-  pausedDraft: string | null;
+  state: "idle" | "running" | "cancelling";
   queued: Array<{ id: string; mode: "steer" | "follow-up"; text: string }>;
 }
 
 export class CartoProject {
-  private applyingChanges = false;
-  private readonly pausedDrafts = new Map<string, string>();
   private readonly runningSubmissions = new Map<string, Promise<void>>();
   private turnState: TurnView["state"] = "idle";
+  /**
+   * Set when the agent's collapse tool, or a declined compaction, asked for a
+   * collapse during a run. Applied when the run ends; never stored, because a
+   * restart cannot honour it anyway.
+   */
+  private collapseRequested = false;
+  /** Whether an archive exists beyond the live store. In-memory only. */
+  private archivePresent = false;
+  /** The generation whose store the live session holds. In-memory only; changes at collapse. */
+  liveGeneration: string;
 
   private constructor(
     readonly root: string,
@@ -57,20 +63,37 @@ export class CartoProject {
     private live: LiveSession,
     /** The last prompt the harness assembled, shared with the harness itself. */
     readonly prompts: PromptStore,
-  ) {}
+    liveGeneration: string,
+  ) {
+    this.liveGeneration = liveGeneration;
+  }
 
+  /**
+   * Carto keeps one Pi store per live generation. There is no durable pointer
+   * to a generation anywhere: at open, the stores are discovered by scanning
+   * the context directory. The newest store is the live one; the second
+   * newest, if any, is the archive, which gets its one collapse of grace at
+   * the next collapse and is not opened for writing until then. Everything
+   * older is deleted, which is the only safe reading of a collapse that
+   * crashed part-way.
+   *
+   * A live session can always be rebuilt from the Brain alone, so adopting a
+   * discovered store is an optimisation, never a correctness requirement.
+   */
   static async open(root: string, config: GlobalConfig): Promise<CartoProject> {
     await mkdir(contextDirectory(root), { recursive: true });
     const brainStore = await BrainStore.open(brainDatabasePath(root));
     let live: LiveSession | undefined;
     let prompts: PromptStore | undefined;
     try {
-      const brain = await brainStore.read();
-      await removeUnreferencedContextFiles(root, brain);
-      await ensureReferencedContextFiles(root, brain);
+      await removeUnreferencedContextFiles(root);
+      const generation = await adoptLiveGeneration(root);
+      const archivePresent = (await discoverContextStores(root)).archive !== undefined;
       const model = parseModelRef(config.model);
-      const generation = brain.context.liveGeneration ?? randomUUID();
       prompts = new PromptStore();
+      // Late binding: the session exists before the project does; the callback
+      // fires from inside a tool, always after both exist.
+      let target: CartoProject | undefined;
       live = await LiveSession.open({
         path: contextDatabasePath(root, generation),
         model,
@@ -79,16 +102,17 @@ export class CartoProject {
         brain: brainStore,
         contextBudget: CONTEXT_BUDGET,
         promptStore: prompts,
+        onCollapseRequest: () => {
+          if (target !== undefined) target.collapseRequested = true;
+        },
       });
-      if (brain.context.liveGeneration === null) {
-        await brainStore.apply({ kind: "context.initialize", liveGeneration: generation });
-      }
-      const project = new CartoProject(root, config, brainStore, live, prompts ?? new PromptStore());
-      await project.refreshEvidence();
-      await project.syncHandles();
-      await project.reconcileWakes();
-      await project.reconcileApprovedChanges();
-      return project;
+      const opened = new CartoProject(root, config, brainStore, live, prompts, generation);
+      opened.archivePresent = archivePresent;
+      target = opened;
+      await opened.refreshEvidence();
+      await opened.syncHandles();
+      await opened.reconcileWakes();
+      return opened;
     } catch (error) {
       const cleanupFailures = await closeOpenedProjectResources(live, brainStore);
       if (cleanupFailures.length > 0) {
@@ -113,23 +137,17 @@ export class CartoProject {
    * it too.
    */
   async view(): Promise<ProjectView> {
-    const [brain, liveCarryPins, liveView] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins(), this.live.view()]);
+    const [brain, liveView] = await Promise.all([this.brainStore.read(), this.live.view()]);
     return {
       brain,
-      context: projectContext(brain, {
-        budget: CONTEXT_BUDGET,
-        carryPins: mergeCarryPins(liveCarryPins, brain.carryPins),
-      }),
-      liveCarryPins,
+      context: projectContext(brain, { budget: CONTEXT_BUDGET }),
       turn: this.projectTurnView(liveView),
       activity: liveView.activity,
+      error: liveView.error,
+      archivePresent: this.archivePresent,
     };
   }
 
-  /**
-   * Keep the private handle table in step with the live generation's carry
-   * pins. No handle is renumbered here; a collapse rebuilds the whole table.
-   */
   /**
    * A cheap view for a frame that the spinner clock asked for: the live
    * documents, the Brain, and the projection, without the transcript. The
@@ -137,16 +155,14 @@ export class CartoProject {
    * commit, and a commit asks for a full read of its own.
    */
   async liveFrameView(): Promise<ProjectView> {
-    const [brain, liveCarryPins, liveView] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins(), this.live.liveView()]);
+    const [brain, liveView] = await Promise.all([this.brainStore.read(), this.live.liveView()]);
     return {
       brain,
-      context: projectContext(brain, {
-        budget: CONTEXT_BUDGET,
-        carryPins: mergeCarryPins(liveCarryPins, brain.carryPins),
-      }),
-      liveCarryPins,
-      turn: this.projectTurnView({ ...liveView, activity: [] }),
+      context: projectContext(brain, { budget: CONTEXT_BUDGET }),
+      turn: this.projectTurnView(liveView),
       activity: liveView.activity,
+      error: liveView.error,
+      archivePresent: this.archivePresent,
     };
   }
 
@@ -165,13 +181,17 @@ export class CartoProject {
     return this.live.onCommit(listener);
   }
 
+  /**
+   * Keep the private handle table in step with the Brain. No handle is
+   * renumbered here; a collapse rebuilds the whole table. The UI calls this on
+   * a timer, so a needless commit would churn SQLite: do not write when the
+   * stored table already covers every record.
+   */
   async syncHandles(): Promise<void> {
-    const [brain, liveCarryPins] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins()]);
-    const carryPins = mergeCarryPins(liveCarryPins, brain.carryPins);
-    // Do not write the Brain when the table already covers every record. The UI
-    // calls this on a timer, so a needless commit would churn SQLite.
-    if (sameJson(ensureHandles(brain.handles, brain, carryPins), brain.handles)) return;
-    await this.brainStore.apply({ kind: "handles.sync", carryPins });
+    const brain = await this.brainStore.read();
+    const next = ensureHandles(brain.handles, brain);
+    if (sameJson(next, brain.handles)) return;
+    await this.brainStore.apply({ kind: "handles.sync" });
   }
 
   async refreshEvidence(): Promise<void> {
@@ -190,15 +210,11 @@ export class CartoProject {
       const source = await refreshSource(this.root, pin.source);
       if (!sameJson(source, pin.source)) await this.brainStore.apply({ kind: "pin.carry.add", pin: { ...pin, source } });
     }
-    await this.live.refreshCarryPins();
     await this.syncHandles();
   }
 
   async addUserContextPin(item: string, reason: string): Promise<void> {
-    const brain = await this.brainStore.read();
-    const contextId = brain.context.archiveGeneration ?? brain.context.liveGeneration;
-    if (contextId === null) throw new ProjectError("There is no context generation to pin.");
-    const source: SourceRef = { kind: "context", contextId, excerpt: item, freshness: "fresh" };
+    const source: SourceRef = { kind: "context", contextId: this.liveGeneration, excerpt: item, freshness: "fresh" };
     await this.brainStore.apply({
       kind: "pin.user.add",
       pin: { id: `user:${randomUUID()}`, item, reason, source, createdAt: Date.now() },
@@ -222,37 +238,6 @@ export class CartoProject {
     });
   }
 
-  /** The normal pin-removal path is deferred to the next collapse. */
-  /** @internal: use removePinHandleAtCollapse from UI or tools. */
-  private async removeUserPin(id: string): Promise<void> {
-    await this.brainStore.apply({ kind: "pin.user.remove", id, markedAt: Date.now() });
-  }
-
-  /** Remove a user pin now and restart from a fresh prefill. */
-  private async removeUserPinNow(id: string): Promise<void> {
-    await this.removeNow({ target: "user-pin", id });
-  }
-
-  private async removeCarryPin(id: string): Promise<void> {
-    const brain = await this.brainStore.read();
-    if (brain.carryPins.some((pin) => pin.id === id)) {
-      await this.brainStore.apply({ kind: "pin.carry.remove", id, markedAt: Date.now() });
-      return;
-    }
-    if ((await this.live.liveCarryPins()).some((pin) => pin.id === id)) {
-      // A carry pin from the current live generation expires at collapse. Keep a
-      // visible mark until then so the person can undo this safe deferred action.
-      await this.brainStore.apply({ kind: "deletion.mark", mark: { target: "carry-pin", id, markedAt: Date.now() } });
-      return;
-    }
-    throw new ProjectError(`No carry pin exists with id ${id}.`);
-  }
-
-  private async removeCarryPinNow(id: string): Promise<void> {
-    await this.removeNow({ target: "carry-pin", id });
-  }
-
-  /** Remove either type of pin. The Context tab does not expose private pin types. */
   /**
    * Turn a short public handle into a private durable ID for an action. The UI
    * shows handles only; the storage ID stays inside the project layer.
@@ -274,6 +259,18 @@ export class CartoProject {
     });
   }
 
+  /** Remove one record the person selected by its short handle. Single step, no undo. */
+  async deleteHandleNow(handle: string): Promise<void> {
+    const target = await this.deletionTargetFor(handle);
+    await this.deleteNow(target.target, target.id);
+  }
+
+  /** Remove a pin, selected by its short handle. Single step, no undo. */
+  async removePinHandleNow(handle: string): Promise<void> {
+    const resolved = await this.resolveTarget(handle, ["pin"]);
+    await this.deleteNow(await this.pinTarget(resolved.id), resolved.id);
+  }
+
   /** Resolve a short handle to a deletion target. */
   async deletionTargetFor(handle: string): Promise<DeletionTarget> {
     const brain = await this.brainStore.read();
@@ -285,55 +282,25 @@ export class CartoProject {
     throw new ProjectError(`The handle ${handle} does not name a record Carto can remove.`);
   }
 
-  /** Defer one removal to the next collapse, selected by its short handle. */
-  async markHandleForDeletion(handle: string): Promise<void> {
-    const target = await this.deletionTargetFor(handle);
-    await this.markForDeletion(target.target, target.id);
-  }
-
-  /** Remove now and restart live context from a fresh prefill. */
-  async deleteHandleNow(handle: string): Promise<void> {
-    const target = await this.deletionTargetFor(handle);
-    await this.removeNow(target);
-  }
-
-  /** Cancel a deferred removal, selected by its short handle. */
-  async undeleteHandle(handle: string): Promise<void> {
-    const target = await this.deletionTargetFor(handle);
-    await this.cancelDeletion(target.target, target.id);
-  }
-
-  /** Remove a pin now, selected by its short handle. */
-  async removePinHandleNow(handle: string): Promise<void> {
-    const resolved = await this.resolveTarget(handle, ["pin"]);
-    await this.removeNow({ target: await this.pinTarget(resolved.id), id: resolved.id });
-  }
-
-  /** Defer a pin removal to the next collapse, selected by its short handle. */
-  async removePinHandleAtCollapse(handle: string): Promise<void> {
-    const resolved = await this.resolveTarget(handle, ["pin"]);
-    await this.markForDeletion(await this.pinTarget(resolved.id), resolved.id);
-  }
-
   /** A pin handle can name either a user pin or a carry pin. */
   async pinTarget(id: string): Promise<"user-pin" | "carry-pin"> {
     const brain = await this.brainStore.read();
     if (brain.userPins.some((pin) => pin.id === id)) return "user-pin";
-    const liveCarryPins = await this.live.liveCarryPins();
-    if (mergeCarryPins(liveCarryPins, brain.carryPins).some((pin) => pin.id === id)) return "carry-pin";
+    if (brain.carryPins.some((pin) => pin.id === id)) return "carry-pin";
     throw new ProjectError("No pin exists with that handle.");
   }
 
-  async markForDeletion(target: DeletionTarget["target"], id: string): Promise<void> {
-    await this.brainStore.apply({ kind: "deletion.mark", mark: { target, id, markedAt: Date.now() } });
-  }
-
+  /**
+   * Delete one record. Deletion is a single step: the record is gone from the
+   * Brain. The frozen projection keeps showing it until the next collapse,
+   * which is what a frozen projection means.
+   */
   async deleteNow(target: DeletionTarget["target"], id: string): Promise<void> {
-    await this.removeNow({ target, id });
-  }
-
-  async cancelDeletion(target: DeletionTarget["target"], id: string): Promise<void> {
-    await this.brainStore.apply({ kind: "deletion.unmark", target: { target, id } });
+    const brain = await this.brainStore.read();
+    if (!hasDeletionTarget(brain, target, id)) {
+      throw new ProjectError(`No ${target} exists with that handle.`);
+    }
+    await this.brainStore.apply({ kind: "record.delete", target: { target, id } });
   }
 
   async editChat(id: string, text: string): Promise<void> {
@@ -371,7 +338,7 @@ export class CartoProject {
     path: string;
     startLine: number;
     endLine: number;
-    links?: string[];
+    edges?: Array<{ kind: "replaces" | "depends-on" | "contradicts"; target: string }>;
   }): Promise<void> {
     const inspected = await inspectProjectFile(this.root, input);
     const previous = (await this.brainStore.read()).atlas.find((entry) => entry.id === input.id);
@@ -391,23 +358,12 @@ export class CartoProject {
           freshness: "fresh",
         },
       ],
-      links: input.links ?? previous?.links ?? [],
+      edges: input.edges ?? previous?.edges ?? [],
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     };
     if (node.title === "" || node.claim === "") throw new ProjectError("An Atlas title and claim cannot be empty.");
     await this.brainStore.apply({ kind: "atlas.upsert", node });
-  }
-
-  async setHandoff(input: Omit<Handoff, "updatedAt"> | null): Promise<void> {
-    if (input === null) {
-      await this.brainStore.apply({ kind: "handoff.set", handoff: null });
-      return;
-    }
-    if (input.intent.trim() === "" || input.nextAction.trim() === "") {
-      throw new ProjectError("A handoff needs an intent and a next action.");
-    }
-    await this.brainStore.apply({ kind: "handoff.set", handoff: { ...input, updatedAt: Date.now() } });
   }
 
   async armWake(input: Pick<WakeEntry, "id" | "kind" | "condition" | "reason">): Promise<void> {
@@ -429,38 +385,23 @@ export class CartoProject {
   }
 
   async deleteChatNow(id: string): Promise<void> {
-    await this.removeNow({ target: "chat", id });
+    await this.deleteNow("chat", id);
   }
 
-  async deleteChatAtCollapse(id: string): Promise<void> {
-    await this.markForDeletion("chat", id);
+  /** Interrupt stops the run at its Pi Durable boundary. Queued inputs stay queued. */
+  async interruptTurn(): Promise<void> {
+    if (!(await this.live.isBusy())) throw new ProjectError("There is no active turn to interrupt.");
+    this.turnState = "cancelling";
+    await this.live.interrupt();
+    this.turnState = "idle";
   }
 
-  async recordChangeProposal(change: ChangeProposal): Promise<void> {
-    if (change.status !== "proposed" || change.resolvedAt !== null) {
-      throw new ProjectError("A new change proposal must have proposed status and no resolution time.");
-    }
-    parseUnifiedPatch(change.patch);
-    await this.brainStore.apply({ kind: "change.upsert", change });
-  }
-
-  async approveChange(id: string): Promise<void> {
-    const change = await this.findChange(id);
-    if (change.status !== "proposed") throw new ProjectError(`Only a proposed change can be approved: ${id}.`);
-    await this.brainStore.apply({
-      kind: "change.upsert",
-      change: { ...change, status: "approved", resolvedAt: null },
-    });
-    await this.reconcileApprovedChanges();
-  }
-
-  async rejectChange(id: string): Promise<void> {
-    const change = await this.findChange(id);
-    if (change.status !== "proposed") throw new ProjectError(`Only a proposed change can be rejected: ${id}.`);
-    await this.brainStore.apply({
-      kind: "change.upsert",
-      change: { ...change, status: "rejected", resolvedAt: Date.now() },
-    });
+  /** Cancel is interrupt plus dropping the queued inputs. */
+  async cancelTurn(): Promise<void> {
+    if (!(await this.live.isBusy())) throw new ProjectError("There is no active turn to cancel.");
+    this.turnState = "cancelling";
+    await this.live.cancel();
+    this.turnState = "idle";
   }
 
   /** Follow-up is the normal input. It is queued while the agent is working. */
@@ -477,9 +418,6 @@ export class CartoProject {
   private async beginSend(text: string, mode: SendMode, recordPersonChat: boolean): Promise<Promise<void>> {
     const clean = text.trim();
     if (clean === "") return Promise.resolve();
-    if ((await this.brainStore.read()).activity.kind === "waiting-for-collapse") {
-      throw new ProjectError("Confirm or cancel the requested collapse before you send another message.");
-    }
     await this.refreshEvidence();
     await this.consumeReadyWakes();
     const id = randomUUID();
@@ -501,45 +439,12 @@ export class CartoProject {
     return request;
   }
 
-  /** Stop at a Pi Durable boundary. The preserved partial is an editable draft. */
-  async pauseTurn(): Promise<void> {
-    if (!(await this.live.isBusy())) throw new ProjectError("There is no active turn to pause.");
-    this.turnState = "cancelling";
-    const draft = await this.live.pause();
-    if (draft !== "") this.pausedDrafts.set("current", draft);
-    this.turnState = "paused";
-    await this.brainStore.apply({ kind: "activity.set", activity: { kind: "idle", detail: "Turn paused. Edit the continuation draft or resume." } });
-  }
-
-  async resumeTurn(text?: string): Promise<void> {
-    const draft = (text ?? this.pausedDrafts.get("current") ?? "").trim();
-    if (this.turnState !== "paused") throw new ProjectError("There is no paused turn to resume.");
-    this.pausedDrafts.delete("current");
-    this.turnState = "idle";
-    if (draft === "") {
-      await this.continueTurn();
-      return;
-    }
-    const id = `resume:${randomUUID()}`;
-    const request = this.live.resumeFromDraft(draft, id);
-    this.trackTurn(id, request);
-  }
-
-  async cancelTurn(): Promise<void> {
-    if (!(await this.live.isBusy()) && this.turnState !== "paused") throw new ProjectError("There is no active or paused turn to cancel.");
-    this.turnState = "cancelling";
-    await this.live.cancel();
-    this.pausedDrafts.clear();
-    this.turnState = "idle";
-    await this.brainStore.apply({ kind: "activity.set", activity: { kind: "idle", detail: null } });
-  }
-
   /**
    * Continue a failed turn when Pi has work left. Otherwise start an agent turn
    * with Carto control data, not a Person Chat record.
    */
   async continueTurn(): Promise<void> {
-    if (await this.live.isBusy()) throw new ProjectError("Wait for the active turn, pause it, or cancel it before continue.");
+    if (await this.live.isBusy()) throw new ProjectError("Wait for the active turn, interrupt it, or cancel it before continue.");
     const id = `continue:${randomUUID()}`;
     const request = this.live.continueOrStart(id);
     this.trackTurn(id, request);
@@ -551,8 +456,7 @@ export class CartoProject {
 
   private projectTurnView(liveView: LiveSessionView): TurnView {
     return {
-      state: this.turnState === "paused" ? "paused" : liveView.busy ? this.turnState : "idle",
-      pausedDraft: this.pausedDrafts.get("current") ?? null,
+      state: liveView.busy ? this.turnState : "idle",
       queued: liveView.queued,
     };
   }
@@ -564,51 +468,31 @@ export class CartoProject {
       .then(async () => {
         await this.finishTurn();
       })
-      .catch(async (error: unknown) => {
-        await this.brainStore.apply({
-          kind: "activity.set",
-          activity: { kind: "error", detail: error instanceof Error ? error.message : String(error) },
-        });
+      .catch((error: unknown) => {
+        this.live.noteError(error instanceof Error ? error.message : String(error));
       })
       .finally(() => {
         this.runningSubmissions.delete(id);
-        if (this.runningSubmissions.size === 0 && this.turnState !== "paused") this.turnState = "idle";
+        if (this.runningSubmissions.size === 0) this.turnState = "idle";
       });
   }
 
   private async finishTurn(): Promise<void> {
     await this.reconcileWakes();
-    await this.reconcileApprovedChanges();
-    const requested = await this.brainStore.read();
-    if (this.config.collapseMode === "agent" && requested.activity.kind === "waiting-for-collapse") await this.rotateContext();
-    const brain = await this.brainStore.read();
-    if (brain.activity.kind === "thinking") await this.brainStore.apply({ kind: "activity.set", activity: { kind: "idle", detail: null } });
+    if (this.collapseRequested) {
+      this.collapseRequested = false;
+      await this.rotateContext();
+    }
   }
 
-  async requestCollapse(detail = "The person requested a context collapse."): Promise<void> {
-    await this.brainStore.apply({ kind: "collapse.request", detail });
-    if (this.config.collapseMode === "agent") await this.rotateContext();
-  }
-
+  /**
+   * Collapse the live context: end it, forget its transcript, keep the Brain,
+   * rebuild fresh context from the Brain, seal the previous store as the
+   * archive, and purge the archive that had its one collapse of grace. No
+   * approval; the person triggers from the workspace, the agent from its tool.
+   */
   async collapse(): Promise<void> {
-    if (this.config.collapseMode === "request") {
-      throw new ProjectError("The default collapse mode needs a confirmed collapse.");
-    }
     await this.rotateContext();
-  }
-
-  async confirmCollapse(): Promise<void> {
-    if ((await this.brainStore.read()).activity.kind !== "waiting-for-collapse") {
-      throw new ProjectError("There is no pending collapse request to confirm.");
-    }
-    await this.rotateContext();
-  }
-
-  async cancelCollapse(): Promise<void> {
-    if ((await this.brainStore.read()).activity.kind !== "waiting-for-collapse") {
-      throw new ProjectError("There is no pending collapse request to cancel.");
-    }
-    await this.brainStore.apply({ kind: "activity.set", activity: { kind: "idle", detail: null } });
   }
 
   async close(): Promise<void> {
@@ -617,74 +501,6 @@ export class CartoProject {
     } finally {
       await this.brainStore.close();
     }
-  }
-
-  private async removeNow(target: DeletionTarget): Promise<void> {
-    const [before, liveCarryPins] = await Promise.all([this.brainStore.read(), this.live.liveCarryPins()]);
-    if (!hasDeletionTarget(before, liveCarryPins, target)) {
-      throw new ProjectError(`No ${target.target} exists with id ${target.id}.`);
-    }
-    await this.live.cancel();
-    this.pausedDrafts.clear();
-    this.turnState = "idle";
-    await this.brainStore.apply({ kind: "deletion.now", target });
-
-    // A fresh session is necessary: Pi Durable cannot subtract arbitrary old
-    // transcript context from a provider request. Preserve only carry pins that
-    // are not the target. The old live and archive files are discarded by the
-    // restart decision, then securely cleaned up.
-    const nextCarryPins = mergeCarryPins(liveCarryPins, before.carryPins).filter(
-      (pin) => target.target !== "carry-pin" || pin.id !== target.id,
-    );
-    await this.restartLiveContext(nextCarryPins);
-  }
-
-  private async restartLiveContext(initialCarryPins: CarryPin[]): Promise<void> {
-    const old = this.live;
-    const generation = randomUUID();
-    const next = await LiveSession.open({
-      path: contextDatabasePath(this.root, generation),
-      model: parseModelRef(this.config.model),
-      config: this.config,
-      projectRoot: this.root,
-      brain: this.brainStore,
-      contextBudget: CONTEXT_BUDGET,
-      initialCarryPins,
-    });
-    try {
-      const decision = await this.brainStore.apply({ kind: "context.restart", newLiveGeneration: generation });
-      this.live = next;
-      const failures: unknown[] = [];
-      await attemptAfterCollapse(() => this.syncHandles(), failures);
-      await attemptAfterCollapse(() => old.close(), failures);
-      for (const effect of decision.effects) {
-        if (effect.kind === "discard-context" || effect.kind === "remove-archive") {
-          await attemptAfterCollapse(() => removeGeneration(this.root, effect.generation), failures);
-        }
-      }
-      await attemptAfterCollapse(() => this.brainStore.vacuum(), failures);
-      await attemptAfterCollapse(() => this.live.vacuum(), failures);
-      await attemptAfterCollapse(async () => removeUnreferencedContextFiles(this.root, await this.brainStore.read()), failures);
-      if (failures.length > 0) {
-        throw new AggregateError(failures, "Carto restarted context but some immediate-removal cleanup could not finish.");
-      }
-    } catch (error) {
-      // Once the new Brain generation commits, `next` is the valid live session.
-      // Do not remove it in that case. A later open will retry unreferenced-file
-      // cleanup. Before that commit, remove the unused candidate generation.
-      const brain = await this.brainStore.read();
-      if (brain.context.liveGeneration !== generation) {
-        await next.close();
-        await removeGeneration(this.root, generation);
-      }
-      throw error;
-    }
-  }
-
-  private async findChange(id: string): Promise<ChangeProposal> {
-    const change = (await this.brainStore.read()).changes.find((candidate) => candidate.id === id);
-    if (change === undefined) throw new ProjectError(`No change exists with id ${id}.`);
-    return change;
   }
 
   private async consumeReadyWakes(): Promise<void> {
@@ -707,25 +523,10 @@ export class CartoProject {
     }
   }
 
-  private async reconcileApprovedChanges(): Promise<void> {
-    if (this.applyingChanges) return;
-    this.applyingChanges = true;
-    try {
-      while (true) {
-        const change = (await this.brainStore.read()).changes.find((candidate) => candidate.status === "approved");
-        if (change === undefined) return;
-        await this.live.ensurePatchApply(change.id);
-      }
-    } finally {
-      this.applyingChanges = false;
-    }
-  }
-
   private async rotateContext(): Promise<void> {
     await this.refreshEvidence();
-    const before = await this.brainStore.read();
-    const oldLive = before.context.liveGeneration;
-    if (oldLive === null) throw new ProjectError("There is no live context to collapse.");
+    const priorGeneration = this.liveGeneration;
+    const discoveredArchive = (await discoverContextStores(this.root)).archive;
 
     const generation = randomUUID();
     const next = await LiveSession.open({
@@ -735,12 +536,13 @@ export class CartoProject {
       projectRoot: this.root,
       brain: this.brainStore,
       contextBudget: CONTEXT_BUDGET,
-      initialCarryPins: before.carryPins,
+      promptStore: this.prompts,
+      onCollapseRequest: () => {
+        this.collapseRequested = true;
+      },
     });
-
-    let decision;
     try {
-      decision = await this.brainStore.apply({ kind: "collapse.rotate", newLiveGeneration: generation });
+      await this.brainStore.apply({ kind: "collapse.rotate" });
     } catch (error) {
       await next.close();
       await removeGeneration(this.root, generation);
@@ -749,19 +551,27 @@ export class CartoProject {
 
     const priorLive = this.live;
     this.live = next;
+    this.liveGeneration = generation;
+    this.archivePresent = true;
+    this.prompts.clear();
     const failures: unknown[] = [];
-    await attemptAfterCollapse(() => this.syncHandles(), failures);
     await attemptAfterCollapse(() => priorLive.vacuum(), failures);
     await attemptAfterCollapse(() => priorLive.close(), failures);
-
-    for (const effect of decision.effects) {
-      if (effect.kind === "remove-archive") await attemptAfterCollapse(() => removeGeneration(this.root, effect.generation), failures);
+    // The archive that was already here had its one collapse of grace with
+    // this collapse. Pins-to-archive export lands with the archive tooling;
+    // nothing can have been pinned to the archive yet, so the purge exports
+    // nothing today.
+    if (discoveredArchive !== undefined) {
+      await attemptAfterCollapse(() => removeGeneration(this.root, discoveredArchive), failures);
     }
+    // Seal the just-archived live store as read-only, best-effort. The open
+    // path discovers stores by mtime, not by mode, so a failed chmod is a
+    // tidiness problem, not a correctness one.
+    await attemptAfterCollapse(() => sealGeneration(this.root, priorGeneration), failures);
     await attemptAfterCollapse(() => this.brainStore.vacuum(), failures);
     await attemptAfterCollapse(() => this.live.vacuum(), failures);
-    await attemptAfterCollapse(async () => removeUnreferencedContextFiles(this.root, await this.brainStore.read()), failures);
+    await attemptAfterCollapse(async () => removeUnreferencedContextFiles(this.root), failures);
     await attemptAfterCollapse(() => this.reconcileWakes(), failures);
-    await attemptAfterCollapse(() => this.reconcileApprovedChanges(), failures);
     if (failures.length > 0) throw new AggregateError(failures, "Carto completed the collapse but some cleanup could not finish.");
   }
 }
@@ -779,10 +589,6 @@ async function closeOpenedProjectResources(live: LiveSession | undefined, brainS
     failures.push(error);
   }
   return failures;
-}
-
-export function collapseNeedsConfirmation(mode: CollapseMode): boolean {
-  return mode === "request";
 }
 
 async function attemptAfterCollapse(work: () => Promise<void>, failures: unknown[]): Promise<void> {
@@ -807,63 +613,109 @@ function sameJson(first: unknown, second: unknown): boolean {
   return JSON.stringify(first) === JSON.stringify(second);
 }
 
-function hasDeletionTarget(brain: CartoBrain, liveCarryPins: readonly CarryPin[], target: DeletionTarget): boolean {
-  switch (target.target) {
+function hasDeletionTarget(brain: CartoBrain, target: DeletionTarget["target"], id: string): boolean {
+  switch (target) {
     case "chat":
-      return brain.chat.some((entry) => entry.id === target.id);
+      return brain.chat.some((entry) => entry.id === id);
     case "ledger":
-      return brain.ledger.some((entry) => entry.id === target.id);
+      return brain.ledger.some((entry) => entry.id === id);
     case "atlas":
-      return brain.atlas.some((entry) => entry.id === target.id);
+      return brain.atlas.some((entry) => entry.id === id);
     case "user-pin":
-      return brain.userPins.some((entry) => entry.id === target.id);
+      return brain.userPins.some((entry) => entry.id === id);
     case "carry-pin":
-      return brain.carryPins.some((entry) => entry.id === target.id) || liveCarryPins.some((entry) => entry.id === target.id);
+      return brain.carryPins.some((entry) => entry.id === id);
   }
 }
 
-async function ensureReferencedContextFiles(root: string, brain: CartoBrain): Promise<void> {
-  for (const [role, generation] of [
-    ["live", brain.context.liveGeneration],
-    ["archive", brain.context.archiveGeneration],
-  ] as const) {
-    if (generation === null) continue;
-    const path = contextDatabasePath(root, generation);
+interface ContextStore {
+  generation: string;
+  mtimeMs: number;
+}
+
+/**
+ * All live context stores, newest first. This is the only record of which
+ * store is which: the Brain keeps no generation pointer, so a fresh read of
+ * the directory is the source of truth after any crash.
+ */
+async function listContextStores(root: string): Promise<ContextStore[]> {
+  const directory = contextDirectory(root);
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if (isMissingFile(error)) return [];
+    throw error;
+  }
+  const stores: ContextStore[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".sqlite")) continue;
+    const generation = name.slice(0, -".sqlite".length);
+    if (!isContextGenerationName(generation)) continue;
     try {
-      const info = await lstat(path);
-      if (!info.isFile() || info.isSymbolicLink()) {
-        throw new ProjectError(`The referenced ${role} context is not a regular file: ${path}.`);
-      }
+      const info = await stat(join(directory, name));
+      if (info.isFile()) stores.push({ generation, mtimeMs: info.mtimeMs });
     } catch (error) {
-      if (isMissingFile(error)) {
-        throw new ProjectError(`The referenced ${role} context is missing: ${path}. Carto will not replace it with an empty session.`);
-      }
-      throw error;
+      if (!isMissingFile(error)) throw error;
     }
   }
+  stores.sort((first, second) => second.mtimeMs - first.mtimeMs);
+  return stores;
 }
 
-async function removeUnreferencedContextFiles(root: string, brain: CartoBrain): Promise<void> {
+async function discoverContextStores(root: string): Promise<{ live: string | undefined; archive: string | undefined }> {
+  const stores = await listContextStores(root);
+  return { live: stores[0]?.generation, archive: stores[1]?.generation };
+}
+
+/**
+ * Pick the store this open should use, repairing permissions left behind by a
+ * collapse that crashed part-way through sealing one. Creates a new generation
+ * when there is nothing to adopt.
+ */
+async function adoptLiveGeneration(root: string): Promise<string> {
+  const stores = await listContextStores(root);
+  if (stores.length === 0) return randomUUID();
+  const live = stores[0]!;
+  // A store left read-only by a crashing seal cannot be opened read-write.
+  await chmod(join(contextDirectory(root), `${live.generation}.sqlite`), 0o600).catch(() => {});
+  return live.generation;
+}
+
+/** Best-effort: seal a retired store as read-only. Discovery never depends on the mode. */
+async function sealGeneration(root: string, generation: string): Promise<void> {
   const directory = contextDirectory(root);
-  const keep = new Set([brain.context.liveGeneration, brain.context.archiveGeneration].filter((id): id is string => id !== null));
-  const files = await readdir(directory, { withFileTypes: true });
-  const names = new Set(files.map((file) => file.name));
-  await Promise.all([
-    ...files
-      .filter((file) => file.isFile() && file.name.endsWith(".sqlite"))
-      .map(async (file) => {
-        const id = file.name.slice(0, -".sqlite".length);
-        if (isContextGenerationName(id) && !keep.has(id)) await removeGeneration(root, id);
-      }),
-    ...files
-      .filter((file) => file.isFile())
-      .map(async (file) => {
-        const id = orphanSidecarGeneration(file.name);
-        if (id !== undefined && !keep.has(id) && !names.has(`${id}.sqlite`)) {
-          await rm(join(directory, file.name), { force: true });
-        }
-      }),
-  ]);
+  for (const name of [`${generation}.sqlite`, `${generation}.sqlite-wal`, `${generation}.sqlite-shm`]) {
+    await chmod(join(directory, name), 0o444).catch(() => {});
+  }
+}
+
+/**
+ * Delete every generation store beyond the live one and its archive: the two
+ * newest survive. This is what makes a collapse idempotent after a crash.
+ */
+async function removeUnreferencedContextFiles(root: string): Promise<void> {
+  const directory = contextDirectory(root);
+  let names: string[];
+  try {
+    names = await readdir(directory);
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+  const stores = await listContextStores(root);
+  const keep = new Set(stores.slice(0, 2).map((store) => store.generation));
+  for (const name of names) {
+    if (name.endsWith(".sqlite")) {
+      const generation = name.slice(0, -".sqlite".length);
+      if (isContextGenerationName(generation) && !keep.has(generation)) await removeGeneration(root, generation);
+      continue;
+    }
+    const sidecar = orphanSidecarGeneration(name);
+    if (sidecar !== undefined && !keep.has(sidecar) && !names.includes(`${sidecar}.sqlite`)) {
+      await rm(join(directory, name), { force: true });
+    }
+  }
 }
 
 function orphanSidecarGeneration(name: string): string | undefined {
@@ -877,6 +729,9 @@ function orphanSidecarGeneration(name: string): string | undefined {
 
 async function removeGeneration(root: string, generation: string): Promise<void> {
   const path = contextDatabasePath(root, generation);
+  // A store sealed read-only by a completed collapse cannot be vacuumed;
+  // restore write permission first, best-effort.
+  await chmod(path, 0o600).catch(() => {});
   let cleanupFailure: unknown;
   try {
     await access(path);

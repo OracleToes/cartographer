@@ -55,7 +55,6 @@ async function deliverWake(
   const current = (await brain.read()).wakes.find((wake) => wake.id === wakeId);
   if (current?.status === "armed" && current.kind === "time" && parseTimeWakeCondition(current.condition) === until) {
     await brain.apply({ kind: "wake.upsert", wake: { ...current, status: "ready" } });
-    await brain.apply({ kind: "activity.set", activity: { kind: "woken", detail: wakeId } });
   }
   await runtime.commit(
     () => ({ status: "terminal", outcome: { status: "completed", result: { wakeId } } }),

@@ -48,7 +48,7 @@ test("the optional legacy importer copies plain Atlas and Ledger records without
     assert.equal(brain.ledger.find((entry) => entry.text === "An old decision")?.status, "closed");
     assert.equal(brain.ledger.find((entry) => entry.text === "An old decision")?.answer?.text, "It was accepted.");
     assert.equal(brain.atlas[0]?.evidence[0]?.freshness, "stale");
-    assert.ok(brain.atlas[0]?.links.includes(brain.atlas[1]?.id));
+    assert.ok(brain.atlas[0]?.edges.some((edge) => edge.kind === "depends-on" && edge.target === brain.atlas[1]?.id));
 
     const plan = projectContext(brain, { budget: 10_000 });
     assert.ok(!plan.blocks.some((block) => block.text.includes("The old runtime had many parts.")));

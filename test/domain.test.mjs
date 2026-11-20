@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createEmptyBrain } from "../dist/domain/brain.js";
+import { byCreatedAt, createEmptyBrain } from "../dist/domain/brain.js";
 import { decide, DomainError } from "../dist/domain/commands.js";
 import { projectContext, renderContextPlan } from "../dist/domain/context.js";
 import { resolveHandle, resolveHandleOfKind } from "../dist/domain/handles.js";
@@ -16,60 +16,93 @@ const source = (freshness = "fresh") => ({
   freshness,
 });
 
-test("collapse keeps deliberate records and purges marked records", () => {
+test("a collapse rebuilds the handle table and keeps every deliberate record", () => {
   let brain = createEmptyBrain();
-  brain = { ...brain, context: { liveGeneration: "g1", archiveGeneration: "g0" } };
   brain = decide(brain, {
     kind: "chat.record",
-    record: { id: "chat-1", author: "user", text: "Keep this chat", createdAt: 1 },
+    record: { id: "chat-1", author: "user", text: "Keep this chat", createdAt: 1, updatedAt: 1 },
   }).brain;
   brain = decide(brain, {
     kind: "ledger.upsert",
-    entry: { id: "ledger-1", kind: "note", text: "Remove this note", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
+    entry: { id: "ledger-1", kind: "note", text: "One Ledger record", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
   }).brain;
   brain = decide(brain, {
     kind: "atlas.upsert",
-    node: { id: "atlas-1", title: "Main", claim: "Main exports value", evidence: [source()], links: [], createdAt: 1, updatedAt: 1 },
+    node: { id: "atlas-1", title: "Main", claim: "Main exports value", evidence: [source()], edges: [], createdAt: 1, updatedAt: 1 },
   }).brain;
   brain = decide(brain, {
     kind: "pin.carry.add",
     pin: { id: "carry-1", item: "Keep one cycle", reason: "Needed next", source: source(), createdAt: 1 },
   }).brain;
-  brain = decide(brain, { kind: "deletion.mark", mark: { target: "ledger", id: "ledger-1", markedAt: 2 } }).brain;
 
-  const result = decide(brain, { kind: "collapse.rotate", newLiveGeneration: "g2" });
+  const result = decide(brain, { kind: "collapse.rotate" });
 
-  assert.equal(result.brain.context.liveGeneration, "g2");
-  assert.equal(result.brain.context.archiveGeneration, "g1");
-  assert.deepEqual(result.brain.carryPins, []);
   assert.equal(result.brain.chat.length, 1);
+  assert.equal(result.brain.ledger.length, 1);
   assert.equal(result.brain.atlas.length, 1);
-  assert.equal(result.brain.ledger.length, 0);
-  assert.deepEqual(result.effects, [{ kind: "remove-archive", generation: "g0" }]);
+  assert.equal(result.brain.carryPins.length, 1);
+  assert.deepEqual(result.effects, []);
+  assert.deepEqual(
+    result.brain.handles.entries.map((entry) => entry.handle),
+    ["L1", "C1", "A1", "P1"],
+  );
 });
 
-test("a collapse needs a current live generation", () => {
-  assert.throws(() => decide(createEmptyBrain(), { kind: "collapse.rotate", newLiveGeneration: "g1" }), DomainError);
-});
-
-test("a context plan uses the active generation carry selection", () => {
+test("delete removes a record in one step, for every target", () => {
   let brain = createEmptyBrain();
   brain = decide(brain, {
-    kind: "pin.carry.add",
-    pin: { id: "carry:future", item: "Future carry", reason: "For the next collapse", source: source(), createdAt: 1 },
+    kind: "chat.record",
+    record: { id: "chat-1", author: "user", text: "Remove me", createdAt: 1, updatedAt: 1 },
   }).brain;
-  const selected = {
-    id: "carry:selected",
-    item: "Selected live carry",
-    reason: "It entered this live generation.",
-    source: { kind: "context", contextId: "old-generation", excerpt: "Exact selected working context.", freshness: "fresh" },
-    createdAt: 1,
-  };
+  brain = decide(brain, {
+    kind: "ledger.upsert",
+    entry: { id: "ledger-1", kind: "note", text: "Remove me", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
+  }).brain;
+  brain = decide(brain, {
+    kind: "atlas.upsert",
+    node: { id: "atlas-1", title: "T", claim: "C", evidence: [source()], edges: [], createdAt: 1, updatedAt: 1 },
+  }).brain;
+  brain = decide(brain, {
+    kind: "pin.user.add",
+    pin: { id: "pin-1", item: "Remove me", reason: "Reason", source: source(), createdAt: 1 },
+  }).brain;
+  brain = decide(brain, {
+    kind: "wake.upsert",
+    wake: { id: "wake-1", kind: "time", condition: "100", status: "armed", reason: "Reason", createdAt: 1 },
+  }).brain;
 
-  const plan = projectContext(brain, { budget: 1000, carryPins: [selected, ...brain.carryPins] });
+  for (const target of [
+    { target: "chat", id: "chat-1" },
+    { target: "ledger", id: "ledger-1" },
+    { target: "atlas", id: "atlas-1" },
+    { target: "user-pin", id: "pin-1" },
+  ]) {
+    brain = decide(brain, { kind: "record.delete", target }).brain;
+  }
 
-  assert.ok(plan.blocks.some((block) => block.id === "carry-pin:carry:selected" && block.text.includes("Exact selected working context.")));
-  assert.ok(plan.blocks.some((block) => block.id === "carry-pin:carry:future"));
+  assert.equal(brain.chat.length, 0);
+  assert.equal(brain.ledger.length, 0);
+  assert.equal(brain.atlas.length, 0);
+  assert.equal(brain.userPins.length, 0);
+  assert.equal(brain.wakes.length, 1);
+  // Handles follow the records they name.
+  assert.deepEqual(brain.handles.entries.map((entry) => entry.handle), ["W1"]);
+});
+
+test("the projection carries structure, not dialogue", () => {
+  let brain = createEmptyBrain();
+  brain = decide(brain, {
+    kind: "chat.record",
+    record: { id: "chat-1", author: "user", text: "A private message the model should never see twice", createdAt: 1, updatedAt: 1 },
+  }).brain;
+  const plan = projectContext(brain, { budget: 10_000 });
+  const rendered = renderContextPlan(plan);
+
+  assert.equal(plan.blocks.length, 0);
+  assert.equal(plan.references.length, 1);
+  assert.doesNotMatch(rendered, /private message the model/);
+  // Chat text reaches the model as a tool result, never as context projection.
+  assert.doesNotMatch(rendered, /## Chat/);
 });
 
 test("context keeps user pins and warns about stale evidence without old text", () => {
@@ -83,7 +116,7 @@ test("context keeps user pins and warns about stale evidence without old text", 
     pin: { id: "pin-2", item: "old text must not enter", reason: "Refresh this", source: source("stale"), createdAt: 1 },
   }).brain;
 
-  const plan = projectContext(brain, { budget: 1000, userMessage: "Tell me about main", at: 1_700_000_000_000 });
+  const plan = projectContext(brain, { budget: 1000 });
   const fresh = plan.blocks.find((block) => block.id === "user-pin:pin-1");
   const stale = plan.blocks.find((block) => block.id === "user-pin:pin-2:stale");
 
@@ -93,7 +126,7 @@ test("context keeps user pins and warns about stale evidence without old text", 
   assert.deepEqual(plan.omissions, [{ id: "user-pin:pin-2", label: "P2", reason: "stale" }]);
 });
 
-test("fresh Carto context uses public handles, typed order, links, and UTC timestamps", () => {
+test("fresh context uses public handles, typed order, edges, and UTC timestamps", () => {
   let brain = createEmptyBrain();
   brain = {
     ...brain,
@@ -109,9 +142,9 @@ test("fresh Carto context uses public handles, typed order, links, and UTC times
       {
         id: "atlas:private-one",
         title: "Context order",
-        claim: "Atlas follows Chat.",
+        claim: "Atlas follows the Ledger.",
         evidence: [source()],
-        links: ["atlas:private-two", "ledger:old-private"],
+        edges: [{ kind: "replaces", target: "atlas:private-two" }],
         createdAt: 50,
         updatedAt: 55,
       },
@@ -120,58 +153,64 @@ test("fresh Carto context uses public handles, typed order, links, and UTC times
         title: "Second Atlas",
         claim: "This is linked.",
         evidence: [source()],
-        links: [],
+        edges: [],
         createdAt: 60,
         updatedAt: 60,
       },
     ],
     userPins: [{ id: "pin:private", item: "Pinned context", reason: "Keep it", source: source(), createdAt: 70 }],
-    handoff: {
-      intent: "Finish order tests",
-      activeLedgerIds: ["ledger:old-private"],
-      openQuestionIds: ["ledger:new-private"],
-      relevantAtlasIds: ["atlas:private-two"],
-      nextAction: "Run the test.",
-      note: "",
-      updatedAt: 80,
-    },
     wakes: [{ id: "wake:private", kind: "time", condition: "100", status: "armed", reason: "Test wake", createdAt: 90 }],
   };
 
-  const plan = projectContext(brain, { budget: 10_000, userMessage: "Current work", at: 100 });
+  const plan = projectContext(brain, { budget: 10_000 });
   const rendered = renderContextPlan(plan);
   const orderedSections = plan.blocks.map((block) => block.section);
 
-  assert.deepEqual(orderedSections, ["rules", "ledger", "ledger", "chat", "chat", "atlas", "atlas", "pin", "handoff", "active", "message"]);
+  assert.deepEqual(orderedSections, ["ledger", "ledger", "atlas", "atlas", "pin", "wake"]);
   assert.deepEqual(
     plan.blocks.filter((block) => block.section === "ledger").map((block) => block.handle),
     ["L1", "L2"],
   );
-  assert.deepEqual(
-    plan.blocks.filter((block) => block.section === "chat").map((block) => block.handle),
-    ["C1", "C2"],
-  );
-  assert.match(plan.blocks.find((block) => block.handle === "A1")?.text ?? "", /Links: A2, L1/);
-  assert.match(plan.blocks.find((block) => block.handle === "H1")?.text ?? "", /Open Ledger: L1/);
-  assert.match(plan.blocks.find((block) => block.handle === "C1")?.text ?? "", /1970-01-01T00:00:00.030Z/);
+  assert.match(plan.blocks.find((block) => block.handle === "A1")?.text ?? "", /Edges: replaces A2/);
+  assert.match(plan.blocks.find((block) => block.handle === "A1")?.text ?? "", /1970-01-01T00:00:00.055Z/);
   assert.match(rendered, /L1 Ledger/);
-  assert.match(rendered, /C1 Person Chat/);
   assert.doesNotMatch(rendered, /ledger:old-private|chat:first-private|atlas:private-one|pin:private|wake:private/);
   assert.ok(plan.references.every((reference) => !("id" in reference)));
 });
 
-test("an immediate context restart discards old live and archive generations", () => {
-  const brain = {
-    ...createEmptyBrain(),
-    context: { liveGeneration: "live", archiveGeneration: "archive" },
-  };
-  const result = decide(brain, { kind: "context.restart", newLiveGeneration: "fresh" });
+test("only armed and ready wakes reach the projection", () => {
+  let brain = createEmptyBrain();
+  for (const [id, status] of [
+    ["wake:armed", "armed"],
+    ["wake:ready", "ready"],
+    ["wake:consumed", "consumed"],
+    ["wake:cancelled", "cancelled"],
+  ]) {
+    brain = decide(brain, {
+      kind: "wake.upsert",
+      wake: { id, kind: "time", condition: "100", status, reason: `Wake ${status}`, createdAt: 1 },
+    }).brain;
+  }
 
-  assert.deepEqual(result.brain.context, { liveGeneration: "fresh", archiveGeneration: null });
-  assert.deepEqual(result.effects, [
-    { kind: "discard-context", generation: "live" },
-    { kind: "discard-context", generation: "archive" },
-  ]);
+  const plan = projectContext(brain, { budget: 10_000 });
+  const woken = plan.blocks.filter((block) => block.section === "wake").map((block) => block.handle);
+
+  assert.equal(woken.length, 2);
+});
+
+test("a stale atlas claim is omitted from the projection and flagged for inspection", () => {
+  let brain = createEmptyBrain();
+  brain = decide(brain, {
+    kind: "atlas.upsert",
+    node: { id: "atlas-1", title: "Stale claim", claim: "Old claim text", evidence: [source("stale")], edges: [], createdAt: 1, updatedAt: 1 },
+  }).brain;
+
+  const plan = projectContext(brain, { budget: 10_000 });
+  const block = plan.blocks.find((candidate) => candidate.section === "atlas");
+
+  assert.match(block?.text ?? "", /Atlas · stale/);
+  assert.doesNotMatch(block?.text ?? "", /Old claim text/);
+  assert.deepEqual(plan.omissions, [{ id: "atlas:atlas-1", label: "A1", reason: "stale" }]);
 });
 
 test("a handle stays with its record across ordinary edits and new records", () => {
@@ -201,31 +240,47 @@ test("a handle stays with its record across ordinary edits and new records", () 
   assert.match(second.blocks.find((block) => block.handle === "L1")?.text ?? "", /First goal, edited/);
 });
 
-test("a hidden record keeps its handle and a collapse renumbers the new generation", () => {
-  let brain = { ...createEmptyBrain(), context: { liveGeneration: "g1", archiveGeneration: null } };
+test("a collapse renumbers handles and keeps the records", () => {
+  let brain = createEmptyBrain();
   for (const [index, id] of ["a", "b", "c"].entries()) {
     brain = decide(brain, {
-      kind: "chat.record",
-      record: { id: `chat:${id}`, author: "user", text: id, createdAt: index + 1, updatedAt: index + 1 },
+      kind: "ledger.upsert",
+      entry: { id: `ledger:${id}`, kind: "note", text: id, status: "open", answer: null, createdAt: index + 1, updatedAt: index + 1 },
     }).brain;
   }
-  brain = decide(brain, { kind: "deletion.mark", mark: { target: "chat", id: "chat:b", markedAt: 5 } }).brain;
+  brain = decide(brain, { kind: "record.delete", target: { target: "ledger", id: "ledger:b" } }).brain;
   const plan = projectContext(brain, { budget: 10_000 });
-  assert.deepEqual(plan.blocks.filter((block) => block.section === "chat").map((block) => block.handle), ["C1", "C3"]);
+  assert.deepEqual(plan.blocks.filter((block) => block.section === "ledger").map((block) => block.handle), ["L1", "L3"]);
 
-  const collapsed = decide(brain, { kind: "collapse.rotate", newLiveGeneration: "g2" }).brain;
-  assert.equal(collapsed.chat.length, 2);
-  assert.deepEqual(collapsed.handles.entries.map((entry) => entry.handle), ["C1", "C2"]);
+  const collapsed = decide(brain, { kind: "collapse.rotate" }).brain;
+  assert.equal(collapsed.ledger.length, 2);
+  assert.deepEqual(collapsed.handles.entries.map((entry) => entry.handle), ["L1", "L2"]);
 });
 
 test("a public handle resolves to its private ID and an unknown handle fails", () => {
   let brain = createEmptyBrain();
   brain = decide(brain, {
     kind: "atlas.upsert",
-    node: { id: "atlas:private", title: "T", claim: "C", evidence: [source()], links: [], createdAt: 1, updatedAt: 1 },
+    node: { id: "atlas:private", title: "T", claim: "C", evidence: [source()], edges: [], createdAt: 1, updatedAt: 1 },
   }).brain;
 
   assert.deepEqual(resolveHandle(brain.handles, "a1"), { kind: "atlas", id: "atlas:private" });
   assert.equal(resolveHandle(brain.handles, "A9"), undefined);
   assert.throws(() => resolveHandleOfKind(brain.handles, "A1", ["ledger"]), /does not name/);
+});
+
+test("an unknown command kind fails explicitly instead of being ignored", () => {
+  assert.throws(() => decide(createEmptyBrain(), { kind: "nope.unknown" }), DomainError);
+  assert.throws(() => decide(createEmptyBrain(), { kind: "record.delete", target: { target: "nope", id: "x" } }), DomainError);
+});
+
+test("records stay in creation order regardless of input order", () => {
+  const brain = {
+    ...createEmptyBrain(),
+    ledger: [
+      { id: "ledger:b", kind: "note", text: "b", status: "open", answer: null, createdAt: 2, updatedAt: 2 },
+      { id: "ledger:a", kind: "note", text: "a", status: "open", answer: null, createdAt: 1, updatedAt: 1 },
+    ],
+  };
+  assert.deepEqual(byCreatedAt(brain.ledger).map((entry) => entry.id), ["ledger:a", "ledger:b"]);
 });

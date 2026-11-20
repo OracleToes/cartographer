@@ -26,10 +26,8 @@ test("a completed transient disclosure folds to one line but remains expandable"
 const { parseCommand } = await import("../dist/runtime/ui.js");
 
 test("person commands accept short handles only", () => {
-  assert.deepEqual(parseCommand("/delete C2"), { kind: "delete", handle: "C2", now: false });
-  assert.deepEqual(parseCommand("/delete-now l1"), { kind: "delete", handle: "l1", now: true });
-  assert.deepEqual(parseCommand("/unpin P3"), { kind: "unpin", handle: "P3", now: false });
-  assert.deepEqual(parseCommand("/approve X1"), { kind: "approve", handle: "X1" });
+  assert.deepEqual(parseCommand("/delete C2"), { kind: "delete", handle: "C2" });
+  assert.deepEqual(parseCommand("/unpin P3"), { kind: "unpin", handle: "P3" });
   assert.deepEqual(parseCommand("/cancel-wake W1"), { kind: "cancel-wake", handle: "W1", reason: "The person cancelled this wake." });
   // A private durable ID is never a valid command argument.
   assert.throws(() => parseCommand("/delete chat:private"), /Unknown or incomplete command/);
@@ -47,7 +45,7 @@ test("Ledger, Atlas, and wake commands take an optional handle", () => {
     evidence: [],
   });
   assert.equal(parseCommand("/ledger note | open | A new note")?.handle, null);
-  assert.deepEqual(parseCommand("/atlas A2 | Title | Claim | src/main.ts:1-2 | A1,L1"), {
+  assert.deepEqual(parseCommand("/atlas A2 | Title | Claim | src/main.ts:1-2 | replaces:A1,depends-on:L1"), {
     kind: "atlas",
     handle: "A2",
     title: "Title",
@@ -55,7 +53,10 @@ test("Ledger, Atlas, and wake commands take an optional handle", () => {
     path: "src/main.ts",
     startLine: 1,
     endLine: 2,
-    links: ["A1", "L1"],
+    edges: [
+      { kind: "replaces", handle: "A1" },
+      { kind: "depends-on", handle: "L1" },
+    ],
   });
   assert.deepEqual(parseCommand("/wake W1 | time | 2030-01-01T00:00:00Z | Check back"), {
     kind: "wake",

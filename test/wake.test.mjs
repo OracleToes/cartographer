@@ -148,7 +148,6 @@ test("a Pi Durable time wake survives as a durable task and delivers its Brain s
   try {
     await session.ensureTimeWake(wakeId, until);
     await eventually(async () => (await brain.read()).wakes.find((wake) => wake.id === wakeId)?.status === "ready");
-    assert.equal((await brain.read()).activity.kind, "woken");
   } finally {
     await session.close();
     await brain.close();
@@ -239,49 +238,6 @@ test("a project-root path wake ignores Carto Brain files but sees direct project
 
     await writeFile(join(root, "project-file.txt"), "project data\n", "utf8");
     await eventually(async () => (await brain.read()).wakes.find((wake) => wake.id === wakeId)?.status === "ready", 4_000);
-  } finally {
-    await session.close();
-    await brain.close();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("selected carry pins stay with one live generation and become stale when their file changes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "carto-carry-"));
-  const text = "original carry source\n";
-  await writeFile(join(root, "carry.txt"), text, "utf8");
-  const brain = await BrainStore.open(join(root, ".brain", "brain.sqlite"));
-  const pin = {
-    id: "carry:test",
-    item: "Original carry fact",
-    reason: "Keep it for the next generation.",
-    source: {
-      kind: "file",
-      path: "carry.txt",
-      startLine: 1,
-      endLine: 1,
-      digest: createHash("sha256").update(text).digest("hex"),
-      excerpt: text.trim(),
-      freshness: "fresh",
-    },
-    createdAt: Date.now(),
-  };
-  let session = await LiveSession.open({
-    path: join(root, ".brain", "context", "live.sqlite"),
-    model: { provider: "openai", modelId: "gpt-4.1-mini" },
-    projectRoot: root,
-    brain,
-    initialCarryPins: [pin],
-  });
-  try {
-    assert.equal((await session.liveCarryPins())[0]?.id, pin.id);
-    await writeFile(join(root, "carry.txt"), "revised carry source\n", "utf8");
-    await session.refreshCarryPins();
-    assert.equal((await session.liveCarryPins())[0]?.source.freshness, "stale");
-
-    await session.close();
-    session = await openSession(root, brain);
-    assert.equal((await session.liveCarryPins())[0]?.source.freshness, "stale");
   } finally {
     await session.close();
     await brain.close();
