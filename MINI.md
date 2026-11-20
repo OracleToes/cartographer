@@ -149,7 +149,8 @@ snapshots.
 > Confirmed by the person: "i want deleted text really gone", and "a fresh
 > store per generation" when choosing between storage shapes, with the person's
 > expectation that a session can be rebuilt from the Brain store if something
-> happens. Archive mechanics are open. See `docs/open-questions.md` §3.
+> happens. Archive mechanics are derived from intention in
+`docs/open-questions.md` §3, pending the person's veto.
 
 ## 5. Collapse
 

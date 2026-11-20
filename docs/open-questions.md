@@ -54,16 +54,31 @@ session is rebuilt from the Brain alone, which the person asked about directly
 something happens, right?" — yes). See `docs/intent.md` §17 and `MINI.md`
 §4.2.
 
-Two mechanics are not confirmed. They are implementation choices, not intent:
+The mechanics below are derived from the person's stated intention, not from
+what is easiest, because the person delegated the choice and does not know
+which is best. Derived, not confirmed — the person can veto any line of it.
 
-**Q3.3 — What is the archive, exactly?** The sealed previous Pi store, or an
-export of the ephemeral material written at collapse? Either satisfies the
-confirmed behaviour. *Needs:* implementation choice.
+**The archive is the sealed previous generation's Pi store.** At collapse the
+old store is sealed read-only and becomes the archive; the new generation gets
+a fresh store. No copy and no export is written at collapse: "it becomes the
+archive" means the old live context unchanged, and `.brain` must not grow by
+accident. Nothing enters the Brain at collapse.
 
-**Q3.4 — How does pin-to-archive survive deleting the archive?** If the
-archive is a store that will be deleted outright, pinned-to-archive records
-must be exported somewhere durable before deletion. *Needs:* where pinned
-archive records live.
+**The person restores; the agent cannot read it.** Recovery opens the sealed
+store read-only and copies chosen records into the Brain. The archive never
+appears in the projection or the state block; the agent does not know it
+exists.
+
+**Pins in the archive survive the purge by becoming Brain records.** Pin
+markers live in the Brain, because it is the durable thing. At the next
+collapse the purge first exports every pinned-to-archive record into the Brain,
+flushes, and only then deletes the sealed store. Unpinned material leaves with
+the file. Order matters: a crash before the delete loses nothing; a crash
+after loses only what was never pinned.
+
+**The Brain grows only by what is explicitly kept.** `.brain` gains records
+only through the agent's writes and the purge's pinned exports — nothing else
+enters it, so it cannot balloon. One sealed generation exists at a time.
 
 ## §4. Recover
 
