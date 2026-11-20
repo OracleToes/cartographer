@@ -43,26 +43,27 @@ agent tending its own Brain, a handoff competes with the Ledger for the same job
 state about an ephemeral fact. *Needs:* whether a restart should recover what the
 agent was doing.
 
-## §3. Pi Durable immutability versus real deletion
+## §3. Pi Durable immutability versus real deletion — resolved
 
-**Q3.1 — Pi Durable transcript entries are immutable.** This is an observable
-fact in the dependency, not a guess. The old spec's workaround was to keep old
-transcripts as an archive generation and purge the previous one at the next
-collapse. If deleted text must really be gone, a transcript that Pi never deletes
-is a problem however the archive is arranged.
+Pi storage is one store per generation, confirmed by the person. A collapse
+creates a fresh store for the new generation; the previous generation's
+material is kept as the archive for one collapse and deleted at the next. The
+Brain is separate from Pi storage and persists across generations; a live
+session is rebuilt from the Brain alone, which the person asked about directly
+("we should be able to rebuild a session state from the brain store if
+something happens, right?" — yes). See `docs/intent.md` §17 and `MINI.md`
+§4.2.
 
-Options:
-- accept that the Pi store retains what Carto has forgotten, and rely on
-  secure-delete and `VACUUM` being best-effort;
-- give each generation its own Pi store and delete the whole store at collapse,
-  rather than relying on row deletion inside a retained database;
-- both.
+Two mechanics are not confirmed. They are implementation choices, not intent:
 
-*Needs:* a decision, because option two changes how generations are stored.
+**Q3.3 — What is the archive, exactly?** The sealed previous Pi store, or an
+export of the ephemeral material written at collapse? Either satisfies the
+confirmed behaviour. *Needs:* implementation choice.
 
-**Q3.2 — Does collapse create a new Pi store or reuse one?** Related to Q3.1.
-The old spec reused one database and reset it. Deleting a file is a stronger
-guarantee than deleting rows.
+**Q3.4 — How does pin-to-archive survive deleting the archive?** If the
+archive is a store that will be deleted outright, pinned-to-archive records
+must be exported somewhere durable before deletion. *Needs:* where pinned
+archive records live.
 
 ## §4. Recover
 

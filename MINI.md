@@ -131,14 +131,25 @@ not keep that history for its own sake. The Brain document uses
 `history: "latest"` and stores current state, not an audit trail of every old
 value.
 
-Carto requests SQLite secure-delete, WAL checkpoint and truncation, and `VACUUM`
-after a collapse and after an immediate restart where the storage engine allows
-it. This is best-effort local cleanup, not a guarantee against SSD wear
-levelling, backups, or snapshots.
+Pi storage is one store per generation. Collapse creates a fresh store for the
+new generation. The previous generation's material is kept as the archive for
+one collapse, and deleted at the next collapse. Transcript text that a collapse
+deletes is removed rather than hidden.
 
-> Confirmed by the person: "i want deleted text really gone". Open: Pi Durable
-> transcript immutability is in tension with this. See `docs/open-questions.md`
-> §3.
+The Brain is separate from Pi storage and persists across generations. A live
+session can always be rebuilt from the Brain alone, after a crash as well as at
+a collapse. A crash during collapse cannot lose Brain state.
+
+Carto requests SQLite secure-delete, WAL checkpoint and truncation, and `VACUUM`
+for the Brain store, after a collapse, an archive purge, and an immediate
+restart where the storage engine allows it. This is best-effort local cleanup
+for the Brain file, not a guarantee against SSD wear levelling, backups, or
+snapshots.
+
+> Confirmed by the person: "i want deleted text really gone", and "a fresh
+> store per generation" when choosing between storage shapes, with the person's
+> expectation that a session can be rebuilt from the Brain store if something
+> happens. Archive mechanics are open. See `docs/open-questions.md` §3.
 
 ## 5. Collapse
 

@@ -274,3 +274,19 @@ slices that are pushed and tested one at a time, rather than one large rewrite.
 **Established by.** The person asked for a rebuild from the fundamentals with the
 dependencies used, and the agent proposed slices, which the person did not
 contradict.
+
+## 17. Pi storage is one store per generation
+
+**Decision.** Pi storage is one store per generation. At collapse a fresh store
+is created for the new generation. The previous generation's material is kept as
+the archive for one collapse and deleted at the next collapse. Transcript text
+that a collapse deletes is removed rather than hidden.
+
+The Brain is separate from Pi storage and persists across generations. A live
+session can always be rebuilt from the Brain alone, after a crash as well as at
+a collapse. A crash during collapse cannot lose Brain state.
+
+**Established by.** The person chose "a fresh store per generation" between the
+two Pi storage options, and asked "we should be able to rebuild a session state
+from the brain store if something happens, right?" — yes; that is the design,
+and now a requirement on it.
