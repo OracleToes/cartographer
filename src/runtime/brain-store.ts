@@ -24,11 +24,22 @@ const BrainDocument = defineDoc<StoredBrain>({
   checkpointWhen: () => true,
 });
 
+/** One committed Brain write, as a signal source for the state block. */
+export interface BrainWrite {
+  /** The command that was applied. */
+  command: CartoCommand;
+  /** The Brain before the command, as a plain snapshot. */
+  before: CartoBrain;
+  /** The Brain after the command, as a plain snapshot. */
+  after: CartoBrain;
+}
+
 export class BrainStore {
   private constructor(
     private readonly harness: Harness,
     private readonly root: Awaited<ReturnType<Harness["root"]>>,
     private readonly database: Awaited<ReturnType<typeof openNodeSqliteDatabase>>,
+    private listener: ((write: BrainWrite) => void) | undefined = undefined,
   ) {}
 
   static async open(path: string): Promise<BrainStore> {
@@ -57,13 +68,32 @@ export class BrainStore {
 
   async apply(command: CartoCommand): Promise<Decision> {
     let result: Decision | undefined;
+    let before: CartoBrain | undefined;
     await this.root.commit(async (transaction) => {
       const document = await transaction.doc(BrainDocument, this.root.id);
-      result = decide(copyBrain(document), command);
+      before = copyBrain(document);
+      result = decide(before, command);
       Object.assign(document, result.brain as unknown as StoredBrain);
     }, BACKGROUND_CONTEXT);
-    if (result === undefined) throw new Error("Carto Brain command did not produce a result.");
-    return result;
+    if (result === undefined || before === undefined) throw new Error("Carto Brain command did not produce a result.");
+    const decision = result as Decision;
+    const prior = before as CartoBrain;
+    try {
+      this.listener?.({ command, before: prior, after: decision.brain });
+    } catch {
+      // A metrics signal must never turn a committed write into an error.
+    }
+    return decision;
+  }
+
+  /**
+   * Observe every committed write. The listener is a signal tap for the
+   * state block's pending list; it never sees a failed command, and its
+   * errors are deliberately swallowed — a metrics signal must never turn a
+   * committed Brain write into an error.
+   */
+  setListener(listener: ((write: BrainWrite) => void) | undefined): void {
+    this.listener = listener;
   }
 
   async vacuum(): Promise<void> {

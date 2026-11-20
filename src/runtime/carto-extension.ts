@@ -9,11 +9,20 @@ import {
   resolveHandleOfKind,
   resolveHandlesOfKind,
 } from "../domain/handles.js";
+import { readFile } from "node:fs/promises";
 import type { AtlasEdge, AtlasEdgeKind, SourceRef, WakeEntry } from "../domain/types.js";
 import { BrainStore } from "./brain-store.js";
 import { pathFingerprint } from "./path-wake-task.js";
 import { parseTimeWakeCondition } from "./wake.js";
 import { digestProjectFile, inspectProjectFile, resolveProjectWatchPath } from "./workspace.js";
+import {
+  STATE_BLOCK_MARKER,
+  appendStateBlock,
+  renderStateBlock,
+  stripStateBlocks,
+  type PendingWrite,
+} from "./state-block.js";
+import { atlasPathMarks, renderProjectTree } from "./tree.js";
 
 /**
  * Public generation-local handles are the only record references a model may
@@ -76,15 +85,41 @@ export interface CartoExtensionOptions {
    * Brain or touches the live store.
    */
   onCollapseRequest?: () => void;
+  /** The model's context window, from the Pi catalog. */
+  contextWindow?: number;
+  /**
+   * The state block (§12, §20, §21). Present in production; a test may leave
+   * it out, in which case nothing is injected and `onYield` does not fire a
+   * continuation — the run ends the way Pi ends it by default.
+   */
+  stateBlock?: {
+    /** The frozen projection for this generation; read verbatim every request. */
+    projectionPath: string;
+    /** The frozen per-part token sums for the block's space line. */
+    partsPath: string;
+    /** The pending-writes source, read at request time. */
+    pendingWrites: () => readonly PendingWrite[];
+  };
 }
 
 export function createCartoExtension(options: CartoExtensionOptions) {
   return defineExtension({
     name: "carto",
     sections: [
+      /**
+       * The frozen projection. Written once at generation creation and read
+       * verbatim ever since, so the section is byte-stable between collapses
+       * and the prompt prefix is not invalidated by Brain writes. A crash
+       * finds the same file (or renders once from the Brain, if the crash
+       * happened during creation) and gets the same bytes either way.
+       */
       section(
         "carto-context",
         async () => {
+          if (options.stateBlock !== undefined) {
+            const frozen = await readFile(options.stateBlock.projectionPath, "utf8").catch(() => undefined);
+            if (frozen !== undefined) return frozen;
+          }
           const brain = await options.brain.read();
           return renderContextPlan(projectContext(brain, { budget: options.contextBudget }));
         },
@@ -111,6 +146,9 @@ export function createCartoExtension(options: CartoExtensionOptions) {
        * Context tab true: the screen reads this, and it has no other way to
        * obtain a prompt that was not sent.
        */
+      ...(options.stateBlock === undefined
+        ? []
+        : [hook(GenerationTask, stateBlockHooks({ ...options, stateBlock: options.stateBlock }))]),
       hook(GenerationTask, {
         beforeProviderRequest: (request) => {
           // The payload is the provider's own body. It is recorded as-is; the
@@ -351,7 +389,10 @@ export function createCartoExtension(options: CartoExtensionOptions) {
         parameters: obj({}),
         replay: "safe",
         execute: async () => {
-          return textOutput("Carto is asleep.");
+          // §13a: only a deliberate sleep stops the agent. The control flag
+          // ends the run without another model request; without it the
+          // state-block continuation would let the run continue forever.
+          return { output: [{ type: "text" as const, text: "Carto is asleep." }], control: { terminate: true } };
         },
       }),
     ],
@@ -403,4 +444,194 @@ function renderWakes(brain: Awaited<ReturnType<BrainStore["read"]>>, wakes: read
 
 function textOutput(text: string) {
   return { output: [{ type: "text" as const, text }] };
+}
+
+type StateBlockOptions = CartoExtensionOptions & { stateBlock: NonNullable<CartoExtensionOptions["stateBlock"]> };
+
+/**
+ * The hooks that carry the state block (§20): `beforeRequest` strips the
+ * markers the transcript legitimately holds and appends the fresh block as
+ * the trailing user-role message; `onYield` continues a tool-free answer with
+ * a byte-sized marker. The model always sees exactly one current block.
+ */
+function stateBlockHooks(options: StateBlockOptions) {
+  return {
+    beforeRequest: async (request: { readonly messages: readonly import("@earendil-works/pi-ai").Message[] }) => {
+      const brain = await options.brain.read();
+      const snapshot = options.promptStore?.current();
+      const previousPayload = snapshot?.payload as
+        | { system?: unknown; messages?: readonly unknown[]; tools?: readonly unknown[] }
+        | undefined;
+      // The messages Pi is about to send already carry the system message
+      // (sections and tools included), so the current estimate needs no
+      // guesswork. The previous payload is only used for the delta since the
+      // provider's own count; it still includes the block the last request
+      // carried while this estimate excludes it, a jitter of ~100 tokens.
+      const visible = stripStateBlocks(request.messages);
+      const { transcriptTokens, toolWorkTokens, systemTokens } = splitContextMessages(visible);
+      const previousSystemTokens =
+        previousPayload === undefined ? 0 : estimateSystem(previousPayload);
+      const systemFromFirstMessage =
+        previousPayload !== undefined &&
+        previousPayload.system === undefined &&
+        Array.isArray(previousPayload.messages) &&
+        previousPayload.messages.length > 0 &&
+        ["system", "developer"].includes(String((previousPayload.messages[0] as { role?: unknown }).role));
+      const previousBodyTokens =
+        previousPayload?.messages === undefined
+          ? 0
+          : previousPayload.messages.reduce(
+              (sum: number, message: unknown, index: number) =>
+                systemFromFirstMessage && index === 0 ? sum : sum + estimateSerialized(message),
+              0,
+            );
+      const previousPromptTokens =
+        previousPayload === undefined ? undefined : previousSystemTokens + previousBodyTokens;
+
+      // The frozen parts are a static file for this generation; read them once.
+      const parts = await cachedProjectionParts(options);
+
+      // Stale named by handle, as of the last evidence refresh.
+      const omissions = projectContext(brain, { budget: options.contextBudget }).omissions;
+      const stale = [...new Set(omissions.filter((omission) => omission.reason === "stale").map((omission) => omission.label))];
+
+      // Armed and ready wakes, named by handle.
+      const wakes = brain.wakes
+        .filter((wake) => wake.status === "armed" || wake.status === "ready")
+        .map((wake) => ({
+          handle: handleOf(brain.handles, "wake", wake.id) ?? "?",
+          kind: wake.kind,
+          condition: wake.condition,
+          status: wake.status as "armed" | "ready",
+        }));
+
+      const marks = atlasPathMarks(brain);
+      const tree = await renderProjectTree(options.projectRoot, { depth: 2, marks, maxLines: 60 });
+
+      const block = renderStateBlock({
+        transcriptTokens,
+        toolWorkTokens,
+        systemTokens,
+        previousPromptTokens,
+        lastReportedInput: snapshot?.usage?.input,
+        contextWindow: options.contextWindow ?? 32_768,
+        parts,
+        pending: options.stateBlock.pendingWrites(),
+        stale,
+        wakes,
+        tree: { root: options.projectRoot, depth: 2, lines: tree.lines },
+      });
+      return { messages: appendStateBlock(visible, block) };
+    },
+    onYield: () => ({ continue: STATE_BLOCK_MARKER }),
+  };
+}
+
+/**
+ * Split the request's messages into the three estimates the block reports.
+ * The system message is rendered as the flattened prompt the model reads:
+ * its content, its sections, and its tools. After it, an assistant message
+ * carrying a tool call counts as tool work, as does every tool-result
+ * message; everything else is transcript. Whole-message attribution keeps
+ * the estimates additive.
+ */
+function splitContextMessages(messages: readonly import("@earendil-works/pi-ai").Message[]): {
+  transcriptTokens: number;
+  toolWorkTokens: number;
+  systemTokens: number;
+} {
+  let transcriptTokens = 0;
+  let toolWorkTokens = 0;
+  let systemTokens = 0;
+  for (const message of messages) {
+    const role = String((message as { role?: unknown }).role);
+    if (role === "system") {
+      systemTokens += estimateSystemMessage(message);
+      continue;
+    }
+    const toolWork =
+      role === "toolResult" ||
+      role === "tool" ||
+      (role === "assistant" &&
+        Array.isArray((message as { content?: unknown }).content) &&
+        (message as { content: readonly unknown[] }).content.some(
+          (block) => block !== null && typeof block === "object" && (block as { type?: unknown }).type === "toolCall",
+        ));
+    if (toolWork) toolWorkTokens += estimateSerialized(message);
+    else transcriptTokens += estimateSerialized(message);
+  }
+  return { transcriptTokens, toolWorkTokens, systemTokens };
+}
+
+function estimateSystemMessage(message: unknown): number {
+  const m = message as {
+    content?: unknown;
+    sections?: Record<string, string | null>;
+    toolsAdded?: readonly unknown[];
+  };
+  const parts: string[] = [];
+  const content = typeof m.content === "string" ? m.content : contentText(m.content);
+  if (content.length > 0) parts.push(content);
+  for (const value of Object.values(m.sections ?? {})) {
+    if (value !== null && value.length > 0) parts.push(value);
+  }
+  if (m.toolsAdded !== undefined && m.toolsAdded.length > 0) parts.push(safeJson(m.toolsAdded) ?? "");
+  const text = parts.join("\n\n");
+  return text.length === 0 ? 0 : Math.max(1, Math.ceil(text.length / 4));
+}
+
+function contentText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part !== null && typeof part === "object" && "text" in part) {
+        const value = (part as { text?: unknown }).text;
+        return typeof value === "string" ? value : "";
+      }
+      return "";
+    })
+    .join("\n");
+}
+
+/** The provider payload's system prompt, as text, for both Anthropic (`system`) and OpenAI (leading system message). */
+function estimateSystem(payload: { system?: unknown; messages?: readonly unknown[] }): number {
+  if (typeof payload.system === "string") return estimateSerialized(payload.system);
+  if (Array.isArray(payload.system)) return estimateSerialized(payload.system);
+  const first = payload.messages?.[0] as { role?: unknown; content?: unknown } | undefined;
+  if (first !== undefined && (first.role === "system" || first.role === "developer")) {
+    return estimateSerialized(first);
+  }
+  return 0;
+}
+
+function estimateSerialized(value: unknown): number {
+  const text = safeJson(value) ?? "";
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+const partsCache = new WeakMap<object, { ledger: number; atlas: number; chat: number; pins: number; wakes: number }>();
+
+/** Read the frozen per-part sums once per extension instance; atomically written at creation. */
+async function cachedProjectionParts(options: CartoExtensionOptions & { stateBlock: NonNullable<CartoExtensionOptions["stateBlock"]> }) {
+  const cached = partsCache.get(options);
+  if (cached !== undefined) return cached;
+  let parts = { ledger: 0, atlas: 0, chat: 0, pins: 0, wakes: 0 };
+  try {
+    const parsed = JSON.parse(await readFile(options.stateBlock.partsPath, "utf8")) as { parts?: typeof parts };
+    if (parsed.parts !== undefined) parts = { ...parts, ...parsed.parts };
+  } catch {
+    // A missing or unreadable parts file means every number reads ▤0; never fail the request.
+  }
+  partsCache.set(options, parts);
+  return parts;
+}
+
+function safeJson(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -384,6 +384,53 @@ test("a carry pin refresh marks a changed file source stale, and survives a reop
     assert.equal((await reopened.view()).brain.carryPins[0]?.source.freshness, "stale");
   } finally {
     await reopened.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the projection snapshot is written once per generation, sealed with it, and purged with it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-projection-snapshot-"));
+  const context = join(root, ".brain", "context");
+  const project = await CartoProject.open(root, config);
+  const generation = project.liveGeneration;
+  const md = join(context, `${generation}.projection.md`);
+  try {
+    const frozen = await readFile(md, "utf8");
+    assert.match(frozen, /^# Carto context/);
+
+    // A Brain write never touches the frozen snapshot.
+    await project.upsertLedger({ id: "ledger:keep", kind: "goal", status: "open", text: "Survives the freeze", answer: null });
+    assert.equal(await readFile(md, "utf8"), frozen);
+
+    await project.collapse();
+    const firstMode = (await stat(md)).mode;
+    assert.equal(firstMode & 0o222, 0, "the archived snapshot is sealed read-only");
+
+    // The rebuilt projection carries the record the freeze was protecting.
+    const rebuilt = await readFile(join(context, `${project.liveGeneration}.projection.md`), "utf8");
+    assert.match(rebuilt, /Survives the freeze/);
+
+    // The next collapse purges the generation that had its one collapse of grace, snapshots included.
+    await project.collapse();
+    await assert.rejects(stat(md), /ENOENT/);
+    await assert.rejects(stat(join(context, `${generation}.projection.json`)), /ENOENT/);
+  } finally {
+    await project.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pending writes are named by handle and cleared at collapse", async () => {
+  const root = await mkdtemp(join(tmpdir(), "carto-pending-writes-"));
+  const project = await CartoProject.open(root, config);
+  try {
+    await project.upsertLedger({ id: "ledger:one", kind: "goal", status: "open", text: "Track this goal", answer: null });
+    assert.deepEqual(project.pendingState.writes, [{ handle: "L1", kind: "ledger", deleted: false }]);
+
+    await project.collapse();
+    assert.deepEqual(project.pendingState.writes, []);
+  } finally {
+    await project.close();
     await rm(root, { recursive: true, force: true });
   }
 });

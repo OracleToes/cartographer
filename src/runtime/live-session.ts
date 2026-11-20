@@ -23,6 +23,7 @@ import { BrainStore } from "./brain-store.js";
 import type { GlobalConfig, ModelRef } from "./config.js";
 import { modelsForConfig } from "./llama-swap-model.js";
 import { createCartoExtension } from "./carto-extension.js";
+import type { PendingWrite } from "./state-block.js";
 import { createPathWakeTask, PATH_WAKE_TASK_NAME, pathFingerprint } from "./path-wake-task.js";
 import type { PromptStore } from "./prompt-store.js";
 import { createPrefillMonitor, type PrefillMonitor, type PrefillState } from "./prefill.js";
@@ -58,6 +59,19 @@ export interface LiveSessionOptions {
    * Brain.
    */
   onCollapseRequest?: () => void;
+  /**
+   * The state block (§12, §20, §21). Present in production; absent in tests
+   * that exercise the harness directly, in which case no block is injected and
+   * no continuation is scheduled.
+   */
+  stateBlock?: {
+    /** The frozen projection for this generation, rendered once at creation. */
+    projectionPath: string;
+    /** The per-part token sums for the block's space line. */
+    partsPath: string;
+    /** The pending-writes source, read at request time. */
+    pendingWrites: () => readonly PendingWrite[];
+  };
 }
 
 export type LiveActivityKind = "reasoning" | "model" | "tool-call" | "tool-output" | "warning" | "error";
@@ -118,6 +132,7 @@ export class LiveSession {
       const registry = createRegistry();
       const timeWakeTask = createTimeWakeTask(options.brain);
       const pathWakeTask = createPathWakeTask(options.projectRoot, options.brain);
+      const contextWindow = models.getModel(providerId, options.model.modelId)?.contextWindow ?? 32_768;
       registry.install(
         createCartoExtension({
           ...(options.promptStore === undefined ? {} : { promptStore: options.promptStore }),
@@ -125,8 +140,10 @@ export class LiveSession {
           projectRoot: options.projectRoot,
           contextId: basename(options.path, ".sqlite"),
           contextBudget: options.contextBudget ?? CONTEXT_BUDGET,
+          contextWindow,
           durableTasks: [timeWakeTask, pathWakeTask],
           ...(options.onCollapseRequest === undefined ? {} : { onCollapseRequest: options.onCollapseRequest }),
+          ...(options.stateBlock === undefined ? {} : { stateBlock: options.stateBlock }),
         }),
       );
 
@@ -137,7 +154,6 @@ export class LiveSession {
         options.prefill ??
         createPrefillMonitor({ provider: providerId, ...(options.config?.llamaSwapEndpoint === undefined ? {} : {}) });
       harness = await Harness.open(storage, { models: prefill.wrap(models), registry }, BACKGROUND_CONTEXT);
-      const contextWindow = models.getModel(providerId, options.model.modelId)?.contextWindow ?? 32_768;
       const agent = {
         model: options.model,
         instructions: CARTO_INSTRUCTIONS,

@@ -32,6 +32,22 @@ export function contextDatabasePath(root: string, generation: string): string {
   return join(contextDirectory(root), `${generation}.sqlite`);
 }
 
+/** The frozen projection for a generation, written once at creation. */
+export function projectionPath(root: string, generation: string): string {
+  if (!isContextGenerationName(generation)) {
+    throw new Error("A Carto context generation has an unsafe file name.");
+  }
+  return join(contextDirectory(root), `${generation}.projection.md`);
+}
+
+/** The frozen projection's per-part token sums, for the state block. */
+export function projectionMetaPath(root: string, generation: string): string {
+  if (!isContextGenerationName(generation)) {
+    throw new Error("A Carto context generation has an unsafe file name.");
+  }
+  return join(contextDirectory(root), `${generation}.projection.json`);
+}
+
 export function isContextGenerationName(generation: string): boolean {
   return /^[A-Za-z0-9-]{1,128}$/.test(generation);
 }

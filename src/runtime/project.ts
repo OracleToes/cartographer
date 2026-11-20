@@ -4,8 +4,8 @@ import { join } from "node:path";
 
 import { openNodeSqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite/node";
 
-import { projectContext } from "../domain/context.js";
-import { ensureHandles, resolveHandle, resolveHandleOfKind } from "../domain/handles.js";
+import { projectContext, renderContextPlan } from "../domain/context.js";
+import { ensureHandles, handleOf, resolveHandle, resolveHandleOfKind } from "../domain/handles.js";
 import type {
   AtlasNode,
   DeletionTarget,
@@ -14,12 +14,21 @@ import type {
   WakeEntry,
 } from "../domain/types.js";
 import { PromptStore } from "./prompt-store.js";
-import { BrainStore } from "./brain-store.js";
+import { BrainStore, type BrainWrite } from "./brain-store.js";
 import type { GlobalConfig } from "./config.js";
 import { parseModelRef } from "./config.js";
 import { CONTEXT_BUDGET, LiveSession, type LiveActivity, type LiveSessionView } from "./live-session.js";
-import { brainDatabasePath, contextDatabasePath, contextDirectory, isContextGenerationName } from "./paths.js";
+import {
+  brainDatabasePath,
+  contextDatabasePath,
+  contextDirectory,
+  isContextGenerationName,
+  projectionMetaPath,
+  projectionPath,
+} from "./paths.js";
 import { parseTimeWakeCondition } from "./wake.js";
+import type { PendingWrite } from "./state-block.js";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { digestProjectFile, inspectProjectFile, resolveProjectWatchPath } from "./workspace.js";
 
 export class ProjectError extends Error {}
@@ -55,6 +64,12 @@ export class CartoProject {
   private archivePresent = false;
   /** The generation whose store the live session holds. In-memory only; changes at collapse. */
   liveGeneration: string;
+  /**
+   * Pending Brain writes since the projection was rebuilt, in write order, for
+   * the state block. Session memory only (§34): cleared at collapse and empty
+   * after a crash. The Brain store taps it through a listener.
+   */
+  private pendingState: { writes: PendingWrite[] } = { writes: [] };
 
   private constructor(
     readonly root: string,
@@ -105,12 +120,19 @@ export class CartoProject {
         onCollapseRequest: () => {
           if (target !== undefined) target.collapseRequested = true;
         },
+        stateBlock: {
+          projectionPath: projectionPath(root, generation),
+          partsPath: projectionMetaPath(root, generation),
+          pendingWrites: () => target?.pendingState.writes ?? [],
+        },
       });
       const opened = new CartoProject(root, config, brainStore, live, prompts, generation);
       opened.archivePresent = archivePresent;
       target = opened;
+      brainStore.setListener((write) => opened.recordPending(write));
       await opened.refreshEvidence();
       await opened.syncHandles();
+      await ensureProjectionSnapshot(root, generation, brainStore);
       await opened.reconcileWakes();
       return opened;
     } catch (error) {
@@ -510,6 +532,51 @@ export class CartoProject {
     }
   }
 
+  /**
+   * Append one line per Brain write for the state block, named by handle.
+   * Called from the Brain store's listener with the write already committed;
+   * failures here must never surface, so the listener body is total.
+   */
+  recordPending(write: BrainWrite): void {
+    const { command, before, after } = write;
+    const push = (kind: PendingWrite["kind"], id: string, table: CartoBrain["handles"], deleted = false) => {
+      this.pendingState.writes.push({ handle: handleOf(table, kind, id), kind, deleted });
+    };
+    switch (command.kind) {
+      case "chat.record":
+        push("chat", command.record.id, after.handles);
+        return;
+      case "ledger.upsert":
+        push("ledger", command.entry.id, after.handles);
+        return;
+      case "atlas.upsert":
+        push("atlas", command.node.id, after.handles);
+        return;
+      case "pin.user.add":
+      case "pin.carry.add":
+        push("pin", command.pin.id, after.handles);
+        return;
+      case "wake.upsert":
+        push("wake", command.wake.id, after.handles);
+        return;
+      case "record.delete": {
+        const kind = command.target.target === "chat" || command.target.target === "ledger" || command.target.target === "atlas" ? command.target.target : "pin";
+        push(kind, command.target.id, before.handles, true);
+        return;
+      }
+      case "legacy.import": {
+        for (const entry of command.ledger) push("ledger", entry.id, after.handles);
+        for (const node of command.atlas) push("atlas", node.id, after.handles);
+        return;
+      }
+      case "collapse.rotate":
+        this.pendingState = { writes: [] };
+        return;
+      case "handles.sync":
+        return;
+    }
+  }
+
   private async reconcileWakes(): Promise<void> {
     const wakes = (await this.brainStore.read()).wakes;
     for (const wake of wakes) {
@@ -540,14 +607,23 @@ export class CartoProject {
       onCollapseRequest: () => {
         this.collapseRequested = true;
       },
+      stateBlock: {
+        projectionPath: projectionPath(this.root, generation),
+        partsPath: projectionMetaPath(this.root, generation),
+        pendingWrites: () => this.pendingState.writes,
+      },
     });
     try {
       await this.brainStore.apply({ kind: "collapse.rotate" });
+      await writeProjectionSnapshot(this.root, generation, this.brainStore);
     } catch (error) {
       await next.close();
       await removeGeneration(this.root, generation);
       throw error;
     }
+    // A fresh generation starts with an empty pending list; the projection it
+    // freezes already contains every record.
+    this.pendingState = { writes: [] };
 
     const priorLive = this.live;
     this.live = next;
@@ -685,7 +761,13 @@ async function adoptLiveGeneration(root: string): Promise<string> {
 /** Best-effort: seal a retired store as read-only. Discovery never depends on the mode. */
 async function sealGeneration(root: string, generation: string): Promise<void> {
   const directory = contextDirectory(root);
-  for (const name of [`${generation}.sqlite`, `${generation}.sqlite-wal`, `${generation}.sqlite-shm`]) {
+  for (const name of [
+    `${generation}.sqlite`,
+    `${generation}.sqlite-wal`,
+    `${generation}.sqlite-shm`,
+    `${generation}.projection.md`,
+    `${generation}.projection.json`,
+  ]) {
     await chmod(join(directory, name), 0o444).catch(() => {});
   }
 }
@@ -712,14 +794,19 @@ async function removeUnreferencedContextFiles(root: string): Promise<void> {
       continue;
     }
     const sidecar = orphanSidecarGeneration(name);
-    if (sidecar !== undefined && !keep.has(sidecar) && !names.includes(`${sidecar}.sqlite`)) {
-      await rm(join(directory, name), { force: true });
+    if (sidecar !== undefined) {
+      if (keep.has(sidecar)) continue;
+      // A projection sidecar is an orphan as soon as its store is gone; a WAL or
+      // SHM file needs the store to be absent too.
+      if (name.endsWith(".projection.md") || name.endsWith(".projection.json") || !names.includes(`${sidecar}.sqlite`)) {
+        await rm(join(directory, name), { force: true });
+      }
     }
   }
 }
 
 function orphanSidecarGeneration(name: string): string | undefined {
-  for (const suffix of [".sqlite-wal", ".sqlite-shm"]) {
+  for (const suffix of [".sqlite-wal", ".sqlite-shm", ".projection.md", ".projection.json"]) {
     if (!name.endsWith(suffix)) continue;
     const generation = name.slice(0, -suffix.length);
     return isContextGenerationName(generation) ? generation : undefined;
@@ -747,8 +834,49 @@ async function removeGeneration(root: string, generation: string): Promise<void>
   } catch (error) {
     if (!isMissingFile(error)) cleanupFailure = error;
   }
-  await Promise.all([rm(path, { force: true }), rm(`${path}-wal`, { force: true }), rm(`${path}-shm`, { force: true })]);
+  await Promise.all([
+    rm(path, { force: true }),
+    rm(`${path}-wal`, { force: true }),
+    rm(`${path}-shm`, { force: true }),
+    rm(projectionPath(root, generation), { force: true }),
+    rm(projectionMetaPath(root, generation), { force: true }),
+  ]);
   if (cleanupFailure !== undefined) throw cleanupFailure;
+}
+
+/**
+ * Write the frozen projection for a generation: the rendered plan, once, plus
+ * the per-part token sums the state block reports. Atomic rename so a crash
+ * mid-write never yields a half-written snapshot.
+ */
+async function writeProjectionSnapshot(root: string, generation: string, brainStore: BrainStore): Promise<void> {
+  const brain = await brainStore.read();
+  const plan = projectContext(brain, { budget: CONTEXT_BUDGET });
+  const parts = { ledger: 0, atlas: 0, chat: 0, pins: 0, wakes: 0 };
+  for (const block of plan.blocks) {
+    if (block.section === "ledger") parts.ledger += block.estimatedTokens;
+    else if (block.section === "atlas") parts.atlas += block.estimatedTokens;
+    else if (block.section === "pin") parts.pins += block.estimatedTokens;
+    else if (block.section === "wake") parts.wakes += block.estimatedTokens;
+  }
+  await atomicWrite(projectionPath(root, generation), renderContextPlan(plan));
+  await atomicWrite(projectionMetaPath(root, generation), `${JSON.stringify({ parts }, null, 2)}\n`);
+}
+
+/** A generation adopted after a crash has no snapshot yet; render it then. */
+async function ensureProjectionSnapshot(root: string, generation: string, brainStore: BrainStore): Promise<void> {
+  try {
+    await access(projectionPath(root, generation));
+    return;
+  } catch {
+    await writeProjectionSnapshot(root, generation, brainStore);
+  }
+}
+
+async function atomicWrite(path: string, content: string): Promise<void> {
+  const temporary = `${path}.tmp-${randomUUID()}`;
+  await writeFile(temporary, content, "utf8");
+  await rename(temporary, path);
 }
 
 function isMissingFile(error: unknown): error is NodeJS.ErrnoException {
