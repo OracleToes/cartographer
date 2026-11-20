@@ -103,21 +103,17 @@ confirmation. Removing it means a person can collapse mid-work. *Needs:* whether
 the agent needs a boundary to finish first, and whether the person should see what
 will be lost.
 
-## §6. Projection order and timestamps
+## §6. Projection order and timestamps — resolved by the freeze
 
-**Q6.1 — Is structural order a requirement at all?** The old spec mandated
-Ledger → Chat → Atlas → pins → Handoff → active. That order is what put volatile
-Chat at the front of the prompt. With Chat text out of the projection, order is
-mostly a caching concern, but the person has not said whether they want a
-required order. *Needs:* required order, or "stable first, volatile last".
+**Q6.1 — Order.** Resolved by the frozen projection. Nothing in the projection
+changes between collapses, so there is no prefix to protect; order is a
+collapse-time convention. No requirement either way. See `docs/intent.md` §19.
 
-**Q6.2 — Where does the timestamp go?** Confirmed that it stays. Open: on the
-record's ID line, which shifts whenever anything above it changes, or in the
-state block, which is already the volatile part. *Needs:* which.
+**Q6.2 — Timestamps.** Resolved by the frozen projection. They stay on the
+record's ID line; the line only changes at a rebuild. See `docs/intent.md` §19.
 
-**Q6.3 — Does an edited record move?** The old spec said editing a Ledger entry
-does not move it. *Needs:* confirm this is still wanted, since it affects cache
-stability.
+**Q6.3 — Does an edited record move?** Resolved by the frozen projection. No
+record moves between collapses. See `docs/intent.md` §19.
 
 ## §7. The state block
 
@@ -140,12 +136,8 @@ Possible shapes:
 
 ### The block's schema
 
-**Q7.0b — Is the projection frozen between collapses?** The design implies it: a
-brain write shows as a tool result and a pending-change line, not in the
-projection, which is what keeps the prefix stable. If the projection instead
-updates every request, brain writes cost a prefix invalidation and the pending
-list has no job. *Needs:* confirmation, because it decides whether Pi's section
-patching is used at all.
+**Q7.0b — Resolved.** The projection is frozen between collapses, confirmed
+by the person. See `docs/intent.md` §19.
 
 **Q7.0c — Is there any ceiling on pending changes?** The block growing is the
 signal to collapse. If the agent ignores it, nothing stops it growing. *Needs:*

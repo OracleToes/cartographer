@@ -191,18 +191,23 @@ The agent never sees a database key, a Pi entry ID, or a generation file name. A
 tool parameter that names a record takes a handle; an unknown handle is an
 explicit error.
 
-**Order is a caching concern, not a product concern.** Volatile content belongs
-where it does not invalidate a stable prefix. The exact order is open.
+**The projection is frozen between collapses.** It is rebuilt only at collapse;
+it is never patched between collapses. A Brain write between collapses appears as
+the write tool's result and as a pending-change line in the state block — never
+as a projection patch. This is what keeps the prefix the server has already read
+valid, and it is what makes the pending list meaningful.
 
-> Open: whether structural order is a requirement at all, and where the
-> timestamps go. See `docs/open-questions.md` §6.
+> Confirmed by the person.
+
+**Order is not a requirement.** After the freeze, nothing in the projection
+changes between collapses, and at a rebuild there is no cached prefix to
+invalidate. The emitted order is a convention, not a product decision.
 
 **Every durable ID line carries an ISO 8601 UTC timestamp**, so the agent can see
-when something changed.
+when something changed. Between collapses the line is frozen, so the timestamp
+costs no prefix stability; it moves only at a rebuild.
 
-> Confirmed by the person. Open: whether the timestamp belongs on the same line
-> as the record text, which costs prefix stability. See
-> `docs/open-questions.md` §6.
+> Confirmed by the person.
 
 ### 6.1 The state block
 

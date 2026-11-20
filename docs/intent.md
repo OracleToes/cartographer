@@ -305,3 +305,19 @@ the proposed set ("chat, atlas, ledger, pins, wakes"), single-step delete
 ("delete means delete"), handoff dropped entirely, activity ephemeral. The
 deletion-mark item picked as part of the proposal is abolished by the
 single-step answer; derived and flagged in `docs/open-questions.md` §2.
+
+
+## 19. The projection is frozen between collapses
+
+**Decision.** The projection is rebuilt only at collapse. Between collapses it is
+never patched: a Brain write appears as the write tool's result and as a
+pending-change line in the state block, not as a projection edit. This keeps the
+prefix stable between collapses and makes the pending list the signal to
+collapse.
+
+Order is not a requirement after the freeze, and timestamps stay on the record's
+ID line — both fall out of the freeze rather than needing their own decisions.
+
+**Established by.** The person confirmed the frozen projection directly when
+asked, after it was pointed out that an unfrozen projection costs a prefix
+invalidation per Brain write and empties the pending list of meaning.
