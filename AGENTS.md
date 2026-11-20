@@ -87,9 +87,9 @@ your own bar. They named `usable` as an example.
 question produces a term, not in batches and not for completeness.
 
 **EXPECT** — be confident enough to call the work done before you build it.
-Make the edits you expect the stage needs, then build, then push, then test.
-Do not build to find out what to do next; that is not an expectation, it is a
-probe.
+Make the edits you expect the stage needs, then, at the end of the stage,
+build, then push, then test. Do not build to find out what to do next; that is
+not an expectation, it is a probe.
 
 **STAGE / SLICE** — one unit of work that ends in a push. Same thing, either
 name. See §4.
@@ -102,13 +102,18 @@ kept, and it is not a substitute for a test. See §5.
 
 ## 4. How to work
 
-A **stage** is one unit of work, ending in a push. While the stage is in
-progress — reading, deciding, editing — run nothing: **no `npm run build`, no
-`npx tsc --noEmit`, no `npm test`, no probe.** The build and the tests happen
-once, at the end, when you are ready to submit the code. They are the
-submission, not a way to check your work as you go. If you do not know whether
-something will compile, read the code; do not ask the compiler. The order, when
-it does run, is fixed:
+A **stage** is one unit of work, ending in a submission push. While the
+stage is in progress — reading, deciding, editing — run nothing: **no
+`npm run build`, no `npx tsc --noEmit`, no `npm test`, no probe.** The build
+and the tests happen once, at the very end, when you are ready to submit the
+code. They are the submission, not a way to check your work as you go. If you
+do not know whether something will compile, read the code; do not ask the
+compiler.
+
+Pushes are not only at the end. Commit and push as you go, half-finished if
+that is where you are — a push mid-stage is how work survives a workspace
+reset, and it implies no verification of any kind: no build, no tests, no
+gate. The submission sequence, when the work is ready, is fixed:
 
 1. **Make every edit you expect the stage to need.** Read the code first.
 2. **Build.** `npm run build` and `npx tsc --noEmit` must both exit zero. The
@@ -123,8 +128,9 @@ the build and tests are how you prove it at the end. Never end a turn with an
 unpushed commit or a dirty tree.
 
 **Keep the branch pushed and current.** This workspace resets to base without
-warning, and the person cannot see anything that is not pushed. Before you
-touch a file:
+warning, and the person cannot see anything that is not pushed. A push
+mid-stage is expected and claims nothing; only the end-of-stage sequence
+submits. Before you touch a file:
 
 - `git fetch` and check whether `origin` has moved ahead.
 - If the workspace has reset, your local commits may be gone while `origin`
@@ -140,8 +146,9 @@ and `origin` together, and push small and often so a reset costs nothing.
 Tests exist to catch breaks. They are not evidence of intent and not a
 substitute for reading the code.
 
-- The only test command is `npm test`. It runs after the push, and only once
-  the work is ready to submit — not mid-stage, not as a check on progress.
+- The only test command is `npm test`. It runs at the very end of the stage,
+  after the submission push, and only once the work is ready to submit —
+  not mid-stage, not as a check on progress.
 - **The test run must finish in 10 seconds.** Not the build, not the whole
   command: the run.
 - A test that needs longer must earn it, in a comment on that test, saying what
@@ -153,8 +160,8 @@ substitute for reading the code.
 - Do not chase a number. Do not add tests to keep a count up. Do not delete the
   only guard for a real break to make a failure disappear.
 - **A probe is allowed** when you genuinely need to check that something works
-  before you rely on it. Run probes after the push, not in the middle of the
-  stage, and do not keep them. A probe is not a test and cannot be used to
+  before you rely on it. Run probes at the end of the stage, after the push,
+  not in the middle of it, and do not keep them. A probe is not a test and cannot be used to
   dodge the 10 second budget.
 
 ## 6. Documents

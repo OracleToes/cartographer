@@ -6,10 +6,16 @@ person on when tests run.
 
 ## The rule that comes first
 
-**Tests run after the push.** A stage is: make every edit you expect the stage
-to need, build until `tsc` and `npm run build` exit zero, commit, push, and only
-then run the suite. Never between edits. When something fails, fix it, build,
-push again, and test again.
+**Pushing and verifying are different acts.** Commit and push as you go,
+mid-stage — half-finished is fine. Origin is what stands between you and a
+reset workspace, and nothing pushed is lost. A mid-stage push implies no
+verification of any kind.
+
+**Tests run once, at the very end of the stage**, when you are ready to tell
+the person the work is done. Every edit you expect the stage to need is made;
+`tsc` and `npm run build` exit zero; you commit, push, and only then run the
+suite. If a test fails, fix it, build, push again, and test again. Never
+between edits, never mid-stage, never as a check on progress.
 
 This is not ceremony. A test run during a stage turns you into a machine that
 watches a progress bar and calls it confidence. The build is the gate that lets
@@ -19,9 +25,9 @@ you say you are done; the tests are what catch you being wrong about that.
 
 | Command | When | Budget |
 | --- | --- | --- |
-| `npx tsc --noEmit` | Before every push | Fast |
-| `npm run build` | Before every push | Fast |
-| `node --test test/*.test.mjs` | After every push | **10 seconds, hard** |
+| `npx tsc --noEmit` | At the end of the stage, before the push | Fast |
+| `npm run build` | At the end of the stage, before the push | Fast |
+| `node --test test/*.test.mjs` | At the very end, after the push, before you report done | **10 seconds, hard** |
 
 The 10 second budget is the test run alone. The build is not inside it. `npm
 test` is `build && node --test`, so the gate runs twice when you use it; that is
@@ -51,8 +57,8 @@ Removing these is a deliverable. Report it as one.
 ## Probes are not tests
 
 A probe is a scoped check for something you are not yet sure works: a PTY
-transcript, a script against a fake server, a one-off in `/tmp`. Run it after
-the push, when you need it, and do not commit it.
+transcript, a script against a fake server, a one-off in `/tmp`. Run it at the
+end of the stage, after the push, when you need it, and do not commit it.
 
 A probe cannot replace a test, cannot be counted as one, and cannot be used to
 dodge the budget. If a probe proves something worth keeping, the next stage
