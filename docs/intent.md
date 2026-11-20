@@ -406,3 +406,15 @@ structural validation.
 "we should not require a node to be connected to another node, so an edge is not
 always required, we want the atlas (and the other tools) to be permissive and
 easy to use, so a node or cluster can exist unconnected."
+
+
+## 26. The tree anchor is a dedicated `tree` tool
+
+**Decision.** The project tree's anchor and depth are moved by a dedicated,
+scoped `tree` tool that returns the rendered tree — an explicit act of
+attention, not a side effect of reading. The tool surface is: chat, atlas,
+ledger, pin, inspect, edit, shell, tree, sleep. Wake is deferred.
+
+**Established by.** The person chose "yes, dedicated tool" when asked to choose
+between a dedicated tool, `inspect` re-anchoring implicitly, and `shell`
+emulating it.

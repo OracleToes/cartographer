@@ -399,6 +399,29 @@ use Pi Durable tasks. A folder wake is bounded.
 > Confirmed as a product part the person named. Open: the bounds and the wake
 > record's shape. See `docs/open-questions.md` §11.
 
+## 10a. The tool surface
+
+The agent's tools are scoped, unique, and permissive. Tool descriptions are the
+authority on what a tool does; the system prompt carries only what no single
+description can say.
+
+- **chat** — declare something person-facing. Plain model text is not Chat.
+- **atlas** — create or update one source-backed claim node, with optional
+  typed edges to other nodes.
+- **ledger** — the agent's working book: goals, notes, questions, instructions,
+  progress.
+- **pin** — pin or remove one Brain item. A pin means "keep it here".
+- **inspect** — read a bounded text range inside the project root.
+- **edit** — apply one atomic edit to a path inside the project.
+- **shell** — run a command inside the project.
+- **tree** — set the project tree's anchor and depth in the state block and
+  return the rendered tree; the agent's explicit statement of what it is
+  attending to.
+- **sleep** — end the run; there is nothing left to do.
+
+> Confirmed by the person, with the dedicated `tree` tool agreed in discussion.
+> Wake is the only deferred tool; sleep's timer defers the wake need for now.
+
 ## 11. Use Pi, do not duplicate Pi
 
 Fixed versions. Pi Durable stores commits, tasks, tool calls, sleeps, wakes,
