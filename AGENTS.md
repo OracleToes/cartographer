@@ -135,6 +135,8 @@ reset, and it implies no verification of any kind: no build, no tests, no
 gate. The submission sequence, when the work is ready, is fixed:
 
 1. **Make every edit you expect the stage to need.** Read the code first.
+   Make surgical edits to existing files; never overwrite or rewrite entire
+   files without the person's express permission.
 2. **Build.** `npm run build` and `npx tsc --noEmit` must both exit zero. The
    build is the gate: it is what lets you say you are confident.
 3. **Commit and push.** Before you run a single test.
@@ -253,6 +255,7 @@ assumption, or a statement, the response is an answer — not work.
 
 ## 9. Do not
 
+- Do not overwrite entire files without the person's express permission. Make surgical edits to specific sections; whole-file replacement risks wiping existing functionality, comments, and structure.
 - Do not record your inference as intent.
 - Do not present a plan, a glossary, or a definition as agreed before it is.
 - Do not run tests during a stage, or run a test suite that cannot fit the run
@@ -290,6 +293,8 @@ The remote tip is the source of truth. Expect it, and repair it when found:
   `git fetch origin <current-branch>`; compare `git rev-parse HEAD` with
   `origin/<branch>`. A commit onto a swept pointer lands as a stray commit
   on the base; it happened once and cost one misplaced commit.
+- After any compaction or workspace reset, read `AGENTS.md` and `MINI.md`
+  before taking any action or touching any file.
 - If the branch pointer trails the remote tip, move it forward with
   `git reset --mixed origin/<current-branch>` (working tree untouched; the
   reflog keeps the old value). Never force-push; never pull rewrites onto a
