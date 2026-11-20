@@ -34,12 +34,15 @@ The Brain holds:
 - **Ledger** — goals, notes, questions, instructions, and progress through a
   particular problem.
 - **Chat** — deliberate Person Chat and Agent Chat records.
-- **Pins, handoff, wakes, and deletion marks** — as the agent and person use
-  them.
-- **The context generation records.**
+- **Pins** — the agent's and the person's pins, in both layers.
+- **Wakes** — the timers and path watches the agent has asked for.
 
-> Open: the exact Brain record set after removing the approval machinery.
-> See `docs/open-questions.md` §2.
+Deleting a Brain record is a single step with no undo state.
+
+> Confirmed by the person: the Brain holds Atlas, Ledger, Chat, pins, and
+> wakes. `handoff` is dropped — the Ledger is sufficient to rebuild a session.
+> `context` and `activity` are not Brain records. Deletion is single-step. See
+> `docs/intent.md` §18.
 
 The Brain is the only durable storage. Nothing else in Carto is durable.
 
@@ -168,7 +171,7 @@ understanding current in the Brain.
 > available" signal or a firm warning before a person-triggered collapse. See
 > `docs/open-questions.md` §5.
 
-Collapse does not delete Brain records. Only a deletion mark or a delete can.
+Collapse does not delete Brain records. Only a delete can.
 
 ## 6. The projection
 
@@ -342,7 +345,7 @@ provider stream cannot be frozen and resumed.
 
 ## 10. Wake and sleep
 
-The agent can sleep with a handoff and wake on a time or a project path. Wakes
+The agent can sleep and wake on a time or a project path. Wakes
 use Pi Durable tasks. A folder wake is bounded.
 
 > Confirmed as a product part the person named. Open: the bounds and the wake

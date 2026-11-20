@@ -22,26 +22,26 @@ caps the feature count, or only the implementation weight.
 unfamiliar-but-useful. Read as a description, novelty is allowed and not
 demanded. *Needs:* which.
 
-## §2. The Brain's record set
+## §2. The Brain's record set — resolved
 
-**Q2.1 — What remains after removing `changes`?** The old Brain held `chat`,
-`ledger`, `atlas`, `userPins`, `carryPins`, `handoff`, `wakes`, `changes`,
-`deletionMarks`, `context`, `activity`. Removing change requests removes
-`changes` and the `/approve` and `/reject` commands. *Needs confirmation of the
-remaining set.*
+Confirmed by the person, answering the four questions of this section:
 
-**Q2.2 — Do deletion marks survive?** If the agent deletes without approval, a
-deletion mark only earns its place as an undo that the person can see. The old
-spec had `d` mark and `D` delete now. With no confirmation, is a two-step delete
-still wanted? *Needs:* yes, as undo; or no, one delete action.
+- The Brain holds Atlas, Ledger, Chat, pins, and wakes.
+- Deletion is a single step: "delete means delete". No undo the person can
+  see, no pending state.
+- `handoff` is dropped entirely. The Ledger plus the sticky records are
+  sufficient to rebuild a session.
+- `activity` is ephemeral; a restart does not recover what the agent was
+  doing. `context` is not a Brain record.
 
-**Q2.3 — Is `handoff` still needed?** It existed to bridge a collapse. With the
-agent tending its own Brain, a handoff competes with the Ledger for the same job.
-*Needs:* whether it is a distinct record or a Ledger kind.
+See `docs/intent.md` §18.
 
-**Q2.4 — Does activity belong in the Brain?** `activity: {idle}` is durable
-state about an ephemeral fact. *Needs:* whether a restart should recover what the
-agent was doing.
+**Q2.5 — deletionMarks (derived, one-word veto).** The set the person picked
+included deletion marks, but the single-step answer abolishes the mark's only
+function: the record sat in a pending-at-collapse state until a purge cleared
+it, which is a two-step delete with an internal name. Recorded as removed.
+*Needs:* one word from the person if marks exist for a reason other than
+pending deletion.
 
 ## §3. Pi Durable immutability versus real deletion — resolved
 

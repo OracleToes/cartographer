@@ -79,7 +79,7 @@ tries to keep stuff in permanent archives, but this agent is an ephemeral daemon
 
 ## 6. Ephemeral means the context, not the Brain
 
-**Decision.** The Brain persists: Chat, Atlas, Ledger, pins, handoff, and the
+**Decision.** The Brain persists: Chat, Atlas, Ledger, pins, wakes, and the
 things kept about the project. Everything else is ephemeral — tool work,
 reasoning, read calls, the transcript.
 
@@ -290,3 +290,18 @@ a collapse. A crash during collapse cannot lose Brain state.
 two Pi storage options, and asked "we should be able to rebuild a session state
 from the brain store if something happens, right?" — yes; that is the design,
 and now a requirement on it.
+
+
+## 18. The Brain's record set
+
+**Decision.** The Brain holds Atlas, Ledger, Chat, pins, and wakes. Deleting a
+Brain record is a single step; there is no pending-deletion state and no
+two-step undo. `handoff` is dropped — the Ledger plus the sticky records are
+sufficient to rebuild a session. `context` is not a Brain record. `activity` is
+ephemeral; a restart does not recover what the agent was doing.
+
+**Established by.** The person answered the four record-set questions directly:
+the proposed set ("chat, atlas, ledger, pins, wakes"), single-step delete
+("delete means delete"), handoff dropped entirely, activity ephemeral. The
+deletion-mark item picked as part of the proposal is abolished by the
+single-step answer; derived and flagged in `docs/open-questions.md` §2.
