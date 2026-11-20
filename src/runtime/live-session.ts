@@ -26,7 +26,6 @@ import { createCartoExtension } from "./carto-extension.js";
 import type { PendingWrite } from "./state-block.js";
 import { createPathWakeTask, PATH_WAKE_TASK_NAME, pathFingerprint } from "./path-wake-task.js";
 import type { PromptStore } from "./prompt-store.js";
-import { createPrefillMonitor, type PrefillMonitor, type PrefillState } from "./prefill.js";
 import { createTimeWakeTask, TIME_WAKE_TASK_NAME } from "./wake-task.js";
 import { resolveProjectWatchPath } from "./workspace.js";
 
@@ -49,8 +48,6 @@ export interface LiveSessionOptions {
   /** Test or host-provided Pi model catalog. Normal starts use the built-in catalog. */
   models?: Models;
   contextBudget?: number;
-  /** A monitor for the server's prompt reading; created for llama-swap when absent. */
-  prefill?: PrefillMonitor;
   /** Where the assembled prompt is recorded, so the screen can show it. */
   promptStore?: PromptStore;
   /**
@@ -98,8 +95,6 @@ export class LiveSession {
   private constructor(
     private readonly projectRoot: string,
     private readonly harness: Harness,
-    /** How far llama.cpp is with reading a prompt, when the provider reports it. */
-    readonly prefill: PrefillMonitor,
     /** The model's context window, read from the Pi catalog at open. */
     readonly contextWindow: number,
     private readonly root: Awaited<ReturnType<Harness["root"]>>,
@@ -147,13 +142,7 @@ export class LiveSession {
         }),
       );
 
-      // Wrap the Models object the Harness is given, so the request that Pi
-      // Durable builds itself still carries `return_progress`. Only the
-      // selected provider is touched; every other request passes through.
-      const prefill =
-        options.prefill ??
-        createPrefillMonitor({ provider: providerId, ...(options.config?.llamaSwapEndpoint === undefined ? {} : {}) });
-      harness = await Harness.open(storage, { models: prefill.wrap(models), registry }, BACKGROUND_CONTEXT);
+      harness = await Harness.open(storage, { models, registry }, BACKGROUND_CONTEXT);
       const agent = {
         model: options.model,
         instructions: CARTO_INSTRUCTIONS,
@@ -166,7 +155,6 @@ export class LiveSession {
       return new LiveSession(
         options.projectRoot,
         harness,
-        prefill,
         contextWindow,
         root,
         database,
@@ -233,29 +221,6 @@ export class LiveSession {
    */
   async cancel(): Promise<void> {
     await this.root.abort(BACKGROUND_CONTEXT);
-  }
-
-  /** How far the newest prompt reading is, or undefined before the first request. */
-  prefillState(): PrefillState | undefined {
-    return this.prefill.current();
-  }
-
-  /** The last finished reading, for the status line after a run ends. */
-  lastPrefill(): { fresh: number; ms: number; at: number } | undefined {
-    return this.prefill.last();
-  }
-
-  /**
-   * Mark a callback dirty on every stored commit, for a screen that must not
-   * render inside a watch. The callback runs one microtask after a commit is
-   * stored, so it can read, but it must not write or wait.
-   */
-  onCommit(listener: () => void): () => void {
-    const observation = this.harness.observeCommits({
-      advance: () => listener(),
-      end: () => undefined,
-    });
-    return () => observation.detach();
   }
 
   /**

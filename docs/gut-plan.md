@@ -1,5 +1,41 @@
 # Gut the UI — audit and proposal
 
+**Amended 2026-11-16: this proposal is void. The person ordered the full
+teardown executed immediately, not the staged G1 → G3 → G2 → G4 sequence.
+Everything below is kept for the audit it contains; its sequencing and its
+"what survives" recommendations no longer describe anything. What actually
+happened:**
+
+- `src/ui/` (all 14 files, ~2,500 lines) is deleted.
+- `src/runtime/ui.ts` (the ~1,000-line app shell) is deleted.
+- `src/domain/prompt-tree.ts` and `src/domain/meter.ts` are deleted, with
+  `test/context-tree.test.mjs`, `test/frame.test.mjs`, `test/screen.test.mjs`,
+  `test/ui.test.mjs`, and `test/input.test.mjs`. The four defects in
+  "What is wrong today" below were repaired by deleting the code that had
+  them, not by fixing it; the Context tab itself is gone.
+- `src/runtime/prefill.ts` is deleted. It existed to feed the token bar.
+  `live-session.ts` and `project.ts` no longer reference it, and the
+  commit-watcher plumbing that only drove frame redraws (`onCommit`,
+  `watchLive`) is gone with it.
+- `src/cli.ts` no longer requires a TTY and no longer imports the UI. It now
+  runs the agent headlessly: each stdin line is one person message, agent
+  Chat records print to stdout when the turn settles, EOF or Ctrl-C ends
+  the session. It is explicitly a placeholder driver, not a designed
+  interface. Nothing new was invented to fill the silence.
+- `docs/ui-plan.md`, `docs/input-plan.md`, `docs/record-pages.md`, and
+  `docs/reference-overlay.md` (agent-written build records for the deleted
+  screen) are deleted. `docs/context-tree.md` stays: it quotes the person's
+  own requirement verbatim. `MINI.md` is untouched; §8 remains the spec of
+  record for whatever screen eventually gets built.
+- The suite went from 109 to 58 tests. The surviving suite covers the
+  domain and runtime foundation (Brain, handles, collapse, projection,
+  state block, wakes, legacy import, workspace, launcher).
+- The UI will be rebuilt only after the person marks the decisions, per the
+  confrontation this file once proposed for G3. Until then there is no
+  screen, and that is the intended state.
+
+---
+
 A proposal, never authority (§6 of `AGENTS.md`). `MINI.md` stays the
 specification of record. The person's word in conversation outranks every
 sentence here. Nothing in this file is agreed until the person says so, in

@@ -70,8 +70,6 @@ the specification makes promises about. In Carto those are:
 | Context | The projection the person sees is the projection the model is sent |
 | Chat | Chat is never collapsed by default; a fold is manual and stays in context |
 | Wake | A durable wake stays armed until its condition is met, and fires once |
-| Frame | `renderFrame` is pure: same state in, same rows out, every row exactly the width |
-| Input | The person's text is visible while typing, and the box never loses it |
 
 Platform and integration boundaries are kept when they protect distinct
 behaviour: SQLite storage, a real HTTP stream, a real PTY. Keep one of each, not
@@ -81,6 +79,20 @@ one per test.
 
 Keep a short ledger of what each stage removed and what guard it left behind. It
 records coverage and gaps, not a score.
+
+### Stage: UI teardown, 2026-11-16
+
+- The UI was torn out whole: `src/ui/`, the `src/runtime/ui.ts` app shell, the
+  token-meter domain math (`domain/meter.ts`), the Context-tree builder
+  (`domain/prompt-tree.ts`), and the prefill monitor (`runtime/prefill.ts`)
+  are deleted. `test/{frame,screen,ui,context-tree,input}.test.mjs` went with
+  them.
+- 109 tests became 58. `npm test` is green on the remaining suite. The
+  ten-second budget is unaddressed, as it was before; the prefill-monitor
+  wait is gone with the monitor, which removes ~50 ms of the debt.
+- Gap: the domain, the runtime, and the headless placeholder driver in
+  `src/cli.ts` are all that remain guarded. None of them proves anything
+  about a screen, because there is no screen.
 
 ### Stage: cleanup, 2026-11-16
 

@@ -1,3 +1,9 @@
+> **Status, 2026-11-16:** the Context tab this document plans was torn out
+> with the rest of the UI before any of it landed. `meter.ts`, the prefill
+> monitor, and `prompt-tree.ts` no longer exist. The requirement quoted below
+> is the person's and still stands; it applies to whatever screen is built
+> when the person says to build it. Nothing here is a plan for the rebuild.
+
 # The Context tab is the prompt
 
 Stage: replace Context's flat projection list with the actual prompt, as a fold

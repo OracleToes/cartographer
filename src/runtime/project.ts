@@ -188,21 +188,6 @@ export class CartoProject {
     };
   }
 
-  /** How far the server is with reading the newest prompt. */
-  prefill(): { current: ReturnType<LiveSession["prefillState"]>; last: ReturnType<LiveSession["lastPrefill"]>; window: number } {
-    return { current: this.live.prefillState(), last: this.live.lastPrefill(), window: this.live.contextWindow };
-  }
-
-  /** The provider's own report of a prompt reading, for a screen that marks itself dirty. */
-  onPrefill(listener: () => void): () => void {
-    return this.live.prefill.subscribe(listener);
-  }
-
-  /** Every stored commit, for a screen that must redraw without a key press. */
-  watchLive(listener: () => void): () => void {
-    return this.live.onCommit(listener);
-  }
-
   /**
    * Keep the private handle table in step with the Brain. No handle is
    * renumbered here; a collapse rebuilds the whole table. The UI calls this on
