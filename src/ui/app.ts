@@ -56,7 +56,7 @@ import { flattenEntry } from "./dump.js";
 import { JumpOverlay, JUMP_TARGETS } from "./jump.js";
 import { Palette, selectTheme, type PaletteCommand } from "./palette.js";
 import { Sidebar, sidebarWidth, type BookKind, type SidebarCounts } from "./sidebar.js";
-import { TranscriptView, type CardEntry, type TranscriptEntry } from "./transcript.js";
+import { TranscriptView, formatToolArgs, type CardEntry, type TranscriptEntry } from "./transcript.js";
 import { AtlasView } from "./atlas-view.js";
 import { LedgerView } from "./ledger-view.js";
 import { ContextView, type ContextDialogueMessage, type ContextToolItem, type ContextWorkItem } from "./context-view.js";
@@ -176,11 +176,17 @@ function liveCardsOf(live: LiveState | undefined): CardEntry[] {
         if (part.thinking.length > 0) cards.push({ kind: "reasoning", id, live: true, text: part.thinking });
       } else if (part.type === "text" && typeof part.text === "string") {
         if (part.text.length > 0) cards.push({ kind: "output", id, live: true, text: part.text });
-      } else if (part.type === "toolCall" && typeof part.name === "string") {
+      } else if (part.type === "toolCall") {
         const callId = typeof part.id === "string" ? part.id : undefined;
         if (callId !== undefined) seenCalls.add(callId);
         const slot = callId === undefined ? undefined : slots.get(callId);
-        cards.push({ kind: "tool", id, live: true, name: part.name, args: prettyArgs(part.arguments), status: slot?.status ?? "pending" });
+        const name = typeof part.name === "string" ? part.name : (slot?.name ?? "");
+        const rawArgs = typeof (part as Record<string, unknown>).rawArguments === "string"
+          ? ((part as Record<string, unknown>).rawArguments as string)
+          : undefined;
+        const args = rawArgs ?? formatToolArgs(part.arguments, name);
+        const status = slot?.status ?? (name.length > 0 ? "running" : "pending");
+        cards.push({ kind: "tool", id, live: true, name, args, status });
       }
     });
   }
@@ -539,7 +545,7 @@ export async function runTui(options: CartoTuiOptions): Promise<number> {
                 kind: "tool",
                 id: `ctx-${entryId}-${partIndex}`,
                 name: part.name,
-                args: prettyArgs(part.arguments),
+                args: formatToolArgs(part.arguments, part.name),
                 ...(output !== undefined ? { output } : {}),
                 ...(callId !== undefined && toolErrors.get(callId) === true ? { failed: true } : {}),
               },

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { padLine, visibleWidth, tokens } from "../dist/ui/tokens.js";
 import { Sidebar } from "../dist/ui/sidebar.js";
-import { TranscriptView } from "../dist/ui/transcript.js";
+import { TranscriptView, formatToolArgs } from "../dist/ui/transcript.js";
 import { ContextView } from "../dist/ui/context-view.js";
 import { AtlasView } from "../dist/ui/atlas-view.js";
 import { LedgerView } from "../dist/ui/ledger-view.js";
@@ -351,4 +351,40 @@ test("LedgerView two-pane navigation, mouse interaction, and detail scrolling", 
     ctrl: false,
   });
   assert.ok(wheelRes?.handled);
+});
+
+test("formatToolArgs formats progressively based on tool name availability", () => {
+  // 1. Tool name empty/unknown: raw JSON output
+  const rawPartial = '{"path": "src/app.ts", "start';
+  assert.equal(formatToolArgs(rawPartial, ""), rawPartial);
+  assert.equal(formatToolArgs({ path: "src/app.ts" }, ""), '{\n  "path": "src/app.ts"\n}');
+
+  // 2. Tool name known: formats object fields human-readably
+  const formatted = formatToolArgs({ path: "src/app.ts", startLine: 10, endLine: 20 }, "read");
+  assert.ok(formatted.includes("path: src/app.ts"));
+  assert.ok(formatted.includes("startLine: 10"));
+  assert.ok(formatted.includes("endLine: 20"));
+
+  // 3. Multiline command formatting
+  const formattedBash = formatToolArgs({ command: "git status\ngit diff" }, "bash");
+  assert.ok(formattedBash.includes("command:\n  git status\n  git diff"));
+});
+
+test("TranscriptView displays tool name in card header when known", () => {
+  const transcript = new TranscriptView();
+  transcript.setLive([
+    {
+      kind: "tool",
+      id: "live-tool-1",
+      name: "read",
+      args: "path: src/app.ts\nstartLine: 1",
+      live: true,
+      status: "running",
+    },
+  ]);
+
+  const rendered = transcript.render(80);
+  const headerLine = rendered[0];
+  assert.ok(headerLine.includes("tool read"));
+  assert.ok(headerLine.includes("running"));
 });
